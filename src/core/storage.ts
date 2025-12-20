@@ -589,7 +589,7 @@ export function getGlobalSession(index: number): ChatSession | null {
 /**
  * Format a tool call for display
  */
-function formatToolCall(toolData: { name?: string; params?: string; result?: string }): string {
+function formatToolCall(toolData: { name?: string; params?: string; result?: string; status?: string }, isError = false): string {
   const lines: string[] = [];
   const toolName = toolData.name ?? 'unknown';
 
@@ -642,7 +642,7 @@ function formatToolCall(toolData: { name?: string; params?: string; result?: str
     if (cmd) lines.push(`Command: ${cmd}`);
   } else if (toolName === 'edit_file' || toolName === 'search_replace') {
     lines.push(`[Tool: ${toolName === 'search_replace' ? 'Search & Replace' : 'Edit File'}]`);
-    const file = getParam('targetFile', 'path', 'file', 'filePath');
+    const file = getParam('targetFile', 'path', 'file', 'filePath', 'relativeWorkspacePath');
     if (file) lines.push(`File: ${file}`);
 
     // Show edit details
@@ -652,17 +652,11 @@ function formatToolCall(toolData: { name?: string; params?: string; result?: str
       if (oldString) lines.push(`Old: ${oldString.slice(0, 100)}${oldString.length > 100 ? '...' : ''}`);
       if (newString) lines.push(`New: ${newString.slice(0, 100)}${newString.length > 100 ? '...' : ''}`);
     }
-  } else if (toolName === 'create_file' || toolName === 'write_file') {
+  } else if (toolName === 'create_file' || toolName === 'write_file' || toolName === 'write') {
     lines.push(`[Tool: ${toolName === 'create_file' ? 'Create File' : 'Write File'}]`);
-    const file = getParam('targetFile', 'path', 'file');
+    const file = getParam('targetFile', 'path', 'file', 'relativeWorkspacePath');
     if (file) lines.push(`File: ${file}`);
-
-    // Show content preview
-    const content = getParam('content', 'fileContent', 'text');
-    if (content) {
-      const preview = content.slice(0, 200).replace(/\n/g, '\\n');
-      lines.push(`Content: ${preview}${content.length > 200 ? '...' : ''}`);
-    }
+    // Note: Content is extracted from bubble's text field in extractBubbleText(), not from params
   } else {
     // Generic tool - show all string params
     lines.push(`[Tool: ${toolName}]`);
@@ -672,6 +666,11 @@ function formatToolCall(toolData: { name?: string; params?: string; result?: str
         lines.push(`${label}: ${val.length > 100 ? val.slice(0, 100) + '...' : val}`);
       }
     }
+  }
+
+  // Add error/cancelled status indicator
+  if (isError || toolData.status === 'cancelled' || toolData.status === 'error') {
+    lines.push(`Status: ❌ ${toolData.status ?? 'error'}`);
   }
 
   return lines.join('\n');
@@ -806,9 +805,27 @@ function extractBubbleText(data: Record<string, unknown>): string {
     }
   }
 
-  // Priority 2: Check if it's a standard tool call with name
-  if (toolFormerData?.name && toolFormerData?.status === 'completed') {
-    return formatToolCall(toolFormerData);
+  // Priority 2: Check if it's a tool call with name (completed, cancelled, or error)
+  if (toolFormerData?.name) {
+    // For write tools, extract content from codeBlocks if available
+    if ((toolFormerData.name === 'write' || toolFormerData.name === 'write_file' || toolFormerData.name === 'create_file')) {
+      const toolInfo = formatToolCall(toolFormerData, isError);
+
+      // Extract content from codeBlocks
+      const codeBlocks = data['codeBlocks'] as Array<{ content?: string }> | undefined;
+      if (codeBlocks && codeBlocks.length > 0 && codeBlocks[0]?.content) {
+        const content = codeBlocks[0].content;
+        const preview = content.slice(0, 200).replace(/\n/g, '\\n');
+        return toolInfo + `\nContent: ${preview}${content.length > 200 ? '...' : ''}`;
+      }
+
+      return toolInfo;
+    }
+
+    const toolDisplay = formatToolCall(toolFormerData, isError);
+    if (toolDisplay) {
+      return toolDisplay;
+    }
   }
 
   // Extract codeBlocks content

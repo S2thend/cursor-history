@@ -72,9 +72,14 @@ src/
 
 **All special message detection is DB-field based:**
 - Errors: `toolFormerData.additionalData.status === 'error'`
-- Tool calls: `toolFormerData.name` + `toolFormerData.status`
+- Tool calls: `toolFormerData.name` exists (any status: completed, cancelled, error)
 - Thinking: `data.thinking.text`
 - Code blocks: `data.codeBlocks` array
+
+**Tool call formatting:**
+- Shows tool name, file paths, parameters regardless of completion status
+- Adds `Status: ❌ cancelled/error` line for failed operations
+- Supports `write` tool name and `relativeWorkspacePath` parameter
 
 ### Bubble Types
 

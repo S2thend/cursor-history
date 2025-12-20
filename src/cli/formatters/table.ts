@@ -51,6 +51,16 @@ function truncate(str: string, maxLength: number): string {
 }
 
 /**
+ * Truncate path from the beginning (keep the end which is more specific)
+ */
+function truncatePath(path: string, maxLength: number): string {
+  if (path.length <= maxLength) {
+    return path;
+  }
+  return '...' + path.slice(-(maxLength - 3));
+}
+
+/**
  * Pad string to fixed width
  */
 function padRight(str: string, width: number): string {
@@ -91,13 +101,13 @@ export function formatSessionsTable(sessions: ChatSessionSummary[], showIds = fa
 
     if (showIds) {
       const msgs = padRight(String(session.messageCount), 5);
-      const workspace = pc.dim(padRight(truncate(session.workspacePath, 25), 25));
+      const workspace = pc.dim(padRight(truncatePath(session.workspacePath, 25), 25));
       const composerId = pc.gray(padRight(session.id, 38));
       const preview = truncate(session.preview, 30);
       lines.push(`${idx} ${date} ${msgs} ${workspace} ${composerId} ${preview}`);
     } else {
       const msgs = padRight(String(session.messageCount), 8);
-      const workspace = pc.dim(padRight(truncate(session.workspacePath, 30), 30));
+      const workspace = pc.dim(padRight(truncatePath(session.workspacePath, 30), 30));
       const preview = truncate(session.preview, 40);
       lines.push(`${idx} ${date} ${msgs} ${workspace} ${preview}`);
     }
