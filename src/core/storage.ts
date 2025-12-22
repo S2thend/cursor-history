@@ -717,7 +717,7 @@ function formatToolCall(
   }
 
   // Add user decision if present (accepted/rejected/pending)
-  const userDecision = (toolData.additionalData as any)?.userDecision;
+  const userDecision = toolData.additionalData?.userDecision;
   if (userDecision && typeof userDecision === 'string') {
     const decisionEmoji = userDecision === 'accepted' ? '✓' : userDecision === 'rejected' ? '✗' : '⏳';
     lines.push(`User Decision: ${decisionEmoji} ${userDecision}`);
@@ -815,7 +815,7 @@ function formatToolCallWithResult(toolData: {
   }
 
   // Add user decision if present
-  const userDecision = (toolData.additionalData as any)?.userDecision;
+  const userDecision = toolData.additionalData?.userDecision;
   if (userDecision && typeof userDecision === 'string') {
     const decisionEmoji = userDecision === 'accepted' ? '✓' : userDecision === 'rejected' ? '✗' : '⏳';
     lines.push(`User Decision: ${decisionEmoji} ${userDecision}`);
