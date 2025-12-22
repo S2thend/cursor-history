@@ -1,0 +1,38 @@
+# Source files
+src/
+tsconfig.json
+
+# Tests
+*.test.ts
+*.spec.ts
+__tests__/
+
+# Development
+.github/
+.vscode/
+node_modules/
+
+# Config files
+.eslintrc*
+.prettierrc*
+eslint.config.js
+
+# Documentation
+CLAUDE.md
+.cursor/
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

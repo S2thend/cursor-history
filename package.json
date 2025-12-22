@@ -28,6 +28,22 @@
   ],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/S2thend/cursor_chat_history.git"
+  },
+  "bugs": {
+    "url": "https://github.com/S2thend/cursor_chat_history/issues"
+  },
+  "homepage": "https://github.com/S2thend/cursor_chat_history#readme",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20.0.0"
   },

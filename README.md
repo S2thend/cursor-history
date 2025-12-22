@@ -17,10 +17,22 @@ CLI tool to browse, search, and export your Cursor AI chat history.
 
 ## Installation
 
+### From NPM (Recommended)
+
+```bash
+# Install globally
+npm install -g cursor-history
+
+# Use the CLI
+cursor-history list
+```
+
+### From Source
+
 ```bash
 # Clone and build
-git clone https://github.com/your-username/cursor-history.git
-cd cursor-history
+git clone https://github.com/S2thend/cursor_chat_history.git
+cd cursor_chat_history
 npm install
 npm run build
 
@@ -165,3 +177,49 @@ When browsing your chat history, you'll see:
 | Linux | `~/.config/Cursor/User/` |
 
 The tool automatically finds and reads your Cursor chat history from these locations.
+
+## Development
+
+### Building from Source
+
+```bash
+npm install
+npm run build
+```
+
+### Running Tests
+
+```bash
+npm test              # Run all tests
+npm run test:watch    # Watch mode
+```
+
+### Releasing to NPM
+
+This project uses GitHub Actions for automatic NPM publishing. To release a new version:
+
+1. Update version in `package.json`:
+   ```bash
+   npm version patch  # For bug fixes (0.1.0 -> 0.1.1)
+   npm version minor  # For new features (0.1.0 -> 0.2.0)
+   npm version major  # For breaking changes (0.1.0 -> 1.0.0)
+   ```
+
+2. Push the version tag to trigger automatic publishing:
+   ```bash
+   git push origin main --tags
+   ```
+
+3. The GitHub workflow will automatically:
+   - Run type checks, linting, and tests
+   - Build the project
+   - Publish to NPM with provenance
+
+**First-time setup**: Add your NPM access token as a GitHub secret named `NPM_TOKEN`:
+1. Create an NPM access token at https://www.npmjs.com/settings/YOUR_USERNAME/tokens
+2. Go to your GitHub repository settings → Secrets and variables → Actions
+3. Add a new repository secret named `NPM_TOKEN` with your NPM token
+
+## License
+
+MIT
