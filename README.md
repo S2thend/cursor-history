@@ -1,9 +1,10 @@
 # cursor-history
 
-CLI tool to browse, search, and export your Cursor AI chat history.
+CLI tool and library to browse, search, and export your Cursor AI chat history.
 
 ## Features
 
+- **Dual interface** - Use as CLI tool or import as a library in your Node.js projects
 - **List sessions** - View all chat sessions across workspaces
 - **View full conversations** - See complete chat history with:
   - AI responses with natural language explanations
@@ -177,6 +178,85 @@ When browsing your chat history, you'll see:
 | Linux | `~/.config/Cursor/User/` |
 
 The tool automatically finds and reads your Cursor chat history from these locations.
+
+## Library API
+
+In addition to the CLI, you can use cursor-history as a library in your Node.js projects:
+
+```typescript
+import {
+  listSessions,
+  getSession,
+  searchSessions,
+  exportSessionToMarkdown
+} from 'cursor-history';
+
+// List all sessions with pagination
+const result = listSessions({ limit: 10 });
+console.log(`Found ${result.pagination.total} sessions`);
+
+for (const session of result.data) {
+  console.log(`${session.id}: ${session.messageCount} messages`);
+}
+
+// Get a specific session (zero-based index)
+const session = getSession(0);
+console.log(session.messages);
+
+// Search across all sessions
+const results = searchSessions('authentication', { context: 2 });
+for (const match of results) {
+  console.log(match.match);
+}
+
+// Export to Markdown
+const markdown = exportSessionToMarkdown(0);
+```
+
+### Available Functions
+
+| Function | Description |
+|----------|-------------|
+| `listSessions(config?)` | List sessions with pagination |
+| `getSession(index, config?)` | Get full session by index |
+| `searchSessions(query, config?)` | Search across sessions |
+| `exportSessionToJson(index, config?)` | Export session to JSON |
+| `exportSessionToMarkdown(index, config?)` | Export session to Markdown |
+| `exportAllSessionsToJson(config?)` | Export all sessions to JSON |
+| `exportAllSessionsToMarkdown(config?)` | Export all sessions to Markdown |
+| `getDefaultDataPath()` | Get platform-specific Cursor data path |
+
+### Configuration Options
+
+```typescript
+interface LibraryConfig {
+  dataPath?: string;    // Custom Cursor data path
+  workspace?: string;   // Filter by workspace path
+  limit?: number;       // Pagination limit
+  offset?: number;      // Pagination offset
+  context?: number;     // Search context lines
+}
+```
+
+### Error Handling
+
+```typescript
+import {
+  listSessions,
+  isDatabaseLockedError,
+  isDatabaseNotFoundError
+} from 'cursor-history';
+
+try {
+  const result = listSessions();
+} catch (err) {
+  if (isDatabaseLockedError(err)) {
+    console.error('Database locked - close Cursor and retry');
+  } else if (isDatabaseNotFoundError(err)) {
+    console.error('Cursor data not found');
+  }
+}
+```
 
 ## Development
 

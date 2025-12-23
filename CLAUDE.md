@@ -2,7 +2,11 @@
 
 ## Overview
 
-CLI tool to browse, search, and export Cursor AI chat history. Built with TypeScript, commander, better-sqlite3, and picocolors.
+CLI tool and library to browse, search, and export Cursor AI chat history. Built with TypeScript, commander, better-sqlite3, and picocolors.
+
+**Dual Interface:**
+- **CLI**: Command-line tool for interactive use (`cursor-history list`, `cursor-history show 1`)
+- **Library**: Programmatic API for integration (`import { listSessions } from 'cursor-history'`)
 
 ## Quick Reference
 
@@ -47,15 +51,54 @@ src/
 ├── cli/
 │   ├── commands/          # list, show, search, export
 │   ├── formatters/        # table.ts (terminal), json.ts
+│   ├── errors.ts          # CLI-specific errors (CliError, SessionNotFoundError)
 │   └── index.ts           # CLI entry, global options
 ├── core/
 │   ├── storage.ts         # findWorkspaces, listSessions, getSession, extractBubbleText
 │   ├── parser.ts          # parseChatData, exportToMarkdown, exportToJson
-│   └── types.ts           # ChatSession, Message, Workspace, etc.
+│   └── types.ts           # ChatSession, Message, Workspace, ToolCall, etc.
 └── lib/
-    ├── platform.ts        # getCursorDataPath, expandPath, contractPath
-    └── errors.ts          # CliError, SessionNotFoundError, handleError
+    ├── index.ts           # Library entry point (listSessions, getSession, searchSessions, export*)
+    ├── types.ts           # Public library types (Session, Message, SearchResult, etc.)
+    ├── config.ts          # Configuration validation and merging
+    ├── errors.ts          # Library errors (DatabaseLockedError, DatabaseNotFoundError)
+    ├── utils.ts           # Utility functions (getDefaultDataPath)
+    └── platform.ts        # getCursorDataPath, expandPath, contractPath
 ```
+
+### Architecture: Shared Core
+
+Both CLI and Library share the same core logic:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      src/core/                              │
+│  storage.ts (DB queries)  +  parser.ts (data parsing)       │
+│                    ↑               ↑                        │
+└────────────────────┼───────────────┼────────────────────────┘
+                     │               │
+        ┌────────────┴───────────────┴────────────┐
+        │                                         │
+        ▼                                         ▼
+┌───────────────────┐                 ┌───────────────────────┐
+│   src/cli/        │                 │   src/lib/            │
+│   commands/       │                 │   index.ts            │
+│   (CLI interface) │                 │   (Library API)       │
+└───────────────────┘                 └───────────────────────┘
+```
+
+**Both share:**
+- `src/core/storage.ts` - `listSessions()`, `getSession()`, `searchSessions()`
+- `src/core/parser.ts` - `exportToJson()`, `exportToMarkdown()`
+
+**The library adds:**
+- Type conversions (core types → library types)
+- Config validation and merging
+- Custom error classes
+- Pagination wrapper (`PaginatedResult<T>`)
+- Zero-based indexing (core uses 1-based)
+
+So when someone uses `import { listSessions } from 'cursor-history'`, they're calling the same underlying database queries as `cursor-history list` CLI command.
 
 ## Key Implementation Details
 
@@ -132,6 +175,56 @@ Tool calls are stored in `toolFormerData`:
 - `isThinking()` - checks for `[Thinking]` marker
 - All markers are set by storage layer based on DB fields
 
+## Library API (`src/lib/`)
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `listSessions(config?)` | List sessions with pagination, returns `PaginatedResult<Session>` |
+| `getSession(index, config?)` | Get full session by zero-based index |
+| `searchSessions(query, config?)` | Search across sessions, returns `SearchResult[]` |
+| `exportSessionToJson(index, config?)` | Export single session to JSON string |
+| `exportSessionToMarkdown(index, config?)` | Export single session to Markdown string |
+| `exportAllSessionsToJson(config?)` | Export all sessions to JSON array string |
+| `exportAllSessionsToMarkdown(config?)` | Export all sessions to Markdown string |
+| `getDefaultDataPath()` | Get platform-specific Cursor data path |
+
+### Configuration (`LibraryConfig`)
+
+```typescript
+interface LibraryConfig {
+  dataPath?: string;    // Custom Cursor data path
+  workspace?: string;   // Filter by workspace path
+  limit?: number;       // Pagination limit
+  offset?: number;      // Pagination offset
+  context?: number;     // Search context lines
+}
+```
+
+### Error Handling
+
+```typescript
+import { listSessions, isDatabaseLockedError, isDatabaseNotFoundError } from 'cursor-history';
+
+try {
+  const result = listSessions();
+} catch (err) {
+  if (isDatabaseLockedError(err)) {
+    console.error('Close Cursor and retry');
+  } else if (isDatabaseNotFoundError(err)) {
+    console.error('Cursor not installed or no history');
+  }
+}
+```
+
+### Key Differences from CLI
+
+- **Zero-based indexing**: Library uses `getSession(0)`, CLI uses `show 1`
+- **Structured data**: Library returns typed objects, CLI formats for display
+- **Stateless**: Each function call opens/closes DB connection
+- **No formatting**: Library returns raw data, no colors or truncation
+
 ## CLI Commands
 
 | Command | Description |
@@ -191,8 +284,17 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 3. Use in command with `--format` option
 
 ## Active Technologies
-- TypeScript 5.9+ (strict mode enabled) + better-sqlite3 (existing), no CLI dependencies (commander/picocolors removed from library) (002-library-api)
-- SQLite databases (state.vscdb) - read-only access via better-sqlite3 (002-library-api)
+- TypeScript 5.9+ (strict mode enabled)
+- better-sqlite3 for SQLite database access (read-only)
+- commander + picocolors for CLI (not used in library)
+- Dual ESM/CommonJS module support
 
 ## Recent Changes
-- 002-library-api: Added TypeScript 5.9+ (strict mode enabled) + better-sqlite3 (existing), no CLI dependencies (commander/picocolors removed from library)
+- 002-library-api: Added library API for programmatic access
+  - `src/lib/index.ts` - Main entry point with all public functions
+  - `src/lib/types.ts` - Public TypeScript types (Session, Message, etc.)
+  - `src/lib/errors.ts` - Custom errors (DatabaseLockedError, etc.)
+  - `src/lib/config.ts` - Configuration validation
+  - CLI and library share `src/core/` for database access
+  - Zero-based indexing in library (vs 1-based in CLI)
+  - Stateless design: each call opens/closes DB connection
