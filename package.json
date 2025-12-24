@@ -1,11 +1,19 @@
 {
   "name": "cursor-history",
   "version": "0.5.1",
-  "description": "CLI tool to browse and export Cursor AI chat history",
+  "description": "CLI tool and library to browse and export Cursor AI chat history",
   "type": "module",
-  "main": "dist/cli/index.js",
+  "main": "dist/lib/index.js",
+  "types": "dist/lib/index.d.ts",
   "bin": {
     "cursor-history": "dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/lib/index.js",
+      "require": "./dist/lib/index.cjs",
+      "types": "./dist/lib/index.d.ts"
+    }
   },
   "scripts": {
     "build": "tsc",

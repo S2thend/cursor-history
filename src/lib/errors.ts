@@ -1,109 +1,91 @@
 /**
- * Error handling utilities and exit codes
+ * Custom error classes for library API
+ *
+ * IMPORTANT: This is a library interface for direct import and use in TypeScript/JavaScript
+ * projects, NOT a network/REST API.
  */
 
 /**
- * CLI exit codes following Unix conventions
+ * Thrown when database is locked by Cursor or another process.
+ *
+ * Recovery: Close Cursor IDE and retry, or implement custom retry logic.
  */
-export const ExitCode = {
-  SUCCESS: 0,
-  GENERAL_ERROR: 1,
-  USAGE_ERROR: 2, // Invalid arguments
-  NOT_FOUND: 3, // Resource not found
-  IO_ERROR: 4, // File/database access error
-} as const;
+export class DatabaseLockedError extends Error {
+  name = 'DatabaseLockedError' as const;
 
-export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
+  /** Path to locked database file */
+  path: string;
 
-/**
- * Custom error class for CLI errors with exit codes
- */
-export class CliError extends Error {
-  constructor(
-    message: string,
-    public readonly exitCode: ExitCode = ExitCode.GENERAL_ERROR
-  ) {
-    super(message);
-    this.name = 'CliError';
-  }
-}
-
-/**
- * Error for when no Cursor installation is found
- */
-export class CursorNotFoundError extends CliError {
-  constructor(searchPath: string) {
-    super(
-      `Cursor data not found at: ${searchPath}\n` +
-        'Make sure Cursor is installed and has been used at least once.\n' +
-        'You can specify a custom path with --data-path or CURSOR_DATA_PATH env var.',
-      ExitCode.NOT_FOUND
-    );
-    this.name = 'CursorNotFoundError';
-  }
-}
-
-/**
- * Error for when no chat history exists
- */
-export class NoHistoryError extends CliError {
-  constructor() {
-    super(
-      'No chat history found.\n' + 'Start a conversation in Cursor to create chat history.',
-      ExitCode.NOT_FOUND
-    );
-    this.name = 'NoHistoryError';
-  }
-}
-
-/**
- * Error for invalid session index
- */
-export class SessionNotFoundError extends CliError {
-  constructor(index: number, maxIndex: number) {
-    const message =
-      maxIndex > 0
-        ? `Session #${index} not found. Valid range: 1-${maxIndex}`
-        : 'No sessions found.';
-    super(message, ExitCode.NOT_FOUND);
-    this.name = 'SessionNotFoundError';
-  }
-}
-
-/**
- * Error for file already exists
- */
-export class FileExistsError extends CliError {
   constructor(path: string) {
-    super(`File already exists: ${path}\nUse --force to overwrite.`, ExitCode.IO_ERROR);
-    this.name = 'FileExistsError';
+    super(`Database is locked: ${path}. Close Cursor or retry later.`);
+    this.path = path;
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, DatabaseLockedError);
+    }
   }
 }
 
 /**
- * Error for search with no results
+ * Thrown when database file or directory does not exist.
+ *
+ * Recovery: Verify Cursor is installed, check dataPath configuration.
  */
-export class NoSearchResultsError extends CliError {
-  constructor(query: string) {
-    super(`No results found for: "${query}"`, ExitCode.NOT_FOUND);
-    this.name = 'NoSearchResultsError';
+export class DatabaseNotFoundError extends Error {
+  name = 'DatabaseNotFoundError' as const;
+
+  /** Path that was not found */
+  path: string;
+
+  constructor(path: string) {
+    super(`Database not found: ${path}. Check dataPath configuration.`);
+    this.path = path;
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, DatabaseNotFoundError);
+    }
   }
 }
 
 /**
- * Handle an error and exit with appropriate code
+ * Thrown when configuration parameters are invalid.
+ *
+ * Recovery: Fix configuration values per LibraryConfig validation rules.
  */
-export function handleError(error: unknown): never {
-  if (error instanceof CliError) {
-    console.error(error.message);
-    process.exit(error.exitCode);
-  }
+export class InvalidConfigError extends Error {
+  name = 'InvalidConfigError' as const;
 
-  if (error instanceof Error) {
-    console.error(`Error: ${error.message}`);
-    process.exit(ExitCode.GENERAL_ERROR);
-  }
+  /** Name of invalid config field */
+  field: string;
 
-  console.error('An unexpected error occurred');
-  process.exit(ExitCode.GENERAL_ERROR);
+  /** Invalid value provided */
+  value: unknown;
+
+  constructor(field: string, value: unknown, reason: string) {
+    super(`Invalid config.${field}: ${reason} (got: ${JSON.stringify(value)})`);
+    this.field = field;
+    this.value = value;
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, InvalidConfigError);
+    }
+  }
+}
+
+/**
+ * Type guard to check if an error is a DatabaseLockedError.
+ */
+export function isDatabaseLockedError(error: unknown): error is DatabaseLockedError {
+  return error instanceof DatabaseLockedError;
+}
+
+/**
+ * Type guard to check if an error is a DatabaseNotFoundError.
+ */
+export function isDatabaseNotFoundError(error: unknown): error is DatabaseNotFoundError {
+  return error instanceof DatabaseNotFoundError;
+}
+
+/**
+ * Type guard to check if an error is an InvalidConfigError.
+ */
+export function isInvalidConfigError(error: unknown): error is InvalidConfigError {
+  return error instanceof InvalidConfigError;
 }

@@ -49,6 +49,17 @@ export interface Message {
   content: string;
   timestamp: Date;
   codeBlocks: CodeBlock[];
+  /** Tool calls executed by assistant (optional, assistant-only) */
+  toolCalls?: ToolCall[];
+  /** AI reasoning/thinking text (optional, assistant-only) */
+  thinking?: string;
+  /** Metadata about message processing (optional) */
+  metadata?: {
+    /** Whether message data was partially corrupted */
+    corrupted?: boolean;
+    /** Original bubble type from database (for debugging) */
+    bubbleType?: number;
+  };
 }
 
 /**
@@ -58,6 +69,24 @@ export interface CodeBlock {
   language: string | null;
   content: string;
   startLine: number;
+}
+
+/**
+ * A tool/function call executed by the assistant
+ */
+export interface ToolCall {
+  /** Tool/function name (e.g., 'read_file', 'write', 'grep') */
+  name: string;
+  /** Tool execution status */
+  status: 'completed' | 'cancelled' | 'error';
+  /** Tool parameters as JSON object (optional) */
+  params?: Record<string, unknown>;
+  /** Tool execution result (optional, present if status === 'completed') */
+  result?: string;
+  /** Error message (optional, present if status === 'error') */
+  error?: string;
+  /** File paths involved in this tool call (optional) */
+  files?: string[];
 }
 
 /**

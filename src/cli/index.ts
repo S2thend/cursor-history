@@ -8,7 +8,7 @@ import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { handleError, ExitCode } from '../lib/errors.js';
+import { handleError, ExitCode } from './errors.js';
 
 // Read version from package.json
 const __dirname = dirname(fileURLToPath(import.meta.url));

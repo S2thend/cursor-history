@@ -5,7 +5,7 @@
 import type { Command } from 'commander';
 import { searchSessions } from '../../core/storage.js';
 import { formatSearchResultsTable, formatSearchResultsJson } from '../formatters/index.js';
-import { NoSearchResultsError, handleError } from '../../lib/errors.js';
+import { NoSearchResultsError, handleError } from '../errors.js';
 import { expandPath } from '../../lib/platform.js';
 
 interface SearchCommandOptions {

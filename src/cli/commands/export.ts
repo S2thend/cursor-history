@@ -14,7 +14,7 @@ import {
   handleError,
   CliError,
   ExitCode,
-} from '../../lib/errors.js';
+} from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 
 interface ExportCommandOptions {

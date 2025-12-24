@@ -5,7 +5,7 @@
 import type { Command } from 'commander';
 import { getSession, listSessions } from '../../core/storage.js';
 import { formatSessionDetail, formatSessionJson } from '../formatters/index.js';
-import { SessionNotFoundError, handleError } from '../../lib/errors.js';
+import { SessionNotFoundError, handleError } from '../errors.js';
 import { expandPath } from '../../lib/platform.js';
 
 interface ShowCommandOptions {

@@ -644,7 +644,7 @@ function formatToolCall(
     const path = getParam('path', 'directory', 'targetDirectory');
     if (pattern) lines.push(`Pattern: ${pattern}`);
     if (path) lines.push(`Path: ${path}`);
-  } else if (toolName === 'run_terminal_command' || toolName === 'execute_command') {
+  } else if (toolName === 'run_terminal_command' || toolName === 'run_terminal_cmd' || toolName === 'execute_command') {
     lines.push(`[Tool: Terminal Command]`);
     const cmd = getParam('command', 'cmd');
     if (cmd) lines.push(`Command: ${cmd}`);
@@ -779,35 +779,37 @@ function formatToolCallWithResult(toolData: {
   try {
     const result = JSON.parse(toolData.result ?? '{}');
 
-    // Check if result has diff
-    if (result.diff && typeof result.diff === 'object') {
-      // Format as tool call header
-      const toolName = toolData.name ?? 'write';
-      lines.push(`[Tool: ${toolName === 'write' || toolName === 'write_file' ? 'Write File' : 'Edit File'}]`);
+    // Check if result has diff - this function only handles diff results
+    if (!(result.diff && typeof result.diff === 'object')) {
+      return null;
+    }
 
-      if (filePath) {
-        lines.push(`File: ${filePath}`);
-      }
+    // Format as tool call header
+    const toolName = toolData.name ?? 'write';
+    lines.push(`[Tool: ${toolName === 'write' || toolName === 'write_file' ? 'Write File' : 'Edit File'}]`);
 
-      // Add the diff blocks
-      const diffText = formatDiffBlock(result.diff);
-      if (diffText) {
-        lines.push('');
-        lines.push(diffText);
-      }
+    if (filePath) {
+      lines.push(`File: ${filePath}`);
+    }
 
-      // Add result summary if available
-      if (result.resultForModel && typeof result.resultForModel === 'string') {
-        lines.push('');
-        lines.push(`Result: ${result.resultForModel}`);
-      }
+    // Add the diff blocks
+    const diffText = formatDiffBlock(result.diff);
+    if (diffText) {
+      lines.push('');
+      lines.push(diffText);
+    }
+
+    // Add result summary if available
+    if (result.resultForModel && typeof result.resultForModel === 'string') {
+      lines.push('');
+      lines.push(`Result: ${result.resultForModel}`);
     }
   } catch {
     // Not JSON or no diff
     return null;
   }
 
-  // Add status indicator
+  // Add status indicator (only if we have diff content)
   if (toolData.status) {
     const statusEmoji = toolData.status === 'completed' ? '✓' : '❌';
     lines.push('');
