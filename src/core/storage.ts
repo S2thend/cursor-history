@@ -118,9 +118,8 @@ function findWorkspacesFromBackup(backupPath: string): Workspace[] {
     if (!match) continue;
 
     const workspaceId = match[1]!;
-    const workspacePath = readWorkspaceJsonFromBackup(backupPath, workspaceId);
-
-    if (!workspacePath) continue;
+    // Try to get workspace path from workspace.json, fall back to workspace ID
+    const workspacePath = readWorkspaceJsonFromBackup(backupPath, workspaceId) ?? `(workspace: ${workspaceId})`;
 
     // Count sessions in this workspace
     let sessionCount = 0;
@@ -391,74 +390,86 @@ export function getSession(index: number, customDataPath?: string, backupPath?: 
     return null;
   }
 
-  // When reading from backup, skip global storage lookup (backups only have workspace DBs)
-  // Try to get full session from global storage (has AI responses) - live data only
-  if (!backupPath) {
-    const globalPath = getGlobalStoragePath();
-    const globalDbPath = join(globalPath, 'state.vscdb');
+  // Try to get full session from global storage (has AI responses)
+  // This works for both live data and backup (if backup includes globalStorage)
+  try {
+    let db: Database.Database | null = null;
 
-    if (existsSync(globalDbPath)) {
+    if (backupPath) {
+      // Try to open globalStorage from backup
       try {
-        const db = openDatabase(globalDbPath);
-
-        // Check if cursorDiskKV table exists
-        const tableCheck = db.prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'"
-        ).get();
-
-        if (tableCheck) {
-          // Get all bubbles for this composer
-          const bubbleRows = db
-            .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC")
-            .all(`bubbleId:${summary.id}:%`) as { key: string; value: string }[];
-
-          db.close();
-
-          if (bubbleRows.length > 0) {
-            const messages = bubbleRows.map((row) => {
-              try {
-                const data = JSON.parse(row.value) as {
-                  type?: number;
-                  createdAt?: string;
-                  bubbleId?: string;
-                };
-
-                const text = extractBubbleText(data);
-                const role = data.type === 2 ? 'assistant' : 'user';
-
-                return {
-                  id: data.bubbleId ?? row.key.split(':').pop() ?? null,
-                  role: role as 'user' | 'assistant',
-                  content: text,
-                  timestamp: data.createdAt ? new Date(data.createdAt) : new Date(),
-                  codeBlocks: [],
-                };
-              } catch {
-                return null;
-              }
-            }).filter((m): m is NonNullable<typeof m> => m !== null && m.content.length > 0);
-
-            if (messages.length > 0) {
-              return {
-                id: summary.id,
-                index,
-                title: summary.title,
-                createdAt: summary.createdAt,
-                lastUpdatedAt: summary.lastUpdatedAt,
-                messageCount: messages.length,
-                messages,
-                workspaceId: summary.workspaceId,
-                workspacePath: summary.workspacePath,
-              };
-            }
-          }
-        } else {
-          db.close();
-        }
+        db = openBackupDatabase(backupPath, 'globalStorage/state.vscdb');
       } catch {
-        // Fall through to workspace storage
+        // Backup might not have globalStorage, fall through to workspace storage
+        db = null;
+      }
+    } else {
+      // Live data - open from filesystem
+      const globalPath = getGlobalStoragePath();
+      const globalDbPath = join(globalPath, 'state.vscdb');
+      if (existsSync(globalDbPath)) {
+        db = openDatabase(globalDbPath);
       }
     }
+
+    if (db) {
+      // Check if cursorDiskKV table exists
+      const tableCheck = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'"
+      ).get();
+
+      if (tableCheck) {
+        // Get all bubbles for this composer
+        const bubbleRows = db
+          .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC")
+          .all(`bubbleId:${summary.id}:%`) as { key: string; value: string }[];
+
+        db.close();
+
+        if (bubbleRows.length > 0) {
+          const messages = bubbleRows.map((row) => {
+            try {
+              const data = JSON.parse(row.value) as {
+                type?: number;
+                createdAt?: string;
+                bubbleId?: string;
+              };
+
+              const text = extractBubbleText(data);
+              const role = data.type === 2 ? 'assistant' : 'user';
+
+              return {
+                id: data.bubbleId ?? row.key.split(':').pop() ?? null,
+                role: role as 'user' | 'assistant',
+                content: text,
+                timestamp: data.createdAt ? new Date(data.createdAt) : new Date(),
+                codeBlocks: [],
+              };
+            } catch {
+              return null;
+            }
+          }).filter((m): m is NonNullable<typeof m> => m !== null && m.content.length > 0);
+
+          if (messages.length > 0) {
+            return {
+              id: summary.id,
+              index,
+              title: summary.title,
+              createdAt: summary.createdAt,
+              lastUpdatedAt: summary.lastUpdatedAt,
+              messageCount: messages.length,
+              messages,
+              workspaceId: summary.workspaceId,
+              workspacePath: summary.workspacePath,
+            };
+          }
+        }
+      } else {
+        db.close();
+      }
+    }
+  } catch {
+    // Fall through to workspace storage
   }
 
   // Fall back to workspace storage (or use backup for backup mode)

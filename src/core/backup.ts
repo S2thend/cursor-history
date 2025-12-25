@@ -10,7 +10,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, readFileSync, writeFileSync, rmdirSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, basename, dirname, sep } from 'node:path';
 import Database from 'better-sqlite3';
 import AdmZip from 'adm-zip';
@@ -76,7 +76,7 @@ export interface DatabaseFileInfo {
   /** File size in bytes */
   size: number;
   /** File type */
-  type: 'global-db' | 'workspace-db';
+  type: 'global-db' | 'workspace-db' | 'workspace-json';
   /** Workspace ID (for workspace DBs) */
   workspaceId?: string;
 }
@@ -104,14 +104,17 @@ export function scanDatabaseFiles(dataPath: string): DatabaseFileInfo[] {
     });
   }
 
-  // Scan workspaceStorage for all workspace databases
+  // Scan workspaceStorage for all workspace databases and workspace.json files
   const workspaceStorageDir = dataPath;
   if (existsSync(workspaceStorageDir)) {
     try {
       const entries = readdirSync(workspaceStorageDir, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.isDirectory()) {
-          const workspaceDbPath = join(workspaceStorageDir, entry.name, 'state.vscdb');
+          const workspaceDir = join(workspaceStorageDir, entry.name);
+
+          // Add state.vscdb if exists
+          const workspaceDbPath = join(workspaceDir, 'state.vscdb');
           if (existsSync(workspaceDbPath)) {
             const stat = statSync(workspaceDbPath);
             files.push({
@@ -119,6 +122,19 @@ export function scanDatabaseFiles(dataPath: string): DatabaseFileInfo[] {
               relativePath: `workspaceStorage/${entry.name}/state.vscdb`,
               size: stat.size,
               type: 'workspace-db',
+              workspaceId: entry.name,
+            });
+          }
+
+          // Add workspace.json if exists (contains workspace path metadata)
+          const workspaceJsonPath = join(workspaceDir, 'workspace.json');
+          if (existsSync(workspaceJsonPath)) {
+            const stat = statSync(workspaceJsonPath);
+            files.push({
+              absolutePath: workspaceJsonPath,
+              relativePath: `workspaceStorage/${entry.name}/workspace.json`,
+              size: stat.size,
+              type: 'workspace-json',
               workspaceId: entry.name,
             });
           }
@@ -323,8 +339,15 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       const tempFilePath = join(tempDir, dbFile.relativePath);
       mkdirSync(dirname(tempFilePath), { recursive: true });
 
-      // T011: Backup database using SQLite backup API
-      await backupDatabase(dbFile.absolutePath, tempFilePath);
+      // For SQLite databases, use backup API; for other files, just copy
+      if (dbFile.type === 'global-db' || dbFile.type === 'workspace-db') {
+        // T011: Backup database using SQLite backup API
+        await backupDatabase(dbFile.absolutePath, tempFilePath);
+      } else {
+        // For non-DB files (like workspace.json), just copy
+        const content = readFileSync(dbFile.absolutePath);
+        writeFileSync(tempFilePath, content);
+      }
 
       // Read backed up file and compute checksum
       const buffer = readFileSync(tempFilePath);
@@ -337,8 +360,10 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
         type: dbFile.type,
       });
 
-      // Count sessions
-      sessionCount += countSessions(tempFilePath);
+      // Count sessions (only for DB files)
+      if (dbFile.type === 'global-db' || dbFile.type === 'workspace-db') {
+        sessionCount += countSessions(tempFilePath);
+      }
       if (dbFile.workspaceId) {
         workspaceIds.add(dbFile.workspaceId);
       }
@@ -430,7 +455,8 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
 // ============================================================================
 
 /**
- * T025: Open a database from a backup zip file into memory
+ * T025: Open a database from a backup zip file
+ * Note: better-sqlite3 cannot open directly from buffer, so we extract to a temp file
  */
 export function openBackupDatabase(backupPath: string, dbPath: string): Database.Database {
   const zip = new AdmZip(backupPath);
@@ -440,8 +466,32 @@ export function openBackupDatabase(backupPath: string, dbPath: string): Database
     throw new Error(`Database not found in backup: ${dbPath}`);
   }
 
-  // Open database from buffer (in-memory)
-  return new Database(buffer);
+  // better-sqlite3 cannot open from buffer directly - write to temp file
+  const tempFile = join(
+    tmpdir(),
+    `cursor_history_backup_${Date.now()}_${Math.random().toString(36).slice(2)}.vscdb`
+  );
+  writeFileSync(tempFile, buffer);
+
+  // Open the temp file and set up cleanup on close
+  const db = new Database(tempFile, { readonly: true });
+
+  // Store temp file path for cleanup
+  (db as Database.Database & { _tempFile?: string })._tempFile = tempFile;
+
+  // Wrap close to clean up temp file
+  const originalClose = db.close.bind(db);
+  db.close = () => {
+    const result = originalClose();
+    try {
+      unlinkSync(tempFile);
+    } catch {
+      // Ignore cleanup errors
+    }
+    return result;
+  };
+
+  return db;
 }
 
 /**
