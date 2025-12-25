@@ -76,21 +76,21 @@
 
 ### Implementation for User Story 2
 
-- [ ] T025 [US2] Implement openBackupDatabase(backupPath, dbPath) in src/core/backup.ts to read DB from zip into memory using new Database(buffer)
-- [ ] T026 [US2] Implement validateBackup(backupPath) in src/core/backup.ts returning BackupValidation with checksum verification
-- [ ] T027 [US2] Implement BackupDataSource abstraction in src/core/storage.ts to switch between live and backup data
-- [ ] T028 [US2] Modify findWorkspaces() in src/core/storage.ts to support backupPath parameter
-- [ ] T029 [US2] Modify listSessions() in src/core/storage.ts to support backupPath parameter
-- [ ] T030 [US2] Modify getSession() in src/core/storage.ts to support backupPath parameter
-- [ ] T031 [US2] Modify searchSessions() in src/core/storage.ts to support backupPath parameter
-- [ ] T032 [P] [US2] Implement validateBackup() library wrapper in src/lib/backup.ts
-- [ ] T033 [P] [US2] Update listSessions, getSession, searchSessions in src/lib/index.ts to accept backupPath
-- [ ] T034 [US2] Add --backup option to list command in src/cli/commands/list.ts
-- [ ] T035 [US2] Add --backup option to show command in src/cli/commands/show.ts
-- [ ] T036 [US2] Add --backup option to search command in src/cli/commands/search.ts
-- [ ] T037 [US2] Add --backup option to export command in src/cli/commands/export.ts
-- [ ] T038 [US2] Handle edge case: invalid/corrupted backup file with clear error message
-- [ ] T039 [US2] Handle edge case: graceful degradation for partially corrupted backups (warn but allow intact files)
+- [x] T025 [US2] Implement openBackupDatabase(backupPath, dbPath) in src/core/backup.ts to read DB from zip into memory using new Database(buffer)
+- [x] T026 [US2] Implement validateBackup(backupPath) in src/core/backup.ts returning BackupValidation with checksum verification
+- [x] T027 [US2] Implement BackupDataSource abstraction in src/core/storage.ts to switch between live and backup data
+- [x] T028 [US2] Modify findWorkspaces() in src/core/storage.ts to support backupPath parameter
+- [x] T029 [US2] Modify listSessions() in src/core/storage.ts to support backupPath parameter
+- [x] T030 [US2] Modify getSession() in src/core/storage.ts to support backupPath parameter
+- [x] T031 [US2] Modify searchSessions() in src/core/storage.ts to support backupPath parameter
+- [x] T032 [P] [US2] Implement validateBackup() library wrapper in src/lib/backup.ts
+- [x] T033 [P] [US2] Update listSessions, getSession, searchSessions in src/lib/index.ts to accept backupPath
+- [x] T034 [US2] Add --backup option to list command in src/cli/commands/list.ts
+- [x] T035 [US2] Add --backup option to show command in src/cli/commands/show.ts
+- [x] T036 [US2] Add --backup option to search command in src/cli/commands/search.ts
+- [x] T037 [US2] Add --backup option to export command in src/cli/commands/export.ts
+- [x] T038 [US2] Handle edge case: invalid/corrupted backup file with clear error message
+- [x] T039 [US2] Handle edge case: graceful degradation for partially corrupted backups (warn but allow intact files)
 
 **Checkpoint**: User Story 2 complete - users can view backup contents via CLI and library
 
@@ -104,21 +104,21 @@
 
 ### Implementation for User Story 3
 
-- [ ] T040 [US3] Implement restoreBackup(config: RestoreConfig) core function in src/core/backup.ts
-- [ ] T041 [US3] Implement integrity verification before restore in src/core/backup.ts
-- [ ] T042 [US3] Implement file extraction with path normalization (forward slashes to OS-native) in src/core/backup.ts
-- [ ] T043 [US3] Implement rollback mechanism for partial restore failures in src/core/backup.ts
-- [ ] T044 [US3] Add force flag handling to prevent accidental data overwrites in src/core/backup.ts
-- [ ] T045 [US3] Add progress callback support for restore operation in src/core/backup.ts
-- [ ] T046 [P] [US3] Implement restoreBackup() library wrapper in src/lib/backup.ts
-- [ ] T047 [P] [US3] Export restoreBackup from src/lib/index.ts
-- [ ] T048 [US3] Implement restore CLI command in src/cli/commands/restore.ts with -t, -f, --json options
-- [ ] T049 [US3] Register restore command in src/cli/index.ts
-- [ ] T050 [US3] Add progress display for restore command (validating, extracting, finalizing phases)
-- [ ] T051 [US3] Handle edge case: backup file not found (exit code 2)
-- [ ] T052 [US3] Handle edge case: invalid/corrupted backup (exit code 3)
-- [ ] T053 [US3] Handle edge case: target exists without --force (exit code 4)
-- [ ] T054 [US3] Handle edge case: integrity check failures (exit code 5)
+- [x] T040 [US3] Implement restoreBackup(config: RestoreConfig) core function in src/core/backup.ts
+- [x] T041 [US3] Implement integrity verification before restore in src/core/backup.ts
+- [x] T042 [US3] Implement file extraction with path normalization (forward slashes to OS-native) in src/core/backup.ts
+- [x] T043 [US3] Implement rollback mechanism for partial restore failures in src/core/backup.ts
+- [x] T044 [US3] Add force flag handling to prevent accidental data overwrites in src/core/backup.ts
+- [x] T045 [US3] Add progress callback support for restore operation in src/core/backup.ts
+- [x] T046 [P] [US3] Implement restoreBackup() library wrapper in src/lib/backup.ts
+- [x] T047 [P] [US3] Export restoreBackup from src/lib/index.ts
+- [x] T048 [US3] Implement restore CLI command in src/cli/commands/restore.ts with -t, -f, --json options
+- [x] T049 [US3] Register restore command in src/cli/index.ts
+- [x] T050 [US3] Add progress display for restore command (validating, extracting, finalizing phases)
+- [x] T051 [US3] Handle edge case: backup file not found (exit code 2)
+- [x] T052 [US3] Handle edge case: invalid/corrupted backup (exit code 3)
+- [x] T053 [US3] Handle edge case: target exists without --force (exit code 4)
+- [x] T054 [US3] Handle edge case: integrity check failures (exit code 5)
 
 **Checkpoint**: User Story 3 complete - users can restore backups via CLI and library
 
@@ -132,16 +132,16 @@
 
 ### Implementation for User Story 4
 
-- [ ] T055 [US4] Implement listBackups(directory?: string) in src/core/backup.ts to scan directory for .zip files
-- [ ] T056 [US4] Implement backup metadata extraction (read manifest from each zip) in src/core/backup.ts
-- [ ] T057 [US4] Handle invalid backups gracefully (include in list with error field) in src/core/backup.ts
-- [ ] T058 [P] [US4] Implement listBackups() library wrapper in src/lib/backup.ts
-- [ ] T059 [P] [US4] Export listBackups from src/lib/index.ts
-- [ ] T060 [US4] Implement list-backups CLI command in src/cli/commands/list-backups.ts with --json option
-- [ ] T061 [US4] Register list-backups command in src/cli/index.ts
-- [ ] T062 [US4] Add table formatter for backup list (filename, date, size, sessions) in src/cli/formatters/table.ts
-- [ ] T063 [US4] Handle edge case: no backups found (informational message, exit code 0)
-- [ ] T064 [US4] Handle edge case: directory not found (exit code 2)
+- [x] T055 [US4] Implement listBackups(directory?: string) in src/core/backup.ts to scan directory for .zip files
+- [x] T056 [US4] Implement backup metadata extraction (read manifest from each zip) in src/core/backup.ts
+- [x] T057 [US4] Handle invalid backups gracefully (include in list with error field) in src/core/backup.ts
+- [x] T058 [P] [US4] Implement listBackups() library wrapper in src/lib/backup.ts
+- [x] T059 [P] [US4] Export listBackups from src/lib/index.ts
+- [x] T060 [US4] Implement list-backups CLI command in src/cli/commands/list-backups.ts with --json option
+- [x] T061 [US4] Register list-backups command in src/cli/index.ts
+- [x] T062 [US4] Add table formatter for backup list (filename, date, size, sessions) in src/cli/commands/list-backups.ts
+- [x] T063 [US4] Handle edge case: no backups found (informational message, exit code 0)
+- [x] T064 [US4] Handle edge case: directory not found (exit code 2)
 
 **Checkpoint**: User Story 4 complete - users can list and manage backups
 
@@ -151,14 +151,14 @@
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T065 [P] Export all backup types from src/lib/types.ts
-- [ ] T066 [P] Add type guards (isBackupError, isRestoreError, isInvalidBackupError) to src/lib/errors.ts
-- [ ] T067 [P] Export type guards from src/lib/index.ts
-- [ ] T068 Update README.md with backup/restore usage examples
-- [ ] T069 Run typecheck and fix any TypeScript errors
-- [ ] T070 Run lint and fix any linting issues
-- [ ] T071 Verify all CLI commands have proper --help text
-- [ ] T072 Run quickstart.md validation (test all documented commands)
+- [x] T065 [P] Export all backup types from src/lib/types.ts
+- [x] T066 [P] Add type guards (isBackupError, isRestoreError, isInvalidBackupError) to src/lib/errors.ts
+- [x] T067 [P] Export type guards from src/lib/index.ts
+- [ ] T068 Update README.md with backup/restore usage examples (deferred - docs)
+- [x] T069 Run typecheck and fix any TypeScript errors
+- [x] T070 Run lint and fix any linting issues
+- [x] T071 Verify all CLI commands have proper --help text
+- [ ] T072 Run quickstart.md validation (test all documented commands) (deferred - docs)
 
 ---
 

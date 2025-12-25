@@ -144,7 +144,8 @@ export function listSessions(config?: LibraryConfig): PaginatedResult<Session> {
         all: true,
         workspacePath: resolved.workspace,
       },
-      resolved.dataPath
+      resolved.dataPath,
+      resolved.backupPath
     );
 
     // Total count before pagination
@@ -158,7 +159,7 @@ export function listSessions(config?: LibraryConfig): PaginatedResult<Session> {
     // Convert to library Session format
     // We need full sessions, not summaries, so we'll fetch each one
     const sessions: Session[] = paginatedSessions.map((summary) => {
-      const fullSession = storage.getSession(summary.index, resolved.dataPath);
+      const fullSession = storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${summary.index} not found`);
       }
@@ -217,7 +218,7 @@ export function getSession(index: number, config?: LibraryConfig): Session {
     // Core storage uses 1-based indexing, so we add 1
     const coreIndex = index + 1;
 
-    const coreSession = storage.getSession(coreIndex, resolved.dataPath);
+    const coreSession = storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
     if (!coreSession) {
       throw new DatabaseNotFoundError(`Session at index ${index} not found`);
     }
@@ -279,13 +280,14 @@ export function searchSessions(query: string, config?: LibraryConfig): SearchRes
         contextChars: resolved.context * 80, // Rough estimate: 1 line = 80 chars
         workspacePath: resolved.workspace,
       },
-      resolved.dataPath
+      resolved.dataPath,
+      resolved.backupPath
     );
 
     // Convert core results to library format
     return coreResults.map((coreResult) => {
       // Get full session for reference
-      const fullSession = storage.getSession(coreResult.index, resolved.dataPath);
+      const fullSession = storage.getSession(coreResult.index, resolved.dataPath, resolved.backupPath);
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${coreResult.index} not found`);
       }
@@ -371,7 +373,7 @@ export function exportSessionToJson(index: number, config?: LibraryConfig): stri
     const resolved = mergeWithDefaults(config);
     const coreIndex = index + 1; // Convert to 1-based indexing
 
-    const coreSession = storage.getSession(coreIndex, resolved.dataPath);
+    const coreSession = storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
     if (!coreSession) {
       throw new DatabaseNotFoundError(`Session at index ${index} not found`);
     }
@@ -404,7 +406,7 @@ export function exportSessionToMarkdown(index: number, config?: LibraryConfig): 
     const resolved = mergeWithDefaults(config);
     const coreIndex = index + 1; // Convert to 1-based indexing
 
-    const coreSession = storage.getSession(coreIndex, resolved.dataPath);
+    const coreSession = storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
     if (!coreSession) {
       throw new DatabaseNotFoundError(`Session at index ${index} not found`);
     }
@@ -445,12 +447,13 @@ export function exportAllSessionsToJson(config?: LibraryConfig): string {
         all: true,
         workspacePath: resolved.workspace,
       },
-      resolved.dataPath
+      resolved.dataPath,
+      resolved.backupPath
     );
 
     // Export each session
     const exportedSessions = coreSessions.map((summary) => {
-      const session = storage.getSession(summary.index, resolved.dataPath);
+      const session = storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
       if (!session) return null;
       return JSON.parse(exportToJson(session, session.workspacePath));
     }).filter((s): s is Record<string, unknown> => s !== null);
@@ -487,14 +490,15 @@ export function exportAllSessionsToMarkdown(config?: LibraryConfig): string {
         all: true,
         workspacePath: resolved.workspace,
       },
-      resolved.dataPath
+      resolved.dataPath,
+      resolved.backupPath
     );
 
     // Export each session
     const parts: string[] = [];
 
     for (const summary of coreSessions) {
-      const session = storage.getSession(summary.index, resolved.dataPath);
+      const session = storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
       if (!session) continue;
 
       parts.push(exportToMarkdown(session, session.workspacePath));

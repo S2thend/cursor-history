@@ -6,6 +6,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import Database from 'better-sqlite3';
+import AdmZip from 'adm-zip';
 import type {
   Workspace,
   ChatSession,
@@ -17,6 +18,7 @@ import type {
 import { getCursorDataPath, contractPath, normalizePath, pathsEqual } from '../lib/platform.js';
 import { SessionNotFoundError } from '../lib/errors.js';
 import { parseChatData, getSearchSnippets, type CursorChatBundle } from './parser.js';
+import { openBackupDatabase, readBackupManifest } from './backup.js';
 
 /**
  * Known SQLite keys for chat data (in priority order)
@@ -64,6 +66,89 @@ export function openDatabaseReadWrite(dbPath: string): Database.Database {
   return new Database(dbPath, { readonly: false });
 }
 
+// ============================================================================
+// Backup Data Source (T027)
+// ============================================================================
+
+/**
+ * Read workspace.json from a backup zip file
+ */
+function readWorkspaceJsonFromBackup(
+  backupPath: string,
+  workspaceId: string
+): string | null {
+  try {
+    const zip = new AdmZip(backupPath);
+    const jsonPath = `workspaceStorage/${workspaceId}/workspace.json`;
+    const buffer = zip.readFile(jsonPath);
+
+    if (!buffer) {
+      return null;
+    }
+
+    const content = buffer.toString('utf-8');
+    const data = JSON.parse(content) as { folder?: string };
+    if (data.folder) {
+      // Convert file:// URL to path
+      return data.folder.replace(/^file:\/\//, '').replace(/%20/g, ' ');
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find workspaces from a backup file
+ */
+function findWorkspacesFromBackup(backupPath: string): Workspace[] {
+  const manifest = readBackupManifest(backupPath);
+  if (!manifest) {
+    return [];
+  }
+
+  const workspaces: Workspace[] = [];
+
+  // Find all workspace databases
+  for (const file of manifest.files) {
+    if (file.type !== 'workspace-db') continue;
+
+    // Extract workspace ID from path: workspaceStorage/{id}/state.vscdb
+    const match = file.path.match(/^workspaceStorage\/([^/]+)\/state\.vscdb$/);
+    if (!match) continue;
+
+    const workspaceId = match[1]!;
+    const workspacePath = readWorkspaceJsonFromBackup(backupPath, workspaceId);
+
+    if (!workspacePath) continue;
+
+    // Count sessions in this workspace
+    let sessionCount = 0;
+    try {
+      const db = openBackupDatabase(backupPath, file.path);
+      const result = getChatDataFromDb(db);
+      if (result) {
+        const parsed = parseChatData(result.data, result.bundle);
+        sessionCount = parsed.length;
+      }
+      db.close();
+    } catch {
+      continue;
+    }
+
+    if (sessionCount > 0) {
+      workspaces.push({
+        id: workspaceId,
+        path: workspacePath,
+        dbPath: file.path, // Relative path within backup
+        sessionCount,
+      });
+    }
+  }
+
+  return workspaces;
+}
+
 /**
  * Read workspace.json to get the original workspace path
  */
@@ -88,8 +173,15 @@ export function readWorkspaceJson(workspaceDir: string): string | null {
 
 /**
  * Find all workspaces with chat history
+ * @param customDataPath - Custom Cursor data path (for live data)
+ * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function findWorkspaces(customDataPath?: string): Workspace[] {
+export function findWorkspaces(customDataPath?: string, backupPath?: string): Workspace[] {
+  // T028: Support reading from backup
+  if (backupPath) {
+    return findWorkspacesFromBackup(backupPath);
+  }
+
   const basePath = getCursorDataPath(customDataPath);
 
   if (!existsSync(basePath)) {
@@ -202,9 +294,13 @@ function getChatDataFromDb(db: Database.Database): { data: string; bundle: Curso
 /**
  * List chat sessions with optional filtering
  * Uses workspace storage for listing (has correct paths and complete list)
+ * @param options - List options (limit, all, workspacePath)
+ * @param customDataPath - Custom Cursor data path (for live data)
+ * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function listSessions(options: ListOptions, customDataPath?: string): ChatSessionSummary[] {
-  const workspaces = findWorkspaces(customDataPath);
+export function listSessions(options: ListOptions, customDataPath?: string, backupPath?: string): ChatSessionSummary[] {
+  // T029: Support reading from backup
+  const workspaces = findWorkspaces(customDataPath, backupPath);
 
   // Filter by workspace if specified
   const filteredWorkspaces = options.workspacePath
@@ -217,7 +313,10 @@ export function listSessions(options: ListOptions, customDataPath?: string): Cha
 
   for (const workspace of filteredWorkspaces) {
     try {
-      const db = openDatabase(workspace.dbPath);
+      // Open database from live or backup source
+      const db = backupPath
+        ? openBackupDatabase(backupPath, workspace.dbPath)
+        : openDatabase(workspace.dbPath);
       const result = getChatDataFromDb(db);
       db.close();
 
@@ -261,9 +360,11 @@ export function listSessions(options: ListOptions, customDataPath?: string): Cha
 
 /**
  * List all workspaces with chat history
+ * @param customDataPath - Custom Cursor data path (for live data)
+ * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function listWorkspaces(customDataPath?: string): Workspace[] {
-  const workspaces = findWorkspaces(customDataPath);
+export function listWorkspaces(customDataPath?: string, backupPath?: string): Workspace[] {
+  const workspaces = findWorkspaces(customDataPath, backupPath);
 
   // Sort by session count descending
   workspaces.sort((a, b) => b.sessionCount - a.sessionCount);
@@ -277,84 +378,91 @@ export function listWorkspaces(customDataPath?: string): Workspace[] {
 /**
  * Get a specific session by index
  * Tries global storage first for complete AI responses, falls back to workspace storage
+ * @param index - Session index (1-based)
+ * @param customDataPath - Custom Cursor data path (for live data)
+ * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function getSession(index: number, customDataPath?: string): ChatSession | null {
-  const summaries = listSessions({ limit: 0, all: true }, customDataPath);
+export function getSession(index: number, customDataPath?: string, backupPath?: string): ChatSession | null {
+  // T030: Support reading from backup
+  const summaries = listSessions({ limit: 0, all: true }, customDataPath, backupPath);
   const summary = summaries.find((s) => s.index === index);
 
   if (!summary) {
     return null;
   }
 
-  // Try to get full session from global storage (has AI responses)
-  const globalPath = getGlobalStoragePath();
-  const globalDbPath = join(globalPath, 'state.vscdb');
+  // When reading from backup, skip global storage lookup (backups only have workspace DBs)
+  // Try to get full session from global storage (has AI responses) - live data only
+  if (!backupPath) {
+    const globalPath = getGlobalStoragePath();
+    const globalDbPath = join(globalPath, 'state.vscdb');
 
-  if (existsSync(globalDbPath)) {
-    try {
-      const db = openDatabase(globalDbPath);
+    if (existsSync(globalDbPath)) {
+      try {
+        const db = openDatabase(globalDbPath);
 
-      // Check if cursorDiskKV table exists
-      const tableCheck = db.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'"
-      ).get();
+        // Check if cursorDiskKV table exists
+        const tableCheck = db.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'"
+        ).get();
 
-      if (tableCheck) {
-        // Get all bubbles for this composer
-        const bubbleRows = db
-          .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC")
-          .all(`bubbleId:${summary.id}:%`) as { key: string; value: string }[];
+        if (tableCheck) {
+          // Get all bubbles for this composer
+          const bubbleRows = db
+            .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC")
+            .all(`bubbleId:${summary.id}:%`) as { key: string; value: string }[];
 
-        db.close();
+          db.close();
 
-        if (bubbleRows.length > 0) {
-          const messages = bubbleRows.map((row) => {
-            try {
-              const data = JSON.parse(row.value) as {
-                type?: number;
-                createdAt?: string;
-                bubbleId?: string;
-              };
+          if (bubbleRows.length > 0) {
+            const messages = bubbleRows.map((row) => {
+              try {
+                const data = JSON.parse(row.value) as {
+                  type?: number;
+                  createdAt?: string;
+                  bubbleId?: string;
+                };
 
-              const text = extractBubbleText(data);
-              const role = data.type === 2 ? 'assistant' : 'user';
+                const text = extractBubbleText(data);
+                const role = data.type === 2 ? 'assistant' : 'user';
 
+                return {
+                  id: data.bubbleId ?? row.key.split(':').pop() ?? null,
+                  role: role as 'user' | 'assistant',
+                  content: text,
+                  timestamp: data.createdAt ? new Date(data.createdAt) : new Date(),
+                  codeBlocks: [],
+                };
+              } catch {
+                return null;
+              }
+            }).filter((m): m is NonNullable<typeof m> => m !== null && m.content.length > 0);
+
+            if (messages.length > 0) {
               return {
-                id: data.bubbleId ?? row.key.split(':').pop() ?? null,
-                role: role as 'user' | 'assistant',
-                content: text,
-                timestamp: data.createdAt ? new Date(data.createdAt) : new Date(),
-                codeBlocks: [],
+                id: summary.id,
+                index,
+                title: summary.title,
+                createdAt: summary.createdAt,
+                lastUpdatedAt: summary.lastUpdatedAt,
+                messageCount: messages.length,
+                messages,
+                workspaceId: summary.workspaceId,
+                workspacePath: summary.workspacePath,
               };
-            } catch {
-              return null;
             }
-          }).filter((m): m is NonNullable<typeof m> => m !== null && m.content.length > 0);
-
-          if (messages.length > 0) {
-            return {
-              id: summary.id,
-              index,
-              title: summary.title,
-              createdAt: summary.createdAt,
-              lastUpdatedAt: summary.lastUpdatedAt,
-              messageCount: messages.length,
-              messages,
-              workspaceId: summary.workspaceId,
-              workspacePath: summary.workspacePath,
-            };
           }
+        } else {
+          db.close();
         }
-      } else {
-        db.close();
+      } catch {
+        // Fall through to workspace storage
       }
-    } catch {
-      // Fall through to workspace storage
     }
   }
 
-  // Fall back to workspace storage
-  const workspaces = findWorkspaces(customDataPath);
+  // Fall back to workspace storage (or use backup for backup mode)
+  const workspaces = findWorkspaces(customDataPath, backupPath);
   const workspace = workspaces.find((w) => w.id === summary.workspaceId);
 
   if (!workspace) {
@@ -362,7 +470,10 @@ export function getSession(index: number, customDataPath?: string): ChatSession 
   }
 
   try {
-    const db = openDatabase(workspace.dbPath);
+    // Open database from live or backup source
+    const db = backupPath
+      ? openBackupDatabase(backupPath, workspace.dbPath)
+      : openDatabase(workspace.dbPath);
     const result = getChatDataFromDb(db);
     db.close();
 
@@ -386,21 +497,28 @@ export function getSession(index: number, customDataPath?: string): ChatSession 
 
 /**
  * Search across all chat sessions
+ * @param query - Search query string
+ * @param options - Search options (limit, contextChars, workspacePath)
+ * @param customDataPath - Custom Cursor data path (for live data)
+ * @param backupPath - Path to backup zip file (if reading from backup)
  */
 export function searchSessions(
   query: string,
   options: SearchOptions,
-  customDataPath?: string
+  customDataPath?: string,
+  backupPath?: string
 ): SearchResult[] {
+  // T031: Support reading from backup
   const summaries = listSessions(
     { limit: 0, all: true, workspacePath: options.workspacePath },
-    customDataPath
+    customDataPath,
+    backupPath
   );
   const results: SearchResult[] = [];
   const lowerQuery = query.toLowerCase();
 
   for (const summary of summaries) {
-    const session = getSession(summary.index, customDataPath);
+    const session = getSession(summary.index, customDataPath, backupPath);
     if (!session) continue;
 
     const snippets = getSearchSnippets(session.messages, lowerQuery, options.contextChars);

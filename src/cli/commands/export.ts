@@ -3,9 +3,11 @@
  */
 
 import type { Command } from 'commander';
+import pc from 'picocolors';
 import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getSession, listSessions, findWorkspaces } from '../../core/storage.js';
+import { validateBackup } from '../../core/backup.js';
 import { exportToMarkdown, exportToJson } from '../../core/parser.js';
 import { formatExportSuccess, formatExportResultJson } from '../formatters/index.js';
 import {
@@ -24,6 +26,7 @@ interface ExportCommandOptions {
   all?: boolean;
   json?: boolean;
   dataPath?: string;
+  backup?: string;
 }
 
 /**
@@ -37,12 +40,34 @@ export function registerExportCommand(program: Command): void {
     .option('-f, --format <format>', 'Output format: md or json', 'md')
     .option('--force', 'Overwrite existing files')
     .option('-a, --all', 'Export all sessions')
+    .option('-b, --backup <path>', 'Export from backup file instead of live data')
     .action(
       async (indexArg: string | undefined, options: ExportCommandOptions, command: Command) => {
         const globalOptions = command.parent?.opts() as { json?: boolean; dataPath?: string };
         const useJson = options.json ?? globalOptions?.json ?? false;
         const customPath = options.dataPath ?? globalOptions?.dataPath;
         const format = options.format === 'json' ? 'json' : 'md';
+        const backupPath = options.backup ? expandPath(options.backup) : undefined;
+
+        // T037: Validate backup if exporting from backup
+        if (backupPath) {
+          const validation = validateBackup(backupPath);
+          if (validation.status === 'invalid') {
+            if (useJson) {
+              console.log(JSON.stringify({ error: 'Invalid backup', errors: validation.errors }));
+            } else {
+              console.error(pc.red('Invalid backup file:'));
+              for (const err of validation.errors) {
+                console.error(pc.dim(`  ${err}`));
+              }
+            }
+            process.exit(3);
+          }
+          if (validation.status === 'warnings' && !useJson) {
+            console.error(pc.yellow(`Warning: Backup has integrity issues (${validation.corruptedFiles.length} corrupted files)`));
+            console.error(pc.dim('Continuing with intact files...\n'));
+          }
+        }
 
         try {
           // Validate arguments
@@ -59,7 +84,8 @@ export function registerExportCommand(program: Command): void {
             // Export all sessions
             const sessions = listSessions(
               { limit: 0, all: true },
-              customPath ? expandPath(customPath) : undefined
+              customPath ? expandPath(customPath) : undefined,
+              backupPath
             );
 
             if (sessions.length === 0) {
@@ -74,12 +100,21 @@ export function registerExportCommand(program: Command): void {
               mkdirSync(outputDir, { recursive: true });
             }
 
-            const workspaces = findWorkspaces(customPath ? expandPath(customPath) : undefined);
+            const workspaces = findWorkspaces(
+              customPath ? expandPath(customPath) : undefined,
+              backupPath
+            );
+
+            // Show backup source indicator if exporting from backup
+            if (backupPath && !useJson) {
+              console.log(pc.dim(`Exporting from backup: ${contractPath(backupPath)}\n`));
+            }
 
             for (const summary of sessions) {
               const session = getSession(
                 summary.index,
-                customPath ? expandPath(customPath) : undefined
+                customPath ? expandPath(customPath) : undefined,
+                backupPath
               );
               if (!session) continue;
 
@@ -119,17 +154,25 @@ export function registerExportCommand(program: Command): void {
               );
             }
 
-            const session = getSession(index, customPath ? expandPath(customPath) : undefined);
+            const session = getSession(
+              index,
+              customPath ? expandPath(customPath) : undefined,
+              backupPath
+            );
 
             if (!session) {
               const sessions = listSessions(
                 { limit: 0, all: true },
-                customPath ? expandPath(customPath) : undefined
+                customPath ? expandPath(customPath) : undefined,
+                backupPath
               );
               throw new SessionNotFoundError(index, sessions.length);
             }
 
-            const workspaces = findWorkspaces(customPath ? expandPath(customPath) : undefined);
+            const workspaces = findWorkspaces(
+              customPath ? expandPath(customPath) : undefined,
+              backupPath
+            );
             const workspace = workspaces.find((w) => w.id === session.workspaceId);
             const workspacePath = workspace?.path;
 
@@ -154,6 +197,11 @@ export function registerExportCommand(program: Command): void {
             const dir = dirname(outputPath);
             if (dir !== '.' && !existsSync(dir)) {
               mkdirSync(dir, { recursive: true });
+            }
+
+            // Show backup source indicator if exporting from backup
+            if (backupPath && !useJson) {
+              console.log(pc.dim(`Exporting from backup: ${contractPath(backupPath)}\n`));
             }
 
             // Export

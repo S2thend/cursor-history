@@ -3,10 +3,12 @@
  */
 
 import type { Command } from 'commander';
+import pc from 'picocolors';
 import { getSession, listSessions } from '../../core/storage.js';
+import { validateBackup } from '../../core/backup.js';
 import { formatSessionDetail, formatSessionJson } from '../formatters/index.js';
 import { SessionNotFoundError, handleError } from '../errors.js';
-import { expandPath } from '../../lib/platform.js';
+import { expandPath, contractPath } from '../../lib/platform.js';
 
 interface ShowCommandOptions {
   json?: boolean;
@@ -15,6 +17,7 @@ interface ShowCommandOptions {
   think?: boolean;
   tool?: boolean;
   error?: boolean;
+  backup?: string;
 }
 
 /**
@@ -28,10 +31,12 @@ export function registerShowCommand(program: Command): void {
     .option('-t, --think', 'Show full thinking/reasoning text')
     .option('--tool', 'Show full tool call details (commands, content, results)')
     .option('-e, --error', 'Show full error messages (default: truncated)')
+    .option('-b, --backup <path>', 'Read from backup file instead of live data')
     .action(async (indexArg: string, options: ShowCommandOptions, command: Command) => {
       const globalOptions = command.parent?.opts() as { json?: boolean; dataPath?: string };
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
+      const backupPath = options.backup ? expandPath(options.backup) : undefined;
 
       const index = parseInt(indexArg, 10);
 
@@ -39,16 +44,46 @@ export function registerShowCommand(program: Command): void {
         handleError(new Error(`Invalid index: ${indexArg}. Must be a positive number.`));
       }
 
+      // T035: Validate backup if reading from backup
+      if (backupPath) {
+        const validation = validateBackup(backupPath);
+        if (validation.status === 'invalid') {
+          if (useJson) {
+            console.log(JSON.stringify({ error: 'Invalid backup', errors: validation.errors }));
+          } else {
+            console.error(pc.red('Invalid backup file:'));
+            for (const err of validation.errors) {
+              console.error(pc.dim(`  ${err}`));
+            }
+          }
+          process.exit(3);
+        }
+        if (validation.status === 'warnings' && !useJson) {
+          console.error(pc.yellow(`Warning: Backup has integrity issues (${validation.corruptedFiles.length} corrupted files)`));
+          console.error(pc.dim('Continuing with intact files...\n'));
+        }
+      }
+
       try {
-        const session = getSession(index, customPath ? expandPath(customPath) : undefined);
+        const session = getSession(
+          index,
+          customPath ? expandPath(customPath) : undefined,
+          backupPath
+        );
 
         if (!session) {
           // Get max index for error message
           const sessions = listSessions(
             { limit: 0, all: true },
-            customPath ? expandPath(customPath) : undefined
+            customPath ? expandPath(customPath) : undefined,
+            backupPath
           );
           throw new SessionNotFoundError(index, sessions.length);
+        }
+
+        // Show backup source indicator if reading from backup
+        if (backupPath && !useJson) {
+          console.log(pc.dim(`Reading from backup: ${contractPath(backupPath)}\n`));
         }
 
         if (useJson) {
