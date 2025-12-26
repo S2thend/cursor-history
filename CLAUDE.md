@@ -254,8 +254,8 @@ try {
 | `show <index>` | Show session details (-s/--short, -t/--think, -f/--fullread, -e/--error) |
 | `search <query>` | Search across sessions (-n, --context) |
 | `export [index]` | Export to md/json (--all, -o, -f, --force) |
-| `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f) |
-| `migrate <source> <dest>` | Move/copy all sessions between workspaces (--copy, --dry-run, -f) |
+| `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f, --debug) |
+| `migrate <source> <dest>` | Move/copy all sessions between workspaces (--copy, --dry-run, -f, --debug) |
 
 ### Show Command Options
 
@@ -263,6 +263,13 @@ try {
 - `-t, --think` - Show full AI thinking/reasoning text (default: 200 char preview)
 - `-f, --fullread` - Show full file read content (default: 100 char preview)
 - `-e, --error` - Show full error messages (default: 300 char preview)
+
+### Migration Command Options
+
+- `--copy` - Copy sessions instead of moving (keeps originals)
+- `--dry-run` - Preview migration without making changes
+- `-f, --force` - Proceed even if destination has existing sessions
+- `--debug` - Show detailed path transformation logs to stderr (useful for troubleshooting)
 
 ### Global Options
 
@@ -312,8 +319,19 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - commander + picocolors for CLI (not used in library)
 - Dual ESM/CommonJS module support
 - SQLite databases (state.vscdb files) + zip archives (004-full-backup)
+- TypeScript 5.0+ (strict mode enabled) + better-sqlite3, commander, picocolors (005-fix-migration-paths)
+- SQLite (globalStorage/state.vscdb, workspaceStorage/*/state.vscdb) (005-fix-migration-paths)
 
 ## Recent Changes
+- 005-fix-migration-paths: Fixed file path references in migrated sessions
+  - File paths in bubble data are now updated during migration (move/copy)
+  - Path fields updated: `toolFormerData.params.{relativeWorkspacePath,targetFile,filePath,path}`, `codeBlocks[].uri.{path,_formatted,_fsPath}`
+  - External paths (outside source workspace) are silently preserved
+  - Nested path detection prevents infinite replacement loops
+  - New `--debug` flag shows detailed path transformation logs to stderr
+  - Dry run now indicates "File paths will be updated to destination workspace"
+  - New error: `NestedPathError` for detecting problematic path configurations
+
 - 003-migrate-workspace: Added session migration feature
   - `src/core/migrate.ts` - Core migration logic (move/copy sessions between workspaces)
   - `src/cli/commands/migrate-session.ts` - Single/multiple session migration command

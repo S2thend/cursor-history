@@ -236,6 +236,40 @@ export function isDestinationHasSessionsError(error: unknown): error is Destinat
   return error instanceof DestinationHasSessionsError;
 }
 
+/**
+ * Thrown when destination workspace path is nested within source workspace.
+ *
+ * Recovery: Choose a destination that is not a subdirectory of the source.
+ */
+export class NestedPathError extends Error {
+  name = 'NestedPathError' as const;
+
+  /** The source workspace path */
+  source: string;
+
+  /** The destination workspace path (nested in source) */
+  destination: string;
+
+  constructor(source: string, destination: string) {
+    super(
+      `Destination path is nested within source: ${destination} is inside ${source}. ` +
+        `This would cause infinite path replacement loops. Choose a different destination.`
+    );
+    this.source = source;
+    this.destination = destination;
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, NestedPathError);
+    }
+  }
+}
+
+/**
+ * Type guard to check if an error is a NestedPathError.
+ */
+export function isNestedPathError(error: unknown): error is NestedPathError {
+  return error instanceof NestedPathError;
+}
+
 // ============================================================================
 // Backup Errors
 // ============================================================================

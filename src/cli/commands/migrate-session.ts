@@ -17,6 +17,7 @@ import {
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
   isSameWorkspaceError,
+  isNestedPathError,
 } from '../../lib/errors.js';
 import type { MigrationMode } from '../../core/types.js';
 
@@ -24,6 +25,7 @@ interface MigrateSessionOptions {
   dryRun?: boolean;
   copy?: boolean;
   force?: boolean;
+  debug?: boolean;
   dataPath?: string;
   json?: boolean;
 }
@@ -37,6 +39,7 @@ export function registerMigrateSessionCommand(program: Command): void {
     .option('--dry-run', 'Preview migration without making changes')
     .option('--copy', 'Copy sessions instead of moving (keeps originals)')
     .option('-f, --force', 'Proceed even if destination has existing sessions')
+    .option('--debug', 'Show detailed path transformation logs')
     .action(async (sessionArg: string, destinationArg: string, options: MigrateSessionOptions) => {
       const globalOptions = program.opts() as { dataPath?: string; json?: boolean };
       const dataPath = globalOptions.dataPath;
@@ -60,6 +63,7 @@ export function registerMigrateSessionCommand(program: Command): void {
           dryRun: options.dryRun ?? false,
           force: options.force ?? false,
           dataPath,
+          debug: options.debug ?? false,
         });
 
         // Output results
@@ -95,6 +99,7 @@ function outputResults(
     newSessionId?: string;
     error?: string;
     dryRun: boolean;
+    pathsWillBeUpdated?: boolean;
   }>,
   isDryRun: boolean
 ): void {
@@ -115,6 +120,9 @@ function outputResults(
       console.log(`  ${pc.cyan(result.sessionId.slice(0, 8))}...`);
       console.log(`    From: ${result.sourceWorkspace}`);
       console.log(`    To:   ${result.destinationWorkspace}`);
+      if (isDryRun && result.pathsWillBeUpdated) {
+        console.log(`    ${pc.blue('File paths will be updated to destination workspace')}`);
+      }
       console.log(`    ${pc.dim(`(${actionLabel})`)}\n`);
     }
   }
@@ -145,6 +153,10 @@ function formatError(error: unknown): string {
 
   if (isSameWorkspaceError(error)) {
     return `Source and destination are the same: ${error.path}\nSpecify a different destination path.`;
+  }
+
+  if (isNestedPathError(error)) {
+    return `Destination is nested within source: ${error.destination} is inside ${error.source}\nThis would cause infinite path replacement loops. Choose a different destination.`;
   }
 
   if (error instanceof Error) {
