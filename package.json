@@ -1,6 +1,6 @@
 {
   "name": "cursor-history",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "CLI tool and library to browse and export Cursor AI chat history",
   "type": "module",
   "main": "dist/lib/index.js",
