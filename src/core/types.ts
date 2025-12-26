@@ -177,6 +177,8 @@ export interface MigrateSessionOptions {
   force: boolean;
   /** Custom Cursor data path (optional) */
   dataPath?: string;
+  /** If true, log detailed path transformation info to stderr */
+  debug?: boolean;
 }
 
 /**
@@ -195,6 +197,8 @@ export interface MigrateWorkspaceOptions {
   force: boolean;
   /** Custom Cursor data path (optional) */
   dataPath?: string;
+  /** If true, log detailed path transformation info to stderr */
+  debug?: boolean;
 }
 
 /**
@@ -217,6 +221,8 @@ export interface SessionMigrationResult {
   error?: string;
   /** Whether this was a dry run */
   dryRun: boolean;
+  /** Indicates file paths in session data will be updated (dry run preview) */
+  pathsWillBeUpdated?: boolean;
 }
 
 /**

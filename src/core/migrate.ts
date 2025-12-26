@@ -23,6 +23,7 @@ import {
   SameWorkspaceError,
   NoSessionsFoundError,
   DestinationHasSessionsError,
+  NestedPathError,
 } from '../lib/errors.js';
 import type {
   MigrateSessionOptions,
@@ -59,17 +60,258 @@ function getGlobalStoragePath(): string {
   }
 }
 
+// ============================================================================
+// Path Transformation Functions (for migration file path updates)
+// ============================================================================
+
+/**
+ * Result of transforming paths in a single bubble
+ */
+interface PathTransformResult {
+  /** Number of paths that were transformed */
+  transformed: number;
+  /** Number of paths that were skipped (outside source workspace) */
+  skipped: number;
+}
+
+/**
+ * T004: Transform a single path by replacing source prefix with destination prefix.
+ * Returns null if path doesn't start with source prefix (external path).
+ *
+ * @param path - The path to transform
+ * @param sourcePrefix - Source workspace path prefix
+ * @param destPrefix - Destination workspace path prefix
+ * @returns Transformed path or null if path is external
+ */
+function transformPath(path: string, sourcePrefix: string, destPrefix: string): string | null {
+  // Normalize for comparison (handle trailing slashes)
+  const normalizedSource = sourcePrefix.replace(/\/+$/, '');
+  const normalizedPath = path;
+
+  // Check if path starts with source prefix
+  if (normalizedPath.startsWith(normalizedSource + '/') || normalizedPath === normalizedSource) {
+    // Replace the prefix
+    return destPrefix + normalizedPath.slice(normalizedSource.length);
+  }
+
+  // Path is outside source workspace
+  return null;
+}
+
+/**
+ * T005: Transform file paths in toolFormerData.params.
+ * Updates: relativeWorkspacePath, targetFile, filePath, path
+ *
+ * @param params - Parsed params object (will be mutated)
+ * @param sourcePrefix - Source workspace path prefix
+ * @param destPrefix - Destination workspace path prefix
+ * @param debug - Whether to log transformations
+ * @returns Count of transformed and skipped paths
+ */
+function transformToolFormerParams(
+  params: Record<string, unknown>,
+  sourcePrefix: string,
+  destPrefix: string,
+  debug: boolean
+): PathTransformResult {
+  const result: PathTransformResult = { transformed: 0, skipped: 0 };
+  const pathFields = ['relativeWorkspacePath', 'targetFile', 'filePath', 'path'];
+
+  for (const field of pathFields) {
+    const value = params[field];
+    if (typeof value !== 'string') continue;
+
+    const transformed = transformPath(value, sourcePrefix, destPrefix);
+    if (transformed !== null) {
+      if (debug) {
+        console.error(`[DEBUG] toolFormerData.params.${field}: ${value} -> ${transformed}`);
+      }
+      params[field] = transformed;
+      result.transformed++;
+    } else {
+      if (debug) {
+        console.error(`[SKIP] toolFormerData.params.${field}: ${value} (outside workspace)`);
+      }
+      result.skipped++;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * T006: Transform file paths in codeBlocks[].uri.
+ * Updates: path, _formatted, _fsPath
+ *
+ * @param uri - URI object (will be mutated)
+ * @param sourcePrefix - Source workspace path prefix
+ * @param destPrefix - Destination workspace path prefix
+ * @param debug - Whether to log transformations
+ * @param blockIndex - Index of code block for logging
+ * @returns Count of transformed and skipped paths
+ */
+function transformCodeBlockUri(
+  uri: Record<string, unknown>,
+  sourcePrefix: string,
+  destPrefix: string,
+  debug: boolean,
+  blockIndex: number
+): PathTransformResult {
+  const result: PathTransformResult = { transformed: 0, skipped: 0 };
+
+  // Transform uri.path
+  if (typeof uri.path === 'string') {
+    const transformed = transformPath(uri.path, sourcePrefix, destPrefix);
+    if (transformed !== null) {
+      if (debug) {
+        console.error(`[DEBUG] codeBlocks[${blockIndex}].uri.path: ${uri.path} -> ${transformed}`);
+      }
+      uri.path = transformed;
+      result.transformed++;
+    } else {
+      if (debug) {
+        console.error(`[SKIP] codeBlocks[${blockIndex}].uri.path: ${uri.path} (outside workspace)`);
+      }
+      result.skipped++;
+    }
+  }
+
+  // Transform uri._fsPath
+  if (typeof uri._fsPath === 'string') {
+    const transformed = transformPath(uri._fsPath, sourcePrefix, destPrefix);
+    if (transformed !== null) {
+      if (debug) {
+        console.error(`[DEBUG] codeBlocks[${blockIndex}].uri._fsPath: ${uri._fsPath} -> ${transformed}`);
+      }
+      uri._fsPath = transformed;
+      result.transformed++;
+    } else {
+      if (debug) {
+        console.error(`[SKIP] codeBlocks[${blockIndex}].uri._fsPath: ${uri._fsPath} (outside workspace)`);
+      }
+      result.skipped++;
+    }
+  }
+
+  // Transform uri._formatted (file:// URL format)
+  if (typeof uri._formatted === 'string') {
+    // Extract path from file:// URL
+    const fileUrlPrefix = 'file://';
+    if (uri._formatted.startsWith(fileUrlPrefix)) {
+      const urlPath = uri._formatted.slice(fileUrlPrefix.length);
+      const transformed = transformPath(urlPath, sourcePrefix, destPrefix);
+      if (transformed !== null) {
+        const newFormatted = fileUrlPrefix + transformed;
+        if (debug) {
+          console.error(`[DEBUG] codeBlocks[${blockIndex}].uri._formatted: ${uri._formatted} -> ${newFormatted}`);
+        }
+        uri._formatted = newFormatted;
+        result.transformed++;
+      } else {
+        if (debug) {
+          console.error(`[SKIP] codeBlocks[${blockIndex}].uri._formatted: ${uri._formatted} (outside workspace)`);
+        }
+        result.skipped++;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * T007: Transform all file paths in a bubble's data.
+ * Updates toolFormerData.params and codeBlocks[].uri
+ *
+ * @param bubbleData - Bubble data object (will be mutated)
+ * @param sourcePrefix - Source workspace path prefix
+ * @param destPrefix - Destination workspace path prefix
+ * @param debug - Whether to log transformations
+ * @returns Total count of transformed and skipped paths
+ */
+function transformBubblePaths(
+  bubbleData: Record<string, unknown>,
+  sourcePrefix: string,
+  destPrefix: string,
+  debug: boolean
+): PathTransformResult {
+  const result: PathTransformResult = { transformed: 0, skipped: 0 };
+
+  // Transform toolFormerData.params
+  const toolFormerData = bubbleData.toolFormerData as Record<string, unknown> | undefined;
+  if (toolFormerData?.params) {
+    try {
+      // params is stored as JSON string
+      const params = JSON.parse(toolFormerData.params as string) as Record<string, unknown>;
+      const paramsResult = transformToolFormerParams(params, sourcePrefix, destPrefix, debug);
+      result.transformed += paramsResult.transformed;
+      result.skipped += paramsResult.skipped;
+
+      // Update params back to JSON string if any paths were transformed
+      if (paramsResult.transformed > 0) {
+        toolFormerData.params = JSON.stringify(params);
+      }
+    } catch {
+      // params is not valid JSON, skip
+    }
+  }
+
+  // Transform codeBlocks[].uri
+  const codeBlocks = bubbleData.codeBlocks as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(codeBlocks)) {
+    for (let i = 0; i < codeBlocks.length; i++) {
+      const block = codeBlocks[i];
+      if (block?.uri && typeof block.uri === 'object') {
+        const uriResult = transformCodeBlockUri(
+          block.uri as Record<string, unknown>,
+          sourcePrefix,
+          destPrefix,
+          debug,
+          i
+        );
+        result.transformed += uriResult.transformed;
+        result.skipped += uriResult.skipped;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * T008: Check if destination path is nested within source path.
+ * This would cause infinite replacement loops during path transformation.
+ *
+ * @param source - Source workspace path
+ * @param destination - Destination workspace path
+ * @returns true if destination is nested within source
+ */
+function isNestedPath(source: string, destination: string): boolean {
+  const normalizedSource = normalizePath(source).replace(/\/+$/, '');
+  const normalizedDest = normalizePath(destination).replace(/\/+$/, '');
+
+  // Destination is nested if it starts with source + separator
+  return normalizedDest.startsWith(normalizedSource + '/');
+}
+
 /**
  * Copy all bubble data for a session in global storage with new IDs.
  * This is required for copy mode to create independent session data.
+ * Also transforms file paths from source workspace to destination workspace.
  *
  * @param oldComposerId - Original composer ID
  * @param newComposerId - New composer ID for the copy
+ * @param sourceWorkspace - Source workspace path (for path transformation)
+ * @param destWorkspace - Destination workspace path (for path transformation)
+ * @param debug - Whether to log detailed path transformations
  * @returns Map of old bubble IDs to new bubble IDs
  */
 function copyBubbleDataInGlobalStorage(
   oldComposerId: string,
-  newComposerId: string
+  newComposerId: string,
+  sourceWorkspace: string,
+  destWorkspace: string,
+  debug: boolean = false
 ): Map<string, string> {
   const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
 
@@ -79,6 +321,10 @@ function copyBubbleDataInGlobalStorage(
 
   const bubbleIdMap = new Map<string, string>();
   const db = new Database(globalDbPath, { readonly: false });
+
+  // Normalize workspace paths for transformation
+  const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
+  const destPrefix = normalizePath(destWorkspace).replace(/\/+$/, '');
 
   try {
     // 1. Copy composerData entry with new ID
@@ -115,7 +361,7 @@ function copyBubbleDataInGlobalStorage(
       ).run(`composerData:${newComposerId}`, JSON.stringify(composerData));
     }
 
-    // 2. Copy all bubble entries with new IDs
+    // 2. Copy all bubble entries with new IDs and transform paths
     const bubbleRows = db.prepare(
       "SELECT key, value FROM cursorDiskKV WHERE key LIKE ?"
     ).all(`bubbleId:${oldComposerId}:%`) as Array<{ key: string; value: string }>;
@@ -135,19 +381,81 @@ function copyBubbleDataInGlobalStorage(
       }
 
       // Parse and update the bubble data
-      const bubbleData = JSON.parse(row.value);
+      const bubbleData = JSON.parse(row.value) as Record<string, unknown>;
       bubbleData.bubbleId = newBubbleId;
+
+      // T010-T011: Transform file paths in the bubble data
+      if (debug) {
+        console.error(`[DEBUG] Processing bubble: ${oldBubbleId} -> ${newBubbleId}`);
+      }
+      transformBubblePaths(bubbleData, sourcePrefix, destPrefix, debug);
 
       // Create new key with new IDs
       const newKey = `bubbleId:${newComposerId}:${newBubbleId}`;
 
-      // Insert the copied bubble
+      // Insert the copied bubble with transformed paths
       db.prepare(
         "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)"
       ).run(newKey, JSON.stringify(bubbleData));
     }
 
     return bubbleIdMap;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Update file paths in existing bubble data for move operations.
+ * Unlike copy mode, this modifies bubbles in place (no new IDs needed).
+ *
+ * @param composerId - Composer ID to update
+ * @param sourceWorkspace - Source workspace path
+ * @param destWorkspace - Destination workspace path
+ * @param debug - Whether to log detailed path transformations
+ */
+function updateBubblePathsInGlobalStorage(
+  composerId: string,
+  sourceWorkspace: string,
+  destWorkspace: string,
+  debug: boolean = false
+): void {
+  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+
+  if (!existsSync(globalDbPath)) {
+    return;
+  }
+
+  const db = new Database(globalDbPath, { readonly: false });
+
+  // Normalize workspace paths for transformation
+  const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
+  const destPrefix = normalizePath(destWorkspace).replace(/\/+$/, '');
+
+  try {
+    // Get all bubble entries for this composer
+    const bubbleRows = db.prepare(
+      "SELECT key, value FROM cursorDiskKV WHERE key LIKE ?"
+    ).all(`bubbleId:${composerId}:%`) as Array<{ key: string; value: string }>;
+
+    for (const row of bubbleRows) {
+      // Parse the bubble data
+      const bubbleData = JSON.parse(row.value) as Record<string, unknown>;
+      const bubbleId = bubbleData.bubbleId as string | undefined;
+
+      // Transform file paths in the bubble data
+      if (debug && bubbleId) {
+        console.error(`[DEBUG] Processing bubble: ${bubbleId}`);
+      }
+      const result = transformBubblePaths(bubbleData, sourcePrefix, destPrefix, debug);
+
+      // Only update if paths were transformed
+      if (result.transformed > 0) {
+        db.prepare(
+          "UPDATE cursorDiskKV SET value = ? WHERE key = ?"
+        ).run(JSON.stringify(bubbleData), row.key);
+      }
+    }
   } finally {
     db.close();
   }
@@ -168,7 +476,7 @@ export function migrateSession(
   sessionId: string,
   options: Omit<MigrateSessionOptions, 'sessionIds'>
 ): SessionMigrationResult {
-  const { destination, mode, dryRun, dataPath } = options;
+  const { destination, mode, dryRun, dataPath, debug = false } = options;
   // Note: force option is used at the CLI layer for validation, not in core migration
 
   // Normalize destination path
@@ -187,6 +495,11 @@ export function migrateSession(
     throw new SameWorkspaceError(normalizedDest);
   }
 
+  // T013: Check for nested paths (would cause infinite replacement loops)
+  if (isNestedPath(sourceWorkspace, normalizedDest)) {
+    throw new NestedPathError(sourceWorkspace, normalizedDest);
+  }
+
   // Find destination workspace
   const destInfo = findWorkspaceByPath(normalizedDest, dataPath);
   if (!destInfo) {
@@ -202,6 +515,7 @@ export function migrateSession(
       destinationWorkspace: normalizedDest,
       mode,
       dryRun: true,
+      pathsWillBeUpdated: true,
     };
   }
 
@@ -243,6 +557,9 @@ export function migrateSession(
           destResult?.rawData
         );
 
+        // T010-T012: Update file paths in global storage bubble data for move mode
+        updateBubblePathsInGlobalStorage(sessionId, sourceWorkspace, normalizedDest, debug);
+
         return {
           success: true,
           sessionId,
@@ -258,7 +575,8 @@ export function migrateSession(
 
         // Copy all bubble data in global storage with new IDs
         // This ensures the copy is fully independent from the original
-        copyBubbleDataInGlobalStorage(sessionId, newSessionId);
+        // T014: Transform paths during copy (AFTER copying, on new data only)
+        copyBubbleDataInGlobalStorage(sessionId, newSessionId, sourceWorkspace, normalizedDest, debug);
 
         // Deep clone and update the session with new ID
         const copiedSession = JSON.parse(JSON.stringify(sessionToMigrate)) as { composerId?: string };
@@ -346,7 +664,7 @@ export function migrateSessions(options: MigrateSessionOptions): SessionMigratio
  * @returns Aggregate result with per-session details
  */
 export function migrateWorkspace(options: MigrateWorkspaceOptions): WorkspaceMigrationResult {
-  const { source, destination, mode, dryRun, force, dataPath } = options;
+  const { source, destination, mode, dryRun, force, dataPath, debug = false } = options;
 
   // Normalize paths
   const normalizedSource = normalizePath(source);
@@ -355,6 +673,11 @@ export function migrateWorkspace(options: MigrateWorkspaceOptions): WorkspaceMig
   // Check if source and destination are the same
   if (pathsEqual(normalizedSource, normalizedDest)) {
     throw new SameWorkspaceError(normalizedSource);
+  }
+
+  // T015: Check for nested paths (would cause infinite replacement loops)
+  if (isNestedPath(normalizedSource, normalizedDest)) {
+    throw new NestedPathError(normalizedSource, normalizedDest);
   }
 
   // Find source workspace
@@ -406,6 +729,7 @@ export function migrateWorkspace(options: MigrateWorkspaceOptions): WorkspaceMig
     dryRun,
     force,
     dataPath,
+    debug,
   });
 
   // Aggregate results

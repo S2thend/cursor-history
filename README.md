@@ -1,6 +1,115 @@
-# cursor-history
+# Cursor History
 
-CLI tool and library to browse, search, and export your Cursor AI chat history.
+<p align="center">
+  <img src="docs/logo.png" alt="cursor-history logo" width="200">
+</p>
+
+[![npm version](https://img.shields.io/npm/v/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
+[![npm downloads](https://img.shields.io/npm/dm/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
+
+**The ultimate open-source tool for browsing, searching, exporting, and backing up your Cursor AI chat history.**
+
+A POSIX-style CLI tool that does one thing well: access your Cursor AI chat history. Built on Unix philosophy—simple, composable, and focused.
+
+```bash
+# Pipe-friendly: combine with other tools
+cursor-history list --json | jq '.[] | select(.messageCount > 10)'
+cursor-history export 1 | grep -i "api" | head -20
+cursor-history search "bug" --json | jq -r '.[].sessionId' | xargs -I {} cursor-history export {}
+```
+
+Never lose a conversation again. Whether you need to find that perfect code snippet from last week, migrate your history to a new machine, or create reliable backups of all your AI-assisted development sessions—cursor-history has you covered. Free, open-source, and built by the community for the community.
+
+## Example Output
+
+### List Sessions
+
+<pre>
+<span style="color: #888">cursor-history list</span>
+
+<span style="color: #5fd7ff">cursor-history</span> - Chat History Browser
+
+<span style="color: #5fd7ff">Sessions (showing 3 of 42):</span>
+
+  <span style="color: #af87ff">#1</span>  <span style="color: #87d787">12/26 09:15 AM</span>  <span style="color: #d7d787">cursor_chat_history</span>
+      <span style="color: #888">15 messages · Updated 2 min ago</span>
+      <span style="color: #fff">"Help me fix the migration path issue..."</span>
+
+  <span style="color: #af87ff">#2</span>  <span style="color: #87d787">12/25 03:22 PM</span>  <span style="color: #d7d787">my-react-app</span>
+      <span style="color: #888">8 messages · Updated 18 hours ago</span>
+      <span style="color: #fff">"Add authentication to the app..."</span>
+
+  <span style="color: #af87ff">#3</span>  <span style="color: #87d787">12/24 11:30 AM</span>  <span style="color: #d7d787">api-server</span>
+      <span style="color: #888">23 messages · Updated 2 days ago</span>
+      <span style="color: #fff">"Create REST endpoints for users..."</span>
+</pre>
+
+### Show Session Details
+
+<pre>
+<span style="color: #888">cursor-history show 1</span>
+
+<span style="color: #5fd7ff">Session #1</span> · <span style="color: #d7d787">cursor_chat_history</span>
+<span style="color: #888">15 messages · Created 12/26 09:15 AM</span>
+
+────────────────────────────────────────
+
+<span style="color: #87d787">You:</span> <span style="color: #888">09:15:23 AM</span>
+
+Help me fix the migration path issue in the codebase
+
+────────────────────────────────────────
+
+<span style="color: #af87ff">Assistant:</span> <span style="color: #888">09:15:45 AM</span>
+
+I'll help you fix the migration path issue. Let me first examine
+the relevant files.
+
+────────────────────────────────────────
+
+<span style="color: #d7af5f">Tool:</span> <span style="color: #888">09:15:46 AM</span>
+<span style="color: #d7af5f">🔧 Read File</span>
+   <span style="color: #888">File:</span> <span style="color: #5fd7ff">src/core/migrate.ts</span>
+   <span style="color: #888">Content:</span> <span style="color: #fff">export function migrateSession(sessionId: string...</span>
+   <span style="color: #87d787">Status: ✓ completed</span>
+
+────────────────────────────────────────
+
+<span style="color: #d7af5f">Tool:</span> <span style="color: #888">09:16:02 AM</span>
+<span style="color: #d7af5f">🔧 Edit File</span>
+   <span style="color: #888">File:</span> <span style="color: #5fd7ff">src/core/migrate.ts</span>
+
+   <span style="color: #87d787">```diff</span>
+<span style="color: #87d787">   + function transformPath(path: string): string {</span>
+<span style="color: #87d787">   +   return path.replace(sourcePrefix, destPrefix);</span>
+<span style="color: #87d787">   + }</span>
+   <span style="color: #87d787">```</span>
+
+   <span style="color: #87d787">Status: ✓ completed</span>
+
+────────────────────────────────────────
+
+<span style="color: #5f87d7">Thinking:</span> <span style="color: #888">09:16:02 AM</span>
+<span style="color: #5f87d7">💭</span> <span style="color: #888">Now I need to update the function to call transformPath
+   for each file reference in the bubble data...</span>
+
+────────────────────────────────────────
+
+<span style="color: #af87ff">Assistant:</span> <span style="color: #888">09:16:30 AM</span>
+
+I've added the path transformation logic. The migration will now
+update all file paths when moving sessions between workspaces.
+
+────────────────────────────────────────
+
+<span style="color: #ff5f5f">Error:</span> <span style="color: #888">09:17:01 AM</span>
+<span style="color: #ff5f5f">❌</span> <span style="color: #ff5f5f">Build failed: Cannot find module './utils'</span>
+
+────────────────────────────────────────
+</pre>
 
 ## Features
 
@@ -464,6 +573,35 @@ This project uses GitHub Actions for automatic NPM publishing. To release a new 
 1. Create an NPM access token at https://www.npmjs.com/settings/YOUR_USERNAME/tokens
 2. Go to your GitHub repository settings → Secrets and variables → Actions
 3. Add a new repository secret named `NPM_TOKEN` with your NPM token
+
+## Contributing
+
+We welcome contributions from the community! Here's how you can help:
+
+### Reporting Issues
+
+- **Bug reports**: [Open an issue](https://github.com/S2thend/cursor_chat_history/issues/new) with steps to reproduce, expected vs actual behavior, and your environment (OS, Node.js version)
+- **Feature requests**: [Open an issue](https://github.com/S2thend/cursor_chat_history/issues/new) describing the feature and its use case
+
+### Submitting Pull Requests
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Make your changes
+4. Run tests and linting (`npm test && npm run lint`)
+5. Commit your changes (`git commit -m 'Add my feature'`)
+6. Push to your fork (`git push origin feature/my-feature`)
+7. [Open a Pull Request](https://github.com/S2thend/cursor_chat_history/pulls)
+
+### Development Setup
+
+```bash
+git clone https://github.com/S2thend/cursor_chat_history.git
+cd cursor_chat_history
+npm install
+npm run build
+npm test
+```
 
 ## License
 

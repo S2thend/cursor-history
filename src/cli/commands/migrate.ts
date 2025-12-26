@@ -18,6 +18,7 @@ import {
   isSameWorkspaceError,
   isNoSessionsFoundError,
   isDestinationHasSessionsError,
+  isNestedPathError,
 } from '../../lib/errors.js';
 import type { MigrationMode, WorkspaceMigrationResult } from '../../core/types.js';
 
@@ -25,6 +26,7 @@ interface MigrateOptions {
   dryRun?: boolean;
   copy?: boolean;
   force?: boolean;
+  debug?: boolean;
   dataPath?: string;
   json?: boolean;
 }
@@ -38,6 +40,7 @@ export function registerMigrateCommand(program: Command): void {
     .option('--dry-run', 'Preview migration without making changes')
     .option('--copy', 'Copy sessions instead of moving (keeps originals)')
     .option('-f, --force', 'Proceed even if destination has existing sessions')
+    .option('--debug', 'Show detailed path transformation logs')
     .action(async (sourceArg: string, destinationArg: string, options: MigrateOptions) => {
       const globalOptions = program.opts() as { dataPath?: string; json?: boolean };
       const dataPath = globalOptions.dataPath;
@@ -59,6 +62,7 @@ export function registerMigrateCommand(program: Command): void {
           dryRun: options.dryRun ?? false,
           force: options.force ?? false,
           dataPath,
+          debug: options.debug ?? false,
         });
 
         // Output results
@@ -133,6 +137,10 @@ function formatError(error: unknown): string {
 
   if (isDestinationHasSessionsError(error)) {
     return `Destination already has ${error.sessionCount} session(s): ${error.path}\nUse --force to proceed (will add sessions alongside existing ones).`;
+  }
+
+  if (isNestedPathError(error)) {
+    return `Destination is nested within source: ${error.destination} is inside ${error.source}\nThis would cause infinite path replacement loops. Choose a different destination.`;
   }
 
   if (error instanceof Error) {
