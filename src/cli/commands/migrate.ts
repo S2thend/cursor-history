@@ -55,7 +55,7 @@ export function registerMigrateCommand(program: Command): void {
         const mode: MigrationMode = options.copy ? 'copy' : 'move';
 
         // Perform migration
-        const result = migrateWorkspace({
+        const result = await migrateWorkspace({
           source,
           destination,
           mode,

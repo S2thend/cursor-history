@@ -31,6 +31,8 @@ export type {
   RestoreResult,
   BackupValidation,
   BackupInfo,
+  // SQLite driver type
+  SqliteDriverName,
 } from './types.js';
 
 // Export error classes
@@ -78,7 +80,7 @@ export {
 export { getDefaultDataPath } from './utils.js';
 
 // API Functions (to be implemented in Phase 3+)
-import type { LibraryConfig, PaginatedResult, Session, SearchResult, MigrateSessionConfig, MigrateWorkspaceConfig, SessionMigrationResult, WorkspaceMigrationResult } from './types.js';
+import type { LibraryConfig, PaginatedResult, Session, SearchResult, MigrateSessionConfig, MigrateWorkspaceConfig, SessionMigrationResult, WorkspaceMigrationResult, SqliteDriverName } from './types.js';
 import { mergeWithDefaults } from './config.js';
 import { DatabaseLockedError, DatabaseNotFoundError } from './errors.js';
 import * as storage from '../core/storage.js';
@@ -86,6 +88,7 @@ import * as migrate from '../core/migrate.js';
 import { exportToJson, exportToMarkdown } from '../core/parser.js';
 import { expandPath } from './platform.js';
 import type { ChatSession as CoreSession } from '../core/types.js';
+import { setDriver as coreSetDriver, getActiveDriver as coreGetActiveDriver } from '../core/database/index.js';
 
 /**
  * Convert core ChatSession to library Session
@@ -121,24 +124,24 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
  *
  * @example
  * // List all sessions
- * const result = listSessions();
+ * const result = await listSessions();
  * console.log(result.data); // Session[]
  *
  * @example
  * // List sessions with pagination
- * const page1 = listSessions({ limit: 10, offset: 0 });
- * const page2 = listSessions({ limit: 10, offset: 10 });
+ * const page1 = await listSessions({ limit: 10, offset: 0 });
+ * const page2 = await listSessions({ limit: 10, offset: 10 });
  *
  * @example
  * // List sessions for specific workspace
- * const result = listSessions({ workspace: '/path/to/project' });
+ * const result = await listSessions({ workspace: '/path/to/project' });
  */
-export function listSessions(config?: LibraryConfig): PaginatedResult<Session> {
+export async function listSessions(config?: LibraryConfig): Promise<PaginatedResult<Session>> {
   try {
     const resolved = mergeWithDefaults(config);
 
     // Get all sessions using core storage layer
-    const coreSessions = storage.listSessions(
+    const coreSessions = await storage.listSessions(
       {
         limit: -1, // Get all, we'll paginate ourselves
         all: true,
@@ -158,13 +161,14 @@ export function listSessions(config?: LibraryConfig): PaginatedResult<Session> {
 
     // Convert to library Session format
     // We need full sessions, not summaries, so we'll fetch each one
-    const sessions: Session[] = paginatedSessions.map((summary) => {
-      const fullSession = storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
+    const sessions: Session[] = [];
+    for (const summary of paginatedSessions) {
+      const fullSession = await storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${summary.index} not found`);
       }
-      return convertToLibrarySession(fullSession);
-    });
+      sessions.push(convertToLibrarySession(fullSession));
+    }
 
     return {
       data: sessions,
@@ -204,21 +208,21 @@ export function listSessions(config?: LibraryConfig): PaginatedResult<Session> {
  * @throws {InvalidConfigError} If index is out of bounds
  *
  * @example
- * const session = getSession(0);
+ * const session = await getSession(0);
  * console.log(session.messages); // Message[]
  *
  * @example
  * // Get session from custom data path
- * const session = getSession(5, { dataPath: '/custom/cursor/data' });
+ * const session = await getSession(5, { dataPath: '/custom/cursor/data' });
  */
-export function getSession(index: number, config?: LibraryConfig): Session {
+export async function getSession(index: number, config?: LibraryConfig): Promise<Session> {
   try {
     const resolved = mergeWithDefaults(config);
 
     // Core storage uses 1-based indexing, so we add 1
     const coreIndex = index + 1;
 
-    const coreSession = storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
+    const coreSession = await storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
     if (!coreSession) {
       throw new DatabaseNotFoundError(`Session at index ${index} not found`);
     }
@@ -253,11 +257,11 @@ export function getSession(index: number, config?: LibraryConfig): Session {
  *
  * @example
  * // Basic search
- * const results = searchSessions('authentication');
+ * const results = await searchSessions('authentication');
  *
  * @example
  * // Search with context lines
- * const results = searchSessions('error', { context: 2 });
+ * const results = await searchSessions('error', { context: 2 });
  * results.forEach(r => {
  *   console.log(r.contextBefore); // 2 lines before match
  *   console.log(r.match);          // matched line
@@ -266,14 +270,14 @@ export function getSession(index: number, config?: LibraryConfig): Session {
  *
  * @example
  * // Search within specific workspace
- * const results = searchSessions('bug', { workspace: '/path/to/project' });
+ * const results = await searchSessions('bug', { workspace: '/path/to/project' });
  */
-export function searchSessions(query: string, config?: LibraryConfig): SearchResult[] {
+export async function searchSessions(query: string, config?: LibraryConfig): Promise<SearchResult[]> {
   try {
     const resolved = mergeWithDefaults(config);
 
     // Search using core storage layer
-    const coreResults = storage.searchSessions(
+    const coreResults = await storage.searchSessions(
       query,
       {
         limit: resolved.limit === Number.MAX_SAFE_INTEGER ? 0 : resolved.limit,
@@ -285,9 +289,10 @@ export function searchSessions(query: string, config?: LibraryConfig): SearchRes
     );
 
     // Convert core results to library format
-    return coreResults.map((coreResult) => {
+    const results: SearchResult[] = [];
+    for (const coreResult of coreResults) {
       // Get full session for reference
-      const fullSession = storage.getSession(coreResult.index, resolved.dataPath, resolved.backupPath);
+      const fullSession = await storage.getSession(coreResult.index, resolved.dataPath, resolved.backupPath);
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${coreResult.index} not found`);
       }
@@ -327,15 +332,17 @@ export function searchSessions(query: string, config?: LibraryConfig): SearchRes
         }
       }
 
-      return {
+      results.push({
         session: convertToLibrarySession(fullSession),
         match: lines[matchLineIndex] ?? match,
         messageIndex: 0, // Would need to track which message contains the match
         offset,
         contextBefore: contextBefore.length > 0 ? contextBefore : undefined,
         contextAfter: contextAfter.length > 0 ? contextAfter : undefined,
-      };
-    });
+      });
+    }
+
+    return results;
   } catch (err) {
     // Check for SQLite BUSY error (database locked)
     if (err instanceof Error && err.message.includes('SQLITE_BUSY')) {
@@ -365,15 +372,15 @@ export function searchSessions(query: string, config?: LibraryConfig): SearchRes
  * @throws {InvalidConfigError} If index is out of bounds
  *
  * @example
- * const json = exportSessionToJson(0);
+ * const json = await exportSessionToJson(0);
  * fs.writeFileSync('session.json', json);
  */
-export function exportSessionToJson(index: number, config?: LibraryConfig): string {
+export async function exportSessionToJson(index: number, config?: LibraryConfig): Promise<string> {
   try {
     const resolved = mergeWithDefaults(config);
     const coreIndex = index + 1; // Convert to 1-based indexing
 
-    const coreSession = storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
+    const coreSession = await storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
     if (!coreSession) {
       throw new DatabaseNotFoundError(`Session at index ${index} not found`);
     }
@@ -398,15 +405,15 @@ export function exportSessionToJson(index: number, config?: LibraryConfig): stri
  * @throws {InvalidConfigError} If index is out of bounds
  *
  * @example
- * const markdown = exportSessionToMarkdown(0);
+ * const markdown = await exportSessionToMarkdown(0);
  * fs.writeFileSync('session.md', markdown);
  */
-export function exportSessionToMarkdown(index: number, config?: LibraryConfig): string {
+export async function exportSessionToMarkdown(index: number, config?: LibraryConfig): Promise<string> {
   try {
     const resolved = mergeWithDefaults(config);
     const coreIndex = index + 1; // Convert to 1-based indexing
 
-    const coreSession = storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
+    const coreSession = await storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
     if (!coreSession) {
       throw new DatabaseNotFoundError(`Session at index ${index} not found`);
     }
@@ -429,19 +436,19 @@ export function exportSessionToMarkdown(index: number, config?: LibraryConfig): 
  * @throws {DatabaseNotFoundError} If database path does not exist
  *
  * @example
- * const json = exportAllSessionsToJson();
+ * const json = await exportAllSessionsToJson();
  * fs.writeFileSync('all-sessions.json', json);
  *
  * @example
  * // Export sessions from specific workspace
- * const json = exportAllSessionsToJson({ workspace: '/path/to/project' });
+ * const json = await exportAllSessionsToJson({ workspace: '/path/to/project' });
  */
-export function exportAllSessionsToJson(config?: LibraryConfig): string {
+export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<string> {
   try {
     const resolved = mergeWithDefaults(config);
 
     // Get all sessions
-    const coreSessions = storage.listSessions(
+    const coreSessions = await storage.listSessions(
       {
         limit: -1,
         all: true,
@@ -452,11 +459,12 @@ export function exportAllSessionsToJson(config?: LibraryConfig): string {
     );
 
     // Export each session
-    const exportedSessions = coreSessions.map((summary) => {
-      const session = storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
-      if (!session) return null;
-      return JSON.parse(exportToJson(session, session.workspacePath));
-    }).filter((s): s is Record<string, unknown> => s !== null);
+    const exportedSessions: Record<string, unknown>[] = [];
+    for (const summary of coreSessions) {
+      const session = await storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
+      if (!session) continue;
+      exportedSessions.push(JSON.parse(exportToJson(session, session.workspacePath)) as Record<string, unknown>);
+    }
 
     return JSON.stringify(exportedSessions, null, 2);
   } catch (err) {
@@ -476,15 +484,15 @@ export function exportAllSessionsToJson(config?: LibraryConfig): string {
  * @throws {DatabaseNotFoundError} If database path does not exist
  *
  * @example
- * const markdown = exportAllSessionsToMarkdown();
+ * const markdown = await exportAllSessionsToMarkdown();
  * fs.writeFileSync('all-sessions.md', markdown);
  */
-export function exportAllSessionsToMarkdown(config?: LibraryConfig): string {
+export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promise<string> {
   try {
     const resolved = mergeWithDefaults(config);
 
     // Get all sessions
-    const coreSessions = storage.listSessions(
+    const coreSessions = await storage.listSessions(
       {
         limit: -1,
         all: true,
@@ -498,7 +506,7 @@ export function exportAllSessionsToMarkdown(config?: LibraryConfig): string {
     const parts: string[] = [];
 
     for (const summary of coreSessions) {
-      const session = storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
+      const session = await storage.getSession(summary.index, resolved.dataPath, resolved.backupPath);
       if (!session) continue;
 
       parts.push(exportToMarkdown(session, session.workspacePath));
@@ -533,14 +541,14 @@ export function exportAllSessionsToMarkdown(config?: LibraryConfig): string {
  *
  * @example
  * // Move a single session by index
- * const results = migrateSession({
+ * const results = await migrateSession({
  *   sessions: 3,
  *   destination: '/path/to/new/project'
  * });
  *
  * @example
  * // Copy multiple sessions
- * const results = migrateSession({
+ * const results = await migrateSession({
  *   sessions: [1, 3, 5],
  *   destination: '/path/to/project',
  *   mode: 'copy'
@@ -548,21 +556,21 @@ export function exportAllSessionsToMarkdown(config?: LibraryConfig): string {
  *
  * @example
  * // Dry run to preview what would happen
- * const results = migrateSession({
+ * const results = await migrateSession({
  *   sessions: '1,3,5',
  *   destination: '/path/to/project',
  *   dryRun: true
  * });
  */
-export function migrateSession(config: MigrateSessionConfig): SessionMigrationResult[] {
+export async function migrateSession(config: MigrateSessionConfig): Promise<SessionMigrationResult[]> {
   // Resolve session identifiers to IDs
-  const sessionIds = storage.resolveSessionIdentifiers(config.sessions, config.dataPath);
+  const sessionIds = await storage.resolveSessionIdentifiers(config.sessions, config.dataPath);
 
   // Expand ~ in destination path
   const destination = expandPath(config.destination);
 
   // Call core migration function
-  return migrate.migrateSessions({
+  return await migrate.migrateSessions({
     sessionIds,
     destination,
     mode: config.mode ?? 'move',
@@ -588,7 +596,7 @@ export function migrateSession(config: MigrateSessionConfig): SessionMigrationRe
  *
  * @example
  * // Move all sessions from old to new project
- * const result = migrateWorkspace({
+ * const result = await migrateWorkspace({
  *   source: '/old/project',
  *   destination: '/new/project'
  * });
@@ -596,7 +604,7 @@ export function migrateSession(config: MigrateSessionConfig): SessionMigrationRe
  *
  * @example
  * // Create backup copy of all sessions
- * const result = migrateWorkspace({
+ * const result = await migrateWorkspace({
  *   source: '/project',
  *   destination: '/backup/project',
  *   mode: 'copy'
@@ -604,19 +612,19 @@ export function migrateSession(config: MigrateSessionConfig): SessionMigrationRe
  *
  * @example
  * // Force merge with existing destination sessions
- * const result = migrateWorkspace({
+ * const result = await migrateWorkspace({
  *   source: '/old/project',
  *   destination: '/existing/project',
  *   force: true
  * });
  */
-export function migrateWorkspace(config: MigrateWorkspaceConfig): WorkspaceMigrationResult {
+export async function migrateWorkspace(config: MigrateWorkspaceConfig): Promise<WorkspaceMigrationResult> {
   // Expand ~ in paths
   const source = expandPath(config.source);
   const destination = expandPath(config.destination);
 
   // Call core migration function
-  return migrate.migrateWorkspace({
+  return await migrate.migrateWorkspace({
     source,
     destination,
     mode: config.mode ?? 'move',
@@ -638,3 +646,45 @@ export {
   listBackups,
   getDefaultBackupDir,
 } from './backup.js';
+
+// ============================================================================
+// SQLite Driver Functions
+// ============================================================================
+
+/**
+ * Set the SQLite driver to use for database operations.
+ *
+ * This allows explicit control over which SQLite driver is used.
+ * By default, the library auto-detects: tries node:sqlite first (Node.js 22.5+),
+ * then falls back to better-sqlite3.
+ *
+ * @param name - Driver name: 'better-sqlite3' or 'node:sqlite'
+ * @throws {Error} If the specified driver is not available
+ *
+ * @example
+ * // Force use of better-sqlite3
+ * setDriver('better-sqlite3');
+ *
+ * @example
+ * // Force use of Node.js built-in sqlite
+ * setDriver('node:sqlite');
+ */
+export function setDriver(name: SqliteDriverName): void {
+  coreSetDriver(name);
+}
+
+/**
+ * Get the name of the currently active SQLite driver.
+ *
+ * Returns undefined if no driver has been selected yet (auto-selection
+ * happens on first database operation).
+ *
+ * @returns Current driver name or undefined
+ *
+ * @example
+ * const driver = getActiveDriver();
+ * console.log(`Using ${driver ?? 'auto-detect'}`);
+ */
+export function getActiveDriver(): SqliteDriverName | undefined {
+  return coreGetActiveDriver() as SqliteDriverName | undefined;
+}

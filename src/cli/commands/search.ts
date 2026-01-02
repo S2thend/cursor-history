@@ -64,7 +64,7 @@ export function registerSearchCommand(program: Command): void {
       }
 
       try {
-        const results = searchSessions(
+        const results = await searchSessions(
           query,
           { limit, contextChars, workspacePath: workspaceFilter },
           customPath ? expandPath(customPath) : undefined,

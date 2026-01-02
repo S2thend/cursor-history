@@ -65,7 +65,7 @@ export function registerShowCommand(program: Command): void {
       }
 
       try {
-        const session = getSession(
+        const session = await getSession(
           index,
           customPath ? expandPath(customPath) : undefined,
           backupPath
@@ -73,7 +73,7 @@ export function registerShowCommand(program: Command): void {
 
         if (!session) {
           // Get max index for error message
-          const sessions = listSessions(
+          const sessions = await listSessions(
             { limit: 0, all: true },
             customPath ? expandPath(customPath) : undefined,
             backupPath

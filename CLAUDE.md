@@ -2,7 +2,7 @@
 
 ## Overview
 
-CLI tool and library to browse, search, and export Cursor AI chat history. Built with TypeScript, commander, better-sqlite3, and picocolors.
+CLI tool and library to browse, search, and export Cursor AI chat history. Built with TypeScript, commander, pluggable SQLite drivers (better-sqlite3 or node:sqlite), and picocolors.
 
 **Dual Interface:**
 - **CLI**: Command-line tool for interactive use (`cursor-history list`, `cursor-history show 1`)
@@ -54,14 +54,22 @@ src/
 │   ├── errors.ts          # CLI-specific errors (CliError, SessionNotFoundError)
 │   └── index.ts           # CLI entry, global options
 ├── core/
+│   ├── database/          # Pluggable SQLite driver abstraction
+│   │   ├── drivers/       # better-sqlite3.ts, node-sqlite.ts adapters
+│   │   ├── types.ts       # Database, Statement, DatabaseDriver interfaces
+│   │   ├── registry.ts    # DriverRegistry singleton (auto-select, manual set)
+│   │   ├── errors.ts      # NoDriverAvailableError, DriverNotAvailableError
+│   │   ├── debug.ts       # Debug logging utility
+│   │   └── index.ts       # Public API (openDatabase, setDriver, getActiveDriver)
 │   ├── storage.ts         # findWorkspaces, listSessions, getSession, extractBubbleText
 │   ├── migrate.ts         # migrateSession, migrateWorkspace, copyBubbleDataInGlobalStorage
+│   ├── backup.ts          # createBackup, restoreBackup, openBackupDatabase
 │   ├── parser.ts          # parseChatData, exportToMarkdown, exportToJson
 │   └── types.ts           # ChatSession, Message, Workspace, ToolCall, MigrationMode, etc.
 └── lib/
-    ├── index.ts           # Library entry point (listSessions, getSession, searchSessions, export*, migrate*)
-    ├── types.ts           # Public library types (Session, Message, SearchResult, MigrateSessionConfig, etc.)
-    ├── config.ts          # Configuration validation and merging
+    ├── index.ts           # Library entry point (listSessions, getSession, searchSessions, export*, migrate*, setDriver, getActiveDriver)
+    ├── types.ts           # Public library types (Session, Message, SearchResult, MigrateSessionConfig, SqliteDriverName, etc.)
+    ├── config.ts          # Configuration validation and merging (including sqliteDriver)
     ├── errors.ts          # Library errors (DatabaseLockedError, SessionNotFoundError, WorkspaceNotFoundError, etc.)
     ├── utils.ts           # Utility functions (getDefaultDataPath)
     └── platform.ts        # getCursorDataPath, expandPath, contractPath, normalizePath, pathsEqual
@@ -119,6 +127,32 @@ So when someone uses `import { listSessions } from 'cursor-history'`, they're ca
 - `formatToolCall()` - Formats tool calls with parameters using `getParam()` helper
 - `formatDiffBlock()` - Formats diff chunks with ```diff markdown fencing
 - `getParam()` - Helper that tries multiple field name variations for tool parameters
+
+### Database Layer (`src/core/database/`)
+
+Pluggable SQLite driver abstraction supporting both `better-sqlite3` and Node.js built-in `node:sqlite`.
+
+**Components:**
+- `types.ts` - `Database`, `Statement`, `DatabaseDriver` interfaces
+- `registry.ts` - `DriverRegistry` singleton with driver management
+- `drivers/better-sqlite3.ts` - Adapter for better-sqlite3 package
+- `drivers/node-sqlite.ts` - Adapter for Node.js 22.5+ built-in SQLite
+- `errors.ts` - `NoDriverAvailableError`, `DriverNotAvailableError`
+- `debug.ts` - Debug logging via `DEBUG=cursor-history:*`
+- `index.ts` - Public API exports
+
+**Driver Selection:**
+- Auto-selects best available driver: `node:sqlite` (preferred, no native bindings) → `better-sqlite3` (fallback)
+- Environment override: `CURSOR_HISTORY_SQLITE_DRIVER=better-sqlite3|node:sqlite`
+- Programmatic control: `setDriver('better-sqlite3')`, `getActiveDriver()`
+- Config option: `LibraryConfig.sqliteDriver`
+
+**Key Functions:**
+- `openDatabase(path)` - Async, triggers driver auto-selection, returns read-only Database
+- `openDatabaseReadWrite(path)` - Async, returns read-write Database for migrations
+- `setDriver(name)` - Force specific driver
+- `getActiveDriver()` - Get currently active driver name
+- `registry.openSync(path, options)` - Sync open (requires driver pre-selected via `ensureDriver()`)
 
 ### Migration Layer (`src/core/migrate.ts`)
 
@@ -210,16 +244,19 @@ Tool calls are stored in `toolFormerData`:
 | `migrateSession(config)` | Move/copy sessions to another workspace |
 | `migrateWorkspace(config)` | Move/copy all sessions between workspaces |
 | `getDefaultDataPath()` | Get platform-specific Cursor data path |
+| `setDriver(name)` | Set SQLite driver ('better-sqlite3' or 'node:sqlite') |
+| `getActiveDriver()` | Get currently active SQLite driver name |
 
 ### Configuration (`LibraryConfig`)
 
 ```typescript
 interface LibraryConfig {
-  dataPath?: string;    // Custom Cursor data path
-  workspace?: string;   // Filter by workspace path
-  limit?: number;       // Pagination limit
-  offset?: number;      // Pagination offset
-  context?: number;     // Search context lines
+  dataPath?: string;       // Custom Cursor data path
+  workspace?: string;      // Filter by workspace path
+  limit?: number;          // Pagination limit
+  offset?: number;         // Pagination offset
+  context?: number;        // Search context lines
+  sqliteDriver?: 'better-sqlite3' | 'node:sqlite';  // Force specific SQLite driver
 }
 ```
 
@@ -315,14 +352,22 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 
 ## Active Technologies
 - TypeScript 5.9+ (strict mode enabled)
-- better-sqlite3 for SQLite database access (read-only for queries, read-write for migrations)
+- Pluggable SQLite: better-sqlite3 (native bindings) or node:sqlite (Node.js 22.5+ built-in)
 - commander + picocolors for CLI (not used in library)
 - Dual ESM/CommonJS module support
-- SQLite databases (state.vscdb files) + zip archives (004-full-backup)
-- TypeScript 5.0+ (strict mode enabled) + better-sqlite3, commander, picocolors (005-fix-migration-paths)
-- SQLite (globalStorage/state.vscdb, workspaceStorage/*/state.vscdb) (005-fix-migration-paths)
+- SQLite databases (state.vscdb files) + zip archives for backups
 
 ## Recent Changes
+- 006-pluggable-sqlite-driver: Added pluggable SQLite driver system
+  - `src/core/database/` - New database abstraction module
+  - Supports `better-sqlite3` (existing) and `node:sqlite` (Node.js 22.5+ built-in)
+  - Auto-selects best available driver: `node:sqlite` first, then `better-sqlite3`
+  - Environment override: `CURSOR_HISTORY_SQLITE_DRIVER=better-sqlite3|node:sqlite`
+  - Library API: `setDriver()`, `getActiveDriver()`, `LibraryConfig.sqliteDriver`
+  - Debug logging via `DEBUG=cursor-history:*`
+  - Solves Node.js v24 ESM compatibility issues with native modules
+  - Backup operations use pluggable driver system for reading backup databases
+
 - 005-fix-migration-paths: Fixed file path references in migrated sessions
   - File paths in bubble data are now updated during migration (move/copy)
   - Path fields updated: `toolFormerData.params.{relativeWorkspacePath,targetFile,filePath,path}`, `codeBlocks[].uri.{path,_formatted,_fsPath}`

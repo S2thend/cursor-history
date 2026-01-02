@@ -8,7 +8,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import Database from 'better-sqlite3';
+import BetterSqlite3 from 'better-sqlite3';
 import {
   findWorkspaceForSession,
   findWorkspaceByPath,
@@ -320,7 +320,7 @@ function copyBubbleDataInGlobalStorage(
   }
 
   const bubbleIdMap = new Map<string, string>();
-  const db = new Database(globalDbPath, { readonly: false });
+  const db = new BetterSqlite3(globalDbPath, { readonly: false });
 
   // Normalize workspace paths for transformation
   const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
@@ -426,7 +426,7 @@ function updateBubblePathsInGlobalStorage(
     return;
   }
 
-  const db = new Database(globalDbPath, { readonly: false });
+  const db = new BetterSqlite3(globalDbPath, { readonly: false });
 
   // Normalize workspace paths for transformation
   const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
@@ -472,10 +472,10 @@ function updateBubblePathsInGlobalStorage(
  * @param options - Migration options
  * @returns Migration result for this session
  */
-export function migrateSession(
+export async function migrateSession(
   sessionId: string,
   options: Omit<MigrateSessionOptions, 'sessionIds'>
-): SessionMigrationResult {
+): Promise<SessionMigrationResult> {
   const { destination, mode, dryRun, dataPath, debug = false } = options;
   // Note: force option is used at the CLI layer for validation, not in core migration
 
@@ -483,7 +483,7 @@ export function migrateSession(
   const normalizedDest = normalizePath(destination);
 
   // Find source workspace for this session
-  const sourceInfo = findWorkspaceForSession(sessionId, dataPath);
+  const sourceInfo = await findWorkspaceForSession(sessionId, dataPath);
   if (!sourceInfo) {
     throw new SessionNotFoundError(sessionId);
   }
@@ -501,7 +501,7 @@ export function migrateSession(
   }
 
   // Find destination workspace
-  const destInfo = findWorkspaceByPath(normalizedDest, dataPath);
+  const destInfo = await findWorkspaceByPath(normalizedDest, dataPath);
   if (!destInfo) {
     throw new WorkspaceNotFoundError(normalizedDest);
   }
@@ -522,8 +522,8 @@ export function migrateSession(
   // Perform the actual migration
   try {
     // Open both databases for read-write
-    const sourceDb = openDatabaseReadWrite(sourceInfo.dbPath);
-    const destDb = openDatabaseReadWrite(destInfo.dbPath);
+    const sourceDb = await openDatabaseReadWrite(sourceInfo.dbPath);
+    const destDb = await openDatabaseReadWrite(destInfo.dbPath);
 
     try {
       // Get composer data from both workspaces
@@ -629,13 +629,13 @@ export function migrateSession(
  * @param options - Migration options including session IDs
  * @returns Array of results for each session
  */
-export function migrateSessions(options: MigrateSessionOptions): SessionMigrationResult[] {
+export async function migrateSessions(options: MigrateSessionOptions): Promise<SessionMigrationResult[]> {
   const { sessionIds, ...sessionOptions } = options;
   const results: SessionMigrationResult[] = [];
 
   for (const sessionId of sessionIds) {
     try {
-      const result = migrateSession(sessionId, sessionOptions);
+      const result = await migrateSession(sessionId, sessionOptions);
       results.push(result);
     } catch (error) {
       // Convert thrown errors to result objects for partial failure handling
@@ -663,7 +663,7 @@ export function migrateSessions(options: MigrateSessionOptions): SessionMigratio
  * @param options - Workspace migration options
  * @returns Aggregate result with per-session details
  */
-export function migrateWorkspace(options: MigrateWorkspaceOptions): WorkspaceMigrationResult {
+export async function migrateWorkspace(options: MigrateWorkspaceOptions): Promise<WorkspaceMigrationResult> {
   const { source, destination, mode, dryRun, force, dataPath, debug = false } = options;
 
   // Normalize paths
@@ -681,19 +681,19 @@ export function migrateWorkspace(options: MigrateWorkspaceOptions): WorkspaceMig
   }
 
   // Find source workspace
-  const sourceInfo = findWorkspaceByPath(normalizedSource, dataPath);
+  const sourceInfo = await findWorkspaceByPath(normalizedSource, dataPath);
   if (!sourceInfo) {
     throw new WorkspaceNotFoundError(normalizedSource);
   }
 
   // Find destination workspace
-  const destInfo = findWorkspaceByPath(normalizedDest, dataPath);
+  const destInfo = await findWorkspaceByPath(normalizedDest, dataPath);
   if (!destInfo) {
     throw new WorkspaceNotFoundError(normalizedDest);
   }
 
   // Get sessions from source workspace
-  const sourceDb = openDatabaseReadWrite(sourceInfo.dbPath);
+  const sourceDb = await openDatabaseReadWrite(sourceInfo.dbPath);
   const sourceResult = getComposerData(sourceDb);
   sourceDb.close();
 
@@ -703,7 +703,7 @@ export function migrateWorkspace(options: MigrateWorkspaceOptions): WorkspaceMig
 
   // Check if destination has existing sessions (unless force is set)
   if (!force) {
-    const destDb = openDatabaseReadWrite(destInfo.dbPath);
+    const destDb = await openDatabaseReadWrite(destInfo.dbPath);
     const destResult = getComposerData(destDb);
     destDb.close();
 
@@ -722,7 +722,7 @@ export function migrateWorkspace(options: MigrateWorkspaceOptions): WorkspaceMig
   }
 
   // Migrate all sessions
-  const results = migrateSessions({
+  const results = await migrateSessions({
     sessionIds,
     destination: normalizedDest,
     mode,

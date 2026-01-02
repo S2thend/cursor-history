@@ -111,6 +111,11 @@ export interface SearchResult {
 }
 
 /**
+ * Available SQLite driver names for the pluggable driver system.
+ */
+export type SqliteDriverName = 'better-sqlite3' | 'node:sqlite';
+
+/**
  * Configuration options for library functions.
  */
 export interface LibraryConfig {
@@ -131,6 +136,15 @@ export interface LibraryConfig {
 
   /** Read from backup file instead of live data (optional) */
   backupPath?: string;
+
+  /**
+   * SQLite driver to use (optional).
+   * - 'better-sqlite3': Native bindings, works on most Node.js versions
+   * - 'node:sqlite': Built-in (Node.js 22.5+), no native bindings needed
+   * If not specified, auto-detects: tries node:sqlite first, then better-sqlite3.
+   * Can also be set via CURSOR_HISTORY_SQLITE_DRIVER environment variable.
+   */
+  sqliteDriver?: SqliteDriverName;
 }
 
 /**

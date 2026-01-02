@@ -87,7 +87,7 @@ export function registerListCommand(program: Command): void {
           }
         }
         // List workspaces
-        const workspaces = listWorkspaces(
+        const workspaces = await listWorkspaces(
           customPath ? expandPath(customPath) : undefined,
           backupPath
         );
@@ -114,7 +114,7 @@ export function registerListCommand(program: Command): void {
       } else {
         // List sessions
         const limit = options.all ? 0 : parseInt(options.limit ?? '20', 10);
-        const sessions = listSessions(
+        const sessions = await listSessions(
           { limit, all: options.all ?? false, workspacePath: workspaceFilter },
           customPath ? expandPath(customPath) : undefined,
           backupPath

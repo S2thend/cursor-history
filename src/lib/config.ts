@@ -7,9 +7,12 @@
 
 import { realpathSync } from 'node:fs';
 import { resolve, normalize, isAbsolute } from 'node:path';
-import type { LibraryConfig } from './types.js';
+import type { LibraryConfig, SqliteDriverName } from './types.js';
 import { InvalidConfigError, DatabaseNotFoundError } from './errors.js';
 import { getCursorDataPath } from '../lib/platform.js';
+
+/** Valid SQLite driver names */
+const VALID_SQLITE_DRIVERS: SqliteDriverName[] = ['better-sqlite3', 'node:sqlite'];
 
 /**
  * Merged configuration with all defaults applied
@@ -21,6 +24,7 @@ export interface ResolvedConfig {
   offset: number;
   context: number;
   backupPath?: string;
+  sqliteDriver?: SqliteDriverName;
 }
 
 /**
@@ -65,6 +69,17 @@ export function validateConfig(config?: LibraryConfig): void {
   if (config.dataPath !== undefined && typeof config.dataPath !== 'string') {
     throw new InvalidConfigError('dataPath', config.dataPath, 'must be a string');
   }
+
+  // Validate sqliteDriver
+  if (config.sqliteDriver !== undefined) {
+    if (!VALID_SQLITE_DRIVERS.includes(config.sqliteDriver)) {
+      throw new InvalidConfigError(
+        'sqliteDriver',
+        config.sqliteDriver,
+        `must be one of: ${VALID_SQLITE_DRIVERS.join(', ')}`
+      );
+    }
+  }
 }
 
 /**
@@ -82,6 +97,7 @@ export function mergeWithDefaults(config?: LibraryConfig): ResolvedConfig {
     offset: config?.offset ?? 0,
     context: config?.context ?? 0,
     backupPath: config?.backupPath,
+    sqliteDriver: config?.sqliteDriver,
   };
 }
 

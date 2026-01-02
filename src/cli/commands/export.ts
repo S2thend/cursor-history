@@ -82,7 +82,7 @@ export function registerExportCommand(program: Command): void {
 
           if (options.all) {
             // Export all sessions
-            const sessions = listSessions(
+            const sessions = await listSessions(
               { limit: 0, all: true },
               customPath ? expandPath(customPath) : undefined,
               backupPath
@@ -100,7 +100,7 @@ export function registerExportCommand(program: Command): void {
               mkdirSync(outputDir, { recursive: true });
             }
 
-            const workspaces = findWorkspaces(
+            const workspaces = await findWorkspaces(
               customPath ? expandPath(customPath) : undefined,
               backupPath
             );
@@ -111,7 +111,7 @@ export function registerExportCommand(program: Command): void {
             }
 
             for (const summary of sessions) {
-              const session = getSession(
+              const session = await getSession(
                 summary.index,
                 customPath ? expandPath(customPath) : undefined,
                 backupPath
@@ -154,14 +154,14 @@ export function registerExportCommand(program: Command): void {
               );
             }
 
-            const session = getSession(
+            const session = await getSession(
               index,
               customPath ? expandPath(customPath) : undefined,
               backupPath
             );
 
             if (!session) {
-              const sessions = listSessions(
+              const sessions = await listSessions(
                 { limit: 0, all: true },
                 customPath ? expandPath(customPath) : undefined,
                 backupPath
@@ -169,7 +169,7 @@ export function registerExportCommand(program: Command): void {
               throw new SessionNotFoundError(index, sessions.length);
             }
 
-            const workspaces = findWorkspaces(
+            const workspaces = await findWorkspaces(
               customPath ? expandPath(customPath) : undefined,
               backupPath
             );

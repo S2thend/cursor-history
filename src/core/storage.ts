@@ -5,8 +5,13 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import Database from 'better-sqlite3';
 import AdmZip from 'adm-zip';
+import {
+  openDatabase as openDatabaseAsync,
+  openDatabaseReadWrite as openDatabaseReadWriteAsync,
+  ensureDriver,
+  type Database,
+} from './database/index.js';
 import type {
   Workspace,
   ChatSession,
@@ -53,17 +58,19 @@ function getGlobalStoragePath(): string {
 
 /**
  * Open a SQLite database file (read-only)
+ * @deprecated Use openDatabaseAsync for new code
  */
-export function openDatabase(dbPath: string): Database.Database {
-  return new Database(dbPath, { readonly: true });
+export async function openDatabase(dbPath: string): Promise<Database> {
+  return openDatabaseAsync(dbPath);
 }
 
 /**
  * Open a SQLite database file for read-write operations
  * IMPORTANT: Only use for migration operations. Requires Cursor to be closed.
+ * @deprecated Use openDatabaseReadWriteAsync for new code
  */
-export function openDatabaseReadWrite(dbPath: string): Database.Database {
-  return new Database(dbPath, { readonly: false });
+export async function openDatabaseReadWrite(dbPath: string): Promise<Database> {
+  return openDatabaseReadWriteAsync(dbPath);
 }
 
 // ============================================================================
@@ -100,12 +107,16 @@ function readWorkspaceJsonFromBackup(
 
 /**
  * Find workspaces from a backup file
+ * Note: This is async to ensure driver auto-selection happens first
  */
-function findWorkspacesFromBackup(backupPath: string): Workspace[] {
+async function findWorkspacesFromBackup(backupPath: string): Promise<Workspace[]> {
   const manifest = readBackupManifest(backupPath);
   if (!manifest) {
     return [];
   }
+
+  // Ensure driver is selected before proceeding (needed for openBackupDatabase's openSync)
+  await ensureDriver();
 
   const workspaces: Workspace[] = [];
 
@@ -175,10 +186,10 @@ export function readWorkspaceJson(workspaceDir: string): string | null {
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function findWorkspaces(customDataPath?: string, backupPath?: string): Workspace[] {
+export async function findWorkspaces(customDataPath?: string, backupPath?: string): Promise<Workspace[]> {
   // T028: Support reading from backup
   if (backupPath) {
-    return findWorkspacesFromBackup(backupPath);
+    return await findWorkspacesFromBackup(backupPath);
   }
 
   const basePath = getCursorDataPath(customDataPath);
@@ -206,7 +217,7 @@ export function findWorkspaces(customDataPath?: string, backupPath?: string): Wo
       // Count sessions in this workspace
       let sessionCount = 0;
       try {
-        const db = openDatabase(dbPath);
+        const db = await openDatabase(dbPath);
         const result = getChatDataFromDb(db);
         if (result) {
           const parsed = parseChatData(result.data, result.bundle);
@@ -238,7 +249,7 @@ export function findWorkspaces(customDataPath?: string, backupPath?: string): Wo
  * Get chat data JSON from database
  * Returns both the main chat data and the bundle for new format
  */
-function getChatDataFromDb(db: Database.Database): { data: string; bundle: CursorChatBundle } | null {
+function getChatDataFromDb(db: Database): { data: string; bundle: CursorChatBundle } | null {
   let mainData: string | null = null;
   const bundle: CursorChatBundle = {};
 
@@ -297,9 +308,9 @@ function getChatDataFromDb(db: Database.Database): { data: string; bundle: Curso
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function listSessions(options: ListOptions, customDataPath?: string, backupPath?: string): ChatSessionSummary[] {
+export async function listSessions(options: ListOptions, customDataPath?: string, backupPath?: string): Promise<ChatSessionSummary[]> {
   // T029: Support reading from backup
-  const workspaces = findWorkspaces(customDataPath, backupPath);
+  const workspaces = await findWorkspaces(customDataPath, backupPath);
 
   // Filter by workspace if specified
   const filteredWorkspaces = options.workspacePath
@@ -315,7 +326,7 @@ export function listSessions(options: ListOptions, customDataPath?: string, back
       // Open database from live or backup source
       const db = backupPath
         ? openBackupDatabase(backupPath, workspace.dbPath)
-        : openDatabase(workspace.dbPath);
+        : await openDatabase(workspace.dbPath);
       const result = getChatDataFromDb(db);
       db.close();
 
@@ -362,8 +373,8 @@ export function listSessions(options: ListOptions, customDataPath?: string, back
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function listWorkspaces(customDataPath?: string, backupPath?: string): Workspace[] {
-  const workspaces = findWorkspaces(customDataPath, backupPath);
+export async function listWorkspaces(customDataPath?: string, backupPath?: string): Promise<Workspace[]> {
+  const workspaces = await findWorkspaces(customDataPath, backupPath);
 
   // Sort by session count descending
   workspaces.sort((a, b) => b.sessionCount - a.sessionCount);
@@ -381,9 +392,9 @@ export function listWorkspaces(customDataPath?: string, backupPath?: string): Wo
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function getSession(index: number, customDataPath?: string, backupPath?: string): ChatSession | null {
+export async function getSession(index: number, customDataPath?: string, backupPath?: string): Promise<ChatSession | null> {
   // T030: Support reading from backup
-  const summaries = listSessions({ limit: 0, all: true }, customDataPath, backupPath);
+  const summaries = await listSessions({ limit: 0, all: true }, customDataPath, backupPath);
   const summary = summaries.find((s) => s.index === index);
 
   if (!summary) {
@@ -393,7 +404,7 @@ export function getSession(index: number, customDataPath?: string, backupPath?: 
   // Try to get full session from global storage (has AI responses)
   // This works for both live data and backup (if backup includes globalStorage)
   try {
-    let db: Database.Database | null = null;
+    let db: Database | null = null;
 
     if (backupPath) {
       // Try to open globalStorage from backup
@@ -408,7 +419,7 @@ export function getSession(index: number, customDataPath?: string, backupPath?: 
       const globalPath = getGlobalStoragePath();
       const globalDbPath = join(globalPath, 'state.vscdb');
       if (existsSync(globalDbPath)) {
-        db = openDatabase(globalDbPath);
+        db = await openDatabase(globalDbPath);
       }
     }
 
@@ -473,7 +484,7 @@ export function getSession(index: number, customDataPath?: string, backupPath?: 
   }
 
   // Fall back to workspace storage (or use backup for backup mode)
-  const workspaces = findWorkspaces(customDataPath, backupPath);
+  const workspaces = await findWorkspaces(customDataPath, backupPath);
   const workspace = workspaces.find((w) => w.id === summary.workspaceId);
 
   if (!workspace) {
@@ -484,7 +495,7 @@ export function getSession(index: number, customDataPath?: string, backupPath?: 
     // Open database from live or backup source
     const db = backupPath
       ? openBackupDatabase(backupPath, workspace.dbPath)
-      : openDatabase(workspace.dbPath);
+      : await openDatabase(workspace.dbPath);
     const result = getChatDataFromDb(db);
     db.close();
 
@@ -513,14 +524,14 @@ export function getSession(index: number, customDataPath?: string, backupPath?: 
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  */
-export function searchSessions(
+export async function searchSessions(
   query: string,
   options: SearchOptions,
   customDataPath?: string,
   backupPath?: string
-): SearchResult[] {
+): Promise<SearchResult[]> {
   // T031: Support reading from backup
-  const summaries = listSessions(
+  const summaries = await listSessions(
     { limit: 0, all: true, workspacePath: options.workspacePath },
     customDataPath,
     backupPath
@@ -529,7 +540,7 @@ export function searchSessions(
   const lowerQuery = query.toLowerCase();
 
   for (const summary of summaries) {
-    const session = getSession(summary.index, customDataPath, backupPath);
+    const session = await getSession(summary.index, customDataPath, backupPath);
     if (!session) continue;
 
     const snippets = getSearchSnippets(session.messages, lowerQuery, options.contextChars);
@@ -563,7 +574,7 @@ export function searchSessions(
  * List sessions from global Cursor storage (cursorDiskKV table)
  * This is where Cursor stores full conversation data including AI responses
  */
-export function listGlobalSessions(): ChatSessionSummary[] {
+export async function listGlobalSessions(): Promise<ChatSessionSummary[]> {
   const globalPath = getGlobalStoragePath();
   const dbPath = join(globalPath, 'state.vscdb');
 
@@ -572,7 +583,7 @@ export function listGlobalSessions(): ChatSessionSummary[] {
   }
 
   try {
-    const db = openDatabase(dbPath);
+    const db = await openDatabase(dbPath);
 
     // Check if cursorDiskKV table exists
     const tableCheck = db.prepare(
@@ -665,8 +676,8 @@ export function listGlobalSessions(): ChatSessionSummary[] {
 /**
  * Get a session from global storage by index
  */
-export function getGlobalSession(index: number): ChatSession | null {
-  const summaries = listGlobalSessions();
+export async function getGlobalSession(index: number): Promise<ChatSession | null> {
+  const summaries = await listGlobalSessions();
   const summary = summaries.find((s) => s.index === index);
 
   if (!summary) {
@@ -677,7 +688,7 @@ export function getGlobalSession(index: number): ChatSession | null {
   const dbPath = join(globalPath, 'state.vscdb');
 
   try {
-    const db = openDatabase(dbPath);
+    const db = await openDatabase(dbPath);
 
     // Get all bubbles for this composer
     const bubbleRows = db
@@ -1169,15 +1180,15 @@ function extractBubbleText(data: Record<string, unknown>): string {
  * Find the workspace that contains a specific session by ID
  * Returns workspace info including the dbPath for read-write access
  */
-export function findWorkspaceForSession(
+export async function findWorkspaceForSession(
   sessionId: string,
   customDataPath?: string
-): { workspace: Workspace; dbPath: string } | null {
-  const workspaces = findWorkspaces(customDataPath);
+): Promise<{ workspace: Workspace; dbPath: string } | null> {
+  const workspaces = await findWorkspaces(customDataPath);
 
   for (const workspace of workspaces) {
     try {
-      const db = openDatabase(workspace.dbPath);
+      const db = await openDatabase(workspace.dbPath);
       const result = getChatDataFromDb(db);
       db.close();
 
@@ -1213,11 +1224,11 @@ export function findWorkspaceForSession(
  * Find a workspace by its path (exact match)
  * Returns workspace info including the dbPath
  */
-export function findWorkspaceByPath(
+export async function findWorkspaceByPath(
   workspacePath: string,
   customDataPath?: string
-): { workspace: Workspace; dbPath: string } | null {
-  const workspaces = findWorkspaces(customDataPath);
+): Promise<{ workspace: Workspace; dbPath: string } | null> {
+  const workspaces = await findWorkspaces(customDataPath);
 
   // Normalize path for comparison
   const normalizedPath = normalizePath(workspacePath);
@@ -1247,7 +1258,7 @@ export interface ComposerDataResult {
  * Get the composer data from a workspace database
  * Handles both new format (with allComposers) and legacy format (direct array)
  */
-export function getComposerData(db: Database.Database): ComposerDataResult | null {
+export function getComposerData(db: Database): ComposerDataResult | null {
   try {
     const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get('composer.composerData') as
       | { value: string }
@@ -1289,7 +1300,7 @@ export function getComposerData(db: Database.Database): ComposerDataResult | nul
  * Preserves the original structure (allComposers wrapper or direct array)
  */
 export function updateComposerData(
-  db: Database.Database,
+  db: Database,
   composers: Array<{ composerId?: string; [key: string]: unknown }>,
   isNewFormat: boolean,
   originalRawData?: unknown
@@ -1321,10 +1332,10 @@ export function updateComposerData(
  * @returns Array of resolved session IDs
  * @throws SessionNotFoundError if any identifier cannot be resolved
  */
-export function resolveSessionIdentifiers(
+export async function resolveSessionIdentifiers(
   input: string | number | (string | number)[],
   customDataPath?: string
-): string[] {
+): Promise<string[]> {
 
   // Normalize input to array
   let identifiers: (string | number)[];
@@ -1339,7 +1350,7 @@ export function resolveSessionIdentifiers(
   }
 
   // Get all sessions for lookup
-  const summaries = listSessions({ limit: 0, all: true }, customDataPath);
+  const summaries = await listSessions({ limit: 0, all: true }, customDataPath);
 
   const resolvedIds: string[] = [];
 

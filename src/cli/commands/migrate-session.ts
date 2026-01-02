@@ -50,13 +50,13 @@ export function registerMigrateSessionCommand(program: Command): void {
         const destination = expandPath(destinationArg);
 
         // Resolve session identifiers to IDs
-        const sessionIds = resolveSessionIdentifiers(sessionArg, dataPath);
+        const sessionIds = await resolveSessionIdentifiers(sessionArg, dataPath);
 
         // Determine mode
         const mode: MigrationMode = options.copy ? 'copy' : 'move';
 
         // Perform migration
-        const results = migrateSessions({
+        const results = await migrateSessions({
           sessionIds,
           destination,
           mode,

@@ -158,8 +158,64 @@ cursor-history list
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 20+ (Node.js 22.5+ recommended for built-in SQLite support)
 - Cursor IDE (with existing chat history)
+
+## SQLite Driver Configuration
+
+cursor-history supports two SQLite drivers for maximum compatibility:
+
+| Driver | Description | Node.js Version |
+|--------|-------------|-----------------|
+| `node:sqlite` | Built-in Node.js SQLite module (no native bindings) | 22.5+ |
+| `better-sqlite3` | Native bindings via better-sqlite3 | 20+ |
+
+### Automatic Driver Selection
+
+By default, cursor-history automatically selects the best available driver:
+
+1. **node:sqlite** (preferred) - Works on Node.js 22.5+ without native compilation
+2. **better-sqlite3** (fallback) - Works on older Node.js versions
+
+### Manual Driver Selection
+
+You can force a specific driver using the environment variable:
+
+```bash
+# Force better-sqlite3
+CURSOR_HISTORY_SQLITE_DRIVER=better-sqlite3 cursor-history list
+
+# Force node:sqlite (requires Node.js 22.5+)
+CURSOR_HISTORY_SQLITE_DRIVER=node:sqlite cursor-history list
+```
+
+### Debug Driver Selection
+
+To see which driver is being used:
+
+```bash
+DEBUG=cursor-history:* cursor-history list
+```
+
+### Library API Driver Control
+
+When using cursor-history as a library, you can control the driver programmatically:
+
+```typescript
+import { setDriver, getActiveDriver, listSessions } from 'cursor-history';
+
+// Force a specific driver before any operations
+setDriver('better-sqlite3');
+
+// Check which driver is active
+const driver = getActiveDriver();
+console.log(`Using driver: ${driver}`);
+
+// Or configure via LibraryConfig
+const result = await listSessions({
+  sqliteDriver: 'node:sqlite'  // Force node:sqlite for this call
+});
+```
 
 ## Usage
 
@@ -475,17 +531,20 @@ const sessions = listSessions({ backupPath: '~/backup.zip' });
 | `listBackups(directory?)` | List available backup files |
 | `getDefaultBackupDir()` | Get default backup directory path |
 | `getDefaultDataPath()` | Get platform-specific Cursor data path |
+| `setDriver(name)` | Set SQLite driver ('better-sqlite3' or 'node:sqlite') |
+| `getActiveDriver()` | Get currently active SQLite driver name |
 
 ### Configuration Options
 
 ```typescript
 interface LibraryConfig {
-  dataPath?: string;    // Custom Cursor data path
-  workspace?: string;   // Filter by workspace path
-  limit?: number;       // Pagination limit
-  offset?: number;      // Pagination offset
-  context?: number;     // Search context lines
-  backupPath?: string;  // Read from backup file instead of live data
+  dataPath?: string;       // Custom Cursor data path
+  workspace?: string;      // Filter by workspace path
+  limit?: number;          // Pagination limit
+  offset?: number;         // Pagination offset
+  context?: number;        // Search context lines
+  backupPath?: string;     // Read from backup file instead of live data
+  sqliteDriver?: 'better-sqlite3' | 'node:sqlite';  // Force specific SQLite driver
 }
 ```
 
