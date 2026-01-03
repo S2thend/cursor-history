@@ -131,7 +131,7 @@ export function registerListBackupsCommand(program: Command): void {
     .alias('backups')
     .description('List available backup files')
     .option('-d, --directory <path>', 'Directory to scan (default: ~/cursor-history-backups)')
-    .action((options: ListBackupsCommandOptions, command: Command) => {
+    .action(async (options: ListBackupsCommandOptions, command: Command) => {
       const globalOptions = command.parent?.opts() as { json?: boolean };
       const useJson = options.json ?? globalOptions?.json ?? false;
 
@@ -160,7 +160,7 @@ export function registerListBackupsCommand(program: Command): void {
         }
 
         // List backups
-        const backups = listBackups(directory);
+        const backups = await listBackups(directory);
 
         // T063: Handle no backups found
         if (backups.length === 0) {

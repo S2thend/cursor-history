@@ -54,19 +54,19 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
  * Restore Cursor chat history from a backup file.
  *
  * @param config - Restore configuration (backupPath required)
- * @returns Restore result
+ * @returns Promise resolving to restore result
  *
  * @example
  * ```typescript
  * import { restoreBackup } from 'cursor-history';
  *
- * const result = restoreBackup({
+ * const result = await restoreBackup({
  *   backupPath: '/path/to/backup.zip',
  *   force: true
  * });
  * ```
  */
-export function restoreBackup(config: RestoreConfig): RestoreResult {
+export async function restoreBackup(config: RestoreConfig): Promise<RestoreResult> {
   return coreRestoreBackup(config);
 }
 
@@ -74,19 +74,19 @@ export function restoreBackup(config: RestoreConfig): RestoreResult {
  * Validate a backup file's integrity without restoring.
  *
  * @param backupPath - Path to backup zip file
- * @returns Validation result with status and details
+ * @returns Promise resolving to validation result with status and details
  *
  * @example
  * ```typescript
  * import { validateBackup } from 'cursor-history';
  *
- * const validation = validateBackup('/path/to/backup.zip');
+ * const validation = await validateBackup('/path/to/backup.zip');
  * if (validation.status === 'valid') {
  *   console.log('Backup is valid');
  * }
  * ```
  */
-export function validateBackup(backupPath: string): BackupValidation {
+export async function validateBackup(backupPath: string): Promise<BackupValidation> {
   return coreValidateBackup(backupPath);
 }
 
@@ -94,19 +94,19 @@ export function validateBackup(backupPath: string): BackupValidation {
  * List available backup files in a directory.
  *
  * @param directory - Directory to scan (default: ~/cursor-history-backups)
- * @returns Array of backup info objects
+ * @returns Promise resolving to array of backup info objects
  *
  * @example
  * ```typescript
  * import { listBackups } from 'cursor-history';
  *
- * const backups = listBackups();
+ * const backups = await listBackups();
  * for (const backup of backups) {
  *   console.log(`${backup.filename}: ${backup.manifest?.stats.sessionCount} sessions`);
  * }
  * ```
  */
-export function listBackups(directory?: string): BackupInfo[] {
+export async function listBackups(directory?: string): Promise<BackupInfo[]> {
   return coreListBackups(directory);
 }
 

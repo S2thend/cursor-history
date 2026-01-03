@@ -3,16 +3,17 @@
  *
  * This module provides low-level backup operations:
  * - SQLite database backup using pluggable driver system
- * - Zip creation/extraction using adm-zip
+ * - Zip creation/extraction using jszip
  * - Manifest generation with checksums
  * - Integrity validation
  */
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, readFileSync, writeFileSync, rmdirSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join, basename, dirname, sep } from 'node:path';
-import AdmZip from 'adm-zip';
+import { join, dirname, sep } from 'node:path';
+import JSZip from 'jszip';
 import type { Database as DatabaseInterface, Statement } from './database/types.js';
 import { registry } from './database/registry.js';
 import { backupDatabase } from './database/index.js';
@@ -29,7 +30,7 @@ import type {
 } from './types.js';
 
 // Package version for manifest
-const CURSOR_HISTORY_VERSION = '0.9.1';
+const CURSOR_HISTORY_VERSION = '0.9.2';
 const MANIFEST_VERSION = '1.0.0';
 
 // ============================================================================
@@ -371,14 +372,15 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
     });
 
     // T014: Create zip file
-    const zip = new AdmZip();
+    const zip = new JSZip();
 
     // Add all backed up database files
     for (const entry of fileEntries) {
       const filePath = join(tempDir, entry.path);
       // Convert path to use forward slashes for cross-platform compatibility
       const zipPath = entry.path.split(sep).join('/');
-      zip.addLocalFile(filePath, dirname(zipPath), basename(zipPath));
+      const fileContent = readFileSync(filePath);
+      zip.file(zipPath, fileContent);
     }
 
     // T015: Create and add manifest
@@ -388,7 +390,7 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       workspaceCount: workspaceIds.size,
     };
     const manifest = createManifest(fileEntries, stats);
-    zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2)));
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
     // Phase: Finalizing
     onProgress?.({
@@ -403,7 +405,8 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
     if (existsSync(outputPath)) {
       unlinkSync(outputPath);
     }
-    zip.writeZip(outputPath);
+    const zipContent = await zip.generateAsync({ type: 'nodebuffer' });
+    await writeFile(outputPath, zipContent);
 
     return {
       success: true,
@@ -478,13 +481,16 @@ class TempFileCleanupWrapper implements DatabaseInterface {
  * Extracts to a temp file since SQLite needs file access.
  * Returns a Database interface compatible with the pluggable driver system.
  */
-export function openBackupDatabase(backupPath: string, dbPath: string): DatabaseInterface {
-  const zip = new AdmZip(backupPath);
-  const buffer = zip.readFile(dbPath);
+export async function openBackupDatabase(backupPath: string, dbPath: string): Promise<DatabaseInterface> {
+  const data = await readFile(backupPath);
+  const zip = await JSZip.loadAsync(data);
+  const dbFile = zip.file(dbPath);
 
-  if (!buffer) {
+  if (!dbFile) {
     throw new Error(`Database not found in backup: ${dbPath}`);
   }
+
+  const buffer = await dbFile.async('nodebuffer');
 
   // Extract to temp file since SQLite needs file access
   const tempFile = join(
@@ -515,13 +521,15 @@ export function openBackupDatabase(backupPath: string, dbPath: string): Database
 /**
  * Read manifest from a backup file
  */
-export function readBackupManifest(backupPath: string): BackupManifest | null {
+export async function readBackupManifest(backupPath: string): Promise<BackupManifest | null> {
   try {
-    const zip = new AdmZip(backupPath);
-    const manifestBuffer = zip.readFile('manifest.json');
-    if (!manifestBuffer) {
+    const data = await readFile(backupPath);
+    const zip = await JSZip.loadAsync(data);
+    const manifestFile = zip.file('manifest.json');
+    if (!manifestFile) {
       return null;
     }
+    const manifestBuffer = await manifestFile.async('nodebuffer');
     return JSON.parse(manifestBuffer.toString('utf-8')) as BackupManifest;
   } catch {
     return null;
@@ -531,7 +539,7 @@ export function readBackupManifest(backupPath: string): BackupManifest | null {
 /**
  * T026: Validate backup integrity
  */
-export function validateBackup(backupPath: string): BackupValidation {
+export async function validateBackup(backupPath: string): Promise<BackupValidation> {
   const errors: string[] = [];
   const validFiles: string[] = [];
   const corruptedFiles: string[] = [];
@@ -549,9 +557,10 @@ export function validateBackup(backupPath: string): BackupValidation {
   }
 
   // Try to open as zip
-  let zip: AdmZip;
+  let zip: JSZip;
   try {
-    zip = new AdmZip(backupPath);
+    const data = await readFile(backupPath);
+    zip = await JSZip.loadAsync(data);
   } catch (e) {
     return {
       status: 'invalid',
@@ -563,8 +572,8 @@ export function validateBackup(backupPath: string): BackupValidation {
   }
 
   // Read manifest
-  const manifestBuffer = zip.readFile('manifest.json');
-  if (!manifestBuffer) {
+  const manifestFile = zip.file('manifest.json');
+  if (!manifestFile) {
     return {
       status: 'invalid',
       validFiles: [],
@@ -576,6 +585,7 @@ export function validateBackup(backupPath: string): BackupValidation {
 
   let manifest: BackupManifest;
   try {
+    const manifestBuffer = await manifestFile.async('nodebuffer');
     manifest = JSON.parse(manifestBuffer.toString('utf-8')) as BackupManifest;
   } catch (e) {
     return {
@@ -589,12 +599,13 @@ export function validateBackup(backupPath: string): BackupValidation {
 
   // Verify each file
   for (const fileEntry of manifest.files) {
-    const buffer = zip.readFile(fileEntry.path);
-    if (!buffer) {
+    const file = zip.file(fileEntry.path);
+    if (!file) {
       missingFiles.push(fileEntry.path);
       continue;
     }
 
+    const buffer = await file.async('nodebuffer');
     const actualChecksum = computeChecksum(buffer);
     if (actualChecksum === fileEntry.checksum) {
       validFiles.push(fileEntry.path);
@@ -637,7 +648,7 @@ export function validateBackup(backupPath: string): BackupValidation {
 /**
  * T040-T045: Restore backup to Cursor data directory
  */
-export function restoreBackup(config: RestoreConfig): RestoreResult {
+export async function restoreBackup(config: RestoreConfig): Promise<RestoreResult> {
   const startTime = Date.now();
   const backupPath = config.backupPath;
   const targetPath = config.targetPath ?? getDefaultCursorDataPath();
@@ -653,7 +664,7 @@ export function restoreBackup(config: RestoreConfig): RestoreResult {
   });
 
   // Validate backup
-  const validation = validateBackup(backupPath);
+  const validation = await validateBackup(backupPath);
 
   if (validation.status === 'invalid') {
     return {
@@ -692,7 +703,8 @@ export function restoreBackup(config: RestoreConfig): RestoreResult {
   });
 
   // Phase: Extracting
-  const zip = new AdmZip(backupPath);
+  const data = await readFile(backupPath);
+  const zip = await JSZip.loadAsync(data);
   const restoredFiles: string[] = [];
   const warnings: string[] = validation.corruptedFiles.map((f) => `Checksum mismatch: ${f}`);
 
@@ -709,10 +721,12 @@ export function restoreBackup(config: RestoreConfig): RestoreResult {
         corruptedFiles: validation.corruptedFiles,
       });
 
-      const buffer = zip.readFile(fileEntry.path);
-      if (!buffer) {
+      const file = zip.file(fileEntry.path);
+      if (!file) {
         continue; // Skip missing files
       }
+
+      const buffer = await file.async('nodebuffer');
 
       // Convert forward slashes to platform-specific separators
       const platformPath = fileEntry.path.split('/').join(sep);
@@ -773,7 +787,7 @@ export function restoreBackup(config: RestoreConfig): RestoreResult {
 /**
  * T055-T057: List all backup files in a directory
  */
-export function listBackups(directory?: string): BackupInfo[] {
+export async function listBackups(directory?: string): Promise<BackupInfo[]> {
   const dir = directory ?? getDefaultBackupDir();
 
   if (!existsSync(dir)) {
@@ -802,7 +816,7 @@ export function listBackups(directory?: string): BackupInfo[] {
 
       // Try to read manifest
       try {
-        const manifest = readBackupManifest(filePath);
+        const manifest = await readBackupManifest(filePath);
         if (manifest) {
           info.manifest = manifest;
         } else {

@@ -46,7 +46,7 @@ export function registerShowCommand(program: Command): void {
 
       // T035: Validate backup if reading from backup
       if (backupPath) {
-        const validation = validateBackup(backupPath);
+        const validation = await validateBackup(backupPath);
         if (validation.status === 'invalid') {
           if (useJson) {
             console.log(JSON.stringify({ error: 'Invalid backup', errors: validation.errors }));

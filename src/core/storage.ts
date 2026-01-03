@@ -3,9 +3,10 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import AdmZip from 'adm-zip';
+import JSZip from 'jszip';
 import {
   openDatabase as openDatabaseAsync,
   openDatabaseReadWrite as openDatabaseReadWriteAsync,
@@ -80,24 +81,26 @@ export async function openDatabaseReadWrite(dbPath: string): Promise<Database> {
 /**
  * Read workspace.json from a backup zip file
  */
-function readWorkspaceJsonFromBackup(
+async function readWorkspaceJsonFromBackup(
   backupPath: string,
   workspaceId: string
-): string | null {
+): Promise<string | null> {
   try {
-    const zip = new AdmZip(backupPath);
+    const data = await readFile(backupPath);
+    const zip = await JSZip.loadAsync(data);
     const jsonPath = `workspaceStorage/${workspaceId}/workspace.json`;
-    const buffer = zip.readFile(jsonPath);
+    const file = zip.file(jsonPath);
 
-    if (!buffer) {
+    if (!file) {
       return null;
     }
 
+    const buffer = await file.async('nodebuffer');
     const content = buffer.toString('utf-8');
-    const data = JSON.parse(content) as { folder?: string };
-    if (data.folder) {
+    const jsonData = JSON.parse(content) as { folder?: string };
+    if (jsonData.folder) {
       // Convert file:// URL to path
-      return data.folder.replace(/^file:\/\//, '').replace(/%20/g, ' ');
+      return jsonData.folder.replace(/^file:\/\//, '').replace(/%20/g, ' ');
     }
     return null;
   } catch {
@@ -110,7 +113,7 @@ function readWorkspaceJsonFromBackup(
  * Note: This is async to ensure driver auto-selection happens first
  */
 async function findWorkspacesFromBackup(backupPath: string): Promise<Workspace[]> {
-  const manifest = readBackupManifest(backupPath);
+  const manifest = await readBackupManifest(backupPath);
   if (!manifest) {
     return [];
   }
@@ -130,12 +133,12 @@ async function findWorkspacesFromBackup(backupPath: string): Promise<Workspace[]
 
     const workspaceId = match[1]!;
     // Try to get workspace path from workspace.json, fall back to workspace ID
-    const workspacePath = readWorkspaceJsonFromBackup(backupPath, workspaceId) ?? `(workspace: ${workspaceId})`;
+    const workspacePath = await readWorkspaceJsonFromBackup(backupPath, workspaceId) ?? `(workspace: ${workspaceId})`;
 
     // Count sessions in this workspace
     let sessionCount = 0;
     try {
-      const db = openBackupDatabase(backupPath, file.path);
+      const db = await openBackupDatabase(backupPath, file.path);
       const result = getChatDataFromDb(db);
       if (result) {
         const parsed = parseChatData(result.data, result.bundle);
@@ -325,7 +328,7 @@ export async function listSessions(options: ListOptions, customDataPath?: string
     try {
       // Open database from live or backup source
       const db = backupPath
-        ? openBackupDatabase(backupPath, workspace.dbPath)
+        ? await openBackupDatabase(backupPath, workspace.dbPath)
         : await openDatabase(workspace.dbPath);
       const result = getChatDataFromDb(db);
       db.close();
@@ -409,7 +412,7 @@ export async function getSession(index: number, customDataPath?: string, backupP
     if (backupPath) {
       // Try to open globalStorage from backup
       try {
-        db = openBackupDatabase(backupPath, 'globalStorage/state.vscdb');
+        db = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb');
       } catch {
         // Backup might not have globalStorage, fall through to workspace storage
         db = null;
@@ -494,7 +497,7 @@ export async function getSession(index: number, customDataPath?: string, backupP
   try {
     // Open database from live or backup source
     const db = backupPath
-      ? openBackupDatabase(backupPath, workspace.dbPath)
+      ? await openBackupDatabase(backupPath, workspace.dbPath)
       : await openDatabase(workspace.dbPath);
     const result = getChatDataFromDb(db);
     db.close();

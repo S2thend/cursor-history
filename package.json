@@ -1,6 +1,6 @@
 {
   "name": "cursor-history",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "The ultimate CLI tool and library to browse, search, export, migrate, and backup your Cursor AI chat history",
   "type": "module",
   "main": "dist/lib/index.js",
@@ -74,13 +74,12 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
     "better-sqlite3": "^12.5.0",
     "commander": "^14.0.2",
+    "jszip": "^3.10.1",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
-    "@types/adm-zip": "^0.5.7",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.0.3",
     "eslint": "^9.39.2",
