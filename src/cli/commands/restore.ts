@@ -133,7 +133,7 @@ export function registerRestoreCommand(program: Command): void {
         }
 
         // T052: Validate backup before attempting restore
-        const validation = validateBackup(backupPath);
+        const validation = await validateBackup(backupPath);
         if (validation.status === 'invalid') {
           if (useJson) {
             console.log(JSON.stringify({
@@ -164,7 +164,7 @@ export function registerRestoreCommand(program: Command): void {
         const onProgress = useJson ? undefined : displayProgress;
 
         // Perform restore
-        const result = restoreBackup({
+        const result = await restoreBackup({
           backupPath,
           targetPath,
           force: options.force ?? false,

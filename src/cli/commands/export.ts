@@ -51,7 +51,7 @@ export function registerExportCommand(program: Command): void {
 
         // T037: Validate backup if exporting from backup
         if (backupPath) {
-          const validation = validateBackup(backupPath);
+          const validation = await validateBackup(backupPath);
           if (validation.status === 'invalid') {
             if (useJson) {
               console.log(JSON.stringify({ error: 'Invalid backup', errors: validation.errors }));
