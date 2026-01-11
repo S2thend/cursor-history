@@ -356,6 +356,8 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - commander + picocolors for CLI (not used in library)
 - Dual ESM/CommonJS module support
 - SQLite databases (state.vscdb files) + zip archives for backups
+- TypeScript 5.9+ (strict mode enabled) + jszip (replacing adm-zip), commander, picocolors, better-sqlite3/node:sqlite (007-replace-adm-zip)
+- SQLite databases (state.vscdb), zip archives for backup (007-replace-adm-zip)
 
 ## Recent Changes
 - 006-pluggable-sqlite-driver: Added pluggable SQLite driver system
