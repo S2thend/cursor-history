@@ -33,13 +33,19 @@ export type {
   BackupInfo,
   // SQLite driver type
   SqliteDriverName,
+  // Message filter type
+  MessageType,
 } from './types.js';
+
+// Export MESSAGE_TYPES constant
+export { MESSAGE_TYPES } from './types.js';
 
 // Export error classes
 export {
   DatabaseLockedError,
   DatabaseNotFoundError,
   InvalidConfigError,
+  InvalidFilterError,
   SessionNotFoundError,
   WorkspaceNotFoundError,
   SameWorkspaceError,
@@ -59,6 +65,7 @@ export {
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isInvalidConfigError,
+  isInvalidFilterError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
   isSameWorkspaceError,
@@ -79,10 +86,19 @@ export {
 // Export utility functions
 export { getDefaultDataPath } from './utils.js';
 
+// Export filter functions from formatters
+export {
+  getMessageType,
+  filterMessages,
+  validateMessageTypes,
+} from '../cli/formatters/table.js';
+
 // API Functions (to be implemented in Phase 3+)
 import type { LibraryConfig, PaginatedResult, Session, SearchResult, MigrateSessionConfig, MigrateWorkspaceConfig, SessionMigrationResult, WorkspaceMigrationResult, SqliteDriverName } from './types.js';
 import { mergeWithDefaults } from './config.js';
-import { DatabaseLockedError, DatabaseNotFoundError } from './errors.js';
+import { DatabaseLockedError, DatabaseNotFoundError, InvalidFilterError } from './errors.js';
+import { filterMessages as filterMessagesImpl, validateMessageTypes as validateMessageTypesImpl } from '../cli/formatters/table.js';
+import { MESSAGE_TYPES as MESSAGE_TYPES_CONST } from '../core/types.js';
 import * as storage from '../core/storage.js';
 import * as migrate from '../core/migrate.js';
 import { exportToJson, exportToMarkdown } from '../core/parser.js';
@@ -201,11 +217,12 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
  * Get a specific session by index.
  *
  * @param index - Zero-based session index (from listSessions result)
- * @param config - Optional configuration (dataPath)
- * @returns Complete session with all messages
+ * @param config - Optional configuration (dataPath, messageFilter)
+ * @returns Complete session with all messages (filtered if messageFilter specified)
  * @throws {DatabaseLockedError} If database is locked by Cursor
  * @throws {DatabaseNotFoundError} If database path does not exist
  * @throws {InvalidConfigError} If index is out of bounds
+ * @throws {InvalidFilterError} If messageFilter contains invalid types
  *
  * @example
  * const session = await getSession(0);
@@ -214,10 +231,22 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
  * @example
  * // Get session from custom data path
  * const session = await getSession(5, { dataPath: '/custom/cursor/data' });
+ *
+ * @example
+ * // Get session with only user messages
+ * const session = await getSession(0, { messageFilter: ['user'] });
  */
 export async function getSession(index: number, config?: LibraryConfig): Promise<Session> {
   try {
     const resolved = mergeWithDefaults(config);
+
+    // Validate message filter if provided
+    if (config?.messageFilter && config.messageFilter.length > 0) {
+      const invalidTypes = validateMessageTypesImpl(config.messageFilter);
+      if (invalidTypes.length > 0) {
+        throw new InvalidFilterError(invalidTypes, MESSAGE_TYPES_CONST);
+      }
+    }
 
     // Core storage uses 1-based indexing, so we add 1
     const coreIndex = index + 1;
@@ -225,6 +254,11 @@ export async function getSession(index: number, config?: LibraryConfig): Promise
     const coreSession = await storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
     if (!coreSession) {
       throw new DatabaseNotFoundError(`Session at index ${index} not found`);
+    }
+
+    // Apply message filter if provided
+    if (config?.messageFilter && config.messageFilter.length > 0) {
+      coreSession.messages = filterMessagesImpl(coreSession.messages, config.messageFilter);
     }
 
     return convertToLibrarySession(coreSession);
@@ -238,7 +272,7 @@ export async function getSession(index: number, config?: LibraryConfig): Promise
       throw new DatabaseNotFoundError(config?.dataPath ?? 'default path');
     }
     // Re-throw library errors as-is
-    if (err instanceof DatabaseLockedError || err instanceof DatabaseNotFoundError) {
+    if (err instanceof DatabaseLockedError || err instanceof DatabaseNotFoundError || err instanceof InvalidFilterError) {
       throw err;
     }
     // Wrap other errors

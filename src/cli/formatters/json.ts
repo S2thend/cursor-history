@@ -2,7 +2,14 @@
  * JSON output formatter for CLI
  */
 
-import type { ChatSessionSummary, Workspace, ChatSession, SearchResult } from '../../core/types.js';
+import type {
+  ChatSessionSummary,
+  Workspace,
+  ChatSession,
+  SearchResult,
+  MessageType,
+} from '../../core/types.js';
+import { getMessageType } from './table.js';
 
 /**
  * Format sessions list as JSON
@@ -45,17 +52,33 @@ export function formatWorkspacesJson(workspaces: Workspace[]): string {
 /**
  * Format a single session as JSON
  */
-export function formatSessionJson(session: ChatSession, workspacePath?: string): string {
-  const output = {
+export function formatSessionJson(
+  session: ChatSession,
+  workspacePath?: string,
+  messageFilter?: MessageType[],
+  originalMessageCount?: number
+): string {
+  // Build base output
+  const output: Record<string, unknown> = {
     index: session.index,
     id: session.id,
     title: session.title,
     createdAt: session.createdAt.toISOString(),
     lastUpdatedAt: session.lastUpdatedAt.toISOString(),
-    messageCount: session.messageCount,
+    messageCount: originalMessageCount ?? session.messageCount,
     workspaceId: session.workspaceId,
     workspacePath: workspacePath ?? null,
-    messages: session.messages.map((m) => ({
+  };
+
+  // Add filter metadata if filtering is active
+  if (messageFilter && messageFilter.length > 0) {
+    output['filter'] = messageFilter;
+    output['filteredMessageCount'] = session.messages.length;
+  }
+
+  // Map messages with optional type field
+  output['messages'] = session.messages.map((m) => {
+    const msg: Record<string, unknown> = {
       id: m.id,
       role: m.role,
       content: m.content,
@@ -65,8 +88,13 @@ export function formatSessionJson(session: ChatSession, workspacePath?: string):
         content: cb.content,
         startLine: cb.startLine,
       })),
-    })),
-  };
+    };
+    // Add type field when filtering is active
+    if (messageFilter && messageFilter.length > 0) {
+      msg['type'] = getMessageType(m);
+    }
+    return msg;
+  });
 
   return JSON.stringify(output, null, 2);
 }

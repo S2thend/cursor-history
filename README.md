@@ -256,8 +256,14 @@ cursor-history show 1 --fullread
 # Show full error messages (not truncated to 300 chars)
 cursor-history show 1 --error
 
+# Filter by message type (user, assistant, tool, thinking, error)
+cursor-history show 1 --only user
+cursor-history show 1 --only user,assistant
+cursor-history show 1 --only tool,error
+
 # Combine options
 cursor-history show 1 --short --think --fullread --error
+cursor-history show 1 --only user,assistant --short
 
 # Output as JSON
 cursor-history show 1 --json
@@ -394,6 +400,7 @@ When browsing your chat history, you'll see:
 - **`--think` flag** - Shows complete AI reasoning/thinking text (not truncated)
 - **`--fullread` flag** - Shows full file read content instead of previews
 - **`--error` flag** - Shows full error messages instead of 300-char preview
+- **`--only <types>` flag** - Filter messages by type: `user`, `assistant`, `tool`, `thinking`, `error` (comma-separated)
 
 ## Where Cursor Stores Data
 
@@ -545,6 +552,7 @@ interface LibraryConfig {
   context?: number;        // Search context lines
   backupPath?: string;     // Read from backup file instead of live data
   sqliteDriver?: 'better-sqlite3' | 'node:sqlite';  // Force specific SQLite driver
+  messageFilter?: MessageType[];  // Filter messages by type (user, assistant, tool, thinking, error)
 }
 ```
 
@@ -553,11 +561,13 @@ interface LibraryConfig {
 ```typescript
 import {
   listSessions,
+  getSession,
   createBackup,
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
+  isInvalidFilterError,
   isBackupError,
   isRestoreError,
   isInvalidBackupError
@@ -574,6 +584,16 @@ try {
     console.error('Session not found');
   } else if (isWorkspaceNotFoundError(err)) {
     console.error('Workspace not found - open project in Cursor first');
+  }
+}
+
+// Filter error handling
+try {
+  const session = getSession(0, { messageFilter: ['invalid'] });
+} catch (err) {
+  if (isInvalidFilterError(err)) {
+    console.error('Invalid filter types:', err.invalidTypes);
+    console.error('Valid types:', err.validTypes);
   }
 }
 

@@ -3,7 +3,8 @@
  */
 
 import pc from 'picocolors';
-import type { ChatSessionSummary, Workspace, ChatSession, SearchResult } from '../../core/types.js';
+import type { ChatSessionSummary, Workspace, ChatSession, SearchResult, MessageType } from '../../core/types.js';
+import { MESSAGE_TYPES } from '../../core/types.js';
 
 /**
  * Check if output supports colors
@@ -152,22 +153,58 @@ export function formatWorkspacesTable(workspaces: Workspace[]): string {
 /**
  * Check if content is a tool call (formatted by storage layer)
  */
-function isToolCall(content: string): boolean {
+export function isToolCall(content: string): boolean {
   return content.startsWith('[Tool:');
 }
 
 /**
  * Check if content is thinking/reasoning text
  */
-function isThinking(content: string): boolean {
+export function isThinking(content: string): boolean {
   return content.startsWith('[Thinking]');
 }
 
 /**
  * Check if content is an error message
  */
-function isError(content: string): boolean {
+export function isError(content: string): boolean {
   return content.startsWith('[Error]');
+}
+
+/**
+ * Get the type of a message based on its role and content
+ */
+export function getMessageType(message: { role: string; content: string }): MessageType {
+  if (message.role === 'user') {
+    return 'user';
+  }
+  // For assistant messages, check content markers
+  if (isToolCall(message.content)) return 'tool';
+  if (isThinking(message.content)) return 'thinking';
+  if (isError(message.content)) return 'error';
+  return 'assistant';
+}
+
+/**
+ * Filter messages by type
+ * Returns all messages if types is empty or contains all types
+ */
+export function filterMessages<T extends { role: string; content: string }>(
+  messages: T[],
+  types: MessageType[]
+): T[] {
+  if (types.length === 0 || types.length === MESSAGE_TYPES.length) {
+    return messages; // No filtering needed
+  }
+  return messages.filter((m) => types.includes(getMessageType(m)));
+}
+
+/**
+ * Validate message filter types
+ * Returns array of invalid types, or empty array if all are valid
+ */
+export function validateMessageTypes(types: string[]): string[] {
+  return types.filter((t) => !MESSAGE_TYPES.includes(t as MessageType));
 }
 
 /**
@@ -298,10 +335,24 @@ function formatToolCallDisplay(content: string, fullTool: boolean): string {
 export function formatSessionDetail(
   session: ChatSession,
   workspacePath?: string,
-  options?: { short?: boolean; fullThinking?: boolean; fullTool?: boolean; fullError?: boolean }
+  options?: {
+    short?: boolean;
+    fullThinking?: boolean;
+    fullTool?: boolean;
+    fullError?: boolean;
+    messageFilter?: MessageType[];
+    originalMessageCount?: number;
+  }
 ): string {
   const lines: string[] = [];
-  const { short = false, fullThinking = false, fullTool = false, fullError = false } = options ?? {};
+  const {
+    short = false,
+    fullThinking = false,
+    fullTool = false,
+    fullError = false,
+    messageFilter,
+    originalMessageCount,
+  } = options ?? {};
 
   // Header
   lines.push(pc.bold(`Chat Session #${session.index}`));
@@ -315,10 +366,25 @@ export function formatSessionDetail(
   if (workspacePath) {
     lines.push(`${pc.bold('Workspace:')} ${workspacePath}`);
   }
-  lines.push(`${pc.bold('Messages:')} ${session.messageCount}`);
+  // Show original message count and filter info if filtering is active
+  if (messageFilter && messageFilter.length > 0 && originalMessageCount !== undefined) {
+    lines.push(
+      `${pc.bold('Messages:')} ${session.messages.length} of ${originalMessageCount} ${pc.dim(`(filter: ${messageFilter.join(', ')})`)}`
+    );
+  } else {
+    lines.push(`${pc.bold('Messages:')} ${session.messageCount}`);
+  }
   lines.push('');
   lines.push(pc.dim('─'.repeat(60)));
   lines.push('');
+
+  // Handle empty filter result
+  if (messageFilter && messageFilter.length > 0 && session.messages.length === 0) {
+    lines.push(pc.yellow(`No messages match the filter: ${messageFilter.join(', ')}`));
+    lines.push('');
+    lines.push(pc.dim('Use --only without arguments to see all messages.'));
+    return lines.join('\n');
+  }
 
   // Messages - with consecutive duplicate folding
   let i = 0;

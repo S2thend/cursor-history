@@ -6,9 +6,16 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { getSession, listSessions } from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
-import { formatSessionDetail, formatSessionJson } from '../formatters/index.js';
+import {
+  formatSessionDetail,
+  formatSessionJson,
+  filterMessages,
+  validateMessageTypes,
+} from '../formatters/index.js';
 import { SessionNotFoundError, handleError } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
+import type { MessageType } from '../../core/types.js';
+import { MESSAGE_TYPES } from '../../core/types.js';
 
 interface ShowCommandOptions {
   json?: boolean;
@@ -18,6 +25,7 @@ interface ShowCommandOptions {
   tool?: boolean;
   error?: boolean;
   backup?: string;
+  only?: string;
 }
 
 /**
@@ -32,6 +40,10 @@ export function registerShowCommand(program: Command): void {
     .option('--tool', 'Show full tool call details (commands, content, results)')
     .option('-e, --error', 'Show full error messages (default: truncated)')
     .option('-b, --backup <path>', 'Read from backup file instead of live data')
+    .option(
+      '-o, --only <types>',
+      'Show only specified message types (user,assistant,tool,thinking,error)'
+    )
     .action(async (indexArg: string, options: ShowCommandOptions, command: Command) => {
       const globalOptions = command.parent?.opts() as { json?: boolean; dataPath?: string };
       const useJson = options.json ?? globalOptions?.json ?? false;
@@ -42,6 +54,19 @@ export function registerShowCommand(program: Command): void {
 
       if (isNaN(index) || index < 1) {
         handleError(new Error(`Invalid index: ${indexArg}. Must be a positive number.`));
+      }
+
+      // Parse and validate message type filter
+      let messageFilter: MessageType[] | undefined;
+      if (options.only) {
+        const types = options.only.split(',').map((t) => t.trim().toLowerCase());
+        const invalidTypes = validateMessageTypes(types);
+        if (invalidTypes.length > 0) {
+          console.error(pc.red(`Invalid message type(s): ${invalidTypes.join(', ')}`));
+          console.error(`Valid types: ${MESSAGE_TYPES.join(', ')}`);
+          process.exit(1);
+        }
+        messageFilter = types as MessageType[];
       }
 
       // T035: Validate backup if reading from backup
@@ -86,8 +111,16 @@ export function registerShowCommand(program: Command): void {
           console.log(pc.dim(`Reading from backup: ${contractPath(backupPath)}\n`));
         }
 
+        // Apply message type filter if specified
+        const originalMessageCount = session.messages.length;
+        if (messageFilter && messageFilter.length > 0) {
+          session.messages = filterMessages(session.messages, messageFilter);
+        }
+
         if (useJson) {
-          console.log(formatSessionJson(session, session.workspacePath));
+          console.log(
+            formatSessionJson(session, session.workspacePath, messageFilter, originalMessageCount)
+          );
         } else {
           console.log(
             formatSessionDetail(session, session.workspacePath, {
@@ -95,6 +128,8 @@ export function registerShowCommand(program: Command): void {
               fullThinking: options.think ?? false,
               fullTool: options.tool ?? false,
               fullError: options.error ?? false,
+              messageFilter,
+              originalMessageCount,
             })
           );
         }

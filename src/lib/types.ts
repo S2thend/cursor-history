@@ -116,6 +116,13 @@ export interface SearchResult {
 export type SqliteDriverName = 'better-sqlite3' | 'node:sqlite';
 
 /**
+ * Valid message type filter values for filtering displayed messages.
+ * Re-exported from core types for library consumers.
+ */
+export type { MessageType } from '../core/types.js';
+export { MESSAGE_TYPES } from '../core/types.js';
+
+/**
  * Configuration options for library functions.
  */
 export interface LibraryConfig {
@@ -145,6 +152,22 @@ export interface LibraryConfig {
    * Can also be set via CURSOR_HISTORY_SQLITE_DRIVER environment variable.
    */
   sqliteDriver?: SqliteDriverName;
+
+  /**
+   * Filter messages by type. When provided, only messages matching
+   * these types are included in session results.
+   *
+   * Valid types: 'user', 'assistant', 'tool', 'thinking', 'error'
+   *
+   * @example
+   * // Show only user messages
+   * { messageFilter: ['user'] }
+   *
+   * @example
+   * // Show user messages and tool calls
+   * { messageFilter: ['user', 'tool'] }
+   */
+  messageFilter?: import('../core/types.js').MessageType[];
 }
 
 /**

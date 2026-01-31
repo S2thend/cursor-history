@@ -257,6 +257,7 @@ interface LibraryConfig {
   offset?: number;         // Pagination offset
   context?: number;        // Search context lines
   sqliteDriver?: 'better-sqlite3' | 'node:sqlite';  // Force specific SQLite driver
+  messageFilter?: MessageType[];  // Filter messages by type (user, assistant, tool, thinking, error)
 }
 ```
 
@@ -288,7 +289,7 @@ try {
 | Command | Description |
 |---------|-------------|
 | `list` | List sessions (--all, --ids, --workspaces, -n) |
-| `show <index>` | Show session details (-s/--short, -t/--think, -f/--fullread, -e/--error) |
+| `show <index>` | Show session details (-s/--short, -t/--think, -f/--fullread, -e/--error, -o/--only) |
 | `search <query>` | Search across sessions (-n, --context) |
 | `export [index]` | Export to md/json (--all, -o, -f, --force) |
 | `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f, --debug) |
@@ -300,6 +301,7 @@ try {
 - `-t, --think` - Show full AI thinking/reasoning text (default: 200 char preview)
 - `-f, --fullread` - Show full file read content (default: 100 char preview)
 - `-e, --error` - Show full error messages (default: 300 char preview)
+- `-o, --only <types>` - Filter by message types (comma-separated: user,assistant,tool,thinking,error)
 
 ### Migration Command Options
 
@@ -358,8 +360,20 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - SQLite databases (state.vscdb files) + zip archives for backups
 - TypeScript 5.9+ (strict mode enabled) + jszip (replacing adm-zip), commander, picocolors, better-sqlite3/node:sqlite (007-replace-adm-zip)
 - SQLite databases (state.vscdb), zip archives for backup (007-replace-adm-zip)
+- TypeScript 5.9+ (strict mode enabled) + commander (CLI), picocolors (formatting), better-sqlite3/node:sqlite (database) (008-message-type-filter)
+- SQLite databases (state.vscdb files) - read-only for this feature (008-message-type-filter)
 
 ## Recent Changes
+- 008-message-type-filter: Added message type filtering feature
+  - `--only <types>` option for `show` command to filter by message type
+  - Five filter types: `user`, `assistant`, `tool`, `thinking`, `error`
+  - `MessageType` type and `MESSAGE_TYPES` constant in `src/core/types.ts`
+  - Filter functions in `src/cli/formatters/table.ts`: `getMessageType()`, `filterMessages()`, `validateMessageTypes()`
+  - Library API: `LibraryConfig.messageFilter` option for `getSession()`
+  - `InvalidFilterError` for invalid filter type validation
+  - JSON output includes `filter`, `filteredMessageCount`, and `type` fields when filtering
+  - Informative message when filter results in zero matching messages
+
 - 006-pluggable-sqlite-driver: Added pluggable SQLite driver system
   - `src/core/database/` - New database abstraction module
   - Supports `better-sqlite3` (existing) and `node:sqlite` (Node.js 22.5+ built-in)

@@ -7,6 +7,22 @@ export type Platform = 'windows' | 'macos' | 'linux';
 export type MessageRole = 'user' | 'assistant';
 
 /**
+ * Valid message type filter values for filtering displayed messages
+ */
+export type MessageType = 'user' | 'assistant' | 'tool' | 'thinking' | 'error';
+
+/**
+ * Array of all valid message types (for validation)
+ */
+export const MESSAGE_TYPES: readonly MessageType[] = [
+  'user',
+  'assistant',
+  'tool',
+  'thinking',
+  'error',
+] as const;
+
+/**
  * Root storage location containing all workspace data
  */
 export interface CursorDataStore {

@@ -90,6 +90,40 @@ export function isInvalidConfigError(error: unknown): error is InvalidConfigErro
   return error instanceof InvalidConfigError;
 }
 
+/**
+ * Thrown when invalid message filter types are provided.
+ *
+ * Recovery: Use valid message types: 'user', 'assistant', 'tool', 'thinking', 'error'.
+ */
+export class InvalidFilterError extends Error {
+  name = 'InvalidFilterError' as const;
+
+  /** The invalid filter types provided */
+  invalidTypes: string[];
+
+  /** The valid filter types */
+  validTypes: readonly string[];
+
+  constructor(invalidTypes: string[], validTypes: readonly string[]) {
+    super(
+      `Invalid message type(s): ${invalidTypes.join(', ')}. ` +
+        `Valid types: ${validTypes.join(', ')}`
+    );
+    this.invalidTypes = invalidTypes;
+    this.validTypes = validTypes;
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, InvalidFilterError);
+    }
+  }
+}
+
+/**
+ * Type guard to check if an error is an InvalidFilterError.
+ */
+export function isInvalidFilterError(error: unknown): error is InvalidFilterError {
+  return error instanceof InvalidFilterError;
+}
+
 // ============================================================================
 // Migration Errors
 // ============================================================================
