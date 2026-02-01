@@ -153,4 +153,13 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
 }
 
 runDriverTests('better-sqlite3', async () => betterSqlite3Driver);
-runDriverTests('node:sqlite', async () => nodeSqliteDriver);
+
+// Only run node:sqlite tests if available (Node.js 22.5+)
+const nodeSqliteAvailable = await nodeSqliteDriver.isAvailable();
+if (nodeSqliteAvailable) {
+  runDriverTests('node:sqlite', async () => nodeSqliteDriver);
+} else {
+  describe.skip('node:sqlite (not available on this Node version)', () => {
+    it('skipped', () => {});
+  });
+}

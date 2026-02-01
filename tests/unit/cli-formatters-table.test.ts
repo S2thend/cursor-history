@@ -186,7 +186,7 @@ describe('formatSearchResultsTable', () => {
     const result = formatSearchResultsTable([sr], 'it');
     expect(result).toContain('#1');
     expect(result).toContain('3 match');
-    expect(result).toContain('found it here');
+    expect(result).toContain('[You] found it here');
   });
 });
 
