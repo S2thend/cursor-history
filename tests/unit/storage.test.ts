@@ -44,6 +44,8 @@ import {
   listWorkspaces,
   listGlobalSessions,
   getGlobalSession,
+  extractTimestamp,
+  fillTimestampGaps,
 } from '../../src/core/storage.js';
 
 /**
@@ -1196,5 +1198,477 @@ describe('getSession (workspace fallback)', () => {
     // When global storage doesn't have the table, it falls back to workspace
     // The result depends on whether workspace data can reconstruct the session
     expect(result).toBeDefined();
+  });
+});
+
+// =============================================================================
+// extractTimestamp
+// =============================================================================
+describe('extractTimestamp', () => {
+  it('returns Date from createdAt ISO string when present', () => {
+    const data = { createdAt: '2024-08-15T14:30:00Z' };
+    const result = extractTimestamp(data);
+    expect(result).toEqual(new Date('2024-08-15T14:30:00Z'));
+  });
+
+  it('returns Date from clientRpcSendTime when createdAt absent', () => {
+    const rpcTime = 1724765400000; // 2024-08-27T14:30:00Z
+    const data = { timingInfo: { clientRpcSendTime: rpcTime } };
+    const result = extractTimestamp(data);
+    expect(result).toEqual(new Date(rpcTime));
+  });
+
+  it('returns Date from clientSettleTime when createdAt and clientRpcSendTime absent', () => {
+    const settleTime = 1724765400000;
+    const data = { timingInfo: { clientSettleTime: settleTime } };
+    const result = extractTimestamp(data);
+    expect(result).toEqual(new Date(settleTime));
+  });
+
+  it('returns Date from clientEndTime as last timing fallback', () => {
+    const endTime = 1724765400000;
+    const data = { timingInfo: { clientEndTime: endTime } };
+    const result = extractTimestamp(data);
+    expect(result).toEqual(new Date(endTime));
+  });
+
+  it('returns null when no timestamp source exists', () => {
+    const data = {};
+    const result = extractTimestamp(data);
+    expect(result).toBeNull();
+  });
+
+  it('skips clientRpcSendTime when value is below threshold', () => {
+    const data = { timingInfo: { clientRpcSendTime: 999 } };
+    const result = extractTimestamp(data);
+    expect(result).toBeNull();
+  });
+
+  it('skips clientRpcSendTime when value is 0 or negative', () => {
+    expect(extractTimestamp({ timingInfo: { clientRpcSendTime: 0 } })).toBeNull();
+    expect(extractTimestamp({ timingInfo: { clientRpcSendTime: -1 } })).toBeNull();
+  });
+
+  it('prefers createdAt over clientRpcSendTime when both present', () => {
+    const data = {
+      createdAt: '2025-01-01T00:00:00Z',
+      timingInfo: { clientRpcSendTime: 1724765400000 },
+    };
+    const result = extractTimestamp(data);
+    expect(result).toEqual(new Date('2025-01-01T00:00:00Z'));
+  });
+
+  it('skips all invalid timingInfo values and returns null', () => {
+    const data = {
+      timingInfo: {
+        clientRpcSendTime: 500,
+        clientSettleTime: -100,
+        clientEndTime: 0,
+      },
+    };
+    const result = extractTimestamp(data);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when timingInfo exists but has no timestamp fields', () => {
+    const data = { timingInfo: { clientStartTime: 1724765400000 } };
+    const result = extractTimestamp(data);
+    // clientStartTime is not in the priority chain for timestamp extraction
+    expect(result).toBeNull();
+  });
+});
+
+// =============================================================================
+// timestamp fallback - US1 (getSession integration)
+// =============================================================================
+describe('timestamp fallback - US1', () => {
+  it('bubble with createdAt still uses createdAt (regression, FR-009)', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: 1000 }],
+    });
+
+    const bubble = JSON.stringify({
+      type: 2,
+      text: 'response',
+      createdAt: '2025-10-15T10:00:00Z',
+      bubbleId: 'b1',
+    });
+
+    setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: bubble }]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    expect(result!.messages[0]!.timestamp).toEqual(new Date('2025-10-15T10:00:00Z'));
+  });
+
+  it('bubble without createdAt but with clientRpcSendTime uses clientRpcSendTime', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const rpcTime = 1724765400000; // 2024-08-27
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: 1000 }],
+    });
+
+    const bubble = JSON.stringify({
+      type: 2,
+      text: 'old response',
+      bubbleId: 'b1',
+      timingInfo: { clientRpcSendTime: rpcTime, clientStartTime: rpcTime + 10, clientEndTime: rpcTime + 500 },
+    });
+
+    setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: bubble }]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    expect(result!.messages[0]!.timestamp).toEqual(new Date(rpcTime));
+  });
+
+  it('bubble without createdAt or clientRpcSendTime but with clientSettleTime uses clientSettleTime', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const settleTime = 1724765400000;
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: 1000 }],
+    });
+
+    const bubble = JSON.stringify({
+      type: 2,
+      text: 'old response',
+      bubbleId: 'b1',
+      timingInfo: { clientSettleTime: settleTime },
+    });
+
+    setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: bubble }]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    expect(result!.messages[0]!.timestamp).toEqual(new Date(settleTime));
+  });
+
+  it('bubble with invalid clientRpcSendTime falls through to next source', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const validEndTime = 1724765400000;
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: 1000 }],
+    });
+
+    const bubble = JSON.stringify({
+      type: 2,
+      text: 'old response',
+      bubbleId: 'b1',
+      timingInfo: { clientRpcSendTime: 999, clientEndTime: validEndTime },
+    });
+
+    setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: bubble }]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    expect(result!.messages[0]!.timestamp).toEqual(new Date(validEndTime));
+  });
+
+  it('bubble with no timestamp source uses session creation time, not current time', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const sessionCreatedAt = 1000; // Unix ms
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: sessionCreatedAt }],
+    });
+
+    const bubble = JSON.stringify({
+      type: 1,
+      text: 'user message with no timestamp',
+      bubbleId: 'b1',
+    });
+
+    setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: bubble }]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    // Should use session creation time, not current time
+    expect(result!.messages[0]!.timestamp).toEqual(new Date(sessionCreatedAt));
+  });
+
+  it('mixed-format session: each bubble uses its own best available source', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const rpcTime = 1724765400000;
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: 1000 }],
+    });
+
+    // Bubble with createdAt (new format)
+    const newBubble = JSON.stringify({
+      type: 2,
+      text: 'new format response',
+      createdAt: '2025-10-15T10:00:00Z',
+      bubbleId: 'b1',
+    });
+
+    // Bubble with timingInfo only (old format)
+    const oldBubble = JSON.stringify({
+      type: 2,
+      text: 'old format response',
+      bubbleId: 'b2',
+      timingInfo: { clientRpcSendTime: rpcTime },
+    });
+
+    // Bubble with no timestamp at all
+    const noTsBubble = JSON.stringify({
+      type: 1,
+      text: 'no timestamp user message',
+      bubbleId: 'b3',
+    });
+
+    setupGetSessionMocks(composerData, [
+      { key: 'bubbleId:c1:b1', value: newBubble },
+      { key: 'bubbleId:c1:b2', value: oldBubble },
+      { key: 'bubbleId:c1:b3', value: noTsBubble },
+    ]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    expect(result!.messages).toHaveLength(3);
+    // New format: uses createdAt
+    expect(result!.messages[0]!.timestamp).toEqual(new Date('2025-10-15T10:00:00Z'));
+    // Old format: uses clientRpcSendTime
+    expect(result!.messages[1]!.timestamp).toEqual(new Date(rpcTime));
+    // No timestamp: interpolated from previous neighbor (b2's clientRpcSendTime)
+    expect(result!.messages[2]!.timestamp).toEqual(new Date(rpcTime));
+  });
+});
+
+// =============================================================================
+// fillTimestampGaps
+// =============================================================================
+describe('fillTimestampGaps', () => {
+  const d1 = new Date('2024-01-01T10:00:00Z');
+  const d2 = new Date('2024-01-01T10:05:00Z');
+  const d3 = new Date('2024-01-01T10:10:00Z');
+  const sessionDate = new Date('2024-01-01T00:00:00Z');
+
+  it('does not change messages when all timestamps are present', () => {
+    const messages = [{ timestamp: d1 as Date | null }, { timestamp: d2 as Date | null }, { timestamp: d3 as Date | null }];
+    fillTimestampGaps(messages);
+    expect(messages[0]!.timestamp).toBe(d1);
+    expect(messages[1]!.timestamp).toBe(d2);
+    expect(messages[2]!.timestamp).toBe(d3);
+  });
+
+  it('first message null, second has timestamp: first gets second (prefer next)', () => {
+    const messages = [{ timestamp: null as Date | null }, { timestamp: d2 as Date | null }];
+    fillTimestampGaps(messages);
+    expect(messages[0]!.timestamp).toBe(d2);
+    expect(messages[1]!.timestamp).toBe(d2);
+  });
+
+  it('last message null, previous has timestamp: last gets previous', () => {
+    const messages = [{ timestamp: d1 as Date | null }, { timestamp: null as Date | null }];
+    fillTimestampGaps(messages);
+    expect(messages[0]!.timestamp).toBe(d1);
+    expect(messages[1]!.timestamp).toBe(d1);
+  });
+
+  it('middle message null, both neighbors have timestamps: gets next (prefer next)', () => {
+    const messages = [
+      { timestamp: d1 as Date | null },
+      { timestamp: null as Date | null },
+      { timestamp: d3 as Date | null },
+    ];
+    fillTimestampGaps(messages);
+    expect(messages[1]!.timestamp).toBe(d3);
+  });
+
+  it('multiple consecutive nulls: all get next available timestamp', () => {
+    const messages = [
+      { timestamp: null as Date | null },
+      { timestamp: null as Date | null },
+      { timestamp: null as Date | null },
+      { timestamp: d3 as Date | null },
+    ];
+    fillTimestampGaps(messages);
+    expect(messages[0]!.timestamp).toBe(d3);
+    expect(messages[1]!.timestamp).toBe(d3);
+    expect(messages[2]!.timestamp).toBe(d3);
+    expect(messages[3]!.timestamp).toBe(d3);
+  });
+
+  it('all messages null with sessionCreatedAt: all get session timestamp', () => {
+    const messages = [
+      { timestamp: null as Date | null },
+      { timestamp: null as Date | null },
+    ];
+    fillTimestampGaps(messages, sessionDate);
+    expect(messages[0]!.timestamp).toBe(sessionDate);
+    expect(messages[1]!.timestamp).toBe(sessionDate);
+  });
+
+  it('all messages null without sessionCreatedAt: all get current time (last resort)', () => {
+    const before = Date.now();
+    const messages = [
+      { timestamp: null as Date | null },
+      { timestamp: null as Date | null },
+    ];
+    fillTimestampGaps(messages);
+    const after = Date.now();
+    for (const msg of messages) {
+      expect(msg.timestamp).toBeInstanceOf(Date);
+      expect((msg.timestamp as Date).getTime()).toBeGreaterThanOrEqual(before);
+      expect((msg.timestamp as Date).getTime()).toBeLessThanOrEqual(after);
+    }
+  });
+
+  it('single message with null timestamp: gets session fallback', () => {
+    const messages = [{ timestamp: null as Date | null }];
+    fillTimestampGaps(messages, sessionDate);
+    expect(messages[0]!.timestamp).toBe(sessionDate);
+  });
+
+  it('trailing nulls after a resolved message: get previous timestamp', () => {
+    const messages = [
+      { timestamp: d1 as Date | null },
+      { timestamp: null as Date | null },
+      { timestamp: null as Date | null },
+    ];
+    fillTimestampGaps(messages);
+    expect(messages[1]!.timestamp).toBe(d1);
+    expect(messages[2]!.timestamp).toBe(d1);
+  });
+});
+
+// =============================================================================
+// timestamp fallback - US3 session-level
+// =============================================================================
+describe('timestamp fallback - US3 session-level', () => {
+  it('all bubbles lack any timestamp source, sessionCreatedAt provided: all get sessionCreatedAt', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const sessionCreatedAt = 1700000000000; // 2023-11-14
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: sessionCreatedAt }],
+    });
+
+    const b1 = JSON.stringify({ type: 1, text: 'user msg', bubbleId: 'b1' });
+    const b2 = JSON.stringify({ type: 2, text: 'assistant msg', bubbleId: 'b2' });
+    const b3 = JSON.stringify({ type: 1, text: 'another user msg', bubbleId: 'b3' });
+
+    setupGetSessionMocks(composerData, [
+      { key: 'bubbleId:c1:b1', value: b1 },
+      { key: 'bubbleId:c1:b2', value: b2 },
+      { key: 'bubbleId:c1:b3', value: b3 },
+    ]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    expect(result!.messages).toHaveLength(3);
+    // All should get sessionCreatedAt since no bubble has any timestamp
+    for (const msg of result!.messages) {
+      expect(msg.timestamp).toEqual(new Date(sessionCreatedAt));
+    }
+  });
+
+  it('all bubbles lack any timestamp source, sessionCreatedAt not available: uses current time', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    // Session with no createdAt (will default to new Date() in listSessions)
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test' }],
+    });
+
+    const b1 = JSON.stringify({ type: 1, text: 'user msg', bubbleId: 'b1' });
+
+    setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: b1 }]);
+
+    const before = Date.now();
+    const result = await getSession(1, '/data');
+    const after = Date.now();
+    expect(result).not.toBeNull();
+    // Timestamp should be approximately now (either from session fallback or last resort)
+    const ts = result!.messages[0]!.timestamp.getTime();
+    expect(ts).toBeGreaterThanOrEqual(before - 1000);
+    expect(ts).toBeLessThanOrEqual(after + 1000);
+  });
+
+  it('full chain integration: createdAt + timingInfo + no-timestamp + interpolation', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const rpcTime = 1724765400000; // 2024-08-27
+    const sessionCreatedAt = 1700000000000; // 2023-11-14
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: sessionCreatedAt }],
+    });
+
+    // b1: user msg, no timestamp → should interpolate from next (b2)
+    const b1 = JSON.stringify({ type: 1, text: 'user question', bubbleId: 'b1' });
+    // b2: assistant, has timingInfo.clientRpcSendTime → should use rpcTime
+    const b2 = JSON.stringify({
+      type: 2, text: 'assistant answer', bubbleId: 'b2',
+      timingInfo: { clientRpcSendTime: rpcTime, clientStartTime: rpcTime + 10, clientEndTime: rpcTime + 500 },
+    });
+    // b3: user msg, no timestamp → should interpolate from prev (b2) since no next
+    const b3 = JSON.stringify({ type: 1, text: 'follow up', bubbleId: 'b3' });
+    // b4: assistant, has createdAt → should use createdAt
+    const b4 = JSON.stringify({
+      type: 2, text: 'new format response', bubbleId: 'b4',
+      createdAt: '2025-10-15T12:00:00Z',
+    });
+
+    setupGetSessionMocks(composerData, [
+      { key: 'bubbleId:c1:b1', value: b1 },
+      { key: 'bubbleId:c1:b2', value: b2 },
+      { key: 'bubbleId:c1:b3', value: b3 },
+      { key: 'bubbleId:c1:b4', value: b4 },
+    ]);
+
+    const result = await getSession(1, '/data');
+    expect(result).not.toBeNull();
+    expect(result!.messages).toHaveLength(4);
+
+    // b1: no timestamp → interpolated from next (b2's rpcTime)
+    expect(result!.messages[0]!.timestamp).toEqual(new Date(rpcTime));
+    // b2: timingInfo.clientRpcSendTime
+    expect(result!.messages[1]!.timestamp).toEqual(new Date(rpcTime));
+    // b3: no timestamp → interpolated from next (b4's createdAt)
+    expect(result!.messages[2]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));
+    // b4: createdAt
+    expect(result!.messages[3]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));
   });
 });
