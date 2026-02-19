@@ -97,7 +97,12 @@ describe('parseChatData', () => {
   it('parses composer format with allComposers', () => {
     const data = {
       allComposers: [
-        { composerId: 'c1', name: 'My Chat', createdAt: 1705300000000, lastUpdatedAt: 1705303600000 },
+        {
+          composerId: 'c1',
+          name: 'My Chat',
+          createdAt: 1705300000000,
+          lastUpdatedAt: 1705303600000,
+        },
       ],
     };
     const result = parseChatData(JSON.stringify(data));
@@ -127,9 +132,7 @@ describe('parseChatData', () => {
 
   it('matches generations to composer by time range', () => {
     const data = {
-      allComposers: [
-        { composerId: 'c4', createdAt: 1000000, lastUpdatedAt: 2000000 },
-      ],
+      allComposers: [{ composerId: 'c4', createdAt: 1000000, lastUpdatedAt: 2000000 }],
     };
     const bundle = {
       generations: JSON.stringify([
@@ -175,9 +178,7 @@ describe('parseChatData', () => {
 
   it('uses bubbles as alternative to messages key', () => {
     const data = {
-      chatSessions: [
-        { id: 's4', bubbles: [{ role: 'user', content: 'via bubbles' }] },
-      ],
+      chatSessions: [{ id: 's4', bubbles: [{ role: 'user', content: 'via bubbles' }] }],
     };
     const result = parseChatData(JSON.stringify(data));
     expect(result).toHaveLength(1);
@@ -186,9 +187,7 @@ describe('parseChatData', () => {
 
   it('derives title from first user message when not set', () => {
     const data = {
-      chatSessions: [
-        { id: 's5', messages: [{ role: 'user', content: 'Short question' }] },
-      ],
+      chatSessions: [{ id: 's5', messages: [{ role: 'user', content: 'Short question' }] }],
     };
     const result = parseChatData(JSON.stringify(data));
     expect(result[0]!.title).toBe('Short question');
@@ -197,9 +196,7 @@ describe('parseChatData', () => {
   it('truncates derived title at 50 chars', () => {
     const longMsg = 'A'.repeat(60);
     const data = {
-      chatSessions: [
-        { id: 's6', messages: [{ role: 'user', content: longMsg }] },
-      ],
+      chatSessions: [{ id: 's6', messages: [{ role: 'user', content: longMsg }] }],
     };
     const result = parseChatData(JSON.stringify(data));
     expect(result[0]!.title).toBe('A'.repeat(47) + '...');
@@ -207,9 +204,7 @@ describe('parseChatData', () => {
 
   it('uses text field as alternative to content', () => {
     const data = {
-      chatSessions: [
-        { id: 's7', messages: [{ role: 'user', text: 'via text field' }] },
-      ],
+      chatSessions: [{ id: 's7', messages: [{ role: 'user', text: 'via text field' }] }],
     };
     const result = parseChatData(JSON.stringify(data));
     expect(result[0]!.messages[0]!.content).toBe('via text field');

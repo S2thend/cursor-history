@@ -449,13 +449,15 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
         name: 'read_file',
         params: JSON.stringify({ targetFile: '/source/project/src/main.ts' }),
       },
-      codeBlocks: [{
-        uri: {
-          path: '/source/project/src/main.ts',
-          _fsPath: '/source/project/src/main.ts',
-          _formatted: 'file:///source/project/src/main.ts',
+      codeBlocks: [
+        {
+          uri: {
+            path: '/source/project/src/main.ts',
+            _fsPath: '/source/project/src/main.ts',
+            _formatted: 'file:///source/project/src/main.ts',
+          },
         },
-      }],
+      ],
     });
 
     const mockRun = vi.fn();
@@ -464,16 +466,20 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
       return {
         prepare: vi.fn((sql: string) => ({
           get: vi.fn((...args: unknown[]) => {
-            if (sql.includes('SELECT value FROM cursorDiskKV') && String(args[0]).startsWith('composerData:')) {
+            if (
+              sql.includes('SELECT value FROM cursorDiskKV') &&
+              String(args[0]).startsWith('composerData:')
+            ) {
               return { value: composerDataValue };
             }
             return undefined;
           }),
           all: vi.fn((...args: unknown[]) => {
-            if (sql.includes('SELECT key, value FROM cursorDiskKV') && String(args[0]).includes('bubbleId:')) {
-              return [
-                { key: 'bubbleId:sid:b1', value: bubbleWithPaths },
-              ];
+            if (
+              sql.includes('SELECT key, value FROM cursorDiskKV') &&
+              String(args[0]).includes('bubbleId:')
+            ) {
+              return [{ key: 'bubbleId:sid:b1', value: bubbleWithPaths }];
             }
             return [];
           }),
@@ -551,9 +557,7 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
     // Bubble has paths OUTSIDE the source workspace - should NOT be transformed
     const composerDataValue = JSON.stringify({
       composerId: 'sid',
-      fullConversationHeadersOnly: [
-        { bubbleId: 'b1', type: 2 },
-      ],
+      fullConversationHeadersOnly: [{ bubbleId: 'b1', type: 2 }],
     });
 
     const bubbleWithExternalPaths = JSON.stringify({
@@ -563,13 +567,15 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
         name: 'read_file',
         params: JSON.stringify({ targetFile: '/other/project/src/lib.ts' }),
       },
-      codeBlocks: [{
-        uri: {
-          path: '/other/project/src/lib.ts',
-          _fsPath: '/other/project/src/lib.ts',
-          _formatted: 'file:///other/project/src/lib.ts',
+      codeBlocks: [
+        {
+          uri: {
+            path: '/other/project/src/lib.ts',
+            _fsPath: '/other/project/src/lib.ts',
+            _formatted: 'file:///other/project/src/lib.ts',
+          },
         },
-      }],
+      ],
     });
 
     const mockRun = vi.fn();
@@ -578,16 +584,20 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
       return {
         prepare: vi.fn((sql: string) => ({
           get: vi.fn((...args: unknown[]) => {
-            if (sql.includes('SELECT value FROM cursorDiskKV') && String(args[0]).startsWith('composerData:')) {
+            if (
+              sql.includes('SELECT value FROM cursorDiskKV') &&
+              String(args[0]).startsWith('composerData:')
+            ) {
               return { value: composerDataValue };
             }
             return undefined;
           }),
           all: vi.fn((...args: unknown[]) => {
-            if (sql.includes('SELECT key, value FROM cursorDiskKV') && String(args[0]).includes('bubbleId:')) {
-              return [
-                { key: 'bubbleId:sid:b1', value: bubbleWithExternalPaths },
-              ];
+            if (
+              sql.includes('SELECT key, value FROM cursorDiskKV') &&
+              String(args[0]).includes('bubbleId:')
+            ) {
+              return [{ key: 'bubbleId:sid:b1', value: bubbleWithExternalPaths }];
             }
             return [];
           }),
@@ -662,13 +672,15 @@ describe('migrateSession - global storage path transformation (move mode)', () =
         name: 'read_file',
         params: JSON.stringify({ targetFile: '/source/project/src/app.ts' }),
       },
-      codeBlocks: [{
-        uri: {
-          path: '/source/project/src/app.ts',
-          _fsPath: '/source/project/src/app.ts',
-          _formatted: 'file:///source/project/src/app.ts',
+      codeBlocks: [
+        {
+          uri: {
+            path: '/source/project/src/app.ts',
+            _fsPath: '/source/project/src/app.ts',
+            _formatted: 'file:///source/project/src/app.ts',
+          },
         },
-      }],
+      ],
     });
 
     const mockRun = vi.fn();
@@ -679,9 +691,7 @@ describe('migrateSession - global storage path transformation (move mode)', () =
           get: vi.fn(),
           all: vi.fn((..._args: unknown[]) => {
             if (sql.includes('SELECT key, value FROM cursorDiskKV')) {
-              return [
-                { key: 'bubbleId:sid:b1', value: bubbleWithPaths },
-              ];
+              return [{ key: 'bubbleId:sid:b1', value: bubbleWithPaths }];
             }
             return [];
           }),

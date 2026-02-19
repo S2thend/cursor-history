@@ -364,8 +364,18 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - SQLite databases (state.vscdb files) - read-only for this feature (008-message-type-filter)
 - TypeScript 5.0+ (strict mode enabled) + better-sqlite3 or node:sqlite (existing), picocolors (existing CLI formatting) (009-token-usage)
 - SQLite (read-only access to existing `state.vscdb` files) (009-token-usage)
+- TypeScript 5.9+ (strict mode enabled) + commander, picocolors, better-sqlite3 / node:sqlite (existing) (010-fix-timestamp-fallback)
+- SQLite databases (`state.vscdb` files) - read-only access (010-fix-timestamp-fallback)
 
 ## Recent Changes
+- 010-fix-timestamp-fallback: Fixed incorrect timestamps on pre-2025-09 sessions (Issue #13)
+  - Extended `RawBubbleData.timingInfo` with `clientRpcSendTime` and `clientSettleTime` fields
+  - New `extractTimestamp()` function in `src/core/storage.ts`: priority chain `createdAt` > `clientRpcSendTime` > `clientSettleTime` > `clientEndTime` > `null`
+  - New `fillTimestampGaps()` function in `src/core/storage.ts`: two-pass timestamp resolution (direct extraction + neighbor interpolation + session fallback)
+  - Validates Unix ms timestamps with `> 1_000_000_000_000` threshold
+  - Updated `getSession()` and `getGlobalSession()` bubble mapping to use new functions
+  - No public API changes; `Message.timestamp` type remains `Date`
+
 - 009-token-usage: Added token usage extraction and display
   - Extracts token counts from multiple sources with fallbacks: `tokenCount` (camelCase), `usage` (snake_case), `contextWindowStatusAtCreation`, `promptDryRunInfo`
   - Per-message display: badge appended after content `[model input→output duration]`

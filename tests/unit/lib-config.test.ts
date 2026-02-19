@@ -16,7 +16,7 @@ describe('validateConfig', () => {
         workspace: '/absolute/path',
         dataPath: '/some/path',
         sqliteDriver: 'better-sqlite3',
-      }),
+      })
     ).not.toThrow();
   });
 
@@ -53,16 +53,20 @@ describe('validateConfig', () => {
   });
 
   it('rejects workspace: non-string', () => {
-    expect(() => validateConfig({ workspace: 123 as unknown as string })).toThrow(InvalidConfigError);
+    expect(() => validateConfig({ workspace: 123 as unknown as string })).toThrow(
+      InvalidConfigError
+    );
   });
 
   it('rejects dataPath: non-string', () => {
-    expect(() => validateConfig({ dataPath: 123 as unknown as string })).toThrow(InvalidConfigError);
+    expect(() => validateConfig({ dataPath: 123 as unknown as string })).toThrow(
+      InvalidConfigError
+    );
   });
 
   it('rejects invalid sqliteDriver', () => {
     expect(() =>
-      validateConfig({ sqliteDriver: 'invalid' as unknown as 'better-sqlite3' }),
+      validateConfig({ sqliteDriver: 'invalid' as unknown as 'better-sqlite3' })
     ).toThrow(InvalidConfigError);
   });
 });

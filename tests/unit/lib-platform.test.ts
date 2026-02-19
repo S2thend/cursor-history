@@ -18,8 +18,8 @@ describe('detectPlatform', () => {
   it('returns correct platform for current environment', () => {
     const platform = detectPlatform();
     // Platform should match the actual OS
-    const expected = process.platform === 'darwin' ? 'macos' :
-                     process.platform === 'win32' ? 'windows' : 'linux';
+    const expected =
+      process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
     expect(platform).toBe(expected);
   });
 });

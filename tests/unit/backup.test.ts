@@ -151,7 +151,9 @@ describe('scanDatabaseFiles', () => {
       return !path.includes('globalStorage') && path.includes('workspaceStorage');
     });
     vi.mocked(readdirSync).mockReturnValue([
-      { name: 'file.txt', isDirectory: () => false } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'file.txt', isDirectory: () => false } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
     ]);
 
     const result = scanDatabaseFiles('/data/workspaceStorage');
@@ -164,15 +166,17 @@ describe('scanDatabaseFiles', () => {
 // =============================================================================
 describe('createManifest', () => {
   it('creates manifest with correct fields', () => {
-    const files = [{ path: 'test.db', size: 100, checksum: 'sha256:abc', type: 'global-db' as const }];
+    const files = [
+      { path: 'test.db', size: 100, checksum: 'sha256:abc', type: 'global-db' as const },
+    ];
     const stats = { totalSize: 100, sessionCount: 5, workspaceCount: 2 };
     const manifest = createManifest(files, stats);
 
     expect(manifest.version).toBe('1.0.0');
     expect(manifest.createdAt).toBeDefined();
     // Platform should match the actual OS
-    const expectedPlatform = process.platform === 'darwin' ? 'darwin' :
-                             process.platform === 'win32' ? 'win32' : 'linux';
+    const expectedPlatform =
+      process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux';
     expect(manifest.sourcePlatform).toBe(expectedPlatform);
     expect(manifest.files).toEqual(files);
     expect(manifest.stats).toEqual(stats);
@@ -382,7 +386,9 @@ describe('createBackup', () => {
     });
     vi.mocked(readdirSync).mockImplementation((_p, _opts) => {
       return [
-        { name: 'ws1', isDirectory: () => true, isFile: () => false } as unknown as ReturnType<typeof readdirSync>[0],
+        { name: 'ws1', isDirectory: () => true, isFile: () => false } as unknown as ReturnType<
+          typeof readdirSync
+        >[0],
       ];
     });
     vi.mocked(statSync).mockReturnValue({ size: 1024 } as ReturnType<typeof statSync>);
@@ -415,7 +421,14 @@ describe('restoreBackup', () => {
     const checksum = computeChecksum(fileContent);
     const manifest = {
       version: '1.0.0',
-      files: [{ path: 'globalStorage/state.vscdb', size: fileContent.length, checksum, type: 'global-db' }],
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: fileContent.length,
+          checksum,
+          type: 'global-db',
+        },
+      ],
     };
 
     vi.mocked(existsSync).mockReturnValue(true); // both backup and target exist

@@ -93,7 +93,8 @@ vi.mock('../../src/core/migrate.js', () => ({
 
 // Mock lib/errors type guards
 vi.mock('../../src/lib/errors.js', async () => {
-  const actual = await vi.importActual<typeof import('../../src/lib/errors.js')>('../../src/lib/errors.js');
+  const actual =
+    await vi.importActual<typeof import('../../src/lib/errors.js')>('../../src/lib/errors.js');
   return actual;
 });
 
@@ -296,9 +297,9 @@ describe('list command', () => {
     const program = createProgram();
     registerListCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'list', '--workspaces'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'list', '--workspaces'])).rejects.toThrow(
+      'process.exit'
+    );
 
     expect(mockFormatCursorNotFound).toHaveBeenCalledWith('/mock/cursor/data');
     expect(exitSpy).toHaveBeenCalledWith(3);
@@ -344,7 +345,12 @@ describe('show command', () => {
     expect(mockFormatSessionDetail).toHaveBeenCalledWith(
       session,
       '/ws',
-      expect.objectContaining({ short: false, fullThinking: false, fullTool: false, fullError: false })
+      expect.objectContaining({
+        short: false,
+        fullThinking: false,
+        fullTool: false,
+        fullError: false,
+      })
     );
     expect(consoleSpy).toHaveBeenCalledWith('session detail');
   });
@@ -407,9 +413,7 @@ describe('show command', () => {
     const program = createProgram();
     registerShowCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'show', '0'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'show', '0'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalled();
@@ -419,9 +423,9 @@ describe('show command', () => {
     const program = createProgram();
     registerShowCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'show', 'abc'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'show', 'abc'])).rejects.toThrow(
+      'process.exit'
+    );
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -433,9 +437,9 @@ describe('show command', () => {
     const program = createProgram();
     registerShowCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'show', '99'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'show', '99'])).rejects.toThrow(
+      'process.exit'
+    );
 
     // handleError is called which does console.error + process.exit
     expect(consoleErrorSpy).toHaveBeenCalled();
@@ -533,9 +537,9 @@ describe('search command', () => {
     const program = createProgram();
     registerSearchCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'search', 'nonexistent'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'search', 'nonexistent'])).rejects.toThrow(
+      'process.exit'
+    );
 
     // handleError prints the NoSearchResultsError message
     expect(consoleErrorSpy).toHaveBeenCalled();
@@ -633,9 +637,7 @@ describe('export command', () => {
     const program = createProgram();
     registerExportCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'export'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'export'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -644,9 +646,9 @@ describe('export command', () => {
     const program = createProgram();
     registerExportCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'export', '0'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'export', '0'])).rejects.toThrow(
+      'process.exit'
+    );
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -658,9 +660,9 @@ describe('export command', () => {
     const program = createProgram();
     registerExportCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'export', '99'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'export', '99'])).rejects.toThrow(
+      'process.exit'
+    );
 
     expect(exitSpy).toHaveBeenCalledWith(3);
   });
@@ -708,11 +710,7 @@ describe('export command', () => {
     // Use --force to avoid FileExistsError on generated filenames
     await program.parseAsync(['node', 'test', 'export', '--all', '--force', '-o', '/tmp/exports']);
 
-    expect(mockListSessions).toHaveBeenCalledWith(
-      { limit: 0, all: true },
-      undefined,
-      undefined
-    );
+    expect(mockListSessions).toHaveBeenCalledWith({ limit: 0, all: true }, undefined, undefined);
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledTimes(2);
   });
 
@@ -722,9 +720,9 @@ describe('export command', () => {
     const program = createProgram();
     registerExportCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'export', '--all'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'export', '--all'])).rejects.toThrow(
+      'process.exit'
+    );
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -805,9 +803,9 @@ describe('list-backups command', () => {
     const program = createProgram();
     registerListBackupsCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'list-backups'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'list-backups'])).rejects.toThrow(
+      'process.exit'
+    );
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -818,9 +816,9 @@ describe('list-backups command', () => {
     const program = createProgram();
     registerListBackupsCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', '--json', 'list-backups'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', '--json', 'list-backups'])).rejects.toThrow(
+      'process.exit'
+    );
 
     const output = consoleSpy.mock.calls[0]![0] as string;
     const parsed = JSON.parse(output);
@@ -904,13 +902,15 @@ describe('migrate command', () => {
     registerMigrateCommand(program);
     await program.parseAsync(['node', 'test', 'migrate', '/source', '/dest']);
 
-    expect(mockMigrateWorkspace).toHaveBeenCalledWith(expect.objectContaining({
-      source: '/source',
-      destination: '/dest',
-      mode: 'move',
-      dryRun: false,
-      force: false,
-    }));
+    expect(mockMigrateWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: '/source',
+        destination: '/dest',
+        mode: 'move',
+        dryRun: false,
+        force: false,
+      })
+    );
     expect(consoleSpy).toHaveBeenCalled();
   });
 
@@ -931,9 +931,11 @@ describe('migrate command', () => {
     registerMigrateCommand(program);
     await program.parseAsync(['node', 'test', 'migrate', '/source', '/dest', '--copy']);
 
-    expect(mockMigrateWorkspace).toHaveBeenCalledWith(expect.objectContaining({
-      mode: 'copy',
-    }));
+    expect(mockMigrateWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'copy',
+      })
+    );
   });
 
   it('migrates with --dry-run flag', async () => {
@@ -953,9 +955,11 @@ describe('migrate command', () => {
     registerMigrateCommand(program);
     await program.parseAsync(['node', 'test', 'migrate', '/source', '/dest', '--dry-run']);
 
-    expect(mockMigrateWorkspace).toHaveBeenCalledWith(expect.objectContaining({
-      dryRun: true,
-    }));
+    expect(mockMigrateWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dryRun: true,
+      })
+    );
     // Should show dry run indicator
     const allOutput = consoleSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('\n');
     expect(allOutput).toContain('Dry run');
@@ -994,8 +998,23 @@ describe('migrate command', () => {
       successCount: 1,
       failureCount: 1,
       results: [
-        { success: true, sessionId: 's1', sourceWorkspace: '/source', destinationWorkspace: '/dest', mode: 'move', dryRun: false },
-        { success: false, sessionId: 's2-long-id-here', sourceWorkspace: '/source', destinationWorkspace: '/dest', mode: 'move', error: 'DB error', dryRun: false },
+        {
+          success: true,
+          sessionId: 's1',
+          sourceWorkspace: '/source',
+          destinationWorkspace: '/dest',
+          mode: 'move',
+          dryRun: false,
+        },
+        {
+          success: false,
+          sessionId: 's2-long-id-here',
+          sourceWorkspace: '/source',
+          destinationWorkspace: '/dest',
+          mode: 'move',
+          error: 'DB error',
+          dryRun: false,
+        },
       ],
       dryRun: false,
     });
@@ -1056,9 +1075,11 @@ describe('migrate command', () => {
     registerMigrateCommand(program);
     await program.parseAsync(['node', 'test', 'migrate', '/source', '/dest', '--force']);
 
-    expect(mockMigrateWorkspace).toHaveBeenCalledWith(expect.objectContaining({
-      force: true,
-    }));
+    expect(mockMigrateWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        force: true,
+      })
+    );
   });
 });
 
@@ -1086,9 +1107,11 @@ describe('backup command', () => {
     registerBackupCommand(program);
     await program.parseAsync(['node', 'test', 'backup']);
 
-    expect(mockCreateBackup).toHaveBeenCalledWith(expect.objectContaining({
-      force: false,
-    }));
+    expect(mockCreateBackup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        force: false,
+      })
+    );
     expect(consoleSpy).toHaveBeenCalled();
   });
 
@@ -1107,9 +1130,11 @@ describe('backup command', () => {
     registerBackupCommand(program);
     await program.parseAsync(['node', 'test', 'backup', '-o', '/custom/backup.zip']);
 
-    expect(mockCreateBackup).toHaveBeenCalledWith(expect.objectContaining({
-      outputPath: '/custom/backup.zip',
-    }));
+    expect(mockCreateBackup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outputPath: '/custom/backup.zip',
+      })
+    );
   });
 
   it('creates backup with --force option', async () => {
@@ -1127,9 +1152,11 @@ describe('backup command', () => {
     registerBackupCommand(program);
     await program.parseAsync(['node', 'test', 'backup', '--force']);
 
-    expect(mockCreateBackup).toHaveBeenCalledWith(expect.objectContaining({
-      force: true,
-    }));
+    expect(mockCreateBackup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        force: true,
+      })
+    );
   });
 
   it('outputs JSON with --json flag', async () => {
@@ -1165,9 +1192,7 @@ describe('backup command', () => {
     const program = createProgram();
     registerBackupCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'backup'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -1184,9 +1209,7 @@ describe('backup command', () => {
     const program = createProgram();
     registerBackupCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'backup'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -1203,9 +1226,7 @@ describe('backup command', () => {
     const program = createProgram();
     registerBackupCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'backup'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -1222,9 +1243,7 @@ describe('backup command', () => {
     const program = createProgram();
     registerBackupCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'backup'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
@@ -1235,9 +1254,7 @@ describe('backup command', () => {
     const program = createProgram();
     registerBackupCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'test', 'backup'])
-    ).rejects.toThrow('process.exit');
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });

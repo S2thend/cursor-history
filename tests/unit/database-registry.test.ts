@@ -92,11 +92,15 @@ describe('setDriver', () => {
 
   it('throws for unavailable driver', async () => {
     registry.register(mockDriver('test', false));
-    await expect(registry.setDriver('test' as 'better-sqlite3')).rejects.toThrow(DriverNotAvailableError);
+    await expect(registry.setDriver('test' as 'better-sqlite3')).rejects.toThrow(
+      DriverNotAvailableError
+    );
   });
 
   it('throws for unregistered driver', async () => {
-    await expect(registry.setDriver('unknown' as 'better-sqlite3')).rejects.toThrow(DriverNotAvailableError);
+    await expect(registry.setDriver('unknown' as 'better-sqlite3')).rejects.toThrow(
+      DriverNotAvailableError
+    );
   });
 });
 

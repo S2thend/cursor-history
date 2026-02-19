@@ -6,7 +6,7 @@ import type { ChatSession, ChatSessionSummary, Message } from '../../src/core/ty
 export function sampleMessage(
   role: 'user' | 'assistant' = 'user',
   content = 'Hello world',
-  overrides: Partial<Message> = {},
+  overrides: Partial<Message> = {}
 ): Message {
   return {
     id: 'msg-1',
@@ -26,10 +26,7 @@ export function sampleSession(overrides: Partial<ChatSession> = {}): ChatSession
     createdAt: new Date('2024-01-15T10:00:00Z'),
     lastUpdatedAt: new Date('2024-01-15T11:00:00Z'),
     messageCount: 2,
-    messages: [
-      sampleMessage('user', 'Hello'),
-      sampleMessage('assistant', 'Hi there!'),
-    ],
+    messages: [sampleMessage('user', 'Hello'), sampleMessage('assistant', 'Hi there!')],
     workspaceId: 'workspace-1',
     ...overrides,
   };

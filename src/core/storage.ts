@@ -496,7 +496,7 @@ export async function getSession(
                   id: data.bubbleId ?? row.key.split(':').pop() ?? null,
                   role: role as 'user' | 'assistant',
                   content: text,
-                  timestamp: data.createdAt ? new Date(data.createdAt) : new Date(),
+                  timestamp: extractTimestamp(data),
                   codeBlocks: [],
                   tokenUsage,
                   model,
@@ -506,15 +506,25 @@ export async function getSession(
                 return null;
               }
             })
-            .filter((m): m is NonNullable<typeof m> => m !== null && m.content.length > 0);
+            .filter(
+              (m): m is NonNullable<typeof m> & { timestamp: Date | null } =>
+                m !== null && m.content.length > 0
+            );
 
-          if (messages.length > 0) {
+          // Resolve null timestamps via neighbor interpolation + session fallback
+          fillTimestampGaps(messages, summary.createdAt);
+          // After fillTimestampGaps, all timestamps are guaranteed non-null
+          const resolvedMessages = messages as Array<
+            (typeof messages)[number] & { timestamp: Date }
+          >;
+
+          if (resolvedMessages.length > 0) {
             // Extract session-level usage from composer data
             let sessionUsage: SessionUsage | undefined;
             if (composerDataRow?.value) {
               try {
                 const composerData = JSON.parse(composerDataRow.value) as RawComposerData;
-                sessionUsage = extractSessionUsage(composerData, messages);
+                sessionUsage = extractSessionUsage(composerData, resolvedMessages);
               } catch {
                 // Ignore parse errors
               }
@@ -526,8 +536,8 @@ export async function getSession(
               title: summary.title,
               createdAt: summary.createdAt,
               lastUpdatedAt: summary.lastUpdatedAt,
-              messageCount: messages.length,
-              messages,
+              messageCount: resolvedMessages.length,
+              messages: resolvedMessages,
               workspaceId: summary.workspaceId,
               workspacePath: summary.workspacePath,
               usage: sessionUsage,
@@ -776,7 +786,7 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
             id: data.bubbleId ?? row.key.split(':').pop() ?? null,
             role: role as 'user' | 'assistant',
             content: text,
-            timestamp: data.createdAt ? new Date(data.createdAt) : new Date(),
+            timestamp: extractTimestamp(data),
             codeBlocks: [],
             tokenUsage,
             model,
@@ -786,7 +796,15 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
           return null;
         }
       })
-      .filter((m): m is NonNullable<typeof m> => m !== null && m.content.length > 0);
+      .filter(
+        (m): m is NonNullable<typeof m> & { timestamp: Date | null } =>
+          m !== null && m.content.length > 0
+      );
+
+    // Resolve null timestamps via neighbor interpolation + session fallback
+    fillTimestampGaps(messages, summary.createdAt);
+    // After fillTimestampGaps, all timestamps are guaranteed non-null
+    const resolvedMessages = messages as Array<(typeof messages)[number] & { timestamp: Date }>;
 
     // Try to get composer data for session-level usage
     let sessionUsage: SessionUsage | undefined;
@@ -796,7 +814,7 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
         .get(`composerData:${summary.id}`) as { value: string } | undefined;
       if (composerRow?.value) {
         const composerData = JSON.parse(composerRow.value) as RawComposerData;
-        sessionUsage = extractSessionUsage(composerData, messages);
+        sessionUsage = extractSessionUsage(composerData, resolvedMessages);
       }
     } catch {
       // Ignore composer data errors
@@ -810,8 +828,8 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
       title: summary.title,
       createdAt: summary.createdAt,
       lastUpdatedAt: summary.lastUpdatedAt,
-      messageCount: messages.length,
-      messages,
+      messageCount: resolvedMessages.length,
+      messages: resolvedMessages,
       workspaceId: 'global',
       usage: sessionUsage,
     };
@@ -1298,6 +1316,10 @@ interface RawBubbleData {
   timingInfo?: {
     clientStartTime?: number;
     clientEndTime?: number;
+    /** Unix ms - when RPC request was sent (old format, assistant only) */
+    clientRpcSendTime?: number;
+    /** Unix ms - when response settled (old format, sometimes present) */
+    clientSettleTime?: number;
   };
   contextWindowStatusAtCreation?: {
     tokensUsed?: number;
@@ -1413,6 +1435,109 @@ export function extractTimingInfo(data: RawBubbleData): number | undefined {
 
   const duration = endTime - startTime;
   return duration > 0 ? duration : undefined;
+}
+
+/** Minimum valid Unix millisecond timestamp (Sep 9, 2001) */
+const MIN_VALID_UNIX_MS = 1_000_000_000_000;
+
+/**
+ * Extract the best available timestamp from a single bubble's data.
+ *
+ * Priority chain:
+ * 1. `createdAt` (ISO string, new Cursor format >= 2025-09)
+ * 2. `timingInfo.clientRpcSendTime` (Unix ms, old format assistant only)
+ * 3. `timingInfo.clientSettleTime` (Unix ms, old format, sometimes present)
+ * 4. `timingInfo.clientEndTime` (Unix ms, old format)
+ * 5. `null` (no direct timestamp available, needs interpolation)
+ *
+ * All timingInfo values are validated against MIN_VALID_UNIX_MS (> 1e12)
+ * to distinguish milliseconds from seconds and reject invalid values.
+ *
+ * @param data - Raw bubble data object with optional createdAt
+ * @returns Date if a direct timestamp is found, null if interpolation is needed
+ */
+export function extractTimestamp(data: RawBubbleData & { createdAt?: string }): Date | null {
+  // 1. createdAt (new Cursor format, >= 2025-09)
+  if (data.createdAt) {
+    return new Date(data.createdAt);
+  }
+
+  const timingInfo = data.timingInfo;
+  if (!timingInfo) return null;
+
+  // 2. clientRpcSendTime (old format, assistant only)
+  const rpc = timingInfo.clientRpcSendTime;
+  if (typeof rpc === 'number' && rpc > MIN_VALID_UNIX_MS) {
+    return new Date(rpc);
+  }
+
+  // 3. clientSettleTime (old format, sometimes present)
+  const settle = timingInfo.clientSettleTime;
+  if (typeof settle === 'number' && settle > MIN_VALID_UNIX_MS) {
+    return new Date(settle);
+  }
+
+  // 4. clientEndTime (old format)
+  const end = timingInfo.clientEndTime;
+  if (typeof end === 'number' && end > MIN_VALID_UNIX_MS) {
+    return new Date(end);
+  }
+
+  return null;
+}
+
+/**
+ * Fill null timestamps in a message array by interpolating from neighbors.
+ *
+ * Pass 1: For each message with a null timestamp, prefer the next message's
+ * timestamp (user messages typically precede assistant responses, so the next
+ * assistant's time is the closest approximation). Falls back to the previous
+ * message's timestamp if no subsequent message has one.
+ *
+ * Pass 2: Any remaining null timestamps are set to sessionCreatedAt (if provided)
+ * or new Date() as an absolute last resort.
+ *
+ * Mutates the array in place.
+ *
+ * @param messages - Array of messages with potentially null timestamps
+ * @param sessionCreatedAt - Session creation time for final fallback
+ */
+export function fillTimestampGaps(
+  messages: Array<{ timestamp: Date | null; [key: string]: unknown }>,
+  sessionCreatedAt?: Date
+): void {
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]!.timestamp !== null) continue;
+
+    // Scan forward for the next message with a timestamp
+    let found = false;
+    for (let j = i + 1; j < messages.length; j++) {
+      if (messages[j]!.timestamp !== null) {
+        messages[i]!.timestamp = messages[j]!.timestamp;
+        found = true;
+        break;
+      }
+    }
+    if (found) continue;
+
+    // Scan backward for the previous message with a timestamp
+    for (let j = i - 1; j >= 0; j--) {
+      if (messages[j]!.timestamp !== null) {
+        messages[i]!.timestamp = messages[j]!.timestamp;
+        found = true;
+        break;
+      }
+    }
+    if (found) continue;
+  }
+
+  // Final fallback: session creation time or current time
+  const fallback = sessionCreatedAt ?? new Date();
+  for (const msg of messages) {
+    if (msg.timestamp === null) {
+      msg.timestamp = fallback;
+    }
+  }
 }
 
 /**

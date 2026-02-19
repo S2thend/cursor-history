@@ -63,7 +63,11 @@ import {
   setDriver,
   getActiveDriver,
 } from '../../src/lib/index.js';
-import { DatabaseLockedError, DatabaseNotFoundError, InvalidFilterError } from '../../src/lib/errors.js';
+import {
+  DatabaseLockedError,
+  DatabaseNotFoundError,
+  InvalidFilterError,
+} from '../../src/lib/errors.js';
 
 const now = new Date('2024-01-15T10:00:00Z');
 const later = new Date('2024-01-15T11:00:00Z');
@@ -78,9 +82,7 @@ function makeCoreSession(id = 'c1', index = 1) {
     messageCount: 1,
     workspaceId: 'ws1',
     workspacePath: '~/proj',
-    messages: [
-      { id: 'm1', role: 'user', content: 'Hello', timestamp: now, codeBlocks: [] },
-    ],
+    messages: [{ id: 'm1', role: 'user', content: 'Hello', timestamp: now, codeBlocks: [] }],
   };
 }
 
@@ -179,9 +181,9 @@ describe('getSession', () => {
   });
 
   it('throws InvalidFilterError for invalid message filter', async () => {
-    await expect(
-      getSession(0, { messageFilter: ['invalid' as 'user'] })
-    ).rejects.toThrow(InvalidFilterError);
+    await expect(getSession(0, { messageFilter: ['invalid' as 'user'] })).rejects.toThrow(
+      InvalidFilterError
+    );
   });
 
   it('applies valid messageFilter', async () => {
