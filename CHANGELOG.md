@@ -2,7 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.11.2] - 2026-02-20
+
+### Changed
+
+- **Improved test coverage for `src/core/`**: Added 31 tests for `extractTokenUsage`, `extractContextWindowStatus`, `extractPromptDryRunInfo`, and `extractSessionUsage`. Core statement coverage raised from 77.39% to 82.13%, now passing the 80% threshold.
+- **Code formatting**: Applied Prettier formatting across all source and test files.
+
+## [0.11.1] - 2026-02-20
 
 ### Fixed
 

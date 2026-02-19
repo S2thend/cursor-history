@@ -508,7 +508,7 @@ export async function getSession(
             })
             .filter(
               (m): m is NonNullable<typeof m> & { timestamp: Date | null } =>
-                m !== null && m.content.length > 0,
+                m !== null && m.content.length > 0
             );
 
           // Resolve null timestamps via neighbor interpolation + session fallback
@@ -798,15 +798,13 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
       })
       .filter(
         (m): m is NonNullable<typeof m> & { timestamp: Date | null } =>
-          m !== null && m.content.length > 0,
+          m !== null && m.content.length > 0
       );
 
     // Resolve null timestamps via neighbor interpolation + session fallback
     fillTimestampGaps(messages, summary.createdAt);
     // After fillTimestampGaps, all timestamps are guaranteed non-null
-    const resolvedMessages = messages as Array<
-      (typeof messages)[number] & { timestamp: Date }
-    >;
+    const resolvedMessages = messages as Array<(typeof messages)[number] & { timestamp: Date }>;
 
     // Try to get composer data for session-level usage
     let sessionUsage: SessionUsage | undefined;
@@ -1506,7 +1504,7 @@ export function extractTimestamp(data: RawBubbleData & { createdAt?: string }): 
  */
 export function fillTimestampGaps(
   messages: Array<{ timestamp: Date | null; [key: string]: unknown }>,
-  sessionCreatedAt?: Date,
+  sessionCreatedAt?: Date
 ): void {
   for (let i = 0; i < messages.length; i++) {
     if (messages[i]!.timestamp !== null) continue;

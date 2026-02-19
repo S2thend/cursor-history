@@ -120,7 +120,7 @@ update all file paths when moving sessions between workspaces.
   - **Full diff display** for file edits and writes with syntax highlighting
   - **Detailed tool calls** showing all parameters (file paths, search patterns, commands, etc.)
   - AI reasoning and thinking blocks
-  - Message timestamps
+  - Message timestamps (accurate for all sessions, including pre-September 2025)
 - **Search** - Find conversations by keyword with highlighted matches
 - **Export** - Save sessions as Markdown or JSON files
 - **Migrate** - Move or copy sessions between workspaces (e.g., when renaming projects)
@@ -379,7 +379,7 @@ When browsing your chat history, you'll see:
 
 - **Complete conversations** - All messages exchanged with Cursor AI
 - **Duplicate message folding** - Consecutive identical messages are folded into one display with multiple timestamps and repeat count (e.g., "02:48:01 PM, 02:48:04 PM, 02:48:54 PM (×3)")
-- **Timestamps** - Exact time each message was sent (HH:MM:SS format)
+- **Timestamps** - Exact time each message was sent (HH:MM:SS format), with smart fallback for pre-September 2025 sessions that extracts timing from alternative data fields and interpolates for messages without direct timestamps
 - **AI tool actions** - Detailed view of what Cursor AI did:
   - **File edits/writes** - Full diff display with syntax highlighting showing exactly what changed
   - **File reads** - File paths and content previews (use `--fullread` for complete content)

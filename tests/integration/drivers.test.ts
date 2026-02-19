@@ -13,14 +13,21 @@ import type { DatabaseDriver, Database } from '../../src/core/database/types.js'
 const tempFiles: string[] = [];
 
 function tempDbPath(): string {
-  const path = join(tmpdir(), `test_driver_${Date.now()}_${Math.random().toString(36).slice(2)}.db`);
+  const path = join(
+    tmpdir(),
+    `test_driver_${Date.now()}_${Math.random().toString(36).slice(2)}.db`
+  );
   tempFiles.push(path);
   return path;
 }
 
 afterEach(() => {
   for (const f of tempFiles) {
-    try { if (existsSync(f)) unlinkSync(f); } catch { /* ignore */ }
+    try {
+      if (existsSync(f)) unlinkSync(f);
+    } catch {
+      /* ignore */
+    }
   }
   tempFiles.length = 0;
 });

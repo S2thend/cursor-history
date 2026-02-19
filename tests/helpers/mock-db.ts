@@ -6,10 +6,7 @@ import { vi } from 'vitest';
 /**
  * Create a mock Statement that returns preconfigured results
  */
-export function createMockStatement(
-  getResult?: unknown,
-  allResult?: unknown[],
-) {
+export function createMockStatement(getResult?: unknown, allResult?: unknown[]) {
   return {
     get: vi.fn((..._args: unknown[]) => getResult),
     all: vi.fn((..._args: unknown[]) => allResult ?? []),

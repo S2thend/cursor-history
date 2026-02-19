@@ -46,6 +46,10 @@ import {
   getGlobalSession,
   extractTimestamp,
   fillTimestampGaps,
+  extractTokenUsage,
+  extractContextWindowStatus,
+  extractPromptDryRunInfo,
+  extractSessionUsage,
 } from '../../src/core/storage.js';
 
 /**
@@ -520,7 +524,7 @@ describe('searchSessions', () => {
 describe('getComposerData', () => {
   it('returns new format with allComposers', () => {
     const data = JSON.stringify({ allComposers: [{ composerId: 'c1' }], selectedComposerIds: [] });
-    const db = createMockDb({ 'ItemTable': { get: { value: data } } });
+    const db = createMockDb({ ItemTable: { get: { value: data } } });
     const result = getComposerData(db);
     expect(result).not.toBeNull();
     expect(result!.isNewFormat).toBe(true);
@@ -530,7 +534,7 @@ describe('getComposerData', () => {
 
   it('returns legacy format (direct array)', () => {
     const data = JSON.stringify([{ composerId: 'c1' }]);
-    const db = createMockDb({ 'ItemTable': { get: { value: data } } });
+    const db = createMockDb({ ItemTable: { get: { value: data } } });
     const result = getComposerData(db);
     expect(result).not.toBeNull();
     expect(result!.isNewFormat).toBe(false);
@@ -544,13 +548,13 @@ describe('getComposerData', () => {
   });
 
   it('returns null on invalid JSON', () => {
-    const db = createMockDb({ 'ItemTable': { get: { value: 'not json' } } });
+    const db = createMockDb({ ItemTable: { get: { value: 'not json' } } });
     const result = getComposerData(db);
     expect(result).toBeNull();
   });
 
   it('returns null for non-array non-object data', () => {
-    const db = createMockDb({ 'ItemTable': { get: { value: '"just a string"' } } });
+    const db = createMockDb({ ItemTable: { get: { value: '"just a string"' } } });
     const result = getComposerData(db);
     expect(result).toBeNull();
   });
@@ -706,13 +710,14 @@ describe('searchSessions (with matches)', () => {
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
 
     const composerData = JSON.stringify({
-      allComposers: [
-        { composerId: 'c1', name: 'Debug Session', createdAt: 2000 },
-      ],
+      allComposers: [{ composerId: 'c1', name: 'Debug Session', createdAt: 2000 }],
     });
 
     const userBubble = JSON.stringify({ type: 1, text: 'How do I fix the authentication bug?' });
-    const assistantBubble = JSON.stringify({ type: 2, text: 'You can fix the bug by checking the token.' });
+    const assistantBubble = JSON.stringify({
+      type: 2,
+      text: 'You can fix the bug by checking the token.',
+    });
 
     setupGetSessionMocks(composerData, [
       { key: 'bubbleId:c1:b1', value: userBubble },
@@ -730,7 +735,11 @@ describe('searchSessions (with matches)', () => {
 
   it('returns empty when no matches', async () => {
     setupForSearch();
-    const results = await searchSessions('nonexistentxyz', { limit: 10, contextChars: 40 }, '/data');
+    const results = await searchSessions(
+      'nonexistentxyz',
+      { limit: 10, contextChars: 40 },
+      '/data'
+    );
     expect(results).toHaveLength(0);
   });
 
@@ -802,7 +811,11 @@ describe('listGlobalSessions (with data)', () => {
     mockOpenDatabase.mockResolvedValue({
       prepare: vi.fn((sql: string) => {
         if (sql.includes('sqlite_master')) {
-          return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
+          return {
+            get: vi.fn(() => ({ name: 'cursorDiskKV' })),
+            all: vi.fn(() => []),
+            run: vi.fn(),
+          };
         }
         if (sql.includes("LIKE 'composerData:%'")) {
           return {
@@ -918,7 +931,10 @@ describe('getSession (more tool types)', () => {
       type: 2,
       toolFormerData: {
         name: 'write',
-        params: JSON.stringify({ relativeWorkspacePath: 'new-file.ts', content: 'export const x = 1;' }),
+        params: JSON.stringify({
+          relativeWorkspacePath: 'new-file.ts',
+          content: 'export const x = 1;',
+        }),
         status: 'completed',
       },
     });
@@ -981,7 +997,8 @@ describe('getSession (more tool types)', () => {
       type: 2,
       someField: 'short',
       nested: {
-        deepField: 'This is a much longer string with **markdown** features that should be found by the fallback.',
+        deepField:
+          'This is a much longer string with **markdown** features that should be found by the fallback.',
       },
     });
     setupToolTest(bubble);
@@ -1067,7 +1084,11 @@ describe('getSession (generic tool)', () => {
       type: 2,
       toolFormerData: {
         name: 'search_replace',
-        params: JSON.stringify({ targetFile: '/src/app.ts', old_string: 'oldCode', new_string: 'newCode' }),
+        params: JSON.stringify({
+          targetFile: '/src/app.ts',
+          old_string: 'oldCode',
+          new_string: 'newCode',
+        }),
         status: 'completed',
       },
     });
@@ -1148,9 +1169,7 @@ describe('getSession (generic tool)', () => {
   it('handles user message with codeBlocks', async () => {
     const bubble = JSON.stringify({
       type: 1,
-      codeBlocks: [
-        { content: 'const x = 1;', languageId: 'typescript' },
-      ],
+      codeBlocks: [{ content: 'const x = 1;', languageId: 'typescript' }],
     });
     setupToolTest(bubble);
     const result = await getSession(1, '/data');
@@ -1171,9 +1190,7 @@ describe('getSession (workspace fallback)', () => {
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
 
     const composerData = JSON.stringify({
-      allComposers: [
-        { composerId: 'c1', name: 'Session', createdAt: 2000 },
-      ],
+      allComposers: [{ composerId: 'c1', name: 'Session', createdAt: 2000 }],
     });
 
     // Path-based mock: workspace DB returns session data, global DB has no cursorDiskKV table
@@ -1323,7 +1340,11 @@ describe('timestamp fallback - US1', () => {
       type: 2,
       text: 'old response',
       bubbleId: 'b1',
-      timingInfo: { clientRpcSendTime: rpcTime, clientStartTime: rpcTime + 10, clientEndTime: rpcTime + 500 },
+      timingInfo: {
+        clientRpcSendTime: rpcTime,
+        clientStartTime: rpcTime + 10,
+        clientEndTime: rpcTime + 500,
+      },
     });
 
     setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: bubble }]);
@@ -1474,7 +1495,11 @@ describe('fillTimestampGaps', () => {
   const sessionDate = new Date('2024-01-01T00:00:00Z');
 
   it('does not change messages when all timestamps are present', () => {
-    const messages = [{ timestamp: d1 as Date | null }, { timestamp: d2 as Date | null }, { timestamp: d3 as Date | null }];
+    const messages = [
+      { timestamp: d1 as Date | null },
+      { timestamp: d2 as Date | null },
+      { timestamp: d3 as Date | null },
+    ];
     fillTimestampGaps(messages);
     expect(messages[0]!.timestamp).toBe(d1);
     expect(messages[1]!.timestamp).toBe(d2);
@@ -1520,10 +1545,7 @@ describe('fillTimestampGaps', () => {
   });
 
   it('all messages null with sessionCreatedAt: all get session timestamp', () => {
-    const messages = [
-      { timestamp: null as Date | null },
-      { timestamp: null as Date | null },
-    ];
+    const messages = [{ timestamp: null as Date | null }, { timestamp: null as Date | null }];
     fillTimestampGaps(messages, sessionDate);
     expect(messages[0]!.timestamp).toBe(sessionDate);
     expect(messages[1]!.timestamp).toBe(sessionDate);
@@ -1531,10 +1553,7 @@ describe('fillTimestampGaps', () => {
 
   it('all messages null without sessionCreatedAt: all get current time (last resort)', () => {
     const before = Date.now();
-    const messages = [
-      { timestamp: null as Date | null },
-      { timestamp: null as Date | null },
-    ];
+    const messages = [{ timestamp: null as Date | null }, { timestamp: null as Date | null }];
     fillTimestampGaps(messages);
     const after = Date.now();
     for (const msg of messages) {
@@ -1640,14 +1659,22 @@ describe('timestamp fallback - US3 session-level', () => {
     const b1 = JSON.stringify({ type: 1, text: 'user question', bubbleId: 'b1' });
     // b2: assistant, has timingInfo.clientRpcSendTime → should use rpcTime
     const b2 = JSON.stringify({
-      type: 2, text: 'assistant answer', bubbleId: 'b2',
-      timingInfo: { clientRpcSendTime: rpcTime, clientStartTime: rpcTime + 10, clientEndTime: rpcTime + 500 },
+      type: 2,
+      text: 'assistant answer',
+      bubbleId: 'b2',
+      timingInfo: {
+        clientRpcSendTime: rpcTime,
+        clientStartTime: rpcTime + 10,
+        clientEndTime: rpcTime + 500,
+      },
     });
     // b3: user msg, no timestamp → should interpolate from prev (b2) since no next
     const b3 = JSON.stringify({ type: 1, text: 'follow up', bubbleId: 'b3' });
     // b4: assistant, has createdAt → should use createdAt
     const b4 = JSON.stringify({
-      type: 2, text: 'new format response', bubbleId: 'b4',
+      type: 2,
+      text: 'new format response',
+      bubbleId: 'b4',
       createdAt: '2025-10-15T12:00:00Z',
     });
 
@@ -1670,5 +1697,314 @@ describe('timestamp fallback - US3 session-level', () => {
     expect(result!.messages[2]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));
     // b4: createdAt
     expect(result!.messages[3]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));
+  });
+});
+
+// =============================================================================
+// extractTokenUsage
+// =============================================================================
+describe('extractTokenUsage', () => {
+  it('returns tokens from camelCase tokenCount (priority 1)', () => {
+    const result = extractTokenUsage({
+      tokenCount: { inputTokens: 100, outputTokens: 50 },
+    } as never);
+    expect(result).toEqual({ inputTokens: 100, outputTokens: 50 });
+  });
+
+  it('returns tokens from snake_case usage (priority 2)', () => {
+    const result = extractTokenUsage({
+      usage: { input_tokens: 200, output_tokens: 80 },
+    } as never);
+    expect(result).toEqual({ inputTokens: 200, outputTokens: 80 });
+  });
+
+  it('prefers camelCase over snake_case when both present', () => {
+    const result = extractTokenUsage({
+      tokenCount: { inputTokens: 100, outputTokens: 50 },
+      usage: { input_tokens: 999, output_tokens: 999 },
+    } as never);
+    expect(result).toEqual({ inputTokens: 100, outputTokens: 50 });
+  });
+
+  it('returns tokens from contextWindowStatusAtCreation (priority 3)', () => {
+    const result = extractTokenUsage({
+      contextWindowStatusAtCreation: { tokensUsed: 500 },
+    } as never);
+    expect(result).toEqual({ inputTokens: 500, outputTokens: 0 });
+  });
+
+  it('returns tokens from promptDryRunInfo fullConversationTokenCount (priority 4)', () => {
+    const result = extractTokenUsage({
+      promptDryRunInfo: JSON.stringify({
+        fullConversationTokenCount: { numTokens: 300 },
+      }),
+    } as never);
+    expect(result).toEqual({ inputTokens: 300, outputTokens: 0 });
+  });
+
+  it('returns tokens from promptDryRunInfo userMessageTokenCount when fullConv absent', () => {
+    const result = extractTokenUsage({
+      promptDryRunInfo: JSON.stringify({
+        userMessageTokenCount: { numTokens: 150 },
+      }),
+    } as never);
+    expect(result).toEqual({ inputTokens: 150, outputTokens: 0 });
+  });
+
+  it('returns undefined when tokenCount has zero values', () => {
+    const result = extractTokenUsage({
+      tokenCount: { inputTokens: 0, outputTokens: 0 },
+    } as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when no token source exists', () => {
+    const result = extractTokenUsage({} as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when promptDryRunInfo is invalid JSON', () => {
+    const result = extractTokenUsage({
+      promptDryRunInfo: 'not json',
+    } as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when promptDryRunInfo has no valid token counts', () => {
+    const result = extractTokenUsage({
+      promptDryRunInfo: JSON.stringify({
+        fullConversationTokenCount: {},
+        userMessageTokenCount: {},
+      }),
+    } as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('handles missing optional fields in tokenCount', () => {
+    const result = extractTokenUsage({
+      tokenCount: { inputTokens: 100 },
+    } as never);
+    expect(result).toEqual({ inputTokens: 100, outputTokens: 0 });
+  });
+});
+
+// =============================================================================
+// extractContextWindowStatus
+// =============================================================================
+describe('extractContextWindowStatus', () => {
+  it('returns status when all fields are valid', () => {
+    const result = extractContextWindowStatus({
+      contextWindowStatusAtCreation: {
+        tokensUsed: 5000,
+        tokenLimit: 128000,
+        percentageRemaining: 96,
+      },
+    } as never);
+    expect(result).toEqual({
+      tokensUsed: 5000,
+      tokenLimit: 128000,
+      percentageRemaining: 96,
+    });
+  });
+
+  it('prefers percentageRemainingFloat over percentageRemaining', () => {
+    const result = extractContextWindowStatus({
+      contextWindowStatusAtCreation: {
+        tokensUsed: 5000,
+        tokenLimit: 128000,
+        percentageRemaining: 96,
+        percentageRemainingFloat: 96.09375,
+      },
+    } as never);
+    expect(result).toEqual({
+      tokensUsed: 5000,
+      tokenLimit: 128000,
+      percentageRemaining: 96.09375,
+    });
+  });
+
+  it('returns undefined when contextWindowStatusAtCreation is absent', () => {
+    const result = extractContextWindowStatus({} as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when tokensUsed is not a number', () => {
+    const result = extractContextWindowStatus({
+      contextWindowStatusAtCreation: {
+        tokensUsed: 'invalid',
+        tokenLimit: 128000,
+        percentageRemaining: 96,
+      },
+    } as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when tokenLimit is not a number', () => {
+    const result = extractContextWindowStatus({
+      contextWindowStatusAtCreation: {
+        tokensUsed: 5000,
+        tokenLimit: undefined,
+        percentageRemaining: 96,
+      },
+    } as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when percentageRemaining is not a number', () => {
+    const result = extractContextWindowStatus({
+      contextWindowStatusAtCreation: {
+        tokensUsed: 5000,
+        tokenLimit: 128000,
+      },
+    } as never);
+    expect(result).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// extractPromptDryRunInfo
+// =============================================================================
+describe('extractPromptDryRunInfo', () => {
+  it('returns parsed info with both token counts', () => {
+    const result = extractPromptDryRunInfo({
+      promptDryRunInfo: JSON.stringify({
+        fullConversationTokenCount: { numTokens: 3000 },
+        userMessageTokenCount: { numTokens: 500 },
+      }),
+    } as never);
+    expect(result).toEqual({
+      fullConversationTokenCount: 3000,
+      userMessageTokenCount: 500,
+    });
+  });
+
+  it('returns info with only fullConversationTokenCount', () => {
+    const result = extractPromptDryRunInfo({
+      promptDryRunInfo: JSON.stringify({
+        fullConversationTokenCount: { numTokens: 3000 },
+      }),
+    } as never);
+    expect(result).toEqual({
+      fullConversationTokenCount: 3000,
+      userMessageTokenCount: undefined,
+    });
+  });
+
+  it('returns info with only userMessageTokenCount', () => {
+    const result = extractPromptDryRunInfo({
+      promptDryRunInfo: JSON.stringify({
+        userMessageTokenCount: { numTokens: 500 },
+      }),
+    } as never);
+    expect(result).toEqual({
+      fullConversationTokenCount: undefined,
+      userMessageTokenCount: 500,
+    });
+  });
+
+  it('returns undefined when promptDryRunInfo is absent', () => {
+    const result = extractPromptDryRunInfo({} as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when promptDryRunInfo is not a string', () => {
+    const result = extractPromptDryRunInfo({
+      promptDryRunInfo: 123,
+    } as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when JSON is invalid', () => {
+    const result = extractPromptDryRunInfo({
+      promptDryRunInfo: '{bad json}',
+    } as never);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when parsed JSON has no valid numTokens', () => {
+    const result = extractPromptDryRunInfo({
+      promptDryRunInfo: JSON.stringify({
+        fullConversationTokenCount: { numTokens: 'not a number' },
+        userMessageTokenCount: {},
+      }),
+    } as never);
+    expect(result).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// extractSessionUsage
+// =============================================================================
+describe('extractSessionUsage', () => {
+  it('returns context usage from composer data', () => {
+    const result = extractSessionUsage(
+      {
+        contextTokensUsed: 5000,
+        contextTokenLimit: 128000,
+        contextUsagePercent: 3.9,
+      } as never,
+      []
+    );
+    expect(result).toEqual({
+      contextTokensUsed: 5000,
+      contextTokenLimit: 128000,
+      contextUsagePercent: 3.9,
+    });
+  });
+
+  it('returns aggregated token usage from messages', () => {
+    const result = extractSessionUsage(undefined, [
+      { tokenUsage: { inputTokens: 100, outputTokens: 50 } },
+      { tokenUsage: { inputTokens: 200, outputTokens: 80 } },
+    ]);
+    expect(result).toEqual({
+      totalInputTokens: 300,
+      totalOutputTokens: 130,
+    });
+  });
+
+  it('returns combined composer and message data', () => {
+    const result = extractSessionUsage(
+      {
+        contextTokensUsed: 5000,
+        contextTokenLimit: 128000,
+        contextUsagePercent: 3.9,
+      } as never,
+      [{ tokenUsage: { inputTokens: 100, outputTokens: 50 } }]
+    );
+    expect(result).toEqual({
+      contextTokensUsed: 5000,
+      contextTokenLimit: 128000,
+      contextUsagePercent: 3.9,
+      totalInputTokens: 100,
+      totalOutputTokens: 50,
+    });
+  });
+
+  it('returns undefined when no data available', () => {
+    const result = extractSessionUsage(undefined, []);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when composer data has no numeric fields', () => {
+    const result = extractSessionUsage({} as never, []);
+    expect(result).toBeUndefined();
+  });
+
+  it('skips messages without tokenUsage', () => {
+    const result = extractSessionUsage(undefined, [
+      {},
+      { tokenUsage: { inputTokens: 100, outputTokens: 50 } },
+      {},
+    ]);
+    expect(result).toEqual({
+      totalInputTokens: 100,
+      totalOutputTokens: 50,
+    });
+  });
+
+  it('returns partial composer data when only some fields present', () => {
+    const result = extractSessionUsage({ contextTokensUsed: 5000 } as never, []);
+    expect(result).toEqual({ contextTokensUsed: 5000 });
   });
 });

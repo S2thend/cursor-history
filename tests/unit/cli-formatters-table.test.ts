@@ -9,7 +9,13 @@ import {
   formatCursorNotFound,
   supportsColor,
 } from '../../src/cli/formatters/table.js';
-import type { ChatSessionSummary, Workspace, ChatSession, SearchResult, MessageType } from '../../src/core/types.js';
+import type {
+  ChatSessionSummary,
+  Workspace,
+  ChatSession,
+  SearchResult,
+  MessageType,
+} from '../../src/core/types.js';
 
 const now = new Date('2024-01-15T10:00:00Z');
 const later = new Date('2024-01-15T11:00:00Z');
@@ -19,16 +25,28 @@ const stripAnsi = (str: string) => str.replace(/\x1b\[[0-9;]*m/g, '');
 
 function makeSummary(overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummary {
   return {
-    id: 'sess-1', index: 1, title: 'Test', createdAt: now, lastUpdatedAt: later,
-    messageCount: 2, workspaceId: 'ws-1', workspacePath: '~/proj', preview: 'Hello',
+    id: 'sess-1',
+    index: 1,
+    title: 'Test',
+    createdAt: now,
+    lastUpdatedAt: later,
+    messageCount: 2,
+    workspaceId: 'ws-1',
+    workspacePath: '~/proj',
+    preview: 'Hello',
     ...overrides,
   };
 }
 
 function makeSession(overrides: Partial<ChatSession> = {}): ChatSession {
   return {
-    id: 'sess-1', index: 1, title: 'Test', createdAt: now, lastUpdatedAt: later,
-    messageCount: 2, workspaceId: 'ws-1',
+    id: 'sess-1',
+    index: 1,
+    title: 'Test',
+    createdAt: now,
+    lastUpdatedAt: later,
+    messageCount: 2,
+    workspaceId: 'ws-1',
     messages: [
       { id: 'm1', role: 'user', content: 'Hello', timestamp: now, codeBlocks: [] },
       { id: 'm2', role: 'assistant', content: 'Hi there!', timestamp: later, codeBlocks: [] },
@@ -98,7 +116,9 @@ describe('formatSessionDetail', () => {
 
   it('truncates messages in short mode', () => {
     const longContent = 'A'.repeat(500);
-    const s = makeSession({ messages: [{ id: 'm1', role: 'user', content: longContent, timestamp: now, codeBlocks: [] }] });
+    const s = makeSession({
+      messages: [{ id: 'm1', role: 'user', content: longContent, timestamp: now, codeBlocks: [] }],
+    });
     const result = formatSessionDetail(s, undefined, { short: true });
     expect(result).not.toContain(longContent);
     expect(result).toContain('...');
@@ -107,7 +127,13 @@ describe('formatSessionDetail', () => {
   it('formats tool call messages', () => {
     const s = makeSession({
       messages: [
-        { id: 'm1', role: 'assistant', content: '[Tool: Read File]\nFile: /path/to/file', timestamp: now, codeBlocks: [] },
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Tool: Read File]\nFile: /path/to/file',
+          timestamp: now,
+          codeBlocks: [],
+        },
       ],
     });
     const result = formatSessionDetail(s);
@@ -118,7 +144,13 @@ describe('formatSessionDetail', () => {
   it('formats error messages', () => {
     const s = makeSession({
       messages: [
-        { id: 'm1', role: 'assistant', content: '[Error]\nSomething went wrong', timestamp: now, codeBlocks: [] },
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Error]\nSomething went wrong',
+          timestamp: now,
+          codeBlocks: [],
+        },
       ],
     });
     const result = formatSessionDetail(s);
@@ -129,7 +161,13 @@ describe('formatSessionDetail', () => {
   it('formats thinking messages', () => {
     const s = makeSession({
       messages: [
-        { id: 'm1', role: 'assistant', content: '[Thinking]\nLet me analyze...', timestamp: now, codeBlocks: [] },
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Thinking]\nLet me analyze...',
+          timestamp: now,
+          codeBlocks: [],
+        },
       ],
     });
     const result = formatSessionDetail(s);
@@ -155,7 +193,10 @@ describe('formatSessionDetail', () => {
   it('shows filter info when messageFilter is active', () => {
     const filter: MessageType[] = ['user'];
     const s = makeSession();
-    const result = formatSessionDetail(s, undefined, { messageFilter: filter, originalMessageCount: 10 });
+    const result = formatSessionDetail(s, undefined, {
+      messageFilter: filter,
+      originalMessageCount: 10,
+    });
     expect(result).toContain('2 of 10');
     expect(result).toContain('user');
   });
@@ -182,8 +223,11 @@ describe('formatSearchResultsTable', () => {
 
   it('formats search results with matches', () => {
     const sr: SearchResult = {
-      sessionId: 's1', index: 1, workspacePath: '~/proj',
-      createdAt: now, matchCount: 3,
+      sessionId: 's1',
+      index: 1,
+      workspacePath: '~/proj',
+      createdAt: now,
+      matchCount: 3,
       snippets: [{ messageRole: 'user', text: 'found it here', matchPositions: [[6, 8]] }],
     };
     const result = formatSearchResultsTable([sr], 'it');
