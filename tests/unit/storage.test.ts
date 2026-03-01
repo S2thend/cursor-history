@@ -18,6 +18,19 @@ vi.mock('../../src/core/backup.js', () => ({
   readBackupManifest: vi.fn().mockResolvedValue(null),
 }));
 
+// For backup-from-zip tests: mock zip so readWorkspaceJsonFromBackup can read workspace.json (hoisted)
+const { mockZipLoadAsync } = vi.hoisted(() => ({
+  mockZipLoadAsync: vi.fn(),
+}));
+vi.mock('jszip', () => ({
+  default: { loadAsync: mockZipLoadAsync },
+}));
+
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return { ...actual, readFile: vi.fn().mockResolvedValue(Buffer.from('zip')) };
+});
+
 // Mock node:fs
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
@@ -30,6 +43,7 @@ vi.mock('node:fs', async () => {
 });
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readBackupManifest, openBackupDatabase } from '../../src/core/backup.js';
 import {
   readWorkspaceJson,
   findWorkspaces,
@@ -166,6 +180,51 @@ describe('readWorkspaceJson', () => {
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ other: 'value' }));
     expect(readWorkspaceJson('/workspace/dir')).toBeNull();
   });
+
+  it('returns path from workspace when folder is missing', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ workspace: 'file:///path/to/project.code-workspace' })
+    );
+    const result = readWorkspaceJson('/workspace/dir');
+    expect(result).toBe('/path/to/project.code-workspace');
+  });
+
+  it('strips file:// from workspace', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ workspace: 'file:///my/workspace.code-workspace' })
+    );
+    const result = readWorkspaceJson('/workspace/dir');
+    expect(result).toBe('/my/workspace.code-workspace');
+  });
+
+  it('decodes %20 in workspace', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ workspace: 'file:///my%20project/ws.code-workspace' })
+    );
+    const result = readWorkspaceJson('/workspace/dir');
+    expect(result).toBe('/my project/ws.code-workspace');
+  });
+
+  it('prefers workspace when both folder and workspace exist', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        folder: 'file:///folder',
+        workspace: 'file:///other.code-workspace',
+      })
+    );
+    const result = readWorkspaceJson('/workspace/dir');
+    expect(result).toBe('/other.code-workspace');
+  });
+
+  it('returns null when both folder and workspace are missing', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({}));
+    expect(readWorkspaceJson('/workspace/dir')).toBeNull();
+  });
 });
 
 // =============================================================================
@@ -211,6 +270,80 @@ describe('findWorkspaces', () => {
 
     const result = await findWorkspaces('/data');
     expect(result).toEqual([]);
+  });
+
+  it('includes workspace when workspace.json has only workspace', async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return path.includes('state.vscdb') || path.includes('workspace.json') || path === '/data';
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ workspace: 'file:///path/to/ws.code-workspace' })
+    );
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test' }],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+
+    const result = await findWorkspaces('/data');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.path).toBe('/path/to/ws.code-workspace');
+    expect(result[0]!.sessionCount).toBe(1);
+  });
+});
+
+// =============================================================================
+// findWorkspaces (from backup) — workspace in workspace.json
+// =============================================================================
+describe('findWorkspaces (from backup)', () => {
+  it('returns path from workspace in backup zip', async () => {
+    vi.mocked(readBackupManifest).mockResolvedValueOnce({
+      version: '1.0.0',
+      createdAt: '2024-01-01T00:00:00Z',
+      cursorHistoryVersion: '0.9.2',
+      sourcePlatform: 'linux',
+      files: [
+        {
+          path: 'workspaceStorage/ws1/state.vscdb',
+          type: 'workspace-db',
+          size: 100,
+          checksum: 'sha256:abc',
+        },
+      ],
+      stats: { totalSize: 100, sessionCount: 1, workspaceCount: 1 },
+    });
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Session' }],
+    });
+    vi.mocked(openBackupDatabase).mockResolvedValueOnce(createWorkspaceDb(composerData));
+
+    mockZipLoadAsync.mockResolvedValueOnce({
+      file: (path: string) => {
+        if (path === 'workspaceStorage/ws1/workspace.json') {
+          return {
+            async: () =>
+              Promise.resolve(
+                Buffer.from(
+                  JSON.stringify({
+                    workspace: 'file:///path/to/backup-workspace.code-workspace',
+                  })
+                )
+              ),
+          };
+        }
+        return null;
+      },
+    });
+
+    const result = await findWorkspaces(undefined, '/backup.zip');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.path).toBe('/path/to/backup-workspace.code-workspace');
+    expect(result[0]!.id).toBe('ws1');
   });
 });
 
@@ -281,6 +414,145 @@ describe('listSessions', () => {
 
     const result = await listSessions({ limit: 1, all: true }, '/data');
     expect(result).toHaveLength(3);
+  });
+
+  it('deduplicates by session id when same session appears in multiple workspaces and attributes to first in sort order', async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path === '/data' ||
+        path.includes('state.vscdb') ||
+        path.includes('workspace.json')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockImplementation((path: any) => {
+      if (path.includes('ws1'))
+        return JSON.stringify({ folder: 'file:///folder' });
+      if (path.includes('ws2'))
+        return JSON.stringify({
+          workspace: 'file:///path/to/project.code-workspace',
+        });
+      return JSON.stringify({});
+    });
+
+    const sameSession = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Same chat', createdAt: 1000 }],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(sameSession));
+
+    const result = await listSessions({ limit: 0, all: true }, '/data');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe('c1');
+    expect(result[0]!.workspacePath).toBe('/path/to/project.code-workspace');
+    // Index must be 1-based consecutive after dedupe (so list --ids shows 1, 2, ... N)
+    expect(result[0]!.index).toBe(1);
+  });
+
+  it('assigns consecutive 1-based indexes after dedupe so list --ids has no gaps', async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path === '/data' ||
+        path.includes('state.vscdb') ||
+        path.includes('workspace.json')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockImplementation((path: any) => {
+      if (path.includes('ws1'))
+        return JSON.stringify({ folder: 'file:///folder' });
+      if (path.includes('ws2'))
+        return JSON.stringify({
+          workspace: 'file:///path/to/project.code-workspace',
+        });
+      return JSON.stringify({});
+    });
+
+    // ws1: c1, c2, c3. ws2: c1 (dup), c4. Deduped first-occurrence order: c1, c2, c3, c4 → 4 sessions
+    mockOpenDatabase.mockImplementation((path: string) => {
+      if (path.includes('ws1'))
+        return Promise.resolve(
+          createWorkspaceDb(
+            JSON.stringify({
+              allComposers: [
+                { composerId: 'c1', name: 'A', createdAt: 1000 },
+                { composerId: 'c2', name: 'B', createdAt: 2000 },
+                { composerId: 'c3', name: 'C', createdAt: 3000 },
+              ],
+            })
+          )
+        );
+      return Promise.resolve(
+        createWorkspaceDb(
+          JSON.stringify({
+            allComposers: [
+              { composerId: 'c1', name: 'A dup', createdAt: 1000 },
+              { composerId: 'c4', name: 'D', createdAt: 4000 },
+            ],
+          })
+        )
+      );
+    });
+
+    const result = await listSessions({ limit: 0, all: true }, '/data');
+    expect(result).toHaveLength(4);
+    result.forEach((s, i) => {
+      expect(s.index).toBe(i + 1);
+    });
+  });
+
+  it('does not remove sessions when two workspaces have no overlapping session ids', async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path === '/data' ||
+        path.includes('state.vscdb') ||
+        path.includes('workspace.json')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockImplementation((path: any) => {
+      if (path.includes('ws1'))
+        return JSON.stringify({ folder: 'file:///folder' });
+      if (path.includes('ws2'))
+        return JSON.stringify({
+          workspace: 'file:///path/to/project.code-workspace',
+        });
+      return JSON.stringify({});
+    });
+
+    mockOpenDatabase.mockImplementation((path: string) => {
+      if (path.includes('ws1'))
+        return Promise.resolve(
+          createWorkspaceDb(
+            JSON.stringify({
+              allComposers: [{ composerId: 'c1', name: 'Only in folder' }],
+            })
+          )
+        );
+      return Promise.resolve(
+        createWorkspaceDb(
+          JSON.stringify({
+            allComposers: [{ composerId: 'c2', name: 'Only in workspace file' }],
+          })
+        )
+      );
+    });
+
+    const result = await listSessions({ limit: 0, all: true }, '/data');
+    expect(result).toHaveLength(2);
+    const ids = result.map((s) => s.id).sort();
+    expect(ids).toEqual(['c1', 'c2']);
   });
 });
 
@@ -565,7 +837,7 @@ describe('searchSessions', () => {
   it('returns empty when no matches', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([]);
-    const result = await searchSessions('xyz', { limit: 10 }, '/data');
+    const result = await searchSessions('xyz', { limit: 10, contextChars: 50 }, '/data');
     expect(result).toEqual([]);
   });
 });
@@ -730,6 +1002,29 @@ describe('findWorkspaceByPath', () => {
     vi.mocked(readdirSync).mockReturnValue([]);
     const result = await findWorkspaceByPath('/nonexistent', '/data');
     expect(result).toBeNull();
+  });
+
+  it('finds workspace by workspace path', async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return path.includes('state.vscdb') || path.includes('workspace.json') || path === '/data';
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ workspace: 'file:///path/to/ws.code-workspace' })
+    );
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Session' }],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+
+    const result = await findWorkspaceByPath('/path/to/ws.code-workspace', '/data');
+    expect(result).not.toBeNull();
+    expect(result!.workspace.path).toBe('/path/to/ws.code-workspace');
+    expect(result!.dbPath).toContain('state.vscdb');
   });
 });
 
