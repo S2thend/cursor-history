@@ -3,7 +3,7 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import type { Platform } from '../core/types.js';
 
 /**
@@ -35,7 +35,7 @@ export function getDefaultCursorDataPath(platform?: Platform): string {
         'workspaceStorage'
       );
     case 'macos':
-      return join(
+      return posix.join(
         homedir(),
         'Library',
         'Application Support',
@@ -44,7 +44,7 @@ export function getDefaultCursorDataPath(platform?: Platform): string {
         'workspaceStorage'
       );
     case 'linux':
-      return join(homedir(), '.config', 'Cursor', 'User', 'workspaceStorage');
+      return posix.join(homedir(), '.config', 'Cursor', 'User', 'workspaceStorage');
   }
 }
 
@@ -107,7 +107,8 @@ export function normalizePath(filePath: string): string {
     normalized = normalized.slice(0, -1);
   }
 
-  return normalized;
+  // Normalize path separators
+  return normalized.replace(/\\/g, '/');
 }
 
 /**

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { validateConfig, mergeWithDefaults, resolveDatabasePath } from '../../src/lib/config.js';
 import { InvalidConfigError, DatabaseNotFoundError } from '../../src/lib/errors.js';
+import { tmpdir } from 'node:os';
+import { basename } from 'node:path';
 
 describe('validateConfig', () => {
   it('accepts undefined config', () => {
@@ -108,8 +110,9 @@ describe('resolveDatabasePath', () => {
   });
 
   it('resolves valid path', () => {
-    const result = resolveDatabasePath('/tmp');
+    const tmpPath = tmpdir();
+    const result = resolveDatabasePath(tmpPath);
     expect(typeof result).toBe('string');
-    expect(result).toContain('tmp');
+    expect(result).toContain(basename(tmpPath));
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { homedir } from 'node:os';
+import { sep } from 'node:path';
 import {
   detectPlatform,
   getDefaultCursorDataPath,
@@ -66,7 +67,7 @@ describe('getCursorDataPath', () => {
 
 describe('expandPath', () => {
   it('expands ~/foo to homedir/foo', () => {
-    expect(expandPath('~/foo')).toBe(homedir() + '/foo');
+    expect(expandPath('~/foo')).toBe(homedir() + sep + 'foo');
   });
 
   it('returns absolute path unchanged', () => {
@@ -91,7 +92,8 @@ describe('contractPath', () => {
 
 describe('normalizePath', () => {
   it('expands tilde', () => {
-    expect(normalizePath('~/foo')).toBe(homedir() + '/foo');
+    const normalizedHome = homedir().replace(/\\/g, '/');
+    expect(normalizePath('~/foo')).toBe(normalizedHome + '/foo');
   });
 
   it('removes trailing slash', () => {
@@ -108,6 +110,11 @@ describe('normalizePath', () => {
 
   it('removes multiple trailing slashes', () => {
     expect(normalizePath('/path///')).toBe('/path');
+  });
+
+  it('normalizes path separators', () => {
+    const input = 'a/b\\c/d';
+    expect(normalizePath(input)).toBe('a/b/c/d');
   });
 });
 
