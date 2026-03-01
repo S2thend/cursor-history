@@ -114,10 +114,11 @@ So when someone uses `import { listSessions } from 'cursor-history'`, they're ca
 
 ### Storage Layer (`src/core/storage.ts`)
 
-- `listSessions()` - Uses workspace storage for listing (correct paths)
+- `listSessions()` - Uses workspace storage for listing (correct paths); when listing all (no workspace filter), deduplicates by session ID and attributes to first workspace in deterministic order (.code-workspace paths before folder paths)
 - `getSession(identifier, ...)` - Get session by 1-based index (number) or composer ID (string). Tries global storage first (full AI responses), falls back to workspace. Returns null when index or composer ID not found.
 - `findWorkspaceForSession(sessionId)` - Finds which workspace contains a session by ID
-- `findWorkspaceByPath(path)` - Finds workspace by its project path
+- `findWorkspaceByPath(path)` - Finds workspace by its project path (folder or .code-workspace file path)
+- `readWorkspaceJson(workspaceDir)` - Reads workspace path from `workspace.json`: supports `folder` (single-folder workspace, file URI) and `configuration` (.code-workspace file URI); prefers `folder` when both exist; same logic used when reading from backup zip
 - `getComposerData(db)` - Reads composer array, handles both `allComposers` and legacy formats
 - `updateComposerData(db, composers)` - Writes composer array, preserves original format
 - `resolveSessionIdentifiers(input)` - Converts index/ID/comma-separated to session ID array
@@ -368,6 +369,10 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - SQLite databases (`state.vscdb` files) - read-only access (010-fix-timestamp-fallback)
 
 ## Recent Changes
+- Workspace file path resolution: Workspaces opened via a .code-workspace file are now discovered and matchable
+  - `readWorkspaceJson()` and `readWorkspaceJsonFromBackup()` now support the `workspace` key (workspace file URI) in addition to `folder` (single-folder URI); prefer `workspace` when both exist;
+  - Listing, `--workspace` filter, and `findWorkspaceByPath()` work when the workspace path is the .code-workspace file path
+  - Session deduplication: When Cursor has two workspaceStorage entries (folder and .code-workspace), both may receive the same chats. When listing all sessions (no `--workspace` filter), the tool deduplicates by session ID so each chat appears once. Attribution is deterministic: workspaces are sorted by path with .code-workspace paths before others, so the session is attributed to the .code-workspace workspace when the same session exists in both. Filtering or exporting by `--workspace` is unchanged (only that workspace's DB is read).
 - 010-fix-timestamp-fallback: Fixed incorrect timestamps on pre-2025-09 sessions (Issue #13)
   - Extended `RawBubbleData.timingInfo` with `clientRpcSendTime` and `clientSettleTime` fields
   - New `extractTimestamp()` function in `src/core/storage.ts`: priority chain `createdAt` > `clientRpcSendTime` > `clientSettleTime` > `clientEndTime` > `null`

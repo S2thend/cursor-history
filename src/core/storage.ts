@@ -87,6 +87,35 @@ export async function openDatabaseReadWrite(dbPath: string): Promise<Database> {
 // ============================================================================
 
 /**
+ * Workspace.json shape: folder (single-folder) or workspace (.code-workspace path) 
+ */
+interface WorkspaceJsonShape {
+  folder?: string;
+  workspace?: string;
+}
+
+/**
+ * Convert file:// URI from workspace.json to filesystem path 
+ */
+function workspaceUriToPath(uri: string): string {
+  return uri.replace(/^file:\/\//, '').replace(/%20/g, ' ');
+}
+
+/**
+ * Read workspace path from parsed workspace.json (folder or configuration).
+ * Prefers folder; falls back to configuration for .code-workspace workspaces.
+ */
+function getWorkspacePathFromJson(data: WorkspaceJsonShape): string | null {
+  if (data.workspace) {
+    return workspaceUriToPath(data.workspace);
+  }
+  if (data.folder) {
+    return workspaceUriToPath(data.folder);
+  }
+  return null;
+}
+
+/**
  * Read workspace.json from a backup zip file
  */
 async function readWorkspaceJsonFromBackup(
@@ -105,12 +134,8 @@ async function readWorkspaceJsonFromBackup(
 
     const buffer = await file.async('nodebuffer');
     const content = buffer.toString('utf-8');
-    const jsonData = JSON.parse(content) as { folder?: string };
-    if (jsonData.folder) {
-      // Convert file:// URL to path
-      return jsonData.folder.replace(/^file:\/\//, '').replace(/%20/g, ' ');
-    }
-    return null;
+    const jsonData = JSON.parse(content) as WorkspaceJsonShape;
+    return getWorkspacePathFromJson(jsonData);
   } catch {
     return null;
   }
@@ -172,7 +197,8 @@ async function findWorkspacesFromBackup(backupPath: string): Promise<Workspace[]
 }
 
 /**
- * Read workspace.json to get the original workspace path
+ * Read workspace.json to get the original workspace path.
+ * Supports single-folder workspaces (folder) and .code-workspace files (configuration).
  */
 export function readWorkspaceJson(workspaceDir: string): string | null {
   const jsonPath = join(workspaceDir, 'workspace.json');
@@ -182,12 +208,8 @@ export function readWorkspaceJson(workspaceDir: string): string | null {
 
   try {
     const content = readFileSync(jsonPath, 'utf-8');
-    const data = JSON.parse(content) as { folder?: string };
-    if (data.folder) {
-      // Convert file:// URL to path
-      return data.folder.replace(/^file:\/\//, '').replace(/%20/g, ' ');
-    }
-    return null;
+    const data = JSON.parse(content) as WorkspaceJsonShape;
+    return getWorkspacePathFromJson(data);
   } catch {
     return null;
   }
@@ -332,13 +354,24 @@ export async function listSessions(
   const workspaces = await findWorkspaces(customDataPath, backupPath);
 
   // Filter by workspace if specified
-  const filteredWorkspaces = options.workspacePath
+  // Deterministic order: .code-workspace paths before others, then by path (for stable attribution when deduping)
+  const filteredWorkspaces = (options.workspacePath
     ? workspaces.filter(
         (w) => w.path === options.workspacePath || w.path.endsWith(options.workspacePath ?? '')
       )
-    : workspaces;
+    : workspaces
+  ).sort((a, b) => {
+    const normA = normalizePath(a.path);
+    const normB = normalizePath(b.path);
+    const aCode = normA.endsWith('.code-workspace') ? 0 : 1;
+    const bCode = normB.endsWith('.code-workspace') ? 0 : 1;
+    if (aCode !== bCode) return aCode - bCode;
+    return normA.localeCompare(normB);
+  });
 
   const allSessions: ChatSessionSummary[] = [];
+  // When listing all workspaces (no filter), dedupe by session id; keep first occurrence (workspace order is already deterministic)
+  const seenIds = options.workspacePath ? null : new Set<string>();
 
   for (const workspace of filteredWorkspaces) {
     try {
@@ -354,6 +387,8 @@ export async function listSessions(
       const sessions = parseChatData(result.data, result.bundle);
 
       for (const session of sessions) {
+        if (seenIds?.has(session.id)) continue;
+        seenIds?.add(session.id);
         allSessions.push({
           id: session.id,
           index: 0, // Will be assigned after sorting
