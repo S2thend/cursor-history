@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { homedir } from 'node:os';
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 import {
   detectPlatform,
   getDefaultCursorDataPath,
@@ -69,7 +69,7 @@ describe('getCursorDataPath', () => {
 
 describe('expandPath', () => {
   it('expands ~/foo to homedir/foo', () => {
-    expect(expandPath('~/foo')).toBe(homedir() + sep + 'foo');
+    expect(expandPath('~/foo')).toBe(join(homedir(), 'foo'));
   });
 
   it('returns absolute path unchanged', () => {
