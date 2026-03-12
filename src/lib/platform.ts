@@ -3,7 +3,7 @@
  */
 
 import { homedir } from 'node:os';
-import { join, posix } from 'node:path';
+import { join } from 'node:path';
 import type { Platform } from '../core/types.js';
 
 /**
@@ -35,7 +35,7 @@ export function getDefaultCursorDataPath(platform?: Platform): string {
         'workspaceStorage'
       );
     case 'macos':
-      return posix.join(
+      return join(
         homedir(),
         'Library',
         'Application Support',
@@ -44,7 +44,7 @@ export function getDefaultCursorDataPath(platform?: Platform): string {
         'workspaceStorage'
       );
     case 'linux':
-      return posix.join(homedir(), '.config', 'Cursor', 'User', 'workspaceStorage');
+      return join(homedir(), '.config', 'Cursor', 'User', 'workspaceStorage');
   }
 }
 
@@ -90,7 +90,6 @@ export function contractPath(path: string): string {
  * Normalize a file path for consistent comparison
  * - Resolves ~ to home directory
  * - Removes trailing slashes
- * - Normalizes path separators
  */
 export function normalizePath(filePath: string): string {
   // Expand ~ to home directory
@@ -107,20 +106,17 @@ export function normalizePath(filePath: string): string {
     normalized = normalized.slice(0, -1);
   }
 
-  // Normalize path separators
-  return normalized.replace(/\\/g, '/');
+  return normalized;
 }
 
 /**
  * Compare two paths for equality (case-sensitive on Unix, case-insensitive on Windows)
  */
 export function pathsEqual(path1: string, path2: string): boolean {
-  const normalized1 = normalizePath(path1);
-  const normalized2 = normalizePath(path2);
-
-  if (process.platform === 'win32') {
-    return normalized1.toLowerCase() === normalized2.toLowerCase();
-  }
-
-  return normalized1 === normalized2;
+  const normalize = (p: string) => normalizePath(p).replace(/\\/g, '/');
+  const n1 = normalize(path1);
+  const n2 = normalize(path2);
+  return process.platform === 'win32'
+    ? n1.toLowerCase() === n2.toLowerCase()
+    : n1 === n2;
 }
