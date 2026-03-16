@@ -120,6 +120,7 @@ So when someone uses `import { listSessions } from 'cursor-history'`, they're ca
 - `findWorkspaceByPath(path)` - Finds workspace by its project path
 - `getComposerData(db)` - Reads composer array, handles both `allComposers` and legacy formats
 - `updateComposerData(db, composers)` - Writes composer array, preserves original format
+- `resolveSessionIndex(identifier, customDataPath?, backupPath?)` - Resolves single index or composer ID to 1-based session index (used by show and export)
 - `resolveSessionIdentifiers(input)` - Converts index/ID/comma-separated to session ID array
 - `extractBubbleText()` - Extracts text from bubble with priority order (all based on DB fields, not pattern matching)
 - `extractThinkingText()` - Extracts from `data.thinking.text` DB field
@@ -289,9 +290,9 @@ try {
 | Command | Description |
 |---------|-------------|
 | `list` | List sessions (--all, --ids, --workspaces, -n) |
-| `show <index>` | Show session details (-s/--short, -t/--think, -f/--fullread, -e/--error, -o/--only) |
+| `show <index>` | Show session by index or composer ID (from list --ids) (-s/--short, -t/--think, -f/--fullread, -e/--error, -o/--only) |
 | `search <query>` | Search across sessions (-n, --context) |
-| `export [index]` | Export to md/json (--all, -o, -f, --force) |
+| `export [index]` | Export by index or composer ID, or --all to md/json (-o, -f, --force) |
 | `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f, --debug) |
 | `migrate <source> <dest>` | Move/copy all sessions between workspaces (--copy, --dry-run, -f, --debug) |
 

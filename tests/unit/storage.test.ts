@@ -35,6 +35,7 @@ import {
   findWorkspaces,
   listSessions,
   getSession,
+  resolveSessionIndex,
   searchSessions,
   getComposerData,
   updateComposerData,
@@ -598,6 +599,54 @@ describe('updateComposerData', () => {
     const parsed = JSON.parse(writtenJson);
     expect(Array.isArray(parsed)).toBe(true);
     expect(parsed).toEqual(composers);
+  });
+});
+
+// =============================================================================
+// resolveSessionIndex
+// =============================================================================
+describe('resolveSessionIndex', () => {
+  function setupSessions() {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [
+        { composerId: 'uuid-abc', name: 'Session A', createdAt: 2000 },
+        { composerId: 'uuid-def', name: 'Session B', createdAt: 1000 },
+      ],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+  }
+
+  it('resolves by 1-based index', async () => {
+    setupSessions();
+    const index = await resolveSessionIndex('1', '/data');
+    expect(index).toBe(1);
+  });
+
+  it('resolves by composer ID', async () => {
+    setupSessions();
+    const index = await resolveSessionIndex('uuid-def', '/data');
+    expect(index).toBe(2);
+  });
+
+  it('throws for unknown index', async () => {
+    setupSessions();
+    await expect(resolveSessionIndex('999', '/data')).rejects.toThrow();
+  });
+
+  it('throws for unknown composer ID', async () => {
+    setupSessions();
+    await expect(resolveSessionIndex('unknown-uuid', '/data')).rejects.toThrow();
+  });
+
+  it('rejects index 0', async () => {
+    setupSessions();
+    await expect(resolveSessionIndex('0', '/data')).rejects.toThrow();
   });
 });
 

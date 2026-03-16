@@ -9,6 +9,7 @@ import { Command } from 'commander';
 // --- Mock functions ---
 const mockListSessions = vi.fn();
 const mockGetSession = vi.fn();
+const mockResolveSessionIndex = vi.fn();
 const mockSearchSessions = vi.fn();
 const mockListWorkspaces = vi.fn();
 const mockFindWorkspaces = vi.fn();
@@ -30,6 +31,7 @@ const mockExistsSync = vi.fn(() => true);
 vi.mock('../../src/core/storage.js', () => ({
   listSessions: (...args: unknown[]) => mockListSessions(...args),
   getSession: (...args: unknown[]) => mockGetSession(...args),
+  resolveSessionIndex: (...args: unknown[]) => mockResolveSessionIndex(...args),
   searchSessions: (...args: unknown[]) => mockSearchSessions(...args),
   listWorkspaces: (...args: unknown[]) => mockListWorkspaces(...args),
   findWorkspaces: (...args: unknown[]) => mockFindWorkspaces(...args),
@@ -108,6 +110,7 @@ import { registerMigrateCommand } from '../../src/cli/commands/migrate.js';
 import { registerBackupCommand } from '../../src/cli/commands/backup.js';
 import { writeFileSync } from 'node:fs';
 import { createBackup } from '../../src/core/backup.js';
+import { SessionNotFoundError } from '../../src/lib/errors.js';
 
 let consoleSpy: ReturnType<typeof vi.spyOn>;
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
@@ -134,11 +137,15 @@ function createProgram() {
 // --- Sample data factories ---
 function makeSessions(count = 2) {
   return Array.from({ length: count }, (_, i) => ({
+    id: `uuid-${i + 1}`,
     index: i + 1,
     title: `Session ${i + 1}`,
     createdAt: new Date('2025-01-01'),
+    lastUpdatedAt: new Date('2025-01-01'),
     messageCount: 5,
+    workspaceId: 'ws1',
     workspacePath: '/ws',
+    preview: 'Preview',
   }));
 }
 
@@ -335,12 +342,14 @@ describe('list command', () => {
 describe('show command', () => {
   it('shows session detail by index', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
 
     const program = createProgram();
     registerShowCommand(program);
     await program.parseAsync(['node', 'test', 'show', '1']);
 
+    expect(mockResolveSessionIndex).toHaveBeenCalledWith('1', undefined, undefined);
     expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined);
     expect(mockFormatSessionDetail).toHaveBeenCalledWith(
       session,
@@ -357,6 +366,7 @@ describe('show command', () => {
 
   it('shows session with --json flag', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
 
     const program = createProgram();
@@ -368,6 +378,7 @@ describe('show command', () => {
   });
 
   it('shows session with --short flag', async () => {
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(makeSession());
 
     const program = createProgram();
@@ -382,6 +393,7 @@ describe('show command', () => {
   });
 
   it('shows session with --think flag', async () => {
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(makeSession());
 
     const program = createProgram();
@@ -396,6 +408,7 @@ describe('show command', () => {
   });
 
   it('shows session with --error flag', async () => {
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(makeSession());
 
     const program = createProgram();
@@ -410,29 +423,52 @@ describe('show command', () => {
   });
 
   it('exits with error for invalid index (0)', async () => {
+    mockResolveSessionIndex.mockRejectedValue(new SessionNotFoundError(0));
+
     const program = createProgram();
     registerShowCommand(program);
 
     await expect(program.parseAsync(['node', 'test', 'show', '0'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
-    expect(exitSpy).toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(3);
   });
 
-  it('exits with error for non-numeric index', async () => {
+  it('exits with error for unknown composer ID', async () => {
+    mockResolveSessionIndex.mockRejectedValue(new SessionNotFoundError('unknown-uuid'));
+
     const program = createProgram();
     registerShowCommand(program);
 
-    await expect(program.parseAsync(['node', 'test', 'show', 'abc'])).rejects.toThrow(
+    await expect(program.parseAsync(['node', 'test', 'show', 'unknown-uuid'])).rejects.toThrow(
       'process.exit'
     );
 
     expect(consoleErrorSpy).toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(3);
   });
 
-  it('throws SessionNotFoundError when session is null', async () => {
-    mockGetSession.mockResolvedValue(null);
-    mockListSessions.mockResolvedValue(makeSessions(5));
+  it('shows session detail by composer ID', async () => {
+    const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
+    mockGetSession.mockResolvedValue(session);
+
+    const program = createProgram();
+    registerShowCommand(program);
+    await program.parseAsync(['node', 'test', 'show', 'uuid-abc']);
+
+    expect(mockResolveSessionIndex).toHaveBeenCalledWith('uuid-abc', undefined, undefined);
+    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined);
+    expect(mockFormatSessionDetail).toHaveBeenCalledWith(
+      session,
+      '/ws',
+      expect.any(Object)
+    );
+    expect(consoleSpy).toHaveBeenCalledWith('session detail');
+  });
+
+  it('throws SessionNotFoundError when session is not found', async () => {
+    mockResolveSessionIndex.mockRejectedValue(new SessionNotFoundError(99));
 
     const program = createProgram();
     registerShowCommand(program);
@@ -441,13 +477,13 @@ describe('show command', () => {
       'process.exit'
     );
 
-    // handleError is called which does console.error + process.exit
     expect(consoleErrorSpy).toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalledWith(3);
   });
 
   it('passes --only filter types to validateMessageTypes and filterMessages', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
     mockValidateMessageTypes.mockReturnValue([]);
 
@@ -460,6 +496,7 @@ describe('show command', () => {
   });
 
   it('exits with error for invalid --only types', async () => {
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockValidateMessageTypes.mockReturnValue(['invalid_type']);
 
     const program = createProgram();
@@ -473,13 +510,15 @@ describe('show command', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it('passes custom data-path to getSession', async () => {
+  it('passes custom data-path to resolveSessionIndex and getSession', async () => {
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(makeSession());
 
     const program = createProgram();
     registerShowCommand(program);
     await program.parseAsync(['node', 'test', '--data-path', '/custom/path', 'show', '1']);
 
+    expect(mockResolveSessionIndex).toHaveBeenCalledWith('1', '/custom/path', undefined);
     expect(mockGetSession).toHaveBeenCalledWith(1, '/custom/path', undefined);
   });
 });
@@ -594,6 +633,7 @@ describe('search command', () => {
 describe('export command', () => {
   it('exports single session to markdown', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
     mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
     mockExistsSync.mockReturnValue(false); // output file doesn't exist
@@ -602,6 +642,7 @@ describe('export command', () => {
     registerExportCommand(program);
     await program.parseAsync(['node', 'test', 'export', '1', '-o', '/tmp/out.md']);
 
+    expect(mockResolveSessionIndex).toHaveBeenCalledWith('1', undefined, undefined);
     expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined);
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledWith('/tmp/out.md', '# Markdown', 'utf-8');
     expect(consoleSpy).toHaveBeenCalledWith('Export done');
@@ -609,6 +650,7 @@ describe('export command', () => {
 
   it('exports single session to json format', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
     mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
     mockExistsSync.mockReturnValue(false);
@@ -622,6 +664,7 @@ describe('export command', () => {
 
   it('exports single session with --json result output', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
     mockFindWorkspaces.mockResolvedValue([]);
     mockExistsSync.mockReturnValue(false);
@@ -631,6 +674,22 @@ describe('export command', () => {
     await program.parseAsync(['node', 'test', '--json', 'export', '1', '-o', '/tmp/out.md']);
 
     expect(consoleSpy).toHaveBeenCalledWith('{"exported":[]}');
+  });
+
+  it('exports single session by composer ID', async () => {
+    const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
+    mockGetSession.mockResolvedValue(session);
+    mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
+    mockExistsSync.mockReturnValue(false);
+
+    const program = createProgram();
+    registerExportCommand(program);
+    await program.parseAsync(['node', 'test', 'export', 'uuid-xyz', '-o', '/tmp/out.md']);
+
+    expect(mockResolveSessionIndex).toHaveBeenCalledWith('uuid-xyz', undefined, undefined);
+    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined);
+    expect(vi.mocked(writeFileSync)).toHaveBeenCalledWith('/tmp/out.md', '# Markdown', 'utf-8');
   });
 
   it('exits with error when no index and no --all', async () => {
@@ -643,6 +702,8 @@ describe('export command', () => {
   });
 
   it('exits with error for invalid index', async () => {
+    mockResolveSessionIndex.mockRejectedValue(new SessionNotFoundError(0));
+
     const program = createProgram();
     registerExportCommand(program);
 
@@ -651,11 +712,11 @@ describe('export command', () => {
     );
 
     expect(consoleErrorSpy).toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(3);
   });
 
   it('exits with error when session not found', async () => {
-    mockGetSession.mockResolvedValue(null);
-    mockListSessions.mockResolvedValue(makeSessions(3));
+    mockResolveSessionIndex.mockRejectedValue(new SessionNotFoundError(99));
 
     const program = createProgram();
     registerExportCommand(program);
@@ -667,8 +728,21 @@ describe('export command', () => {
     expect(exitSpy).toHaveBeenCalledWith(3);
   });
 
+  it('exits with error for unknown composer ID', async () => {
+    mockResolveSessionIndex.mockRejectedValue(new SessionNotFoundError('no-such-id'));
+
+    const program = createProgram();
+    registerExportCommand(program);
+
+    await expect(program.parseAsync(['node', 'test', 'export', 'no-such-id', '-o', '/tmp/out.md']))
+      .rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(3);
+  });
+
   it('exits with error when file exists and no --force', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
     mockFindWorkspaces.mockResolvedValue([]);
     mockExistsSync.mockReturnValue(true); // file already exists
@@ -685,6 +759,7 @@ describe('export command', () => {
 
   it('overwrites file when --force is set', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
     mockFindWorkspaces.mockResolvedValue([]);
     mockExistsSync.mockReturnValue(true);
@@ -729,6 +804,7 @@ describe('export command', () => {
 
   it('generates default filename when no -o specified', async () => {
     const session = makeSession();
+    mockResolveSessionIndex.mockResolvedValue(1);
     mockGetSession.mockResolvedValue(session);
     mockFindWorkspaces.mockResolvedValue([]);
     mockExistsSync.mockReturnValue(false);

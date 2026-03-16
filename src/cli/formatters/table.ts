@@ -123,9 +123,15 @@ export function formatSessionsTable(sessions: ChatSessionSummary[], showIds = fa
   }
 
   lines.push('');
-  lines.push(pc.dim(`Showing ${sessions.length} session(s). Use "show <#>" to view details.`));
+  lines.push(
+    pc.dim(
+      `Showing ${sessions.length} session(s). Use "show <#>" or "show <composer-id>" to view details.`
+    )
+  );
   if (showIds) {
-    lines.push(pc.dim(`Composer IDs can be used with external tools for export.`));
+    lines.push(
+      pc.dim(`Composer IDs can be used with external tools and show/export commands.`)
+    );
   }
 
   return lines.join('\n');

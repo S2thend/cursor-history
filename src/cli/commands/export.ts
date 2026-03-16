@@ -6,12 +6,11 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { getSession, listSessions, findWorkspaces } from '../../core/storage.js';
+import { getSession, listSessions, findWorkspaces, resolveSessionIndex } from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
 import { exportToMarkdown, exportToJson } from '../../core/parser.js';
 import { formatExportSuccess, formatExportResultJson } from '../formatters/index.js';
 import {
-  SessionNotFoundError,
   FileExistsError,
   handleError,
   CliError,
@@ -35,7 +34,7 @@ interface ExportCommandOptions {
 export function registerExportCommand(program: Command): void {
   program
     .command('export [index]')
-    .description('Export chat session(s) to file')
+    .description('Export chat session(s) to file (index or composer ID)')
     .option('-o, --output <path>', 'Output file or directory')
     .option('-f, --format <format>', 'Output format: md or json', 'md')
     .option('--force', 'Overwrite existing files')
@@ -148,16 +147,12 @@ export function registerExportCommand(program: Command): void {
               exported.push({ index: session.index, path: contractPath(filePath) });
             }
           } else {
-            // Export single session
-            const index = parseInt(indexArg!, 10);
-
-            if (isNaN(index) || index < 1) {
-              throw new CliError(
-                `Invalid index: ${indexArg}. Must be a positive number.`,
-                ExitCode.USAGE_ERROR
-              );
-            }
-
+            // Export single session (index or composer ID)
+            const index = await resolveSessionIndex(
+              indexArg!,
+              customPath ? expandPath(customPath) : undefined,
+              backupPath
+            );
             const session = await getSession(
               index,
               customPath ? expandPath(customPath) : undefined,
@@ -165,12 +160,11 @@ export function registerExportCommand(program: Command): void {
             );
 
             if (!session) {
-              const sessions = await listSessions(
-                { limit: 0, all: true },
-                customPath ? expandPath(customPath) : undefined,
-                backupPath
-              );
-              throw new SessionNotFoundError(index, sessions.length);
+              const msg =
+                indexArg === String(index)
+                  ? `Session ${index} could not be loaded.`
+                  : `Session ${indexArg} (index ${index}) could not be loaded.`;
+              handleError(new Error(msg));
             }
 
             const workspaces = await findWorkspaces(

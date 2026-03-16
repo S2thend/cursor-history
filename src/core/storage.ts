@@ -1827,6 +1827,46 @@ export function updateComposerData(
 }
 
 /**
+ * Resolve a single session identifier (index or composer ID) to a 1-based session index.
+ * Used by show and export so they accept either index or composer ID; only the index is
+ * needed to call getSession(index, ...).
+ *
+ * @param identifier - Session index (e.g. "1") or composer ID (UUID string)
+ * @param customDataPath - Optional custom Cursor data path
+ * @param backupPath - Optional path to backup zip (for show -b / export -b)
+ * @returns The 1-based session index
+ * @throws SessionNotFoundError from lib/errors if not found
+ */
+export async function resolveSessionIndex(
+  identifier: string,
+  customDataPath?: string,
+  backupPath?: string
+): Promise<number> {
+  const summaries = await listSessions(
+    { limit: 0, all: true },
+    customDataPath,
+    backupPath
+  );
+
+  let summary: ChatSessionSummary | undefined;
+
+  if (/^\d+$/.test(identifier)) {
+    const index = parseInt(identifier, 10);
+    if (index >= 1) {
+      summary = summaries.find((s) => s.index === index);
+    }
+  } else {
+    summary = summaries.find((s) => s.id === identifier);
+  }
+
+  if (!summary) {
+    throw new SessionNotFoundError(identifier);
+  }
+
+  return summary.index;
+}
+
+/**
  * Resolve session identifiers (index or ID) to actual session IDs
  * Supports: single index (number), single ID (string), comma-separated, or array
  *

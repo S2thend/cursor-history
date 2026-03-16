@@ -4,7 +4,7 @@
 
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { getSession, listSessions } from '../../core/storage.js';
+import { getSession, resolveSessionIndex } from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
 import {
   formatSessionDetail,
@@ -12,7 +12,7 @@ import {
   filterMessages,
   validateMessageTypes,
 } from '../formatters/index.js';
-import { SessionNotFoundError, handleError } from '../errors.js';
+import { handleError } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 import type { MessageType } from '../../core/types.js';
 import { MESSAGE_TYPES } from '../../core/types.js';
@@ -34,7 +34,7 @@ interface ShowCommandOptions {
 export function registerShowCommand(program: Command): void {
   program
     .command('show <index>')
-    .description('Show a chat session by index')
+    .description('Show a chat session by index or composer ID (from list --ids)')
     .option('-s, --short', 'Truncate user and assistant messages')
     .option('-t, --think', 'Show full thinking/reasoning text')
     .option('--tool', 'Show full tool call details (commands, content, results)')
@@ -49,12 +49,6 @@ export function registerShowCommand(program: Command): void {
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
       const backupPath = options.backup ? expandPath(options.backup) : undefined;
-
-      const index = parseInt(indexArg, 10);
-
-      if (isNaN(index) || index < 1) {
-        handleError(new Error(`Invalid index: ${indexArg}. Must be a positive number.`));
-      }
 
       // Parse and validate message type filter
       let messageFilter: MessageType[] | undefined;
@@ -94,6 +88,11 @@ export function registerShowCommand(program: Command): void {
       }
 
       try {
+        const index = await resolveSessionIndex(
+          indexArg,
+          customPath ? expandPath(customPath) : undefined,
+          backupPath
+        );
         const session = await getSession(
           index,
           customPath ? expandPath(customPath) : undefined,
@@ -101,13 +100,12 @@ export function registerShowCommand(program: Command): void {
         );
 
         if (!session) {
-          // Get max index for error message
-          const sessions = await listSessions(
-            { limit: 0, all: true },
-            customPath ? expandPath(customPath) : undefined,
-            backupPath
-          );
-          throw new SessionNotFoundError(index, sessions.length);
+          // Resolver already validated session exists; getSession null is unexpected
+          const msg =
+            indexArg === String(index)
+              ? `Session ${index} could not be loaded.`
+              : `Session ${indexArg} (index ${index}) could not be loaded.`;
+          handleError(new Error(msg));
         }
 
         // Show backup source indicator if reading from backup
