@@ -4,7 +4,7 @@
 
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { getSession, resolveSessionIndex } from '../../core/storage.js';
+import { getSession, listSessions } from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
 import {
   formatSessionDetail,
@@ -12,7 +12,7 @@ import {
   filterMessages,
   validateMessageTypes,
 } from '../formatters/index.js';
-import { handleError } from '../errors.js';
+import { SessionNotFoundError, handleError } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 import type { MessageType } from '../../core/types.js';
 import { MESSAGE_TYPES } from '../../core/types.js';
@@ -49,6 +49,16 @@ export function registerShowCommand(program: Command): void {
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
       const backupPath = options.backup ? expandPath(options.backup) : undefined;
+
+      // Only treat arg as index when the entire string is digits
+      const identifier: number | string = /^\d+$/.test(indexArg!)
+        ? parseInt(indexArg!, 10)
+        : indexArg!;
+
+      // CLI uses 1-based index; 0 is invalid
+      if (typeof identifier === 'number' && identifier < 1) {
+        handleError(new Error(`Invalid index: ${indexArg}. Must be a positive number.`));
+      }
 
       // Parse and validate message type filter
       let messageFilter: MessageType[] | undefined;
@@ -88,24 +98,23 @@ export function registerShowCommand(program: Command): void {
       }
 
       try {
-        const index = await resolveSessionIndex(
-          indexArg,
-          customPath ? expandPath(customPath) : undefined,
-          backupPath
-        );
         const session = await getSession(
-          index,
+          identifier,
           customPath ? expandPath(customPath) : undefined,
           backupPath
         );
 
         if (!session) {
-          // Resolver already validated session exists; getSession null is unexpected
-          const msg =
-            indexArg === String(index)
-              ? `Session ${index} could not be loaded.`
-              : `Session ${indexArg} (index ${index}) could not be loaded.`;
-          handleError(new Error(msg));
+          if (typeof identifier === 'number') {
+            const sessions = await listSessions(
+              { limit: 0, all: true },
+              customPath ? expandPath(customPath) : undefined,
+              backupPath
+            );
+            throw new SessionNotFoundError({ index: identifier, maxIndex: sessions.length });
+          } else {
+            throw new SessionNotFoundError({ composerId: identifier });
+          }
         }
 
         // Show backup source indicator if reading from backup

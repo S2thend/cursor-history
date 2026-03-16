@@ -25,7 +25,6 @@ export {
   listWorkspaces,
   listSessions,
   getSession,
-  resolveSessionIndex,
   searchSessions,
   openDatabase,
   readWorkspaceJson,

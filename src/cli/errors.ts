@@ -2,8 +2,6 @@
  * Error handling utilities and exit codes
  */
 
-import { isSessionNotFoundError } from '../lib/errors.js';
-
 /**
  * CLI exit codes following Unix conventions
  */
@@ -58,17 +56,19 @@ export class NoHistoryError extends CliError {
   }
 }
 
+type SessionNotFoundErrorArgs = { composerId: string } | { index: number; maxIndex: number };
+
 /**
- * Error for invalid session index or composer ID
+ * Error when session is not found by index or composer ID.
  */
 export class SessionNotFoundError extends CliError {
-  constructor(identifier: number | string, maxIndex: number) {
+  constructor(args: SessionNotFoundErrorArgs) {
     const message =
-      typeof identifier === 'number'
-        ? maxIndex > 0
-          ? `Session #${identifier} not found. Valid range: 1-${maxIndex}`
-          : 'No sessions found.'
-        : `Session '${identifier}' not found.`;
+      'composerId' in args
+        ? `Session not found: ${args.composerId}`
+        : args.maxIndex > 0
+          ? `Session #${args.index} not found. Valid range: 1-${args.maxIndex}`
+          : 'No sessions found.';
     super(message, ExitCode.NOT_FOUND);
     this.name = 'SessionNotFoundError';
   }
@@ -101,11 +101,6 @@ export function handleError(error: unknown): never {
   if (error instanceof CliError) {
     console.error(error.message);
     process.exit(error.exitCode);
-  }
-
-  if (isSessionNotFoundError(error)) {
-    console.error(error.message);
-    process.exit(ExitCode.NOT_FOUND);
   }
 
   if (error instanceof Error) {

@@ -6,11 +6,12 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { getSession, listSessions, findWorkspaces, resolveSessionIndex } from '../../core/storage.js';
+import { getSession, listSessions, findWorkspaces } from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
 import { exportToMarkdown, exportToJson } from '../../core/parser.js';
 import { formatExportSuccess, formatExportResultJson } from '../formatters/index.js';
 import {
+  SessionNotFoundError,
   FileExistsError,
   handleError,
   CliError,
@@ -76,7 +77,7 @@ export function registerExportCommand(program: Command): void {
           // Validate arguments
           if (!options.all && !indexArg) {
             throw new CliError(
-              'Please specify a session index or use --all to export all sessions.',
+              'Please specify a session index or composer ID, or use --all to export all sessions.',
               ExitCode.USAGE_ERROR
             );
           }
@@ -148,23 +149,37 @@ export function registerExportCommand(program: Command): void {
             }
           } else {
             // Export single session (index or composer ID)
-            const index = await resolveSessionIndex(
-              indexArg!,
-              customPath ? expandPath(customPath) : undefined,
-              backupPath
-            );
+
+            // Only treat arg as index when the entire string is digits
+            const identifier: number | string = /^\d+$/.test(indexArg!)
+              ? parseInt(indexArg!, 10)
+              : indexArg!;
+
+            // CLI uses 1-based index; 0 is invalid
+            if (typeof identifier === 'number' && identifier < 1) {
+              throw new CliError(
+                `Invalid index: ${indexArg}. Must be a positive number.`,
+                ExitCode.USAGE_ERROR
+              );
+            }
+
             const session = await getSession(
-              index,
+              identifier,
               customPath ? expandPath(customPath) : undefined,
               backupPath
             );
 
             if (!session) {
-              const msg =
-                indexArg === String(index)
-                  ? `Session ${index} could not be loaded.`
-                  : `Session ${indexArg} (index ${index}) could not be loaded.`;
-              handleError(new Error(msg));
+              if (typeof identifier === 'number') {
+                const sessions = await listSessions(
+                  { limit: 0, all: true },
+                  customPath ? expandPath(customPath) : undefined,
+                  backupPath
+                );
+                throw new SessionNotFoundError({ index: identifier, maxIndex: sessions.length });
+              } else {
+                throw new SessionNotFoundError({ composerId: identifier });
+              }
             }
 
             const workspaces = await findWorkspaces(
@@ -183,7 +198,7 @@ export function registerExportCommand(program: Command): void {
               const safeTitle = (session.title ?? 'untitled')
                 .replace(/[^a-zA-Z0-9-_]/g, '_')
                 .slice(0, 30);
-              outputPath = `${dateStr}-${index}-${safeTitle}.${format}`;
+              outputPath = `${dateStr}-${session.index}-${safeTitle}.${format}`;
             }
 
             // Check if file exists
@@ -209,7 +224,7 @@ export function registerExportCommand(program: Command): void {
                 : exportToMarkdown(session, workspacePath);
 
             writeFileSync(outputPath, content, 'utf-8');
-            exported.push({ index, path: contractPath(outputPath) });
+            exported.push({ index: session.index, path: contractPath(outputPath) });
           }
 
           // Output result

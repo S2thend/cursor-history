@@ -240,9 +240,9 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
 }
 
 /**
- * Get a specific session by index.
+ * Get a specific session by index or session ID.
  *
- * @param index - Zero-based session index (from listSessions result)
+ * @param index - Zero-based session index (from listSessions result) or session ID string
  * @param config - Optional configuration (dataPath, messageFilter)
  * @returns Complete session with all messages (filtered if messageFilter specified)
  * @throws {DatabaseLockedError} If database is locked by Cursor
@@ -255,6 +255,10 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
  * console.log(session.messages); // Message[]
  *
  * @example
+ * // Get session by session ID
+ * const session = await getSession('abc-123-session-id');
+ *
+ * @example
  * // Get session from custom data path
  * const session = await getSession(5, { dataPath: '/custom/cursor/data' });
  *
@@ -262,7 +266,7 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
  * // Get session with only user messages
  * const session = await getSession(0, { messageFilter: ['user'] });
  */
-export async function getSession(index: number, config?: LibraryConfig): Promise<Session> {
+export async function getSession(index: number | string, config?: LibraryConfig): Promise<Session> {
   try {
     const resolved = mergeWithDefaults(config);
 
@@ -274,12 +278,17 @@ export async function getSession(index: number, config?: LibraryConfig): Promise
       }
     }
 
-    // Core storage uses 1-based indexing, so we add 1
-    const coreIndex = index + 1;
+    // Core storage uses 1-based indexing, so we add 1 when passed an index.
+    const coreIdentifier: number | string = typeof index === 'number' ? index + 1 : index;
 
-    const coreSession = await storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
+    const coreSession = await storage.getSession(
+      coreIdentifier,
+      resolved.dataPath,
+      resolved.backupPath
+    );
+
     if (!coreSession) {
-      throw new DatabaseNotFoundError(`Session at index ${index} not found`);
+      throw new DatabaseNotFoundError(`Session not found: ${index}`);
     }
 
     // Apply message filter if provided
@@ -443,7 +452,7 @@ export async function searchSessions(
 /**
  * Export a session to JSON format.
  *
- * @param index - Zero-based session index (from listSessions result)
+ * @param index - Zero-based session index or composer ID string
  * @param config - Optional configuration (dataPath)
  * @returns JSON string representation of session
  * @throws {DatabaseLockedError} If database is locked by Cursor
@@ -453,15 +462,27 @@ export async function searchSessions(
  * @example
  * const json = await exportSessionToJson(0);
  * fs.writeFileSync('session.json', json);
+ *
+ * @example
+ * const json = await exportSessionToJson('composer-id-uuid');
  */
-export async function exportSessionToJson(index: number, config?: LibraryConfig): Promise<string> {
+export async function exportSessionToJson(
+  index: number | string,
+  config?: LibraryConfig
+): Promise<string> {
   try {
     const resolved = mergeWithDefaults(config);
-    const coreIndex = index + 1; // Convert to 1-based indexing
 
-    const coreSession = await storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
+    // Core storage uses 1-based indexing, so we add 1 when passed an index.
+    const coreIdentifier: number | string = typeof index === 'number' ? index + 1 : index;
+
+    const coreSession = await storage.getSession(
+      coreIdentifier,
+      resolved.dataPath,
+      resolved.backupPath
+    );
     if (!coreSession) {
-      throw new DatabaseNotFoundError(`Session at index ${index} not found`);
+      throw new DatabaseNotFoundError(`Session not found: ${index}`);
     }
 
     return exportToJson(coreSession, coreSession.workspacePath);
@@ -478,28 +499,36 @@ export async function exportSessionToJson(index: number, config?: LibraryConfig)
 /**
  * Export a session to Markdown format.
  *
- * @param index - Zero-based session index (from listSessions result)
+ * @param index - Zero-based session index or composer ID string
  * @param config - Optional configuration (dataPath)
  * @returns Markdown formatted string
  * @throws {DatabaseLockedError} If database is locked by Cursor
- * @throws {DatabaseNotFoundError} If database path does not exist
- * @throws {InvalidConfigError} If index is out of bounds
+ * @throws {DatabaseNotFoundError} If database path does not exist or session cannot be found
  *
  * @example
  * const markdown = await exportSessionToMarkdown(0);
  * fs.writeFileSync('session.md', markdown);
+ *
+ * @example
+ * const markdown = await exportSessionToMarkdown('session-id-uuid');
  */
 export async function exportSessionToMarkdown(
-  index: number,
+  index: number | string,
   config?: LibraryConfig
 ): Promise<string> {
   try {
     const resolved = mergeWithDefaults(config);
-    const coreIndex = index + 1; // Convert to 1-based indexing
 
-    const coreSession = await storage.getSession(coreIndex, resolved.dataPath, resolved.backupPath);
+    // Core storage uses 1-based indexing, so we add 1 when passed an index.
+    const coreIdentifier: number | string = typeof index === 'number' ? index + 1 : index;
+
+    const coreSession = await storage.getSession(
+      coreIdentifier,
+      resolved.dataPath,
+      resolved.backupPath
+    );
     if (!coreSession) {
-      throw new DatabaseNotFoundError(`Session at index ${index} not found`);
+      throw new DatabaseNotFoundError(`Session not found: ${index}`);
     }
 
     return exportToMarkdown(coreSession, coreSession.workspacePath);

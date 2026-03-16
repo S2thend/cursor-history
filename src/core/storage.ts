@@ -408,24 +408,29 @@ export async function listWorkspaces(
 }
 
 /**
- * Get a specific session by index
+ * Get a specific session by index (1-based) or composer ID
  * Tries global storage first for complete AI responses, falls back to workspace storage
- * @param index - Session index (1-based)
+ * @param identifier - Session index (1-based number) or composer ID (string)
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
+ * @returns The session or null (identifier not found).
  */
 export async function getSession(
-  index: number,
+  identifier: number | string,
   customDataPath?: string,
   backupPath?: string
 ): Promise<ChatSession | null> {
   // T030: Support reading from backup
   const summaries = await listSessions({ limit: 0, all: true }, customDataPath, backupPath);
-  const summary = summaries.find((s) => s.index === index);
-
+  const summary: ChatSessionSummary | undefined =
+    typeof identifier === 'string'
+      ? summaries.find((s) => s.id === identifier)
+      : summaries.find((s) => s.index === identifier);
   if (!summary) {
     return null;
   }
+
+  const index: number = typeof identifier === 'string' ? summary.index : identifier;
 
   // Try to get full session from global storage (has AI responses)
   // This works for both live data and backup (if backup includes globalStorage)
@@ -1824,46 +1829,6 @@ export function updateComposerData(
     jsonValue,
     'composer.composerData'
   );
-}
-
-/**
- * Resolve a single session identifier (index or composer ID) to a 1-based session index.
- * Used by show and export so they accept either index or composer ID; only the index is
- * needed to call getSession(index, ...).
- *
- * @param identifier - Session index (e.g. "1") or composer ID (UUID string)
- * @param customDataPath - Optional custom Cursor data path
- * @param backupPath - Optional path to backup zip (for show -b / export -b)
- * @returns The 1-based session index
- * @throws SessionNotFoundError from lib/errors if not found
- */
-export async function resolveSessionIndex(
-  identifier: string,
-  customDataPath?: string,
-  backupPath?: string
-): Promise<number> {
-  const summaries = await listSessions(
-    { limit: 0, all: true },
-    customDataPath,
-    backupPath
-  );
-
-  let summary: ChatSessionSummary | undefined;
-
-  if (/^\d+$/.test(identifier)) {
-    const index = parseInt(identifier, 10);
-    if (index >= 1) {
-      summary = summaries.find((s) => s.index === index);
-    }
-  } else {
-    summary = summaries.find((s) => s.id === identifier);
-  }
-
-  if (!summary) {
-    throw new SessionNotFoundError(identifier);
-  }
-
-  return summary.index;
 }
 
 /**

@@ -164,6 +164,15 @@ describe('getSession', () => {
     expect(mockGetSession).toHaveBeenCalledWith(1, expect.anything(), undefined);
   });
 
+  it('passes composer ID string through to core getSession', async () => {
+    mockGetSession.mockResolvedValue(makeCoreSession('my-composer-id', 1));
+
+    const session = await getSession('my-composer-id');
+
+    expect(mockGetSession).toHaveBeenCalledWith('my-composer-id', expect.anything(), undefined);
+    expect(session.id).toBe('my-composer-id');
+  });
+
   it('returns converted Session', async () => {
     mockGetSession.mockResolvedValue(makeCoreSession());
 

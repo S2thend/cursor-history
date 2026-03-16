@@ -57,15 +57,21 @@ describe('NoHistoryError', () => {
 
 describe('SessionNotFoundError', () => {
   it('shows range when maxIndex > 0', () => {
-    const err = new SessionNotFoundError(5, 3);
+    const err = new SessionNotFoundError({ index: 5, maxIndex: 3 });
     expect(err.message).toContain('Session #5');
     expect(err.message).toContain('1-3');
     expect(err.exitCode).toBe(ExitCode.NOT_FOUND);
   });
 
   it('shows no sessions message when maxIndex is 0', () => {
-    const err = new SessionNotFoundError(1, 0);
+    const err = new SessionNotFoundError({ index: 1, maxIndex: 0 });
     expect(err.message).toContain('No sessions found');
+  });
+
+  it('shows composer ID when session not found by ID', () => {
+    const err = new SessionNotFoundError({ composerId: 'xyz-123-abc' });
+    expect(err.message).toBe('Session not found: xyz-123-abc');
+    expect(err.exitCode).toBe(ExitCode.NOT_FOUND);
   });
 });
 

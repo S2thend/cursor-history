@@ -35,7 +35,6 @@ import {
   findWorkspaces,
   listSessions,
   getSession,
-  resolveSessionIndex,
   searchSessions,
   getComposerData,
   updateComposerData,
@@ -317,6 +316,20 @@ describe('getSession', () => {
     expect(result).toBeNull();
   });
 
+  it('returns null for unknown composer ID', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Only Session', createdAt: 1000 }],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+    const result = await getSession('unknown-composer-id', '/data');
+    expect(result).toBeNull();
+  });
+
   it('returns session from global storage with bubble data', async () => {
     // Setup workspace to list sessions
     vi.mocked(existsSync).mockReturnValue(true);
@@ -357,6 +370,44 @@ describe('getSession', () => {
     expect(result!.messages[0]!.role).toBe('user');
     expect(result!.messages[0]!.content).toBe('Hello from user');
     expect(result!.messages[1]!.role).toBe('assistant');
+    expect(result!.messages[1]!.content).toBe('Here is my response');
+  });
+
+  it('returns same session when called with composer ID string', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test Chat', createdAt: 1000 }],
+    });
+
+    const userBubble = JSON.stringify({
+      type: 1,
+      text: 'Hello from user',
+      createdAt: '2024-01-15T10:00:00Z',
+      bubbleId: 'b1',
+    });
+
+    const assistantBubble = JSON.stringify({
+      type: 2,
+      text: 'Here is my response',
+      createdAt: '2024-01-15T10:01:00Z',
+      bubbleId: 'b2',
+    });
+
+    setupGetSessionMocks(composerData, [
+      { key: 'bubbleId:c1:b1', value: userBubble },
+      { key: 'bubbleId:c1:b2', value: assistantBubble },
+    ]);
+
+    const result = await getSession('c1', '/data');
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe('c1');
+    expect(result!.messages).toHaveLength(2);
+    expect(result!.messages[0]!.content).toBe('Hello from user');
     expect(result!.messages[1]!.content).toBe('Here is my response');
   });
 
@@ -603,54 +654,6 @@ describe('updateComposerData', () => {
 });
 
 // =============================================================================
-// resolveSessionIndex
-// =============================================================================
-describe('resolveSessionIndex', () => {
-  function setupSessions() {
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readdirSync).mockReturnValue([
-      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
-    ]);
-    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
-
-    const composerData = JSON.stringify({
-      allComposers: [
-        { composerId: 'uuid-abc', name: 'Session A', createdAt: 2000 },
-        { composerId: 'uuid-def', name: 'Session B', createdAt: 1000 },
-      ],
-    });
-    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
-  }
-
-  it('resolves by 1-based index', async () => {
-    setupSessions();
-    const index = await resolveSessionIndex('1', '/data');
-    expect(index).toBe(1);
-  });
-
-  it('resolves by composer ID', async () => {
-    setupSessions();
-    const index = await resolveSessionIndex('uuid-def', '/data');
-    expect(index).toBe(2);
-  });
-
-  it('throws for unknown index', async () => {
-    setupSessions();
-    await expect(resolveSessionIndex('999', '/data')).rejects.toThrow();
-  });
-
-  it('throws for unknown composer ID', async () => {
-    setupSessions();
-    await expect(resolveSessionIndex('unknown-uuid', '/data')).rejects.toThrow();
-  });
-
-  it('rejects index 0', async () => {
-    setupSessions();
-    await expect(resolveSessionIndex('0', '/data')).rejects.toThrow();
-  });
-});
-
-// =============================================================================
 // resolveSessionIdentifiers
 // =============================================================================
 describe('resolveSessionIdentifiers', () => {
@@ -698,6 +701,11 @@ describe('resolveSessionIdentifiers', () => {
   it('throws for unknown identifier', async () => {
     setupSessions();
     await expect(resolveSessionIdentifiers(999, '/data')).rejects.toThrow();
+  });
+
+  it('throws for unknown composer ID string', async () => {
+    setupSessions();
+    await expect(resolveSessionIdentifiers('unknown-uuid-xyz', '/data')).rejects.toThrow();
   });
 });
 

@@ -5,7 +5,7 @@
 CLI tool and library to browse, search, and export Cursor AI chat history. Built with TypeScript, commander, pluggable SQLite drivers (better-sqlite3 or node:sqlite), and picocolors.
 
 **Dual Interface:**
-- **CLI**: Command-line tool for interactive use (`cursor-history list`, `cursor-history show 1`)
+- **CLI**: Command-line tool for interactive use (`cursor-history list`, `cursor-history show 1` or `show <composer-id>`)
 - **Library**: Programmatic API for integration (`import { listSessions } from 'cursor-history'`)
 
 ## Quick Reference
@@ -115,12 +115,11 @@ So when someone uses `import { listSessions } from 'cursor-history'`, they're ca
 ### Storage Layer (`src/core/storage.ts`)
 
 - `listSessions()` - Uses workspace storage for listing (correct paths)
-- `getSession()` - Tries global storage first (full AI responses), falls back to workspace
+- `getSession(identifier, ...)` - Get session by 1-based index (number) or composer ID (string). Tries global storage first (full AI responses), falls back to workspace. Returns null when index or composer ID not found.
 - `findWorkspaceForSession(sessionId)` - Finds which workspace contains a session by ID
 - `findWorkspaceByPath(path)` - Finds workspace by its project path
 - `getComposerData(db)` - Reads composer array, handles both `allComposers` and legacy formats
 - `updateComposerData(db, composers)` - Writes composer array, preserves original format
-- `resolveSessionIndex(identifier, customDataPath?, backupPath?)` - Resolves single index or composer ID to 1-based session index (used by show and export)
 - `resolveSessionIdentifiers(input)` - Converts index/ID/comma-separated to session ID array
 - `extractBubbleText()` - Extracts text from bubble with priority order (all based on DB fields, not pattern matching)
 - `extractThinkingText()` - Extracts from `data.thinking.text` DB field
@@ -236,10 +235,10 @@ Tool calls are stored in `toolFormerData`:
 | Function | Description |
 |----------|-------------|
 | `listSessions(config?)` | List sessions with pagination, returns `PaginatedResult<Session>` |
-| `getSession(index, config?)` | Get full session by zero-based index |
+| `getSession(identifier, config?)` | Get full session by zero-based index (number) or composer ID (string) |
 | `searchSessions(query, config?)` | Search across sessions, returns `SearchResult[]` |
-| `exportSessionToJson(index, config?)` | Export single session to JSON string |
-| `exportSessionToMarkdown(index, config?)` | Export single session to Markdown string |
+| `exportSessionToJson(identifier, config?)` | Export single session to JSON (index or composer ID) |
+| `exportSessionToMarkdown(identifier, config?)` | Export single session to Markdown (index or composer ID) |
 | `exportAllSessionsToJson(config?)` | Export all sessions to JSON array string |
 | `exportAllSessionsToMarkdown(config?)` | Export all sessions to Markdown string |
 | `migrateSession(config)` | Move/copy sessions to another workspace |
@@ -292,7 +291,7 @@ try {
 | `list` | List sessions (--all, --ids, --workspaces, -n) |
 | `show <index>` | Show session by index or composer ID (from list --ids) (-s/--short, -t/--think, -f/--fullread, -e/--error, -o/--only) |
 | `search <query>` | Search across sessions (-n, --context) |
-| `export [index]` | Export by index or composer ID, or --all to md/json (-o, -f, --force) |
+| `export [index]` | Export to md/json (--all, -o, -f, --force) |
 | `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f, --debug) |
 | `migrate <source> <dest>` | Move/copy all sessions between workspaces (--copy, --dry-run, -f, --debug) |
 
