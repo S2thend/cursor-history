@@ -367,6 +367,8 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - SQLite (read-only access to existing `state.vscdb` files) (009-token-usage)
 - TypeScript 5.9+ (strict mode enabled) + commander, picocolors, better-sqlite3 / node:sqlite (existing) (010-fix-timestamp-fallback)
 - SQLite databases (`state.vscdb` files) - read-only access (010-fix-timestamp-fallback)
+- TypeScript 5.9+ (strict mode enabled) + better-sqlite3 / node:sqlite (pluggable), commander, picocolors (012-fix-session-data-integrity)
+- SQLite databases (state.vscdb files) — read-only access (012-fix-session-data-integrity)
 
 ## Recent Changes
 - Workspace file path resolution: Workspaces opened via a .code-workspace file are now discovered and matchable
