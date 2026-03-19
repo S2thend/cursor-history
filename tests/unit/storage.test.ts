@@ -199,13 +199,15 @@ describe('readWorkspaceJson', () => {
     expect(result).toBe('/my/workspace.code-workspace');
   });
 
-  it('decodes %20 in workspace', () => {
+  it('decodes percent-encoded characters in workspace URI (e.g. %20, %23, %28, %29)', () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(
-      JSON.stringify({ workspace: 'file:///my%20project/ws.code-workspace' })
+      JSON.stringify({
+        workspace: 'file:///path%23with%28hash%29/my%20ws.code-workspace',
+      })
     );
     const result = readWorkspaceJson('/workspace/dir');
-    expect(result).toBe('/my project/ws.code-workspace');
+    expect(result).toBe('/path#with(hash)/my ws.code-workspace');
   });
 
   it('prefers workspace when both folder and workspace exist', () => {
@@ -837,7 +839,7 @@ describe('searchSessions', () => {
   it('returns empty when no matches', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([]);
-    const result = await searchSessions('xyz', { limit: 10, contextChars: 50 }, '/data');
+    const result = await searchSessions('xyz', { limit: 10 }, '/data');
     expect(result).toEqual([]);
   });
 });

@@ -116,7 +116,5 @@ export function pathsEqual(path1: string, path2: string): boolean {
   const normalize = (p: string) => normalizePath(p).replace(/\\/g, '/');
   const n1 = normalize(path1);
   const n2 = normalize(path2);
-  return process.platform === 'win32'
-    ? n1.toLowerCase() === n2.toLowerCase()
-    : n1 === n2;
+  return process.platform === 'win32' ? n1.toLowerCase() === n2.toLowerCase() : n1 === n2;
 }

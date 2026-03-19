@@ -25,7 +25,10 @@ program
   .version(packageJson.version, '-v, --version', 'Show version number')
   .option('--json', 'Output in JSON format')
   .option('--data-path <path>', 'Custom Cursor data directory')
-  .option('-w, --workspace <path>', 'Filter by workspace path');
+  .option(
+    '-w, --workspace <path>',
+    'Filter by workspace path (no session deduplication across workspaces when set)'
+  );
 
 // Lazy-load commands to avoid circular dependencies
 async function loadCommands() {

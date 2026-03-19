@@ -87,7 +87,7 @@ export async function openDatabaseReadWrite(dbPath: string): Promise<Database> {
 // ============================================================================
 
 /**
- * Workspace.json shape: folder (single-folder) or workspace (.code-workspace path) 
+ * Workspace.json shape: folder (single-folder) or workspace (.code-workspace path)
  */
 interface WorkspaceJsonShape {
   folder?: string;
@@ -95,15 +95,19 @@ interface WorkspaceJsonShape {
 }
 
 /**
- * Convert file:// URI from workspace.json to filesystem path 
+ * Convert file:// URI from workspace.json to filesystem path
  */
 function workspaceUriToPath(uri: string): string {
-  return uri.replace(/^file:\/\//, '').replace(/%20/g, ' ');
+  try {
+    return decodeURIComponent(uri.replace(/^file:\/\//, ''));
+  } catch {
+    return uri.replace(/^file:\/\//, '');
+  }
 }
 
 /**
  * Read workspace path from parsed workspace.json (folder or configuration).
- * Prefers folder; falls back to configuration for .code-workspace workspaces.
+ * Prefers workspace (.code-workspace path); falls back to folder for single-folder workspaces.
  */
 function getWorkspacePathFromJson(data: WorkspaceJsonShape): string | null {
   if (data.workspace) {
@@ -341,6 +345,8 @@ function getChatDataFromDb(db: Database): { data: string; bundle: CursorChatBund
 /**
  * List chat sessions with optional filtering
  * Uses workspace storage for listing (has correct paths and complete list)
+ * When `options.workspacePath` is unset, deduplicates by session ID across workspaces (deterministic order).
+ * When `workspacePath` is set, lists that workspace's DB only with no cross-workspace deduplication.
  * @param options - List options (limit, all, workspacePath)
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
@@ -355,11 +361,12 @@ export async function listSessions(
 
   // Filter by workspace if specified
   // Deterministic order: .code-workspace paths before others, then by path (for stable attribution when deduping)
-  const filteredWorkspaces = (options.workspacePath
-    ? workspaces.filter(
-        (w) => w.path === options.workspacePath || w.path.endsWith(options.workspacePath ?? '')
-      )
-    : workspaces
+  const filteredWorkspaces = (
+    options.workspacePath
+      ? workspaces.filter(
+          (w) => w.path === options.workspacePath || w.path.endsWith(options.workspacePath ?? '')
+        )
+      : workspaces
   ).sort((a, b) => {
     const normA = normalizePath(a.path);
     const normB = normalizePath(b.path);
