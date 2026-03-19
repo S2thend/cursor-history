@@ -81,26 +81,27 @@ A developer or maintainer troubleshooting why sessions appear user-only can enab
 - What happens when a session has zero bubbles in global storage but exists in workspace storage? The workspace fallback should activate and the session should be marked as `source: 'workspace-fallback'`.
 - What happens when `toolFormerData.params` contains invalid JSON? The tool call should still be created, and `toolCalls[].params` should preserve the raw payload in an object-shaped sentinel such as `{ _raw: '...' }`.
 - What happens when `toolFormerData.name` is present but neither `toolFormerData.status` nor `toolFormerData.additionalData.status` is set? The tool call should still be created and default to `status: 'completed'`.
-- What happens when one global bubble row is malformed JSON but the rest of the session is readable? The session should still be returned as `source: 'global'`; parseable bubbles are preserved, the malformed bubble becomes a corrupted placeholder message with `metadata.corrupted = true`, and the parse failure is logged for debugging.
+- What happens when one global bubble row is malformed JSON but the rest of the session is readable? The session should still be returned as `source: 'global'`; parseable bubbles are preserved, the malformed bubble becomes a corrupted placeholder message with `metadata.corrupted = true` and `role: 'assistant'` (default, since the actual type cannot be determined from unparseable data), and the parse failure is logged for debugging.
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
 - **FR-001**: System MUST NOT silently swallow errors when global storage loading fails in `getSession()`. Errors MUST be logged via the existing debug logging system (`DEBUG=cursor-history:*`) before falling back to workspace parsing.
-- **FR-002**: System MUST preserve assistant bubbles (type=2) that have empty extracted text content, using the visible placeholder `[empty message]` in the `content` field instead of silently filtering them out. This is consistent with existing `[Thinking]` and `[Error]` inline marker patterns.
+- **FR-002**: System MUST preserve assistant bubbles (type=2) that have empty extracted text content, using the visible placeholder `[empty message]` in the `content` field instead of silently filtering them out. This is consistent with existing `[Thinking]` and `[Error]` inline marker patterns. (See also FR-006 for the filter mechanism this replaces.)
 - **FR-003**: System MUST populate `message.toolCalls` with structured tool call data when `toolFormerData` contains a tool name, in addition to the existing flattened text rendering. If `toolFormerData.params` is invalid JSON, `toolCalls[].params` MUST preserve the raw payload using an object-shaped sentinel such as `{ _raw: '...' }` rather than widening the public type to include strings. If no explicit tool status is present, the system MUST default `toolCalls[].status` to `'completed'`.
 - **FR-004**: System MUST expose an optional `source` field on `ChatSession` (core) and `Session` (library) indicating whether the session was loaded from global bubble data (`'global'`) or reconstructed from workspace metadata (`'workspace-fallback'`). The field defaults to `undefined` for backward compatibility. For backup-loaded sessions, the `source` value reflects which data was actually available in the backup (not the access method).
 - **FR-005**: System MUST distinguish in debug output between workspace-fallback reasons (global DB not found, `cursorDiskKV` table missing, no bubbles for composer, DB open/query error) and malformed bubble JSON parse errors encountered during otherwise successful global loads.
-- **FR-006**: The `content.length > 0` filter in bubble-to-message mapping MUST be replaced with logic that preserves messages with empty content but annotates them, so that no bubbles are silently discarded.
+- **FR-006**: The `content.length > 0` filter in bubble-to-message mapping MUST be replaced with logic that preserves messages with empty content but annotates them, so that no bubbles are silently discarded. (This is the mechanism for FR-002's placeholder behavior.)
 - **FR-007**: The workspace/composer fallback parser MUST NOT present prompt snapshots as equivalent to full conversation history. Sessions from this path MUST be distinguishable from global-sourced sessions.
 - **FR-008**: The `getGlobalSession()` function MUST apply the same fixes (empty bubble preservation, toolCalls population, debug logging) as `getSession()`.
 - **FR-009**: System MUST NOT downgrade a session to `source: 'workspace-fallback'` solely because one or more individual global bubble rows fail to parse. It MUST preserve all parseable global bubbles and insert one corrupted placeholder message for each malformed row, with debug logging for the parse failure.
 - **FR-010**: Corrupted placeholder messages created for malformed bubble rows MUST set `message.metadata.corrupted` to `true` so consumers can detect degraded message data programmatically.
+- **FR-011**: System MUST populate `message.metadata.bubbleType` with the original bubble `type` value when parsed bubble data provides it, so consumers and maintainers can inspect the source bubble type for debugging.
 
 ### Key Entities
 
-- **Message**: Extended with populated `toolCalls` field and preserved even when `content` is empty. Corrupted placeholder messages set `metadata.corrupted = true`.
+- **Message**: Extended with populated `toolCalls` field and preserved even when `content` is empty. Corrupted placeholder messages set `metadata.corrupted = true`, and parsed bubble messages populate `metadata.bubbleType` when the source bubble type is known.
 - **ToolCall**: Already defined in types; now actually populated from `toolFormerData` during bubble mapping. Invalid JSON params are preserved in `params` via an object-shaped sentinel (for example `{ _raw: '...' }`) so the public type remains object-only.
 - **ChatSession / Session**: Extended with optional `source` field (`source?: 'global' | 'workspace-fallback'`). Defaults to `undefined` for backward compatibility. Non-breaking addition following the same pattern as `tokenUsage`, `model`, and `durationMs`.
 

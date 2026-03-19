@@ -17,7 +17,7 @@ Fix a data integrity bug where `getSession()` and `listSessions()` can return se
 **Project Type**: Single project (CLI + library sharing core)
 **Performance Goals**: N/A (bug fix, no new perf requirements)
 **Constraints**: Non-breaking change — new fields are optional, existing API contracts preserved
-**Scale/Scope**: 5 files modified in core/lib/cli layers, ~200-300 lines changed
+**Scale/Scope**: 7-9 files modified across core/lib/cli/docs layers, ~250-350 lines changed
 
 ## Constitution Check
 
@@ -26,9 +26,9 @@ Fix a data integrity bug where `getSession()` and `listSessions()` can return se
 | Principle | Status | Notes |
 |-----------|--------|-------|
 | I. Simplicity First | ✅ Pass | Minimal changes to existing functions; no new abstractions. `[empty message]` placeholder follows existing `[Thinking]`/`[Error]` pattern. |
-| II. CLI-Native Design | ✅ Pass | CLI `show` command gets a visual indicator for degraded sessions. JSON output includes `source` field. |
-| III. Documentation-Driven | ✅ Pass | Types are self-documenting with JSDoc. CLAUDE.md will be updated with new fields. |
-| IV. Incremental Delivery | ✅ Pass | Each fix (debug logging, empty bubble preservation, toolCalls population, source field) is independently testable and deliverable. |
+| II. CLI-Native Design | ✅ Pass | CLI `show` command gets a visual indicator for degraded sessions, and CLI JSON output will include `source` for machine-readable parity. |
+| III. Documentation-Driven | ✅ Pass | Types are self-documenting with JSDoc. Both `CHANGELOG.md` and `CLAUDE.md` will be updated for this user-facing change. |
+| IV. Incremental Delivery | ✅ Pass | Each fix (debug logging, empty bubble preservation, toolCalls population, source field) has explicit verification tasks, plus manual validation on real Cursor exports before merge. |
 | V. Defensive Parsing | ✅ Pass | This fix directly improves defensive parsing: malformed bubbles become corrupted placeholders instead of being silently dropped; global load failures are logged instead of swallowed. |
 
 No violations. No complexity tracking needed.
@@ -58,10 +58,11 @@ src/
 │       └── debug.ts       # Extend debug logging for storage operations (new namespace)
 ├── cli/
 │   └── formatters/
-│       └── table.ts       # Show degraded session indicator in CLI output
+│       ├── table.ts       # Show degraded session indicator in CLI output
+│       └── json.ts        # Include source in CLI JSON session output
 └── lib/
     ├── types.ts           # Add source field to Session (already has metadata.corrupted)
     └── index.ts           # Thread source field through convertToLibrarySession()
 ```
 
-**Structure Decision**: Existing single-project structure. All changes are modifications to existing files — no new files needed.
+**Structure Decision**: Existing single-project structure. All changes are modifications to existing files plus documentation updates in `CHANGELOG.md` and `CLAUDE.md` — no new files needed.
