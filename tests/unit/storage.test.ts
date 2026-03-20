@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Database } from '../../src/core/database/types.js';
 
 // Mock the database module
@@ -58,12 +58,14 @@ import {
   listWorkspaces,
   listGlobalSessions,
   getGlobalSession,
+  extractToolCalls,
   extractTimestamp,
   fillTimestampGaps,
   extractTokenUsage,
   extractContextWindowStatus,
   extractPromptDryRunInfo,
   extractSessionUsage,
+  mapBubbleToMessage,
 } from '../../src/core/storage.js';
 
 /**
@@ -144,6 +146,11 @@ function createMockDb(queryMap: Record<string, { get?: unknown; all?: unknown[] 
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 // =============================================================================
@@ -830,6 +837,102 @@ describe('getSession', () => {
     expect(result).not.toBeNull();
     expect(result!.messages[0]!.content).toContain('[Error]');
   });
+
+  it('keeps global source and preserves malformed rows as corrupted placeholders', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: 1000 }],
+    });
+
+    setupGetSessionMocks(composerData, [
+      {
+        key: 'bubbleId:c1:b1',
+        value: JSON.stringify({
+          type: 2,
+          text: 'good response',
+          createdAt: '2024-01-15T10:00:00Z',
+          bubbleId: 'b1',
+        }),
+      },
+      { key: 'bubbleId:c1:b2', value: '{"type":2,' },
+    ]);
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('global');
+    expect(result!.messages).toHaveLength(2);
+    expect(result!.messages[1]!.content).toBe('[corrupted message]');
+    expect(result!.messages[1]!.metadata?.corrupted).toBe(true);
+  });
+});
+
+describe('mapBubbleToMessage', () => {
+  it('preserves empty bubbles with a placeholder and bubbleType metadata', () => {
+    const message = mapBubbleToMessage({
+      key: 'bubbleId:c1:b1',
+      value: JSON.stringify({
+        type: 2,
+        text: '',
+        createdAt: '2024-01-15T10:00:00Z',
+        bubbleId: 'b1',
+      }),
+    });
+
+    expect(message.role).toBe('assistant');
+    expect(message.content).toBe('[empty message]');
+    expect(message.metadata?.bubbleType).toBe(2);
+  });
+
+  it('returns a corrupted placeholder when the bubble row is malformed', () => {
+    const message = mapBubbleToMessage({
+      key: 'bubbleId:c1:b-bad',
+      value: '{"type":2,',
+    });
+
+    expect(message.content).toBe('[corrupted message]');
+    expect(message.role).toBe('assistant');
+    expect(message.metadata?.corrupted).toBe(true);
+  });
+});
+
+describe('extractToolCalls', () => {
+  it('preserves invalid params with a raw sentinel and defaults status to completed', () => {
+    const toolCalls = extractToolCalls({
+      toolFormerData: {
+        name: 'read_file',
+        params: '{"bad"',
+        result: '{"contents":"hello"}',
+      },
+    });
+
+    expect(toolCalls).toEqual([
+      expect.objectContaining({
+        name: 'read_file',
+        status: 'completed',
+        params: { _raw: '{"bad"' },
+      }),
+    ]);
+  });
+
+  it('prefers error status from additionalData over other values', () => {
+    const toolCalls = extractToolCalls({
+      toolFormerData: {
+        name: 'run_terminal_command',
+        status: 'completed',
+        additionalData: { status: 'error' },
+        result: '{"message":"boom"}',
+      },
+    });
+
+    expect(toolCalls?.[0]?.status).toBe('error');
+    expect(toolCalls?.[0]?.error).toContain('boom');
+  });
 });
 
 // =============================================================================
@@ -1049,6 +1152,85 @@ describe('getGlobalSession', () => {
     vi.mocked(existsSync).mockReturnValue(false);
     const result = await getGlobalSession(999);
     expect(result).toBeNull();
+  });
+
+  it('returns source=global and preserves malformed rows as placeholders', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+
+    const composerValue = JSON.stringify({
+      name: 'Global Session',
+      createdAt: '2024-01-15T10:00:00Z',
+      updatedAt: '2024-01-15T10:05:00Z',
+    });
+    const goodBubble = JSON.stringify({
+      type: 2,
+      text: 'Assistant reply',
+      createdAt: '2024-01-15T10:01:00Z',
+      bubbleId: 'b1',
+      toolFormerData: {
+        name: 'read_file',
+        params: '{"bad"',
+      },
+    });
+
+    mockOpenDatabase.mockResolvedValue({
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('sqlite_master')) {
+          return {
+            get: vi.fn(() => ({ name: 'cursorDiskKV' })),
+            all: vi.fn(() => []),
+            run: vi.fn(),
+          };
+        }
+        if (sql.includes("LIKE 'composerData:%'")) {
+          return {
+            get: vi.fn(),
+            all: vi.fn(() => [{ key: 'composerData:g1', value: composerValue }]),
+            run: vi.fn(),
+          };
+        }
+        if (sql.includes('COUNT(*)')) {
+          return { get: vi.fn(() => ({ count: 2 })), all: vi.fn(() => []), run: vi.fn() };
+        }
+        if (sql.includes('LIMIT 1')) {
+          return {
+            get: vi.fn(() => ({ value: goodBubble })),
+            all: vi.fn(() => []),
+            run: vi.fn(),
+          };
+        }
+        if (sql.includes('WHERE key LIKE ? ORDER BY rowid ASC')) {
+          return {
+            get: vi.fn(),
+            all: vi.fn(() => [
+              { key: 'bubbleId:g1:b1', value: goodBubble },
+              { key: 'bubbleId:g1:b2', value: '{"type":2,' },
+            ]),
+            run: vi.fn(),
+          };
+        }
+        if (sql.includes('WHERE key = ?')) {
+          return {
+            get: vi.fn(() => ({ value: composerValue })),
+            all: vi.fn(() => []),
+            run: vi.fn(),
+          };
+        }
+        return { get: vi.fn(), all: vi.fn(() => []), run: vi.fn() };
+      }),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    });
+
+    const result = await getGlobalSession(1);
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('global');
+    expect(result!.messages).toHaveLength(2);
+    expect(result!.messages[0]!.metadata?.bubbleType).toBe(2);
+    expect(result!.messages[0]!.toolCalls?.[0]?.params).toEqual({ _raw: '{"bad"' });
+    expect(result!.messages[1]!.content).toBe('[corrupted message]');
+    expect(result!.messages[1]!.metadata?.corrupted).toBe(true);
   });
 });
 
@@ -1569,6 +1751,163 @@ describe('getSession (workspace fallback)', () => {
     // When global storage doesn't have the table, it falls back to workspace
     // The result depends on whether workspace data can reconstruct the session
     expect(result).toBeDefined();
+  });
+
+  it('marks fallback sessions with source=workspace-fallback and logs missing global DB', async () => {
+    vi.stubEnv('DEBUG', 'cursor-history:*');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(existsSync).mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes('globalStorage/state.vscdb')) return false;
+      return value === '/data' || value.includes('state.vscdb') || value.includes('workspace.json');
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Session', createdAt: 2000 }],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('workspace-fallback');
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[cursor-history:storage] Global DB not found')
+    );
+  });
+});
+
+describe('getSession debug logging', () => {
+  function setupFallbackHarness(globalDb: Database) {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Session', createdAt: 2000 }],
+    });
+    const wsDb = createWorkspaceDb(composerData);
+
+    mockOpenDatabase.mockImplementation(async (path: string) => {
+      if (String(path).includes('globalStorage')) return globalDb;
+      return wsDb;
+    });
+  }
+
+  it('logs when cursorDiskKV is missing', async () => {
+    vi.stubEnv('DEBUG', 'cursor-history:*');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    setupFallbackHarness({
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('sqlite_master')) {
+          return { get: vi.fn(() => undefined), all: vi.fn(() => []), run: vi.fn() };
+        }
+        return { get: vi.fn(), all: vi.fn(() => []), run: vi.fn() };
+      }),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    });
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('workspace-fallback');
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[cursor-history:storage] cursorDiskKV table not found')
+    );
+  });
+
+  it('logs when the composer has no global bubbles', async () => {
+    vi.stubEnv('DEBUG', 'cursor-history:*');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    setupFallbackHarness({
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('sqlite_master')) {
+          return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
+        }
+        return { get: vi.fn(), all: vi.fn(() => []), run: vi.fn() };
+      }),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    });
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('workspace-fallback');
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[cursor-history:storage] No bubbles for composer c1')
+    );
+  });
+
+  it('logs query errors while loading global bubbles', async () => {
+    vi.stubEnv('DEBUG', 'cursor-history:*');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    setupFallbackHarness({
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('sqlite_master')) {
+          return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
+        }
+        if (sql.includes('WHERE key LIKE ? ORDER BY rowid ASC')) {
+          return {
+            get: vi.fn(),
+            all: vi.fn(() => {
+              throw new Error('query failed');
+            }),
+            run: vi.fn(),
+          };
+        }
+        return { get: vi.fn(), all: vi.fn(() => []), run: vi.fn() };
+      }),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    });
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('workspace-fallback');
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[cursor-history:storage] Failed to load global bubbles for composer c1: query failed'
+      )
+    );
+  });
+
+  it('logs malformed bubble rows while keeping the session global', async () => {
+    vi.stubEnv('DEBUG', 'cursor-history:*');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test', createdAt: 1000 }],
+    });
+
+    setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: '{"type":2,' }]);
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('global');
+    expect(result!.messages[0]!.metadata?.corrupted).toBe(true);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[cursor-history:storage] Malformed bubble row bubbleId:c1:b1')
+    );
   });
 });
 

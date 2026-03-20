@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { debugLog } from '../../src/core/database/debug.js';
+import { debugLog, debugLogStorage } from '../../src/core/database/debug.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -29,5 +29,15 @@ describe('debugLog', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     debugLog('test message');
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('debugLogStorage', () => {
+  it('writes to stderr with the storage namespace when DEBUG is set', () => {
+    vi.stubEnv('DEBUG', 'cursor-history:*');
+    vi.stubEnv('CURSOR_HISTORY_DEBUG', '');
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    debugLogStorage('storage failure');
+    expect(spy).toHaveBeenCalledWith('[cursor-history:storage] storage failure');
   });
 });

@@ -19,7 +19,7 @@
 
 **Purpose**: No project initialization needed — existing codebase, branch already created.
 
-- [ ] T001 Verify branch `012-fix-session-data-integrity` is checked out and builds cleanly with `npm run build`
+- [X] T001 Verify branch `012-fix-session-data-integrity` is checked out and builds cleanly with `npm run build`
 
 ---
 
@@ -29,11 +29,11 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T002 [P] Add `debugLogStorage(message: string)` function in `src/core/database/debug.ts` using `[cursor-history:storage]` namespace prefix, same env var check as existing `debugLog()`
-- [ ] T003 Extract shared `mapBubbleToMessage(row: { key: string; value: string }): Message | null` helper function in `src/core/storage.ts` from the duplicated bubble-to-message mapping logic in `getSession()` (lines ~482-517) and `getGlobalSession()` (lines ~772-807). As part of the extraction, set `metadata.bubbleType` from `data.type` on parsed returned messages for debugging visibility. Treat this as an intentional behavioral/output change, not a refactor-only task. (FR-011)
-- [ ] T004 Refactor `getSession()` in `src/core/storage.ts` to call `mapBubbleToMessage()` instead of inline mapping. Verify no additional output changes beyond the intentional `metadata.bubbleType` population from T003.
-- [ ] T005 Refactor `getGlobalSession()` in `src/core/storage.ts` to call `mapBubbleToMessage()` instead of inline mapping. Verify no additional output changes beyond the intentional `metadata.bubbleType` population from T003.
-- [ ] T028 Verify via `mapBubbleToMessage()` in `src/core/storage.ts` that messages created from parseable bubbles with known `type` values populate `metadata.bubbleType` with the original type value. (FR-011, SC-008)
+- [X] T002 [P] Add `debugLogStorage(message: string)` function in `src/core/database/debug.ts` using `[cursor-history:storage]` namespace prefix, same env var check as existing `debugLog()`
+- [X] T003 Extract shared `mapBubbleToMessage(row: { key: string; value: string }): Message | null` helper function in `src/core/storage.ts` from the duplicated bubble-to-message mapping logic in `getSession()` (lines ~482-517) and `getGlobalSession()` (lines ~772-807). As part of the extraction, set `metadata.bubbleType` from `data.type` on parsed returned messages for debugging visibility. Treat this as an intentional behavioral/output change, not a refactor-only task. (FR-011)
+- [X] T004 Refactor `getSession()` in `src/core/storage.ts` to call `mapBubbleToMessage()` instead of inline mapping. Verify no additional output changes beyond the intentional `metadata.bubbleType` population from T003.
+- [X] T005 Refactor `getGlobalSession()` in `src/core/storage.ts` to call `mapBubbleToMessage()` instead of inline mapping. Verify no additional output changes beyond the intentional `metadata.bubbleType` population from T003.
+- [X] T028 Verify via `mapBubbleToMessage()` in `src/core/storage.ts` that messages created from parseable bubbles with known `type` values populate `metadata.bubbleType` with the original type value. (FR-011, SC-008)
 
 **Checkpoint**: Both `getSession()` and `getGlobalSession()` use the shared helper. Build passes. `metadata.bubbleType` is populated and validated when available; other behavior remains unchanged.
 
@@ -47,10 +47,10 @@
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] In `mapBubbleToMessage()` in `src/core/storage.ts`, replace the `content.length > 0` filter: when `extractBubbleText()` returns empty string, set `content` to `'[empty message]'` instead of filtering the message out. Applies to both user and assistant bubbles. (FR-002, FR-006)
-- [ ] T007 [US1] In `mapBubbleToMessage()` in `src/core/storage.ts`, handle malformed bubble JSON: when `JSON.parse(row.value)` throws, create a corrupted placeholder message with `content: '[corrupted message]'`, `role: 'assistant'` (default — actual type unknowable from malformed data), `metadata: { corrupted: true }`, and log the parse error via `debugLogStorage()`. Return the placeholder instead of `null`. (FR-009, FR-010)
-- [ ] T008 [US1] Update `mapBubbleToMessage()` return type from `Message | null` to `Message` in `src/core/storage.ts`, since after T006 and T007 it always returns a message. Remove the `.filter(m !== null && m.content.length > 0)` from both call sites in `getSession()` and `getGlobalSession()` — no filter needed. (FR-006, FR-008)
-- [ ] T021 [US1] Verify via `src/core/storage.ts` `getSession()` that a known session with assistant bubbles, empty bubbles, and malformed rows returns both roles, preserves `[empty message]`, and marks corrupted placeholders with `metadata.corrupted = true`. (SC-001, SC-003, SC-007)
+- [X] T006 [US1] In `mapBubbleToMessage()` in `src/core/storage.ts`, replace the `content.length > 0` filter: when `extractBubbleText()` returns empty string, set `content` to `'[empty message]'` instead of filtering the message out. Applies to both user and assistant bubbles. (FR-002, FR-006)
+- [X] T007 [US1] In `mapBubbleToMessage()` in `src/core/storage.ts`, handle malformed bubble JSON: when `JSON.parse(row.value)` throws, create a corrupted placeholder message with `content: '[corrupted message]'`, `role: 'assistant'` (default — actual type unknowable from malformed data), `metadata: { corrupted: true }`, and log the parse error via `debugLogStorage()`. Return the placeholder instead of `null`. (FR-009, FR-010)
+- [X] T008 [US1] Update `mapBubbleToMessage()` return type from `Message | null` to `Message` in `src/core/storage.ts`, since after T006 and T007 it always returns a message. Remove the `.filter(m !== null && m.content.length > 0)` from both call sites in `getSession()` and `getGlobalSession()` — no filter needed. (FR-006, FR-008)
+- [X] T021 [US1] Verify via `src/core/storage.ts` `getSession()` that a known session with assistant bubbles, empty bubbles, and malformed rows returns both roles, preserves `[empty message]`, and marks corrupted placeholders with `metadata.corrupted = true`. (SC-001, SC-003, SC-007)
 
 **Checkpoint**: `getSession()` preserves all bubbles. Empty bubbles show `[empty message]`. Malformed bubbles show `[corrupted message]` with `metadata.corrupted = true`. Assistant messages no longer silently disappear.
 
@@ -64,9 +64,9 @@
 
 ### Implementation for User Story 2
 
-- [ ] T009 [US2] Create `extractToolCalls(data: Record<string, unknown>): ToolCall[] | undefined` helper function in `src/core/storage.ts`. Extract `name` from `toolFormerData.name`, determine `status` (error > cancelled > completed default), parse `params` with `{ _raw: rawString }` fallback for invalid JSON, extract `result`, extract `files` from param file path fields using `getParam()`. Return `undefined` if no `toolFormerData.name`. (FR-003)
-- [ ] T010 [US2] Integrate `extractToolCalls()` into `mapBubbleToMessage()` in `src/core/storage.ts` — set `toolCalls` field on the returned message object. (FR-003, FR-008)
-- [ ] T022 [US2] Verify via `src/core/storage.ts` `getSession()` that tool activity produces populated `toolCalls`, invalid params use `{ _raw: ... }`, and missing explicit status defaults to `completed`. (SC-002)
+- [X] T009 [US2] Create `extractToolCalls(data: Record<string, unknown>): ToolCall[] | undefined` helper function in `src/core/storage.ts`. Extract `name` from `toolFormerData.name`, determine `status` (error > cancelled > completed default), parse `params` with `{ _raw: rawString }` fallback for invalid JSON, extract `result`, extract `files` from param file path fields using `getParam()`. Return `undefined` if no `toolFormerData.name`. (FR-003)
+- [X] T010 [US2] Integrate `extractToolCalls()` into `mapBubbleToMessage()` in `src/core/storage.ts` — set `toolCalls` field on the returned message object. (FR-003, FR-008)
+- [X] T022 [US2] Verify via `src/core/storage.ts` `getSession()` that tool activity produces populated `toolCalls`, invalid params use `{ _raw: ... }`, and missing explicit status defaults to `completed`. (SC-002)
 
 **Checkpoint**: `message.toolCalls` is populated for all messages with `toolFormerData.name`. Invalid params use `{ _raw }` sentinel. Status defaults to `'completed'` when not explicit.
 
@@ -80,13 +80,13 @@
 
 ### Implementation for User Story 3
 
-- [ ] T011 [P] [US3] Add optional `source?: 'global' | 'workspace-fallback'` field to `ChatSession` interface in `src/core/types.ts` with JSDoc comment. (FR-004)
-- [ ] T012 [P] [US3] Add optional `source?: 'global' | 'workspace-fallback'` field to `Session` interface in `src/lib/types.ts` with JSDoc comment. (FR-004)
-- [ ] T013 [US3] Set `source: 'global'` on sessions returned from the global storage path in `getSession()` and `getGlobalSession()` in `src/core/storage.ts`. Set `source: 'workspace-fallback'` on sessions returned from the workspace fallback path. For backup-loaded sessions, set based on which data was actually available. (FR-004, FR-007)
-- [ ] T014 [US3] Thread `source` field through `convertToLibrarySession()` in `src/lib/index.ts` — map `coreSession.source` to `Session.source`. (FR-004)
-- [ ] T015 [P] [US3] Add degraded session visual indicator in `formatSessionDetail()` in `src/cli/formatters/table.ts` — when session `source === 'workspace-fallback'`, display a warning line (e.g., yellow text: "⚠ Partial data — loaded from workspace fallback"). (FR-007)
-- [ ] T027 [P] [US3] Update `formatSessionJson()` in `src/cli/formatters/json.ts` so CLI JSON output includes `session.source` when present, while preserving the existing output shape for sessions where `source` is undefined. (FR-004, FR-007)
-- [ ] T023 [US3] Verify via `src/core/storage.ts`, `src/lib/index.ts`, `src/cli/formatters/table.ts`, and `src/cli/formatters/json.ts` that global sessions report `source: 'global'`, fallback sessions report `source: 'workspace-fallback'`, CLI detail shows a degraded warning, and CLI JSON includes `source`. (SC-004)
+- [X] T011 [P] [US3] Add optional `source?: 'global' | 'workspace-fallback'` field to `ChatSession` interface in `src/core/types.ts` with JSDoc comment. (FR-004)
+- [X] T012 [P] [US3] Add optional `source?: 'global' | 'workspace-fallback'` field to `Session` interface in `src/lib/types.ts` with JSDoc comment. (FR-004)
+- [X] T013 [US3] Set `source: 'global'` on sessions returned from the global storage path in `getSession()` and `getGlobalSession()` in `src/core/storage.ts`. Set `source: 'workspace-fallback'` on sessions returned from the workspace fallback path. For backup-loaded sessions, set based on which data was actually available. (FR-004, FR-007)
+- [X] T014 [US3] Thread `source` field through `convertToLibrarySession()` in `src/lib/index.ts` — map `coreSession.source` to `Session.source`. (FR-004)
+- [X] T015 [P] [US3] Add degraded session visual indicator in `formatSessionDetail()` in `src/cli/formatters/table.ts` — when session `source === 'workspace-fallback'`, display a warning line (e.g., yellow text: "⚠ Partial data — loaded from workspace fallback"). (FR-007)
+- [X] T027 [P] [US3] Update `formatSessionJson()` in `src/cli/formatters/json.ts` so CLI JSON output includes `session.source` when present, while preserving the existing output shape for sessions where `source` is undefined. (FR-004, FR-007)
+- [X] T023 [US3] Verify via `src/core/storage.ts`, `src/lib/index.ts`, `src/cli/formatters/table.ts`, and `src/cli/formatters/json.ts` that global sessions report `source: 'global'`, fallback sessions report `source: 'workspace-fallback'`, CLI detail shows a degraded warning, and CLI JSON includes `source`. (SC-004)
 
 **Checkpoint**: Sessions carry `source` field. CLI shows a degraded warning. CLI JSON includes `source`. Library consumers can check `session.source` programmatically.
 
@@ -100,9 +100,9 @@
 
 ### Implementation for User Story 4
 
-- [ ] T016 [US4] In `getSession()` in `src/core/storage.ts`, replace the outer `catch {}` block (line ~556) with granular debug logging via `debugLogStorage()`: log "Global DB not found" when `existsSync` fails, "cursorDiskKV table not found" when table check fails, "No bubbles for composer [id]" when `bubbleRows.length === 0`, and the actual error message for any caught exception. (FR-001, FR-005)
-- [ ] T017 [US4] In `getGlobalSession()` in `src/core/storage.ts`, add equivalent debug logging for the global load path — log DB open failures and query errors via `debugLogStorage()`. (FR-005, FR-008)
-- [ ] T024 [US4] Verify via `src/core/storage.ts` and `src/core/database/debug.ts` with `DEBUG=cursor-history:*` that missing DB, missing table, no bubbles, query error, and malformed row parse failure each emit specific debug messages. (SC-005)
+- [X] T016 [US4] In `getSession()` in `src/core/storage.ts`, replace the outer `catch {}` block (line ~556) with granular debug logging via `debugLogStorage()`: log "Global DB not found" when `existsSync` fails, "cursorDiskKV table not found" when table check fails, "No bubbles for composer [id]" when `bubbleRows.length === 0`, and the actual error message for any caught exception. (FR-001, FR-005)
+- [X] T017 [US4] In `getGlobalSession()` in `src/core/storage.ts`, add equivalent debug logging for the global load path — log DB open failures and query errors via `debugLogStorage()`. (FR-005, FR-008)
+- [X] T024 [US4] Verify via `src/core/storage.ts` and `src/core/database/debug.ts` with `DEBUG=cursor-history:*` that missing DB, missing table, no bubbles, query error, and malformed row parse failure each emit specific debug messages. (SC-005)
 
 **Checkpoint**: Every global storage fallback event produces a debug log entry. `DEBUG=cursor-history:*` reveals the specific failure reason.
 
@@ -112,11 +112,11 @@
 
 **Purpose**: Verify no regressions and update documentation.
 
-- [ ] T018 Run `npm run build && npm test` to verify existing tests pass. Fix any broken assertions caused by new `[empty message]` placeholder or additional fields. Additionally, verify `listSessions()` returns sessions with assistant roles (the fix is transitive via `getSession()` but must be confirmed end-to-end). (SC-006)
-- [ ] T019 Run `npm run typecheck` to verify no type errors from new `source` field or `toolCalls` population.
-- [ ] T020 [P] Update CLAUDE.md Recent Changes section with `012-fix-session-data-integrity` feature summary: list new `source` field, `toolCalls` population, empty bubble preservation, corrupted bubble handling, debug logging.
+- [X] T018 Run `npm run build && npm test` to verify existing tests pass. Fix any broken assertions caused by new `[empty message]` placeholder or additional fields. Additionally, verify `listSessions()` returns sessions with assistant roles (the fix is transitive via `getSession()` but must be confirmed end-to-end). (SC-006)
+- [X] T019 Run `npm run typecheck` to verify no type errors from new `source` field or `toolCalls` population.
+- [X] T020 [P] Update CLAUDE.md Recent Changes section with `012-fix-session-data-integrity` feature summary: list new `source` field, `toolCalls` population, empty bubble preservation, corrupted bubble handling, debug logging.
 - [ ] T025 Run manual validation via `src/cli/commands/show.ts` and `src/lib/index.ts` against real Cursor chat exports/backups before merge: confirm assistant/tool data recovery, degraded fallback marking, and debug logging behavior on at least one failure case.
-- [ ] T026 [P] Update `CHANGELOG.md` with user-facing release notes for `012-fix-session-data-integrity`: `source` field, `toolCalls` population, empty/corrupted bubble handling, degraded-session indicators, and debug logging improvements.
+- [X] T026 [P] Update `CHANGELOG.md` with user-facing release notes for `012-fix-session-data-integrity`: `source` field, `toolCalls` population, empty/corrupted bubble handling, degraded-session indicators, and debug logging improvements.
 
 ---
 

@@ -118,6 +118,17 @@ describe('listSessions', () => {
     expect(result.pagination.total).toBe(1);
   });
 
+  it('preserves assistant roles in listSessions output', async () => {
+    mockListSessions.mockResolvedValue([makeCoreSummary()]);
+    mockGetSession.mockResolvedValue({
+      ...makeCoreSession(),
+      messages: [{ id: 'm2', role: 'assistant', content: 'Hi', timestamp: later, codeBlocks: [] }],
+    });
+
+    const result = await listSessions();
+    expect(result.data[0]!.messages[0]!.role).toBe('assistant');
+  });
+
   it('applies pagination with offset and limit', async () => {
     mockListSessions.mockResolvedValue([
       makeCoreSummary('c1', 1),
@@ -181,6 +192,13 @@ describe('getSession', () => {
     expect(session.messages).toHaveLength(1);
     expect(session.messages[0]!.role).toBe('user');
     expect(session.timestamp).toBe('2024-01-15T10:00:00.000Z');
+  });
+
+  it('threads session source through the library type', async () => {
+    mockGetSession.mockResolvedValue({ ...makeCoreSession(), source: 'workspace-fallback' });
+
+    const session = await getSession(0);
+    expect(session.source).toBe('workspace-fallback');
   });
 
   it('throws DatabaseNotFoundError when session not found', async () => {

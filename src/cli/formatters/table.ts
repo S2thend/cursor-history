@@ -507,6 +507,9 @@ export function formatSessionDetail(
   } else {
     lines.push(`${pc.bold('Messages:')} ${session.messageCount}`);
   }
+  if (session.source === 'workspace-fallback') {
+    lines.push(pc.yellow('⚠ Partial data - loaded from workspace fallback'));
+  }
   lines.push('');
   lines.push(pc.dim('─'.repeat(60)));
   lines.push('');

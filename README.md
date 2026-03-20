@@ -141,6 +141,16 @@ npm install -g cursor-history
 cursor-history list
 ```
 
+If you prefer `pnpm`:
+
+```bash
+# Install globally
+pnpm add -g cursor-history
+
+# Use the CLI
+cursor-history list
+```
+
 ### From Source
 
 ```bash
@@ -156,6 +166,20 @@ node dist/cli/index.js list
 # Or link globally
 npm link
 cursor-history list
+```
+
+Equivalent `pnpm` workflow:
+
+```bash
+# Clone and build
+git clone https://github.com/S2thend/cursor_chat_history.git
+cd cursor_chat_history
+pnpm install
+pnpm build
+
+# Run directly
+node dist/cli/index.js list
+node dist/cli/index.js show 1 --json
 ```
 
 ## Requirements
@@ -622,11 +646,26 @@ npm install
 npm run build
 ```
 
+With `pnpm`:
+
+```bash
+pnpm install
+pnpm build
+```
+
 ### Running Tests
 
 ```bash
 npm test              # Run all tests
 npm run test:watch    # Watch mode
+```
+
+With `pnpm`:
+
+```bash
+pnpm test             # Run all tests
+pnpm test:watch       # Watch mode
+pnpm typecheck
 ```
 
 ### Releasing to NPM
@@ -682,6 +721,16 @@ cd cursor_chat_history
 npm install
 npm run build
 npm test
+```
+
+Or with `pnpm`:
+
+```bash
+git clone https://github.com/S2thend/cursor_chat_history.git
+cd cursor_chat_history
+pnpm install
+pnpm build
+pnpm test
 ```
 
 ## License

@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Session data integrity**: `getSession()` and `getGlobalSession()` now preserve empty bubbles as `[empty message]`, retain malformed global rows as `[corrupted message]` placeholders with `metadata.corrupted = true`, and populate `message.metadata.bubbleType` when the source bubble type is known.
+- **Structured tool call recovery**: `message.toolCalls` is now populated from `toolFormerData`, including default `completed` status handling and `{ _raw: ... }` sentinels when tool params contain invalid JSON.
+- **Degraded session signaling**: Sessions now expose `source: 'global' | 'workspace-fallback'`, the library threads it through, CLI JSON includes it, and `show` warns when output is coming from workspace fallback data.
+- **Global load diagnostics**: Fallbacks no longer fail silently. Storage-level debug logs now distinguish missing global DBs, missing `cursorDiskKV`, zero-bubble composers, query/open failures, and malformed bubble rows.
+
 ## [0.11.2] - 2026-02-20
 
 ### Changed

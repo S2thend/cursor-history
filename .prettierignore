@@ -1,4 +1,7 @@
 dist/
+build/
 node_modules/
+coverage/
 tests/fixtures/
 *.md
+package-lock.json
