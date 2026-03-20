@@ -21,6 +21,7 @@ A developer using the `cursor-history` library API calls `getSession()` for a se
 2. **Given** a session whose global storage read fails before usable bubble data can be loaded (DB locked, query error, missing DB, missing table, or no bubbles for the composer), **When** `getSession()` falls back to workspace parsing, **Then** the returned session includes a `source` indicator marking it as degraded/fallback data, and debug logging explains why global loading failed.
 3. **Given** a session where global loading succeeds but some assistant bubbles have empty extracted text, **When** `getSession()` processes those bubbles, **Then** those bubbles are preserved in the output with placeholder content rather than silently dropped.
 4. **Given** a session where most global bubbles parse successfully but one bubble row contains malformed JSON, **When** `getSession()` processes the session, **Then** the parseable bubbles are returned, the malformed row is represented as a corrupted placeholder message with `metadata.corrupted = true`, the session remains `source: 'global'`, and debug logging records the parse failure.
+5. **Given** a parseable global bubble whose payload includes a known `type` value, **When** the bubble is mapped to a message, **Then** `message.metadata.bubbleType` equals that original bubble type value.
 
 ---
 
@@ -116,6 +117,7 @@ A developer or maintainer troubleshooting why sessions appear user-only can enab
 - **SC-005**: When debug logging is enabled, every global storage fallback event produces a log entry explaining the specific failure reason.
 - **SC-006**: Existing tests continue to pass. No regressions in CLI output formatting or library API return types.
 - **SC-007**: For every malformed global bubble row preserved as a corrupted placeholder message, the returned message has `metadata.corrupted === true`.
+- **SC-008**: For every parseable bubble with a known source `type`, the returned message has `metadata.bubbleType` set to that original type value.
 
 ## Clarifications
 

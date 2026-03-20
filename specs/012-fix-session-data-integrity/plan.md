@@ -47,7 +47,7 @@ specs/012-fix-session-data-integrity/
 └── tasks.md             # Phase 2 output (created by /speckit.tasks)
 ```
 
-### Source Code (files to modify)
+### Primary Code Files to Modify
 
 ```text
 src/

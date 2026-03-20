@@ -33,8 +33,9 @@
 - [ ] T003 Extract shared `mapBubbleToMessage(row: { key: string; value: string }): Message | null` helper function in `src/core/storage.ts` from the duplicated bubble-to-message mapping logic in `getSession()` (lines ~482-517) and `getGlobalSession()` (lines ~772-807). As part of the extraction, set `metadata.bubbleType` from `data.type` on parsed returned messages for debugging visibility. Treat this as an intentional behavioral/output change, not a refactor-only task. (FR-011)
 - [ ] T004 Refactor `getSession()` in `src/core/storage.ts` to call `mapBubbleToMessage()` instead of inline mapping. Verify no additional output changes beyond the intentional `metadata.bubbleType` population from T003.
 - [ ] T005 Refactor `getGlobalSession()` in `src/core/storage.ts` to call `mapBubbleToMessage()` instead of inline mapping. Verify no additional output changes beyond the intentional `metadata.bubbleType` population from T003.
+- [ ] T028 Verify via `mapBubbleToMessage()` in `src/core/storage.ts` that messages created from parseable bubbles with known `type` values populate `metadata.bubbleType` with the original type value. (FR-011, SC-008)
 
-**Checkpoint**: Both `getSession()` and `getGlobalSession()` use the shared helper. Build passes. `metadata.bubbleType` is populated when available; other behavior remains unchanged.
+**Checkpoint**: Both `getSession()` and `getGlobalSession()` use the shared helper. Build passes. `metadata.bubbleType` is populated and validated when available; other behavior remains unchanged.
 
 ---
 
@@ -83,8 +84,8 @@
 - [ ] T012 [P] [US3] Add optional `source?: 'global' | 'workspace-fallback'` field to `Session` interface in `src/lib/types.ts` with JSDoc comment. (FR-004)
 - [ ] T013 [US3] Set `source: 'global'` on sessions returned from the global storage path in `getSession()` and `getGlobalSession()` in `src/core/storage.ts`. Set `source: 'workspace-fallback'` on sessions returned from the workspace fallback path. For backup-loaded sessions, set based on which data was actually available. (FR-004, FR-007)
 - [ ] T014 [US3] Thread `source` field through `convertToLibrarySession()` in `src/lib/index.ts` — map `coreSession.source` to `Session.source`. (FR-004)
-- [ ] T015 [US3] Add degraded session visual indicator in `formatSessionDetail()` in `src/cli/formatters/table.ts` — when session `source === 'workspace-fallback'`, display a warning line (e.g., yellow text: "⚠ Partial data — loaded from workspace fallback"). (FR-007)
-- [ ] T027 [US3] Update `formatSessionJson()` in `src/cli/formatters/json.ts` so CLI JSON output includes `session.source` when present, while preserving the existing output shape for sessions where `source` is undefined. (FR-004, FR-007)
+- [ ] T015 [P] [US3] Add degraded session visual indicator in `formatSessionDetail()` in `src/cli/formatters/table.ts` — when session `source === 'workspace-fallback'`, display a warning line (e.g., yellow text: "⚠ Partial data — loaded from workspace fallback"). (FR-007)
+- [ ] T027 [P] [US3] Update `formatSessionJson()` in `src/cli/formatters/json.ts` so CLI JSON output includes `session.source` when present, while preserving the existing output shape for sessions where `source` is undefined. (FR-004, FR-007)
 - [ ] T023 [US3] Verify via `src/core/storage.ts`, `src/lib/index.ts`, `src/cli/formatters/table.ts`, and `src/cli/formatters/json.ts` that global sessions report `source: 'global'`, fallback sessions report `source: 'workspace-fallback'`, CLI detail shows a degraded warning, and CLI JSON includes `source`. (SC-004)
 
 **Checkpoint**: Sessions carry `source` field. CLI shows a degraded warning. CLI JSON includes `source`. Library consumers can check `session.source` programmatically.
@@ -95,7 +96,7 @@
 
 **Goal**: Replace silent `catch {}` blocks with granular debug logging so maintainers can diagnose why global loading failed.
 
-**Independent Test**: Set `DEBUG=cursor-history:*`, trigger each failure mode (missing DB, missing table, no bubbles, query error). Verify appropriate debug messages appear on stderr.
+**Independent Test**: Set `DEBUG=cursor-history:*`, trigger each failure mode (missing DB, missing table, no bubbles, query error, malformed bubble row). Verify appropriate debug messages appear on stderr.
 
 ### Implementation for User Story 4
 
@@ -156,11 +157,13 @@
 ## Parallel Example: After Phase 2
 
 ```text
-# Coordinate same-file work, parallelize different files:
-Stream A (core storage): T006 → T007 → T008 → T009 → T010 → T016 → T017
-Stream B (types/lib): T011 + T012 (parallel) → T013 → T014
-Stream C (CLI formatters): T015 + T027 (parallel after T013)
-Stream D (verification/docs): T021 → T022 → T023 → T024 → T018 → T019 → T025 → T020 + T026
+# After Phase 2 is complete (including T028), coordinate same-file work and parallelize different files:
+Stream A (US1 core storage): T006 → T007 → T008 → T021
+Stream B (US2 core storage, coordinated with Stream A): T009 → T010 → T022
+Stream C (US3 types/lib): T011 + T012 (parallel) → T013 → T014
+Stream D (US3 CLI, after T013): T015 + T027 (parallel) → T023 (after T014, T015, T027)
+Stream E (US4 core storage, coordinated with Streams A/B): T016 → T017 → T024
+Stream F (polish/docs, after story verification): T018 → T019 → T025 → T020 + T026
 ```
 
 ---
@@ -170,14 +173,14 @@ Stream D (verification/docs): T021 → T022 → T023 → T024 → T018 → T019 
 ### MVP First (User Story 1 Only)
 
 1. Complete Phase 1: Setup (T001)
-2. Complete Phase 2: Foundational (T002–T005)
+2. Complete Phase 2: Foundational (T002–T005, T028)
 3. Complete Phase 3: User Story 1 (T006–T008, T021)
 4. **STOP and VALIDATE**: `getSession()` now returns assistant messages, empty bubbles preserved, malformed bubbles handled
 5. This alone fixes the core data integrity bug
 
 ### Incremental Delivery
 
-1. Setup + Foundational → Shared helper extracted, `metadata.bubbleType` populated for debugging visibility
+1. Setup + Foundational + T028 validation → Shared helper extracted, `metadata.bubbleType` populated for debugging visibility
 2. Add US1 + T021 verification → Core bug fixed (MVP)
 3. Add US2 + T022 verification → `toolCalls` populated
 4. Add US3 + T023 verification → `source` field available, CLI text/JSON outputs updated
