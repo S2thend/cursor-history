@@ -18,9 +18,11 @@ import type {
   ChatSession,
   ChatSessionSummary,
   ListOptions,
+  Message,
   SearchOptions,
   SearchResult,
   TokenUsage,
+  ToolCall,
   SessionUsage,
   ContextWindowStatus,
 } from './types.js';
@@ -28,6 +30,7 @@ import { getCursorDataPath, contractPath, normalizePath, pathsEqual } from '../l
 import { SessionNotFoundError } from '../lib/errors.js';
 import { parseChatData, getSearchSnippets, type CursorChatBundle } from './parser.js';
 import { openBackupDatabase, readBackupManifest } from './backup.js';
+import { debugLogStorage } from './database/debug.js';
 
 /**
  * Known SQLite keys for chat data (in priority order)
@@ -80,6 +83,240 @@ export async function openDatabase(dbPath: string): Promise<Database> {
  */
 export async function openDatabaseReadWrite(dbPath: string): Promise<Database> {
   return openDatabaseReadWriteAsync(dbPath);
+}
+
+interface ToolFormerAdditionalData {
+  status?: string;
+  userDecision?: string;
+}
+
+interface ToolFormerData {
+  name?: string;
+  params?: string;
+  rawArgs?: string;
+  result?: string;
+  status?: string;
+  additionalData?: ToolFormerAdditionalData;
+}
+
+interface BubbleRow {
+  key: string;
+  value: string;
+}
+
+type BubbleMessage = Omit<Message, 'timestamp'> & { timestamp: Date | null };
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function closeDatabase(db: Database | null): void {
+  if (!db) {
+    return;
+  }
+
+  try {
+    db.close();
+  } catch {
+    // Ignore close failures during fallback handling.
+  }
+}
+
+function getBubbleRowId(rowKey: string): string | null {
+  return rowKey.split(':').pop() ?? null;
+}
+
+function parseToolParams(
+  paramsText?: string,
+  rawArgsText?: string
+): Record<string, unknown> | undefined {
+  const rawText = paramsText ?? rawArgsText;
+  if (typeof rawText !== 'string' || rawText.trim().length === 0) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(rawText) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Preserve the raw payload below.
+  }
+
+  return { _raw: rawText };
+}
+
+function getParam(params: Record<string, unknown> | undefined, ...keys: string[]): string {
+  if (!params) {
+    return '';
+  }
+
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  return '';
+}
+
+function getToolCallStatus(toolData: ToolFormerData): ToolCall['status'] {
+  const statuses = [toolData.additionalData?.status, toolData.status];
+  if (statuses.includes('error')) {
+    return 'error';
+  }
+  if (statuses.includes('cancelled')) {
+    return 'cancelled';
+  }
+  return 'completed';
+}
+
+function extractToolFiles(params: Record<string, unknown> | undefined): string[] | undefined {
+  const candidates = [
+    getParam(params, 'targetFile', 'file', 'filePath', 'relativeWorkspacePath'),
+    getParam(params, 'path'),
+    getParam(params, 'targetDirectory', 'directory'),
+  ].filter((value) => value.length > 0);
+
+  const files = [...new Set(candidates)];
+  return files.length > 0 ? files : undefined;
+}
+
+function extractToolError(result: string): string {
+  try {
+    const parsed = JSON.parse(result) as Record<string, unknown>;
+    for (const key of ['error', 'message', 'stderr', 'output', 'resultForModel']) {
+      const value = parsed[key];
+      if (typeof value === 'string' && value.trim().length > 0) {
+        return value;
+      }
+    }
+  } catch {
+    // Fall back to the raw string below.
+  }
+
+  return result;
+}
+
+export function extractToolCalls(data: Record<string, unknown>): ToolCall[] | undefined {
+  const toolData = data['toolFormerData'] as ToolFormerData | undefined;
+  const name = typeof toolData?.name === 'string' ? toolData.name.trim() : '';
+  if (!name || !toolData) {
+    return undefined;
+  }
+
+  const params = parseToolParams(toolData.params, toolData.rawArgs);
+  const status = getToolCallStatus(toolData);
+  const resultText =
+    typeof toolData.result === 'string' && toolData.result.trim().length > 0
+      ? toolData.result
+      : undefined;
+
+  const toolCall: ToolCall = {
+    name,
+    status,
+  };
+
+  if (params) {
+    toolCall.params = params;
+  }
+
+  const files = extractToolFiles(params);
+  if (files) {
+    toolCall.files = files;
+  }
+
+  if (status === 'error' && resultText) {
+    toolCall.error = extractToolError(resultText);
+  } else if (status === 'completed' && resultText) {
+    toolCall.result = resultText;
+  }
+
+  return [toolCall];
+}
+
+export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
+  let rawData: Record<string, unknown>;
+
+  try {
+    rawData = JSON.parse(row.value) as Record<string, unknown>;
+  } catch (error) {
+    debugLogStorage(`Malformed bubble row ${row.key}: ${getErrorMessage(error)}`);
+    return {
+      id: getBubbleRowId(row.key),
+      role: 'assistant',
+      content: '[corrupted message]',
+      timestamp: null,
+      codeBlocks: [],
+      metadata: { corrupted: true },
+    };
+  }
+
+  try {
+    const data = rawData as RawBubbleData & {
+      bubbleId?: string;
+      createdAt?: string;
+      type?: number;
+    };
+    const bubbleType = typeof data.type === 'number' ? data.type : undefined;
+    const extractedContent = extractBubbleText(rawData);
+    const metadata =
+      bubbleType !== undefined
+        ? {
+            bubbleType,
+          }
+        : undefined;
+
+    return {
+      id: data.bubbleId ?? getBubbleRowId(row.key),
+      role: bubbleType === 2 ? 'assistant' : 'user',
+      content: extractedContent.length > 0 ? extractedContent : '[empty message]',
+      timestamp: extractTimestamp(data),
+      codeBlocks: [],
+      toolCalls: extractToolCalls(rawData),
+      tokenUsage: extractTokenUsage(data),
+      model: extractModelInfo(data),
+      durationMs: extractTimingInfo(data),
+      metadata,
+    };
+  } catch (error) {
+    debugLogStorage(`Failed to map bubble row ${row.key}: ${getErrorMessage(error)}`);
+    return {
+      id: getBubbleRowId(row.key),
+      role: 'assistant',
+      content: '[corrupted message]',
+      timestamp: null,
+      codeBlocks: [],
+      metadata: { corrupted: true },
+    };
+  }
+}
+
+function resolveBubbleMessages(bubbleRows: BubbleRow[], sessionCreatedAt: Date): Message[] {
+  const messages = bubbleRows.map((row) => mapBubbleToMessage(row));
+  fillTimestampGaps(messages, sessionCreatedAt);
+  return messages as Message[];
+}
+
+function parseComposerSessionUsage(
+  composerDataValue: string | undefined,
+  messages: Array<{ tokenUsage?: TokenUsage }>
+): SessionUsage | undefined {
+  if (!composerDataValue) {
+    return undefined;
+  }
+
+  try {
+    const composerData = JSON.parse(composerDataValue) as RawComposerData;
+    return extractSessionUsage(composerData, messages);
+  } catch {
+    return undefined;
+  }
 }
 
 // ============================================================================
@@ -476,127 +713,93 @@ export async function getSession(
 
   // Try to get full session from global storage (has AI responses)
   // This works for both live data and backup (if backup includes globalStorage)
-  try {
-    let db: Database | null = null;
+  let globalDb: Database | null = null;
+  let globalLoadFailed = false;
+  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
 
+  try {
     if (backupPath) {
-      // Try to open globalStorage from backup
       try {
-        db = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb');
-      } catch {
-        // Backup might not have globalStorage, fall through to workspace storage
-        db = null;
+        globalDb = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb');
+      } catch (error) {
+        globalLoadFailed = true;
+        debugLogStorage(`Global DB not found in backup: ${getErrorMessage(error)}`);
       }
+    } else if (!existsSync(globalDbPath)) {
+      globalLoadFailed = true;
+      debugLogStorage(`Global DB not found at ${globalDbPath}`);
     } else {
-      // Live data - open from filesystem
-      const globalPath = getGlobalStoragePath();
-      const globalDbPath = join(globalPath, 'state.vscdb');
-      if (existsSync(globalDbPath)) {
-        db = await openDatabase(globalDbPath);
+      try {
+        globalDb = await openDatabase(globalDbPath);
+      } catch (error) {
+        globalLoadFailed = true;
+        debugLogStorage(`Failed to open global DB at ${globalDbPath}: ${getErrorMessage(error)}`);
       }
     }
 
-    if (db) {
-      // Check if cursorDiskKV table exists
-      const tableCheck = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
-        .get();
+    if (globalDb) {
+      let bubbleRows: BubbleRow[] = [];
+      let composerDataRow: { value: string } | undefined;
 
-      if (tableCheck) {
-        // Get all bubbles for this composer
-        const bubbleRows = db
-          .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC')
-          .all(`bubbleId:${summary.id}:%`) as { key: string; value: string }[];
+      try {
+        const tableCheck = globalDb
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
+          .get();
 
-        // Get composer data for session-level usage (before closing db)
-        let composerDataRow: { value: string } | undefined;
-        try {
-          composerDataRow = db
-            .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
-            .get(`composerData:${summary.id}`) as { value: string } | undefined;
-        } catch {
-          // Ignore composer data errors
-        }
+        if (!tableCheck) {
+          globalLoadFailed = true;
+          debugLogStorage('cursorDiskKV table not found');
+        } else {
+          bubbleRows = globalDb
+            .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC')
+            .all(`bubbleId:${summary.id}:%`) as BubbleRow[];
 
-        db.close();
+          try {
+            composerDataRow = globalDb
+              .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+              .get(`composerData:${summary.id}`) as { value: string } | undefined;
+          } catch {
+            // Ignore composer data errors; message-level recovery still works.
+          }
 
-        if (bubbleRows.length > 0) {
-          const messages = bubbleRows
-            .map((row) => {
-              try {
-                const rawData = JSON.parse(row.value) as Record<string, unknown>;
-                const data = rawData as RawBubbleData & {
-                  type?: number;
-                  createdAt?: string;
-                  bubbleId?: string;
-                };
-
-                const text = extractBubbleText(rawData);
-                const role = data.type === 2 ? 'assistant' : 'user';
-
-                // Extract token usage data
-                const tokenUsage = extractTokenUsage(data);
-                const model = extractModelInfo(data);
-                const durationMs = extractTimingInfo(data);
-
-                return {
-                  id: data.bubbleId ?? row.key.split(':').pop() ?? null,
-                  role: role as 'user' | 'assistant',
-                  content: text,
-                  timestamp: extractTimestamp(data),
-                  codeBlocks: [],
-                  tokenUsage,
-                  model,
-                  durationMs,
-                };
-              } catch {
-                return null;
-              }
-            })
-            .filter(
-              (m): m is NonNullable<typeof m> & { timestamp: Date | null } =>
-                m !== null && m.content.length > 0
-            );
-
-          // Resolve null timestamps via neighbor interpolation + session fallback
-          fillTimestampGaps(messages, summary.createdAt);
-          // After fillTimestampGaps, all timestamps are guaranteed non-null
-          const resolvedMessages = messages as Array<
-            (typeof messages)[number] & { timestamp: Date }
-          >;
-
-          if (resolvedMessages.length > 0) {
-            // Extract session-level usage from composer data
-            let sessionUsage: SessionUsage | undefined;
-            if (composerDataRow?.value) {
-              try {
-                const composerData = JSON.parse(composerDataRow.value) as RawComposerData;
-                sessionUsage = extractSessionUsage(composerData, resolvedMessages);
-              } catch {
-                // Ignore parse errors
-              }
-            }
-
-            return {
-              id: summary.id,
-              index,
-              title: summary.title,
-              createdAt: summary.createdAt,
-              lastUpdatedAt: summary.lastUpdatedAt,
-              messageCount: resolvedMessages.length,
-              messages: resolvedMessages,
-              workspaceId: summary.workspaceId,
-              workspacePath: summary.workspacePath,
-              usage: sessionUsage,
-            };
+          if (bubbleRows.length === 0) {
+            globalLoadFailed = true;
+            debugLogStorage(`No bubbles for composer ${summary.id}`);
           }
         }
-      } else {
-        db.close();
+      } catch (error) {
+        globalLoadFailed = true;
+        debugLogStorage(
+          `Failed to load global bubbles for composer ${summary.id}: ${getErrorMessage(error)}`
+        );
+      } finally {
+        closeDatabase(globalDb);
+      }
+
+      if (bubbleRows.length > 0) {
+        const resolvedMessages = resolveBubbleMessages(bubbleRows, summary.createdAt);
+        const sessionUsage = parseComposerSessionUsage(composerDataRow?.value, resolvedMessages);
+
+        return {
+          id: summary.id,
+          index,
+          title: summary.title,
+          createdAt: summary.createdAt,
+          lastUpdatedAt: summary.lastUpdatedAt,
+          messageCount: resolvedMessages.length,
+          messages: resolvedMessages,
+          workspaceId: summary.workspaceId,
+          workspacePath: summary.workspacePath,
+          usage: sessionUsage,
+          source: 'global',
+        };
       }
     }
-  } catch {
-    // Fall through to workspace storage
+  } catch (error) {
+    globalLoadFailed = true;
+    debugLogStorage(
+      `Unexpected global load failure for composer ${summary.id}: ${getErrorMessage(error)}`
+    );
   }
 
   // Fall back to workspace storage (or use backup for backup mode)
@@ -627,6 +830,7 @@ export async function getSession(
       index,
       workspaceId: workspace.id,
       workspacePath: summary.workspacePath,
+      source: globalLoadFailed ? 'workspace-fallback' : session.source,
     };
   } catch {
     return null;
@@ -802,72 +1006,26 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
 
   const globalPath = getGlobalStoragePath();
   const dbPath = join(globalPath, 'state.vscdb');
+  let db: Database | null = null;
 
   try {
-    const db = await openDatabase(dbPath);
+    db = await openDatabase(dbPath);
 
-    // Get all bubbles for this composer
     const bubbleRows = db
       .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC')
-      .all(`bubbleId:${summary.id}:%`) as { key: string; value: string }[];
+      .all(`bubbleId:${summary.id}:%`) as BubbleRow[];
 
-    const messages = bubbleRows
-      .map((row) => {
-        try {
-          const rawData = JSON.parse(row.value) as Record<string, unknown>;
-          const data = rawData as RawBubbleData & {
-            type?: number;
-            createdAt?: string;
-            bubbleId?: string;
-          };
-
-          const text = extractBubbleText(rawData);
-          const role = data.type === 2 ? 'assistant' : 'user';
-
-          // Extract token usage data
-          const tokenUsage = extractTokenUsage(data);
-          const model = extractModelInfo(data);
-          const durationMs = extractTimingInfo(data);
-
-          return {
-            id: data.bubbleId ?? row.key.split(':').pop() ?? null,
-            role: role as 'user' | 'assistant',
-            content: text,
-            timestamp: extractTimestamp(data),
-            codeBlocks: [],
-            tokenUsage,
-            model,
-            durationMs,
-          };
-        } catch {
-          return null;
-        }
-      })
-      .filter(
-        (m): m is NonNullable<typeof m> & { timestamp: Date | null } =>
-          m !== null && m.content.length > 0
-      );
-
-    // Resolve null timestamps via neighbor interpolation + session fallback
-    fillTimestampGaps(messages, summary.createdAt);
-    // After fillTimestampGaps, all timestamps are guaranteed non-null
-    const resolvedMessages = messages as Array<(typeof messages)[number] & { timestamp: Date }>;
-
-    // Try to get composer data for session-level usage
-    let sessionUsage: SessionUsage | undefined;
-    try {
-      const composerRow = db
-        .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
-        .get(`composerData:${summary.id}`) as { value: string } | undefined;
-      if (composerRow?.value) {
-        const composerData = JSON.parse(composerRow.value) as RawComposerData;
-        sessionUsage = extractSessionUsage(composerData, resolvedMessages);
-      }
-    } catch {
-      // Ignore composer data errors
+    if (bubbleRows.length === 0) {
+      debugLogStorage(`No bubbles for composer ${summary.id}`);
+      return null;
     }
 
-    db.close();
+    const resolvedMessages = resolveBubbleMessages(bubbleRows, summary.createdAt);
+
+    const composerRow = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${summary.id}`) as { value: string } | undefined;
+    const sessionUsage = parseComposerSessionUsage(composerRow?.value, resolvedMessages);
 
     return {
       id: summary.id,
@@ -879,46 +1037,28 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
       messages: resolvedMessages,
       workspaceId: 'global',
       usage: sessionUsage,
+      source: 'global',
     };
-  } catch {
+  } catch (error) {
+    debugLogStorage(`Failed to load global session ${summary.id}: ${getErrorMessage(error)}`);
     return null;
+  } finally {
+    closeDatabase(db);
   }
 }
 
 /**
  * Format a tool call for display
  */
-function formatToolCall(toolData: {
-  name?: string;
-  params?: string;
-  result?: string;
-  status?: string;
-  additionalData?: { status?: string; userDecision?: string };
-}): string {
+function formatToolCall(toolData: ToolFormerData): string {
   const lines: string[] = [];
   const toolName = toolData.name ?? 'unknown';
-
-  // Parse params
-  let params: Record<string, unknown> = {};
-  try {
-    params = JSON.parse(toolData.params ?? '{}') as Record<string, unknown>;
-  } catch {
-    // Ignore parse errors
-  }
-
-  // Helper to get string param
-  const getParam = (...keys: string[]): string => {
-    for (const key of keys) {
-      const val = params[key];
-      if (typeof val === 'string' && val.trim()) return val;
-    }
-    return '';
-  };
+  const params = parseToolParams(toolData.params, toolData.rawArgs) ?? {};
 
   // Format based on tool type
   if (toolName === 'read_file') {
     lines.push(`[Tool: Read File]`);
-    const file = getParam('targetFile', 'path', 'file');
+    const file = getParam(params, 'targetFile', 'path', 'file');
     if (file) lines.push(`File: ${file}`);
 
     // Show abbreviated content
@@ -933,12 +1073,12 @@ function formatToolCall(toolData: {
     }
   } else if (toolName === 'list_dir') {
     lines.push(`[Tool: List Directory]`);
-    const dir = getParam('targetDirectory', 'path', 'directory');
+    const dir = getParam(params, 'targetDirectory', 'path', 'directory');
     if (dir) lines.push(`Directory: ${dir}`);
   } else if (toolName === 'grep' || toolName === 'search' || toolName === 'codebase_search') {
     lines.push(`[Tool: ${toolName === 'grep' ? 'Grep' : 'Search'}]`);
-    const pattern = getParam('pattern', 'query', 'searchQuery', 'regex');
-    const path = getParam('path', 'directory', 'targetDirectory');
+    const pattern = getParam(params, 'pattern', 'query', 'searchQuery', 'regex');
+    const path = getParam(params, 'path', 'directory', 'targetDirectory');
     if (pattern) lines.push(`Pattern: ${pattern}`);
     if (path) lines.push(`Path: ${path}`);
   } else if (
@@ -947,7 +1087,7 @@ function formatToolCall(toolData: {
     toolName === 'execute_command'
   ) {
     lines.push(`[Tool: Terminal Command]`);
-    const cmd = getParam('command', 'cmd');
+    const cmd = getParam(params, 'command', 'cmd');
     if (cmd) lines.push(`Command: ${cmd}`);
 
     // Show command output from result
@@ -967,12 +1107,19 @@ function formatToolCall(toolData: {
     }
   } else if (toolName === 'edit_file' || toolName === 'search_replace') {
     lines.push(`[Tool: ${toolName === 'search_replace' ? 'Search & Replace' : 'Edit File'}]`);
-    const file = getParam('targetFile', 'path', 'file', 'filePath', 'relativeWorkspacePath');
+    const file = getParam(
+      params,
+      'targetFile',
+      'path',
+      'file',
+      'filePath',
+      'relativeWorkspacePath'
+    );
     if (file) lines.push(`File: ${file}`);
 
     // Show edit details
-    const oldString = getParam('oldString', 'old_string', 'search', 'searchString');
-    const newString = getParam('newString', 'new_string', 'replace', 'replaceString');
+    const oldString = getParam(params, 'oldString', 'old_string', 'search', 'searchString');
+    const newString = getParam(params, 'newString', 'new_string', 'replace', 'replaceString');
     if (oldString || newString) {
       if (oldString)
         lines.push(`Old: ${oldString.slice(0, 100)}${oldString.length > 100 ? '...' : ''}`);
@@ -981,7 +1128,7 @@ function formatToolCall(toolData: {
     }
   } else if (toolName === 'create_file' || toolName === 'write_file' || toolName === 'write') {
     lines.push(`[Tool: ${toolName === 'create_file' ? 'Create File' : 'Write File'}]`);
-    const file = getParam('targetFile', 'path', 'file', 'relativeWorkspacePath');
+    const file = getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath');
     if (file) lines.push(`File: ${file}`);
     // Note: Content is extracted from bubble's codeBlocks field in extractBubbleText(), not from params
   } else {
@@ -1062,26 +1209,12 @@ function formatDiffBlock(diffData: {
 /**
  * Format tool call data that includes result with diff
  */
-function formatToolCallWithResult(toolData: {
-  name?: string;
-  params?: string;
-  result?: string;
-  rawArgs?: string;
-  status?: string;
-  additionalData?: { status?: string; userDecision?: string };
-}): string | null {
+function formatToolCallWithResult(toolData: ToolFormerData): string | null {
   const lines: string[] = [];
 
   // Parse params to get file path first
-  let filePath = '';
-  if (toolData.params || toolData.rawArgs) {
-    try {
-      const params = JSON.parse(toolData.params ?? toolData.rawArgs ?? '{}');
-      filePath = params.relativeWorkspacePath ?? params.file_path ?? '';
-    } catch {
-      // Ignore parse errors
-    }
-  }
+  const params = parseToolParams(toolData.params, toolData.rawArgs);
+  const filePath = getParam(params, 'relativeWorkspacePath', 'file_path');
 
   // Parse the result for diff information
   try {
@@ -1170,18 +1303,7 @@ function extractBubbleText(data: Record<string, unknown>): string {
   const isAssistant = bubbleType === 2;
 
   // Check for tool call in toolFormerData (with name = tool action)
-  const toolFormerData = data['toolFormerData'] as
-    | {
-        name?: string;
-        params?: string;
-        result?: string;
-        rawArgs?: string;
-        status?: string;
-        additionalData?: {
-          status?: string;
-        };
-      }
-    | undefined;
+  const toolFormerData = data['toolFormerData'] as ToolFormerData | undefined;
 
   // Check if it's an error - but don't return yet, mark it and continue extraction
   const isError = toolFormerData?.additionalData?.status === 'error';

@@ -70,6 +70,10 @@ export function formatSessionJson(
     workspacePath: workspacePath ?? null,
   };
 
+  if (session.source !== undefined) {
+    output['source'] = session.source;
+  }
+
   // Add filter metadata if filtering is active
   if (messageFilter && messageFilter.length > 0) {
     output['filter'] = messageFilter;

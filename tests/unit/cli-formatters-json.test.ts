@@ -113,6 +113,11 @@ describe('formatSessionJson', () => {
     const result = JSON.parse(formatSessionJson(makeSession()));
     expect(result.workspacePath).toBeNull();
   });
+
+  it('includes source when present', () => {
+    const result = JSON.parse(formatSessionJson(makeSession({ source: 'workspace-fallback' })));
+    expect(result.source).toBe('workspace-fallback');
+  });
 });
 
 describe('formatSearchResultsJson', () => {

@@ -212,6 +212,12 @@ describe('formatSessionDetail', () => {
     const result = formatSessionDetail(makeSession(), '~/my/workspace');
     expect(result).toContain('~/my/workspace');
   });
+
+  it('shows degraded warning for workspace fallback sessions', () => {
+    const result = formatSessionDetail(makeSession({ source: 'workspace-fallback' }));
+    expect(result).toContain('Partial data');
+    expect(result).toContain('workspace fallback');
+  });
 });
 
 describe('formatSearchResultsTable', () => {

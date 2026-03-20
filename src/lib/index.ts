@@ -141,6 +141,7 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
       metadata: msg.metadata,
     })),
     messageCount: coreSession.messageCount,
+    source: coreSession.source,
     usage: coreSession.usage,
     metadata: {
       lastModified: coreSession.lastUpdatedAt.toISOString(),

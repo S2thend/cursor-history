@@ -367,8 +367,15 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - SQLite (read-only access to existing `state.vscdb` files) (009-token-usage)
 - TypeScript 5.9+ (strict mode enabled) + commander, picocolors, better-sqlite3 / node:sqlite (existing) (010-fix-timestamp-fallback)
 - SQLite databases (`state.vscdb` files) - read-only access (010-fix-timestamp-fallback)
+- TypeScript 5.9+ (strict mode enabled) + better-sqlite3 / node:sqlite (pluggable), commander, picocolors (012-fix-session-data-integrity)
+- SQLite databases (state.vscdb files) — read-only access (012-fix-session-data-integrity)
 
 ## Recent Changes
+- 012-fix-session-data-integrity: Restored full session fidelity across storage fallbacks
+  - Added shared bubble mapping in `src/core/storage.ts` so `getSession()` and `getGlobalSession()` preserve empty bubbles as `[empty message]`, retain malformed rows as `[corrupted message]`, and populate `message.metadata.bubbleType`
+  - Populated structured `message.toolCalls` from `toolFormerData`, including default `completed` status handling and `{ _raw: ... }` sentinels for invalid params
+  - Added `session.source` to core and library types, threaded it through the library API, exposed it in CLI JSON, and surfaced a degraded warning in CLI detail output for workspace fallback sessions
+  - Replaced silent global-load fallbacks with `debugLogStorage()` messages that distinguish missing global DBs, missing `cursorDiskKV`, empty composer bubble sets, query/open failures, and malformed bubble rows
 - Workspace file path resolution: Workspaces opened via a .code-workspace file are now discovered and matchable
   - `readWorkspaceJson()` and `readWorkspaceJsonFromBackup()` now support the `workspace` key (workspace file URI) in addition to `folder` (single-folder URI); prefer `workspace` when both exist;
   - Listing, `--workspace` filter, and `findWorkspaceByPath()` work when the workspace path is the .code-workspace file path

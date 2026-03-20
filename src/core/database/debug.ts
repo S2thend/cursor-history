@@ -14,3 +14,13 @@ export function debugLog(message: string): void {
     console.error(`[cursor-history:sqlite] ${message}`);
   }
 }
+
+/**
+ * Log storage-layer debug output to stderr if debug mode is enabled
+ * @param message - Message to log
+ */
+export function debugLogStorage(message: string): void {
+  if (process.env['DEBUG'] || process.env['CURSOR_HISTORY_DEBUG']) {
+    console.error(`[cursor-history:storage] ${message}`);
+  }
+}

@@ -25,6 +25,9 @@ export interface Session {
   /** Total number of messages in session */
   messageCount: number;
 
+  /** Source data completeness: full global bubbles or degraded workspace fallback */
+  source?: 'global' | 'workspace-fallback';
+
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
 
