@@ -369,6 +369,8 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - SQLite databases (`state.vscdb` files) - read-only access (010-fix-timestamp-fallback)
 - TypeScript 5.9+ (strict mode enabled) + better-sqlite3 / node:sqlite (pluggable), commander, picocolors (012-fix-session-data-integrity)
 - SQLite databases (state.vscdb files) — read-only access (012-fix-session-data-integrity)
+- TypeScript 5.9+ (strict mode) + Node.js built-in only; no new deps (013-fix-tool-content-truncation)
+- N/A (read-only access to existing SQLite; no schema changes) (013-fix-tool-content-truncation)
 
 ## Recent Changes
 - 012-fix-session-data-integrity: Restored full session fidelity across storage fallbacks
