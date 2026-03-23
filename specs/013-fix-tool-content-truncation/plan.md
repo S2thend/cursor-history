@@ -4,19 +4,19 @@
 
 ## Summary
 
-Remove five storage-layer truncations in `formatToolCall()` that cause `Message.content` to be incomplete, and add two explicit branches for `read_file_v2` and `edit_file_v2` with robust priority-chain content extraction. All changes are in `src/core/storage.ts`. No public API, type, or display-layer changes are needed.
+Remove four truncations in `formatToolCall()` plus the v2-specific truncated `codeBlocks` append path in `extractBubbleText()` that cause `Message.content` to be incomplete, and add two explicit branches for `read_file_v2` and `edit_file_v2` with robust priority-chain content extraction. All production logic changes are in `src/core/storage.ts`. No public API or display-layer code changes are needed, but test coverage spans storage, formatter, and show-command paths.
 
 ## Technical Context
 
 **Language/Version**: TypeScript 5.9+ (strict mode)
 **Primary Dependencies**: Node.js built-in only; no new deps
 **Storage**: N/A (read-only access to existing SQLite; no schema changes)
-**Testing**: Vitest — unit tests in `tests/unit/storage.test.ts`
+**Testing**: Vitest — unit tests in `tests/unit/storage.test.ts`, `tests/unit/cli-formatters-table.test.ts`, and `tests/unit/cli-commands.test.ts`
 **Target Platform**: Node.js 20 LTS+
 **Project Type**: Single project (CLI + library sharing `src/core/`)
-**Performance Goals**: No throughput target; strings are never truncated at storage layer regardless of size
+**Performance Goals**: This feature must not introduce additional storage-layer truncation. It preserves the full payload already loaded by the current session/message model; it does not redesign the broader parser/session memory model.
 **Constraints**: No public API breakage; `Message.toolCalls[].result` unchanged; display-layer behavior unchanged by default
-**Scale/Scope**: Single function (`formatToolCall`) in one file; two new branches + four one-line removals
+**Scale/Scope**: One production file (`src/core/storage.ts`); primary work in `formatToolCall()` plus a small `extractBubbleText()` call-site / fallback adjustment
 
 ## Constitution Check
 
@@ -24,7 +24,7 @@ Remove five storage-layer truncations in `formatToolCall()` that cause `Message.
 |---|---|---|
 | I. Simplicity First | ✅ Pass | Minimal change: remove slices, add two branches in one function. No new abstractions. |
 | II. CLI-Native Design | ✅ Pass | No CLI interface changes. stdout/stderr contract preserved. |
-| III. Documentation-Driven | ✅ Pass | CLAUDE.md and CHANGELOG update required at PR time. |
+| III. Documentation-Driven | ✅ Pass | `CHANGELOG.md` update required at PR time. |
 | IV. Incremental Delivery | ✅ Pass | Each of the four fix types is independently testable and releasable. |
 | V. Defensive Parsing | ✅ Pass | Priority chain skips malformed/non-string candidates; `debugLogStorage()` on failures; no throw. |
 
@@ -48,11 +48,15 @@ specs/013-fix-tool-content-truncation/
 ```text
 src/
 └── core/
-    └── storage.ts       ← all logic changes (formatToolCall function)
+    └── storage.ts                    ← all production logic changes
 
 tests/
 └── unit/
-    └── storage.test.ts  ← new test cases in existing describe block
+    ├── storage.test.ts               ← storage-layer coverage
+    ├── cli-formatters-table.test.ts  ← formatter non-regression coverage
+    └── cli-commands.test.ts          ← show-command flag wiring coverage
+
+CHANGELOG.md                          ← release notes update
 ```
 
 **Structure Decision**: Single project, no new files, no structural changes.
@@ -64,10 +68,10 @@ See [research.md](research.md). All questions resolved:
 | Question | Resolution |
 |---|---|
 | Where is `codeBlocks` sourced from? | Bubble object (`data`), not `toolFormerData`. Must be passed into `formatToolCall()` or handled in `extractBubbleText()` at call site. |
-| Does `read_file_v2` ever produce a diff? | No. `formatToolCallWithResult()` handles diffs exclusively; `read_file_v2` never matches that path. Diff coexistence clause in spec is forward-compatible; no code change needed now. |
+| Does `read_file_v2` ever produce a diff? | It may be uncommon, but the accepted spec requires preserving a valid `diff` if present. The `read_file_v2` branch will detect and append it after primary content, or emit it on its own if no usable primary content exists. |
 | Does `parseToolParams` try `rawArgs` when `params` is malformed? | No — it uses `paramsText ?? rawArgsText` (first non-null). If `params` is malformed JSON, `rawArgs` is not tried. FR-007b is still satisfied: no throw, tool header + any recoverable path returned. |
-| How is `debugLogStorage` called? | `debugLogStorage('storage', message, ...args)`. Import already present. |
-| Does display layer need changes? | No. `formatToolCallDisplay()` already truncates for terminal via `fullTool` flag. |
+| How is `debugLogStorage` called? | `debugLogStorage(message)`. It accepts a single message string. |
+| Does display layer need changes? | No production display-layer changes. Existing formatter behavior remains, and CLI coverage should include formatter rendering plus `show --tool` flag wiring. |
 
 ## Phase 1: Design
 
@@ -108,7 +112,9 @@ Priority chain for content:
 3. JSON.stringify of first non-string candidate encountered above
 4. No `Content:` line if nothing found
 
-On `toolData.result` parse failure: log `debugLogStorage('storage', 'read_file_v2: failed to parse result JSON', e)`. Continue with `codeBlocks` fallback.
+If a valid `diff` is present in `toolData.result`, append it after the selected primary content. If no usable primary content exists, emit the diff on its own.
+
+On `toolData.result` parse failure: log `debugLogStorage(<message containing 'read_file_v2'>)`. Continue with `codeBlocks` fallback.
 
 ### D. `edit_file_v2` branch design
 
@@ -128,7 +134,7 @@ Priority chain for content (all from parsed params):
 5. JSON.stringify of first non-string named candidate encountered above
 6. No `Content:` line if nothing found
 
-On `parseToolParams` returning `{ _raw: ... }` sentinel: log `debugLogStorage('storage', 'edit_file_v2: params/rawArgs could not be parsed as object', ...)`. Continue; no Content line.
+On `parseToolParams` returning `{ _raw: ... }` sentinel: log `debugLogStorage(<message containing 'edit_file_v2'>)`. Continue with remaining fallback behavior; if no content is found, return header-only output plus any path extractable from normal parsed path fields.
 
 ### E. Truncation removals (surgical)
 

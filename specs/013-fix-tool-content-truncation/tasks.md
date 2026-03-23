@@ -5,7 +5,7 @@
 
 **Tests**: Test tasks are included — this is a pure normalization fix and regression safety requires explicit coverage of all priority chain branches.
 
-**Organization**: Tasks are grouped by user story. All implementation is in `src/core/storage.ts`; all tests are in `tests/unit/storage.test.ts`. No setup or foundational phase needed — no new infrastructure, no new files, no dependencies to install.
+**Organization**: Tasks are grouped by user story. All production logic changes are in `src/core/storage.ts`. Tests span `tests/unit/storage.test.ts`, `tests/unit/cli-formatters-table.test.ts`, and `tests/unit/cli-commands.test.ts`. Documentation update is in `CHANGELOG.md`. No setup or foundational phase needed — no new infrastructure and no dependencies to install.
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -23,8 +23,8 @@
 ### Implementation for User Story 1 & 2
 
 - [ ] T001 [US1] Extend `formatToolCall()` signature in `src/core/storage.ts` to accept an optional `codeBlocks?: Array<{ content?: unknown }>` parameter (add as second param with default `undefined`)
-- [ ] T002 [US1] Add `read_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Read File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'effectiveUri')`, then run priority chain — (1) parse `toolData.result` JSON → `result.contents` if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) JSON.stringify of first non-string named candidate encountered; (4) no Content line if none found. Additionally, if `toolData.result` JSON contains a valid `diff` object (same shape as handled by `formatToolCallWithResult()`), append the formatted diff after the selected primary content; if no usable primary content was found, emit the diff on its own. Wrap in try/catch on result parse; call `debugLogStorage('storage', 'read_file_v2: failed to parse result JSON', e)` on failure.
-- [ ] T003 [US2] Add `edit_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Edit File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath')`, then run priority chain — (1) `streamingContent` param if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) `content` param if string and non-whitespace; (4) `fileContent` param if string and non-whitespace; (5) JSON.stringify of first non-string named candidate encountered; (6) no Content line if none found. Call `debugLogStorage('storage', 'edit_file_v2: params/rawArgs could not be parsed as object', ...)` when `parseToolParams` returns `{ _raw: ... }` sentinel.
+- [ ] T002 [US1] Add `read_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Read File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'effectiveUri')`, then run priority chain — (1) parse `toolData.result` JSON → `result.contents` if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) JSON.stringify of first non-string named candidate encountered; (4) no Content line if none found. Additionally, if `toolData.result` JSON contains a valid `diff` object (same shape as handled by `formatToolCallWithResult()`), append the formatted diff after the selected primary content; if no usable primary content was found, emit the diff on its own. Wrap in try/catch on result parse; call `debugLogStorage()` with a message containing `read_file_v2` on failure.
+- [ ] T003 [US2] Add `edit_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Edit File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath')`, then run priority chain — (1) `streamingContent` param if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) `content` param if string and non-whitespace; (4) `fileContent` param if string and non-whitespace; (5) JSON.stringify of first non-string named candidate encountered; (6) no Content line if none found. Call `debugLogStorage()` with a message containing `edit_file_v2` when `parseToolParams` returns `{ _raw: ... }` sentinel.
 - [ ] T004 [US1] Update the `formatToolCall()` call site in `extractBubbleText()` in `src/core/storage.ts` (line ~1321) to pass the bubble-level `codeBlocks` field as the new second argument: `formatToolCall(toolFormerData, data['codeBlocks'] as Array<{ content?: unknown }> | undefined)`
 - [ ] T005 [US1] In `extractBubbleText()` in `src/core/storage.ts`, remove the existing 200-char-truncated `codeBlocks` append block (lines ~1324–1329) for `read_file_v2` and `edit_file_v2` only — these branches now handle `codeBlocks` internally. Retain the existing block for all other tool types. **Note**: apply this only after T002's diff-append path is fully implemented; removing the block before that would leave FR-004 (diff must not be blocked by skipped primary content) unmet.
 
@@ -42,8 +42,9 @@
 - [ ] T015 [P] [US2] Add test `edit_file_v2 — userDecision rejected with full content` in `tests/unit/storage.test.ts`: full `streamingContent` + `additionalData.userDecision = 'rejected'`; assert content present and `User Decision: ✗ rejected` present
 - [ ] T015a [P] [US1] Add test `read_file_v2 — primary content and diff both present` in `tests/unit/storage.test.ts`: result JSON has both `contents: 'file text'` and a valid `diff` object with `chunks`; assert `message.content` contains `'file text'` followed by the diff block (US1 scenario 6)
 - [ ] T015b [P] [US1] Add test `read_file_v2 — diff-only when no usable primary content` in `tests/unit/storage.test.ts`: result JSON has no `contents` (or whitespace-only) but has a valid `diff` object; assert `message.content` contains the diff block and does not contain a `Content:` line (US1 scenario 7)
-- [ ] T015c [P] [US1] Add test `read_file_v2 — debugLogStorage called on malformed result` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `result = '{'`; assert `debugLogStorage` is called with `'storage'` as first arg and a message containing `'read_file_v2'`
-- [ ] T015d [P] [US2] Add test `edit_file_v2 — debugLogStorage called on malformed params` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `params = '{'`, no `rawArgs`; assert `debugLogStorage` is called with `'storage'` as first arg and a message containing `'edit_file_v2'`
+- [ ] T015c [P] [US1] Add test `read_file_v2 — debugLogStorage called on malformed result` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `result = '{'`; assert `debugLogStorage` is called with a message containing `'read_file_v2'`
+- [ ] T015d [P] [US2] Add test `edit_file_v2 — debugLogStorage called on malformed params` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `params = '{'`, no `rawArgs`; assert `debugLogStorage` is called with a message containing `'edit_file_v2'`
+- [ ] T015e [P] [US1] Add test `read_file_v2 — toolCalls.result unchanged` in `tests/unit/storage.test.ts`: bubble with `toolFormerData.result = JSON.stringify({ contents: 'file text' })`; assert `message.content` is normalized as expected and `message.toolCalls?.[0]?.result` equals the original raw result string
 
 **Checkpoint**: `npm test` passes. `message.content` for `read_file_v2` and `edit_file_v2` contains full content. User Stories 1 and 2 complete.
 
@@ -89,9 +90,9 @@
 
 ## Phase 4: User Story 5 — CLI display non-regression (Priority: P2)
 
-**Goal**: Verify that the display layer still shows a preview without `--fullread` and full content with `--fullread`, confirming no regression from the storage-layer changes.
+**Goal**: Verify that the display layer still shows a preview without `--tool` and full content with `--tool`, confirming no regression from the storage-layer changes.
 
-**Independent Test**: Run `cursor-history show <index>` on a session with a `read_file_v2` or `read_file` call. Without `--fullread` the terminal shows a preview; with `--fullread` the full content appears.
+**Independent Test**: Run `cursor-history show <index>` on a session with a `read_file_v2` or `read_file` call. Without `--tool` the terminal shows a preview; with `--tool` the full content appears.
 
 ### Implementation for User Story 5
 
@@ -101,6 +102,7 @@
 
 - [ ] T023 [P] [US5] Add test `formatToolCallDisplay truncates Content line without fullTool` in `tests/unit/cli-formatters-table.test.ts`: pass a `message.content` string containing a long `Content:` line (e.g. 500+ chars); call with `fullTool = false`; assert the rendered output is shorter than the input
 - [ ] T024 [P] [US5] Add test `formatToolCallDisplay preserves Content line with fullTool` in `tests/unit/cli-formatters-table.test.ts`: same input; call with `fullTool = true`; assert the full content is present in the rendered output
+- [ ] T024a [P] [US5] Add test `show --tool passes fullTool=true` in `tests/unit/cli-commands.test.ts`: invoke `show 1 --tool`; assert `formatSessionDetail` receives `{ fullTool: true }`
 
 **Checkpoint**: `npm test` passes. Display layer correctly previews and expands content. All 5 user stories complete.
 
@@ -119,7 +121,7 @@
 - [ ] T030 Run `npm test` — full test suite must pass with zero failures
 - [ ] T031 Run `npm run typecheck` — zero TypeScript errors
 - [ ] T032 Run `npm run lint` — zero lint errors
-- [ ] T033 Update `CLAUDE.md` Recent Changes section with a summary of this feature's changes
+- [ ] T033 Update `CHANGELOG.md` with a summary of this library-visible `Message.content` normalization change and note that default CLI preview behavior remains unchanged
 
 ---
 
@@ -139,7 +141,7 @@
 - **US2 (edit_file_v2)**: Shares T001 (signature change) with US1; T003 can start after T001
 - **US3 (terminal)**: Independent of US1/US2 — parallel
 - **US4 (read_file legacy)**: Independent of US1/US2/US3 — parallel
-- **US5 (CLI display)**: Depends on US1 storage changes existing; tests are read-only formatter verification
+- **US5 (CLI display)**: Depends on US1 storage changes existing; verification covers formatter behavior plus `show --tool` flag wiring
 
 ### Within Each Phase
 
@@ -149,9 +151,9 @@
 ### Parallel Opportunities
 
 - T002 and T003 can be written in parallel (different branches), both after T001
-- T006–T015d (all test tasks for US1/US2) can be written in parallel after T002/T003
+- T006–T015e (all test tasks for US1/US2) can be written in parallel after T002/T003
 - T016, T019, T025, T026 are all independent one-line removals — fully parallel
-- T017–T018, T020–T021, T027–T029a, T023–T024 are all independent test additions — fully parallel
+- T017–T018, T020–T021, T027–T029a, T023–T024a are all independent test additions — fully parallel
 
 ---
 
@@ -177,6 +179,7 @@ Task T015a: test read_file_v2 primary content + diff
 Task T015b: test read_file_v2 diff-only
 Task T015c: test read_file_v2 debugLogStorage on malformed result
 Task T015d: test edit_file_v2 debugLogStorage on malformed params
+Task T015e: test read_file_v2 toolCalls.result unchanged
 ```
 
 ---
@@ -186,7 +189,7 @@ Task T015d: test edit_file_v2 debugLogStorage on malformed params
 ### MVP First (User Stories 1 & 2 — the primary bug)
 
 1. Complete Phase 1: T001 → T002+T003 (parallel) → T004 → T005
-2. Add tests T006–T015 (parallel)
+2. Add tests T006–T015e (parallel)
 3. Run `npm test` — verify all pass
 4. **STOP and VALIDATE**: `message.content` for `read_file_v2` and `edit_file_v2` is full
 5. This resolves issue #25 completely
@@ -203,8 +206,8 @@ Task T015d: test edit_file_v2 debugLogStorage on malformed params
 
 ## Notes
 
-- All logic changes are in one function (`formatToolCall`) in one file (`src/core/storage.ts`)
-- All test changes are in one file (`tests/unit/storage.test.ts`) plus one formatter test file (`tests/unit/cli-formatters-table.test.ts`)
+- All production logic changes are in one file (`src/core/storage.ts`), primarily in `formatToolCall()` with a small `extractBubbleText()` adjustment
+- Test changes are in `tests/unit/storage.test.ts`, `tests/unit/cli-formatters-table.test.ts`, and `tests/unit/cli-commands.test.ts`
 - No new files, no new dependencies, no API changes
 - `edit_file` (legacy, non-v2) `oldString`/`newString` truncations are intentionally **not** changed — they are search-replace strings, not file content
 - T005 is important: the existing 200-char `codeBlocks` append in `extractBubbleText()` must be excluded for `read_file_v2` and `edit_file_v2` to avoid double-appending
