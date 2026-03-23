@@ -122,9 +122,9 @@ User Decision: <emoji> <decision>   (if present)
 
 Priority chain for content (all from parsed params):
 1. `streamingContent` (string, trimmed non-empty)
-2. `content` (string, trimmed non-empty)
-3. `fileContent` (string, trimmed non-empty)
-4. `codeBlocks?.[0]?.content` (string, trimmed non-empty)
+2. `codeBlocks?.[0]?.content` (string, trimmed non-empty)
+3. `content` (string, trimmed non-empty)
+4. `fileContent` (string, trimmed non-empty)
 5. JSON.stringify of first non-string named candidate encountered above
 6. No `Content:` line if nothing found
 
@@ -134,14 +134,16 @@ On `parseToolParams` returning `{ _raw: ... }` sentinel: log `debugLogStorage('s
 
 | Location | Change |
 |---|---|
-| `read_file` branch ~L1068 | `result.contents.slice(0, 300).replace(/\n/g, '\\n')` → `result.contents` (keep `.replace` for terminal compat, remove slice) |
+| `read_file` branch ~L1068 | `result.contents.slice(0, 300).replace(/\n/g, '\\n')` → `result.contents` (remove both the slice **and** the `.replace(/\n/g, '\\n')` — it was a display hack tied to the preview; real newlines are correct for library API and `formatToolCallDisplay()` already handles them) |
 | `run_terminal_command` branch ~L1100 | `output.slice(0, 500)` → `output`; remove `output.length > 500 ? '...' : ''` |
 | Generic `else` params ~L1140 | `val.length > 100 ? val.slice(0, 100) + '...' : val` → `val` |
 | Generic `else` result ~L1151–1152 | `resultText.slice(0, 500)` → `resultText`; remove ternary suffix |
 
-Note on `read_file` `replace(/\n/g, '\\n')`: The display layer already handles multi-line content in `formatToolCallDisplay()`. Removing the `\n` → `\\n` replacement preserves newlines in `Message.content`, which is correct for the library API. The display layer renders them correctly. This is a **secondary benefit** of the fix, not a separate task.
+Note on `read_file` `replace(/\n/g, '\\n')`: This replacement was a display hack tied to the 300-char preview — it compressed multiline content onto one visual line. It is removed alongside the slice. Real newlines are correct for the library API; `formatToolCallDisplay()` already iterates content line-by-line and handles them correctly.
 
 ### F. Test plan
+
+> **Note**: `tasks.md` is the authoritative and complete test list. This section is a design reference only — it may not reflect additions made during clarification (debugLogStorage assertion, generic result field test, diff-append tests).
 
 New test cases in `tests/unit/storage.test.ts`, in the existing `describe('getSession (more tool types)')` block using `setupToolTest()`:
 

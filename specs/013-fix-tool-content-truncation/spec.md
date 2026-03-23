@@ -87,7 +87,7 @@ A user running `cursor-history show` from the terminal expects that `--fullread`
 
 1. **Given** a session with a `read_file_v2` or `read_file` message, **When** the user runs `show` without `--fullread`, **Then** the terminal shows a truncated preview (consistent with existing read-file display behavior).
 2. **Given** a session with a `read_file_v2` or `read_file` message, **When** the user runs `show --fullread`, **Then** the terminal shows the complete file content.
-3. **Given** a session with an `edit_file_v2` message, **When** the user runs `show`, **Then** terminal output follows the existing display-level truncation rules for that content type.
+3. **Given** a session with an `edit_file_v2` message, **When** the user runs `show`, **Then** terminal output follows the same display-level truncation rules as `read_file_v2` — the content flows through `formatToolCallDisplay()` as a `Content:` line and is subject to the same `fullTool` truncation logic.
 
 ---
 
@@ -98,7 +98,7 @@ A user running `cursor-history show` from the terminal expects that `--fullread`
 - What happens when both `result.contents` and `codeBlocks[0].content` are present — which takes priority? (`result.contents` takes priority per FR-003.)
 - What happens when both usable primary content and a valid `diff` are present in `read_file_v2`? (Render the selected primary content first, then the diff.)
 - What happens when `codeBlocks` exists but `codeBlocks[0].content` is not a string? (Skip it; it becomes a candidate for the JSON.stringify fallback.)
-- What happens when the JSON.stringify fallback produces a very large string?
+- What happens when the JSON.stringify fallback produces a very large string? (No size cap — consistent with the general no-truncation policy. Library consumers own their memory budget.)
 - What happens when `result` JSON parses successfully but none of the named chain candidates (`contents`, `codeBlocks[0].content`) are present at all? (No content section is emitted; tool header and file path are returned.)
 
 ## Requirements *(mandatory)*

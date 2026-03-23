@@ -23,10 +23,10 @@
 ### Implementation for User Story 1 & 2
 
 - [ ] T001 [US1] Extend `formatToolCall()` signature in `src/core/storage.ts` to accept an optional `codeBlocks?: Array<{ content?: unknown }>` parameter (add as second param with default `undefined`)
-- [ ] T002 [US1] Add `read_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Read File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'effectiveUri')`, then run priority chain — (1) parse `toolData.result` JSON → `result.contents` if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) JSON.stringify of first non-string named candidate encountered; (4) no Content line if none found. Wrap in try/catch on result parse; call `debugLogStorage('storage', 'read_file_v2: failed to parse result JSON', e)` on failure.
-- [ ] T003 [US2] Add `edit_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Edit File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath')`, then run priority chain — (1) `streamingContent` param if string and non-whitespace; (2) `content` param if string and non-whitespace; (3) `fileContent` param if string and non-whitespace; (4) `codeBlocks?.[0]?.content` if string and non-whitespace; (5) JSON.stringify of first non-string named candidate encountered; (6) no Content line if none found. Call `debugLogStorage('storage', 'edit_file_v2: params/rawArgs could not be parsed as object', ...)` when `parseToolParams` returns `{ _raw: ... }` sentinel.
+- [ ] T002 [US1] Add `read_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Read File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'effectiveUri')`, then run priority chain — (1) parse `toolData.result` JSON → `result.contents` if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) JSON.stringify of first non-string named candidate encountered; (4) no Content line if none found. Additionally, if `toolData.result` JSON contains a valid `diff` object (same shape as handled by `formatToolCallWithResult()`), append the formatted diff after the selected primary content; if no usable primary content was found, emit the diff on its own. Wrap in try/catch on result parse; call `debugLogStorage('storage', 'read_file_v2: failed to parse result JSON', e)` on failure.
+- [ ] T003 [US2] Add `edit_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Edit File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath')`, then run priority chain — (1) `streamingContent` param if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) `content` param if string and non-whitespace; (4) `fileContent` param if string and non-whitespace; (5) JSON.stringify of first non-string named candidate encountered; (6) no Content line if none found. Call `debugLogStorage('storage', 'edit_file_v2: params/rawArgs could not be parsed as object', ...)` when `parseToolParams` returns `{ _raw: ... }` sentinel.
 - [ ] T004 [US1] Update the `formatToolCall()` call site in `extractBubbleText()` in `src/core/storage.ts` (line ~1321) to pass the bubble-level `codeBlocks` field as the new second argument: `formatToolCall(toolFormerData, data['codeBlocks'] as Array<{ content?: unknown }> | undefined)`
-- [ ] T005 [US1] In `extractBubbleText()` in `src/core/storage.ts`, remove the existing 200-char-truncated `codeBlocks` append block (lines ~1324–1329) for `read_file_v2` and `edit_file_v2` only — these branches now handle `codeBlocks` internally. Retain the existing block for all other tool types.
+- [ ] T005 [US1] In `extractBubbleText()` in `src/core/storage.ts`, remove the existing 200-char-truncated `codeBlocks` append block (lines ~1324–1329) for `read_file_v2` and `edit_file_v2` only — these branches now handle `codeBlocks` internally. Retain the existing block for all other tool types. **Note**: apply this only after T002's diff-append path is fully implemented; removing the block before that would leave FR-004 (diff must not be blocked by skipped primary content) unmet.
 
 ### Tests for User Story 1 & 2
 
@@ -40,6 +40,10 @@
 - [ ] T013 [P] [US2] Add test `edit_file_v2 — codeBlocks fallback` in `tests/unit/storage.test.ts`: no string params; `codeBlocks: [{ content: 'block content' }]`; assert used
 - [ ] T014 [P] [US2] Add test `edit_file_v2 — malformed params` in `tests/unit/storage.test.ts`: `params = '{'`, no `rawArgs`; assert no throw, `message.content` contains `[Tool: Edit File v2]`
 - [ ] T015 [P] [US2] Add test `edit_file_v2 — userDecision rejected with full content` in `tests/unit/storage.test.ts`: full `streamingContent` + `additionalData.userDecision = 'rejected'`; assert content present and `User Decision: ✗ rejected` present
+- [ ] T015a [P] [US1] Add test `read_file_v2 — primary content and diff both present` in `tests/unit/storage.test.ts`: result JSON has both `contents: 'file text'` and a valid `diff` object with `chunks`; assert `message.content` contains `'file text'` followed by the diff block (US1 scenario 6)
+- [ ] T015b [P] [US1] Add test `read_file_v2 — diff-only when no usable primary content` in `tests/unit/storage.test.ts`: result JSON has no `contents` (or whitespace-only) but has a valid `diff` object; assert `message.content` contains the diff block and does not contain a `Content:` line (US1 scenario 7)
+- [ ] T015c [P] [US1] Add test `read_file_v2 — debugLogStorage called on malformed result` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `result = '{'`; assert `debugLogStorage` is called with `'storage'` as first arg and a message containing `'read_file_v2'`
+- [ ] T015d [P] [US2] Add test `edit_file_v2 — debugLogStorage called on malformed params` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `params = '{'`, no `rawArgs`; assert `debugLogStorage` is called with `'storage'` as first arg and a message containing `'edit_file_v2'`
 
 **Checkpoint**: `npm test` passes. `message.content` for `read_file_v2` and `edit_file_v2` contains full content. User Stories 1 and 2 complete.
 
@@ -111,6 +115,7 @@
 - [ ] T027 [P] Add non-regression test `generic tool — string param > 100 chars` in `tests/unit/storage.test.ts`: unknown tool name, param value 150 chars; assert full value in content, no `...`
 - [ ] T028 [P] Add non-regression test `list_dir — content unchanged` in `tests/unit/storage.test.ts`: assert content is identical to pre-fix expected value (path only, no truncation was ever applied here)
 - [ ] T029 [P] Add non-regression test `edit_file — oldString/newString still truncated at 100` in `tests/unit/storage.test.ts`: `oldString` of 150 chars; assert content contains the 100-char truncated form with `...` (these truncations are intentional and remain in scope)
+- [ ] T029a [P] Add test `generic tool — result field > 500 chars` in `tests/unit/storage.test.ts`: unknown tool name, `result = JSON.stringify({ output: 'z'.repeat(600) })`; assert full 600-char string in content, no `...` (covers T026 removal)
 - [ ] T030 Run `npm test` — full test suite must pass with zero failures
 - [ ] T031 Run `npm run typecheck` — zero TypeScript errors
 - [ ] T032 Run `npm run lint` — zero lint errors
@@ -144,9 +149,9 @@
 ### Parallel Opportunities
 
 - T002 and T003 can be written in parallel (different branches), both after T001
-- T006–T015 (all test tasks for US1/US2) can be written in parallel
+- T006–T015d (all test tasks for US1/US2) can be written in parallel after T002/T003
 - T016, T019, T025, T026 are all independent one-line removals — fully parallel
-- T017–T018, T020–T021, T027–T029, T023–T024 are all independent test additions — fully parallel
+- T017–T018, T020–T021, T027–T029a, T023–T024 are all independent test additions — fully parallel
 
 ---
 
@@ -154,7 +159,7 @@
 
 ```bash
 # US1 and US2 implementation in parallel:
-Task T002: add read_file_v2 branch in src/core/storage.ts
+Task T002: add read_file_v2 branch (with diff-append) in src/core/storage.ts
 Task T003: add edit_file_v2 branch in src/core/storage.ts
 
 # After T002/T003, all tests in parallel:
@@ -168,6 +173,10 @@ Task T012: test edit_file_v2 content fallback
 Task T013: test edit_file_v2 codeBlocks fallback
 Task T014: test edit_file_v2 malformed params
 Task T015: test edit_file_v2 rejected with full content
+Task T015a: test read_file_v2 primary content + diff
+Task T015b: test read_file_v2 diff-only
+Task T015c: test read_file_v2 debugLogStorage on malformed result
+Task T015d: test edit_file_v2 debugLogStorage on malformed params
 ```
 
 ---
