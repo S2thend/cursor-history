@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Tool content normalization**: `Message.content` now preserves full payloads for `read_file_v2`, `edit_file_v2`, legacy `read_file`, terminal-command output, and generic tool params/results. Default CLI previews are unchanged; `show --tool` still expands full tool content in the terminal.
 - **Session data integrity**: `getSession()` and `getGlobalSession()` now preserve empty bubbles as `[empty message]`, retain malformed global rows as `[corrupted message]` placeholders with `metadata.corrupted = true`, and populate `message.metadata.bubbleType` when the source bubble type is known.
 - **Structured tool call recovery**: `message.toolCalls` is now populated from `toolFormerData`, including default `completed` status handling and `{ _raw: ... }` sentinels when tool params contain invalid JSON.
 - **Degraded session signaling**: Sessions now expose `source: 'global' | 'workspace-fallback'`, the library threads it through, CLI JSON includes it, and `show` warns when output is coming from workspace fallback data.

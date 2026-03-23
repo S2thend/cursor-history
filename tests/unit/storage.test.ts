@@ -44,6 +44,7 @@ vi.mock('node:fs', async () => {
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { readBackupManifest, openBackupDatabase } from '../../src/core/backup.js';
+import * as debugModule from '../../src/core/database/debug.js';
 import {
   readWorkspaceJson,
   findWorkspaces,
@@ -1446,6 +1447,266 @@ describe('getSession (more tool types)', () => {
     expect(result!.messages[0]!.content).toContain('npm test');
   });
 
+  it('handles read_file_v2 with full result contents', async () => {
+    const fileText = 'x'.repeat(500);
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: JSON.stringify({ contents: fileText }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('[Tool: Read File v2]');
+    expect(session!.messages[0]!.content).toContain(fileText);
+    expect(session!.messages[0]!.content).not.toContain(`${fileText.slice(0, 300)}...`);
+  });
+
+  it('handles read_file_v2 with codeBlocks fallback', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      codeBlocks: [{ content: 'fallback content' }],
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: JSON.stringify({}),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('fallback content');
+  });
+
+  it('handles read_file_v2 with JSON.stringify fallback', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: JSON.stringify({ contents: { nested: true } }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('{"nested":true}');
+  });
+
+  it('handles read_file_v2 with malformed result JSON', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: '{',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('[Tool: Read File v2]');
+    expect(session!.messages[0]!.content).not.toContain('Content:');
+  });
+
+  it('handles read_file_v2 with whitespace-only contents', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      codeBlocks: [{ content: 'real content' }],
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: JSON.stringify({ contents: '   ' }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('real content');
+  });
+
+  it('handles edit_file_v2 with full streamingContent', async () => {
+    const fileText = 'x'.repeat(200);
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'edit_file_v2',
+        params: JSON.stringify({ targetFile: '/f.ts', streamingContent: fileText }),
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('[Tool: Edit File v2]');
+    expect(session!.messages[0]!.content).toContain(fileText);
+    expect(session!.messages[0]!.content).not.toContain(`${fileText.slice(0, 100)}...`);
+  });
+
+  it('handles edit_file_v2 with content param fallback', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'edit_file_v2',
+        params: JSON.stringify({ targetFile: '/f.ts', content: 'content fallback' }),
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('content fallback');
+  });
+
+  it('handles edit_file_v2 with codeBlocks fallback', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      codeBlocks: [{ content: 'block content' }],
+      toolFormerData: {
+        name: 'edit_file_v2',
+        params: JSON.stringify({ targetFile: '/f.ts' }),
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('block content');
+  });
+
+  it('handles edit_file_v2 with malformed params', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'edit_file_v2',
+        params: '{',
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('[Tool: Edit File v2]');
+  });
+
+  it('handles edit_file_v2 with rejected user decision and full content', async () => {
+    const fileText = 'x'.repeat(200);
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'edit_file_v2',
+        params: JSON.stringify({ targetFile: '/f.ts', streamingContent: fileText }),
+        status: 'completed',
+        additionalData: { userDecision: 'rejected' },
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain(fileText);
+    expect(session!.messages[0]!.content).toContain('User Decision: ✗ rejected');
+  });
+
+  it('handles read_file_v2 with both primary content and diff', async () => {
+    const rawResult = JSON.stringify({
+      contents: 'file text',
+      diff: { chunks: [{ diffString: '-old\n+new' }] },
+    });
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: rawResult,
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('Content: file text');
+    expect(session!.messages[0]!.content).toContain('```diff');
+    expect(session!.messages[0]!.content).toContain('-old');
+    expect(session!.messages[0]!.content).toContain('+new');
+  });
+
+  it('handles read_file_v2 with diff only when no usable primary content exists', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: JSON.stringify({
+          contents: '   ',
+          diff: { chunks: [{ diffString: '-old\n+new' }] },
+        }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('```diff');
+    expect(session!.messages[0]!.content).not.toContain('Content:');
+  });
+
+  it('logs malformed read_file_v2 result payloads', async () => {
+    const debugSpy = vi.spyOn(debugModule, 'debugLogStorage').mockImplementation(() => {});
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: '{',
+      },
+    });
+    setupToolTest(bubble);
+    await getSession(1, '/data');
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('read_file_v2'));
+  });
+
+  it('logs malformed edit_file_v2 params payloads', async () => {
+    const debugSpy = vi.spyOn(debugModule, 'debugLogStorage').mockImplementation(() => {});
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'edit_file_v2',
+        params: '{',
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    await getSession(1, '/data');
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('edit_file_v2'));
+  });
+
+  it('preserves toolCalls result for read_file_v2', async () => {
+    const rawResult = JSON.stringify({ contents: 'file text' });
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file_v2',
+        params: JSON.stringify({ targetFile: '/src/file.ts' }),
+        status: 'completed',
+        result: rawResult,
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain('file text');
+    expect(session!.messages[0]!.toolCalls?.[0]?.result).toBe(rawResult);
+  });
+
   it('extracts edit_file tool call', async () => {
     const bubble = JSON.stringify({
       type: 2,
@@ -1578,6 +1839,41 @@ describe('getSession (generic tool)', () => {
     expect(result!.messages[0]!.content).toContain('Parsed 100 rows');
   });
 
+  it('keeps generic tool string params longer than 100 chars', async () => {
+    const payload = 'p'.repeat(150);
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'custom_tool',
+        params: JSON.stringify({ payload }),
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain(`Payload: ${payload}`);
+    expect(session!.messages[0]!.content).not.toContain(`${payload.slice(0, 100)}...`);
+  });
+
+  it('keeps generic tool result fields longer than 500 chars', async () => {
+    const output = 'z'.repeat(600);
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'custom_tool',
+        params: '{}',
+        status: 'completed',
+        result: JSON.stringify({ output }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain(`Result: ${output}`);
+    expect(session!.messages[0]!.content).not.toContain(`${output.slice(0, 500)}...`);
+  });
+
   it('handles tool with non-JSON result string', async () => {
     const bubble = JSON.stringify({
       type: 2,
@@ -1685,21 +1981,110 @@ describe('getSession (generic tool)', () => {
     expect(result!.messages[0]!.content).toContain('ls -la');
   });
 
-  it('handles read_file with content preview', async () => {
+  it('keeps terminal command output longer than 500 chars', async () => {
+    const output = 'x'.repeat(600);
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'run_terminal_command',
+        params: JSON.stringify({ command: 'npm test' }),
+        status: 'completed',
+        result: JSON.stringify({ output }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain(`Output: ${output}`);
+    expect(session!.messages[0]!.content).not.toContain(`${output.slice(0, 500)}...`);
+  });
+
+  it('omits empty terminal command output lines', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'run_terminal_command',
+        params: JSON.stringify({ command: 'npm test' }),
+        status: 'completed',
+        result: JSON.stringify({ output: '' }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).not.toContain('Output:');
+  });
+
+  it('keeps read_file contents longer than 300 chars', async () => {
+    const content = 'y'.repeat(400);
     const bubble = JSON.stringify({
       type: 2,
       toolFormerData: {
         name: 'read_file',
         params: JSON.stringify({ path: '/src/index.ts' }),
         status: 'completed',
-        result: JSON.stringify({ contents: 'export function main() { return true; }' }),
+        result: JSON.stringify({ contents: content }),
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain(`Content: ${content}`);
+    expect(session!.messages[0]!.content).not.toContain(`${content.slice(0, 300)}...`);
+  });
+
+  it('handles read_file with full content', async () => {
+    const content = 'export function main() {\n  return true;\n}';
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'read_file',
+        params: JSON.stringify({ path: '/src/index.ts' }),
+        status: 'completed',
+        result: JSON.stringify({ contents: content }),
       },
     });
     setupToolTest(bubble);
     const result = await getSession(1, '/data');
     expect(result).not.toBeNull();
     expect(result!.messages[0]!.content).toContain('[Tool: Read File]');
-    expect(result!.messages[0]!.content).toContain('Content:');
+    expect(result!.messages[0]!.content).toContain(`Content: ${content}`);
+    expect(result!.messages[0]!.content).toContain('\n  return true;\n');
+  });
+
+  it('keeps list_dir content unchanged', async () => {
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'list_dir',
+        params: JSON.stringify({ targetDirectory: '/src' }),
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toBe(
+      '[Tool: List Directory]\nDirectory: /src\nStatus: ✓ completed'
+    );
+  });
+
+  it('keeps edit_file old and new strings truncated', async () => {
+    const oldString = 'o'.repeat(150);
+    const newString = 'n'.repeat(150);
+    const bubble = JSON.stringify({
+      type: 2,
+      toolFormerData: {
+        name: 'edit_file',
+        params: JSON.stringify({ targetFile: '/src/main.ts', oldString, newString }),
+        status: 'completed',
+      },
+    });
+    setupToolTest(bubble);
+    const session = await getSession(1, '/data');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0]!.content).toContain(`Old: ${'o'.repeat(100)}...`);
+    expect(session!.messages[0]!.content).toContain(`New: ${'n'.repeat(100)}...`);
   });
 
   it('handles user message with codeBlocks', async () => {

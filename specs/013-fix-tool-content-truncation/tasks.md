@@ -22,29 +22,29 @@
 
 ### Implementation for User Story 1 & 2
 
-- [ ] T001 [US1] Extend `formatToolCall()` signature in `src/core/storage.ts` to accept an optional `codeBlocks?: Array<{ content?: unknown }>` parameter (add as second param with default `undefined`)
-- [ ] T002 [US1] Add `read_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Read File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'effectiveUri')`, then run priority chain — (1) parse `toolData.result` JSON → `result.contents` if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) JSON.stringify of first non-string named candidate encountered; (4) no Content line if none found. Additionally, if `toolData.result` JSON contains a valid `diff` object (same shape as handled by `formatToolCallWithResult()`), append the formatted diff after the selected primary content; if no usable primary content was found, emit the diff on its own. Wrap in try/catch on result parse; call `debugLogStorage()` with a message containing `read_file_v2` on failure.
-- [ ] T003 [US2] Add `edit_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Edit File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath')`, then run priority chain — (1) `streamingContent` param if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) `content` param if string and non-whitespace; (4) `fileContent` param if string and non-whitespace; (5) JSON.stringify of first non-string named candidate encountered; (6) no Content line if none found. Call `debugLogStorage()` with a message containing `edit_file_v2` when `parseToolParams` returns `{ _raw: ... }` sentinel.
-- [ ] T004 [US1] Update the `formatToolCall()` call site in `extractBubbleText()` in `src/core/storage.ts` (line ~1321) to pass the bubble-level `codeBlocks` field as the new second argument: `formatToolCall(toolFormerData, data['codeBlocks'] as Array<{ content?: unknown }> | undefined)`
-- [ ] T005 [US1] In `extractBubbleText()` in `src/core/storage.ts`, remove the existing 200-char-truncated `codeBlocks` append block (lines ~1324–1329) for `read_file_v2` and `edit_file_v2` only — these branches now handle `codeBlocks` internally. Retain the existing block for all other tool types. **Note**: apply this only after T002's diff-append path is fully implemented; removing the block before that would leave FR-004 (diff must not be blocked by skipped primary content) unmet.
+- [X] T001 [US1] Extend `formatToolCall()` signature in `src/core/storage.ts` to accept an optional `codeBlocks?: Array<{ content?: unknown }>` parameter (add as second param with default `undefined`)
+- [X] T002 [US1] Add `read_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Read File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'effectiveUri')`, then run priority chain — (1) parse `toolData.result` JSON → `result.contents` if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) JSON.stringify of first non-string named candidate encountered; (4) no Content line if none found. Additionally, if `toolData.result` JSON contains a valid `diff` object (same shape as handled by `formatToolCallWithResult()`), append the formatted diff after the selected primary content; if no usable primary content was found, emit the diff on its own. Wrap in try/catch on result parse; call `debugLogStorage()` with a message containing `read_file_v2` on failure.
+- [X] T003 [US2] Add `edit_file_v2` branch to `formatToolCall()` in `src/core/storage.ts`: emit `[Tool: Edit File v2]`, extract file path via `getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath')`, then run priority chain — (1) `streamingContent` param if string and non-whitespace; (2) `codeBlocks?.[0]?.content` if string and non-whitespace; (3) `content` param if string and non-whitespace; (4) `fileContent` param if string and non-whitespace; (5) JSON.stringify of first non-string named candidate encountered; (6) no Content line if none found. Call `debugLogStorage()` with a message containing `edit_file_v2` when `parseToolParams` returns `{ _raw: ... }` sentinel.
+- [X] T004 [US1] Update the `formatToolCall()` call site in `extractBubbleText()` in `src/core/storage.ts` (line ~1321) to pass the bubble-level `codeBlocks` field as the new second argument: `formatToolCall(toolFormerData, data['codeBlocks'] as Array<{ content?: unknown }> | undefined)`
+- [X] T005 [US1] In `extractBubbleText()` in `src/core/storage.ts`, remove the existing 200-char-truncated `codeBlocks` append block (lines ~1324–1329) for `read_file_v2` and `edit_file_v2` only — these branches now handle `codeBlocks` internally. Retain the existing block for all other tool types. **Note**: apply this only after T002's diff-append path is fully implemented; removing the block before that would leave FR-004 (diff must not be blocked by skipped primary content) unmet.
 
 ### Tests for User Story 1 & 2
 
-- [ ] T006 [P] [US1] Add test `read_file_v2 — full result.contents` in `tests/unit/storage.test.ts` (`getSession (more tool types)` describe): bubble with `toolFormerData.name = 'read_file_v2'`, `result = JSON.stringify({ contents: 'x'.repeat(500) })`; assert `message.content` contains the 500-char string with no `...`
-- [ ] T007 [P] [US1] Add test `read_file_v2 — codeBlocks fallback` in `tests/unit/storage.test.ts`: bubble with `read_file_v2`, result JSON missing `contents`; bubble has `codeBlocks: [{ content: 'fallback content' }]`; assert `message.content` contains `'fallback content'`
-- [ ] T008 [P] [US1] Add test `read_file_v2 — JSON.stringify fallback` in `tests/unit/storage.test.ts`: bubble with `read_file_v2`, result JSON has `contents: { nested: true }` (non-string); assert `message.content` contains `JSON.stringify({ nested: true })`
-- [ ] T009 [P] [US1] Add test `read_file_v2 — malformed result JSON` in `tests/unit/storage.test.ts`: `result = '{'`; assert no throw, `message.content` contains `[Tool: Read File v2]` and does not contain `Content:`
-- [ ] T010 [P] [US1] Add test `read_file_v2 — whitespace-only contents` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ contents: '   ' })`; bubble has `codeBlocks: [{ content: 'real content' }]`; assert `message.content` contains `'real content'` (whitespace skipped)
-- [ ] T011 [P] [US2] Add test `edit_file_v2 — full streamingContent` in `tests/unit/storage.test.ts`: `params = JSON.stringify({ targetFile: '/f.ts', streamingContent: 'x'.repeat(200) })`; assert full 200-char string in content, no `...`
-- [ ] T012 [P] [US2] Add test `edit_file_v2 — content param fallback` in `tests/unit/storage.test.ts`: no `streamingContent`; `content` param present; assert `content` value used
-- [ ] T013 [P] [US2] Add test `edit_file_v2 — codeBlocks fallback` in `tests/unit/storage.test.ts`: no string params; `codeBlocks: [{ content: 'block content' }]`; assert used
-- [ ] T014 [P] [US2] Add test `edit_file_v2 — malformed params` in `tests/unit/storage.test.ts`: `params = '{'`, no `rawArgs`; assert no throw, `message.content` contains `[Tool: Edit File v2]`
-- [ ] T015 [P] [US2] Add test `edit_file_v2 — userDecision rejected with full content` in `tests/unit/storage.test.ts`: full `streamingContent` + `additionalData.userDecision = 'rejected'`; assert content present and `User Decision: ✗ rejected` present
-- [ ] T015a [P] [US1] Add test `read_file_v2 — primary content and diff both present` in `tests/unit/storage.test.ts`: result JSON has both `contents: 'file text'` and a valid `diff` object with `chunks`; assert `message.content` contains `'file text'` followed by the diff block (US1 scenario 6)
-- [ ] T015b [P] [US1] Add test `read_file_v2 — diff-only when no usable primary content` in `tests/unit/storage.test.ts`: result JSON has no `contents` (or whitespace-only) but has a valid `diff` object; assert `message.content` contains the diff block and does not contain a `Content:` line (US1 scenario 7)
-- [ ] T015c [P] [US1] Add test `read_file_v2 — debugLogStorage called on malformed result` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `result = '{'`; assert `debugLogStorage` is called with a message containing `'read_file_v2'`
-- [ ] T015d [P] [US2] Add test `edit_file_v2 — debugLogStorage called on malformed params` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `params = '{'`, no `rawArgs`; assert `debugLogStorage` is called with a message containing `'edit_file_v2'`
-- [ ] T015e [P] [US1] Add test `read_file_v2 — toolCalls.result unchanged` in `tests/unit/storage.test.ts`: bubble with `toolFormerData.result = JSON.stringify({ contents: 'file text' })`; assert `message.content` is normalized as expected and `message.toolCalls?.[0]?.result` equals the original raw result string
+- [X] T006 [P] [US1] Add test `read_file_v2 — full result.contents` in `tests/unit/storage.test.ts` (`getSession (more tool types)` describe): bubble with `toolFormerData.name = 'read_file_v2'`, `result = JSON.stringify({ contents: 'x'.repeat(500) })`; assert `message.content` contains the 500-char string with no `...`
+- [X] T007 [P] [US1] Add test `read_file_v2 — codeBlocks fallback` in `tests/unit/storage.test.ts`: bubble with `read_file_v2`, result JSON missing `contents`; bubble has `codeBlocks: [{ content: 'fallback content' }]`; assert `message.content` contains `'fallback content'`
+- [X] T008 [P] [US1] Add test `read_file_v2 — JSON.stringify fallback` in `tests/unit/storage.test.ts`: bubble with `read_file_v2`, result JSON has `contents: { nested: true }` (non-string); assert `message.content` contains `JSON.stringify({ nested: true })`
+- [X] T009 [P] [US1] Add test `read_file_v2 — malformed result JSON` in `tests/unit/storage.test.ts`: `result = '{'`; assert no throw, `message.content` contains `[Tool: Read File v2]` and does not contain `Content:`
+- [X] T010 [P] [US1] Add test `read_file_v2 — whitespace-only contents` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ contents: '   ' })`; bubble has `codeBlocks: [{ content: 'real content' }]`; assert `message.content` contains `'real content'` (whitespace skipped)
+- [X] T011 [P] [US2] Add test `edit_file_v2 — full streamingContent` in `tests/unit/storage.test.ts`: `params = JSON.stringify({ targetFile: '/f.ts', streamingContent: 'x'.repeat(200) })`; assert full 200-char string in content, no `...`
+- [X] T012 [P] [US2] Add test `edit_file_v2 — content param fallback` in `tests/unit/storage.test.ts`: no `streamingContent`; `content` param present; assert `content` value used
+- [X] T013 [P] [US2] Add test `edit_file_v2 — codeBlocks fallback` in `tests/unit/storage.test.ts`: no string params; `codeBlocks: [{ content: 'block content' }]`; assert used
+- [X] T014 [P] [US2] Add test `edit_file_v2 — malformed params` in `tests/unit/storage.test.ts`: `params = '{'`, no `rawArgs`; assert no throw, `message.content` contains `[Tool: Edit File v2]`
+- [X] T015 [P] [US2] Add test `edit_file_v2 — userDecision rejected with full content` in `tests/unit/storage.test.ts`: full `streamingContent` + `additionalData.userDecision = 'rejected'`; assert content present and `User Decision: ✗ rejected` present
+- [X] T015a [P] [US1] Add test `read_file_v2 — primary content and diff both present` in `tests/unit/storage.test.ts`: result JSON has both `contents: 'file text'` and a valid `diff` object with `chunks`; assert `message.content` contains `'file text'` followed by the diff block (US1 scenario 6)
+- [X] T015b [P] [US1] Add test `read_file_v2 — diff-only when no usable primary content` in `tests/unit/storage.test.ts`: result JSON has no `contents` (or whitespace-only) but has a valid `diff` object; assert `message.content` contains the diff block and does not contain a `Content:` line (US1 scenario 7)
+- [X] T015c [P] [US1] Add test `read_file_v2 — debugLogStorage called on malformed result` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `result = '{'`; assert `debugLogStorage` is called with a message containing `'read_file_v2'`
+- [X] T015d [P] [US2] Add test `edit_file_v2 — debugLogStorage called on malformed params` in `tests/unit/storage.test.ts`: spy on `debugLogStorage`; set `params = '{'`, no `rawArgs`; assert `debugLogStorage` is called with a message containing `'edit_file_v2'`
+- [X] T015e [P] [US1] Add test `read_file_v2 — toolCalls.result unchanged` in `tests/unit/storage.test.ts`: bubble with `toolFormerData.result = JSON.stringify({ contents: 'file text' })`; assert `message.content` is normalized as expected and `message.toolCalls?.[0]?.result` equals the original raw result string
 
 **Checkpoint**: `npm test` passes. `message.content` for `read_file_v2` and `edit_file_v2` contains full content. User Stories 1 and 2 complete.
 
@@ -58,12 +58,12 @@
 
 ### Implementation for User Story 3
 
-- [ ] T016 [US3] In `formatToolCall()` in `src/core/storage.ts`, in the `run_terminal_command` / `run_terminal_cmd` / `execute_command` branch (~L1100): remove `output.slice(0, 500)` → emit `output` directly; remove the ternary `output.length > 500 ? '...' : ''` suffix
+- [X] T016 [US3] In `formatToolCall()` in `src/core/storage.ts`, in the `run_terminal_command` / `run_terminal_cmd` / `execute_command` branch (~L1100): remove `output.slice(0, 500)` → emit `output` directly; remove the ternary `output.length > 500 ? '...' : ''` suffix
 
 ### Tests for User Story 3
 
-- [ ] T017 [P] [US3] Add test `run_terminal_command — output > 500 chars` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ output: 'x'.repeat(600) })`; assert full 600-char string in content, no `...`
-- [ ] T018 [P] [US3] Add test `run_terminal_command — empty output` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ output: '' })`; assert no `Output:` line in content (existing behaviour preserved)
+- [X] T017 [P] [US3] Add test `run_terminal_command — output > 500 chars` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ output: 'x'.repeat(600) })`; assert full 600-char string in content, no `...`
+- [X] T018 [P] [US3] Add test `run_terminal_command — empty output` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ output: '' })`; assert no `Output:` line in content (existing behaviour preserved)
 
 **Checkpoint**: `npm test` passes. Full terminal output in `message.content`.
 
@@ -77,12 +77,12 @@
 
 ### Implementation for User Story 4
 
-- [ ] T019 [US4] In `formatToolCall()` in `src/core/storage.ts`, in the `read_file` branch (~L1068): remove `.slice(0, 300)` from `result.contents`; remove the `.replace(/\n/g, '\\n')` call (newlines should be preserved in `Message.content` for the library API); remove the ternary `result.contents.length > 300 ? '...' : ''` suffix. Keep `lines.push(\`Content: ${result.contents}\`)`.
+- [X] T019 [US4] In `formatToolCall()` in `src/core/storage.ts`, in the `read_file` branch (~L1068): remove `.slice(0, 300)` from `result.contents`; remove the `.replace(/\n/g, '\\n')` call (newlines should be preserved in `Message.content` for the library API); remove the ternary `result.contents.length > 300 ? '...' : ''` suffix. Keep `lines.push(\`Content: ${result.contents}\`)`.
 
 ### Tests for User Story 4
 
-- [ ] T020 [P] [US4] Add test `read_file — result.contents > 300 chars` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ contents: 'y'.repeat(400) })`; assert full 400-char string in content, no `...`
-- [ ] T021 [P] [US4] Update existing test `read_file with content preview` in `tests/unit/storage.test.ts` (~L1688): verify it still passes with full content (test was asserting partial content — update assertion if it checked for truncation)
+- [X] T020 [P] [US4] Add test `read_file — result.contents > 300 chars` in `tests/unit/storage.test.ts`: `result = JSON.stringify({ contents: 'y'.repeat(400) })`; assert full 400-char string in content, no `...`
+- [X] T021 [P] [US4] Update existing test `read_file with content preview` in `tests/unit/storage.test.ts` (~L1688): verify it still passes with full content (test was asserting partial content — update assertion if it checked for truncation)
 
 **Checkpoint**: `npm test` passes. Full file content in `message.content` for legacy `read_file`.
 
@@ -96,13 +96,13 @@
 
 ### Implementation for User Story 5
 
-- [ ] T022 [US5] Verify `formatToolCallDisplay()` in `src/cli/formatters/table.ts` — confirm the function already handles `Content:` lines via its existing line-by-line iteration and `fullTool` parameter. No code changes expected. Document finding in a code comment if the function's behaviour is non-obvious.
+- [X] T022 [US5] Verify `formatToolCallDisplay()` in `src/cli/formatters/table.ts` — confirm the function already handles `Content:` lines via its existing line-by-line iteration and `fullTool` parameter. No code changes expected. Document finding in a code comment if the function's behaviour is non-obvious.
 
 ### Tests for User Story 5
 
-- [ ] T023 [P] [US5] Add test `formatToolCallDisplay truncates Content line without fullTool` in `tests/unit/cli-formatters-table.test.ts`: pass a `message.content` string containing a long `Content:` line (e.g. 500+ chars); call with `fullTool = false`; assert the rendered output is shorter than the input
-- [ ] T024 [P] [US5] Add test `formatToolCallDisplay preserves Content line with fullTool` in `tests/unit/cli-formatters-table.test.ts`: same input; call with `fullTool = true`; assert the full content is present in the rendered output
-- [ ] T024a [P] [US5] Add test `show --tool passes fullTool=true` in `tests/unit/cli-commands.test.ts`: invoke `show 1 --tool`; assert `formatSessionDetail` receives `{ fullTool: true }`
+- [X] T023 [P] [US5] Add test `formatToolCallDisplay truncates Content line without fullTool` in `tests/unit/cli-formatters-table.test.ts`: pass a `message.content` string containing a long `Content:` line (e.g. 500+ chars); call with `fullTool = false`; assert the rendered output is shorter than the input
+- [X] T024 [P] [US5] Add test `formatToolCallDisplay preserves Content line with fullTool` in `tests/unit/cli-formatters-table.test.ts`: same input; call with `fullTool = true`; assert the full content is present in the rendered output
+- [X] T024a [P] [US5] Add test `show --tool passes fullTool=true` in `tests/unit/cli-commands.test.ts`: invoke `show 1 --tool`; assert `formatSessionDetail` receives `{ fullTool: true }`
 
 **Checkpoint**: `npm test` passes. Display layer correctly previews and expands content. All 5 user stories complete.
 
@@ -112,16 +112,16 @@
 
 **Purpose**: Generic tool branch cleanup and final validation.
 
-- [ ] T025 [P] In `formatToolCall()` in `src/core/storage.ts`, generic `else` branch (~L1137–1142): remove `val.length > 100 ? val.slice(0, 100) + '...' : val` — emit `val` directly for all string params
-- [ ] T026 [P] In `formatToolCall()` in `src/core/storage.ts`, generic `else` branch (~L1151–1152): remove `resultText.slice(0, 500)` — emit `resultText` directly; remove the ternary `resultText.length > 500 ? '...' : ''` suffix
-- [ ] T027 [P] Add non-regression test `generic tool — string param > 100 chars` in `tests/unit/storage.test.ts`: unknown tool name, param value 150 chars; assert full value in content, no `...`
-- [ ] T028 [P] Add non-regression test `list_dir — content unchanged` in `tests/unit/storage.test.ts`: assert content is identical to pre-fix expected value (path only, no truncation was ever applied here)
-- [ ] T029 [P] Add non-regression test `edit_file — oldString/newString still truncated at 100` in `tests/unit/storage.test.ts`: `oldString` of 150 chars; assert content contains the 100-char truncated form with `...` (these truncations are intentional and remain in scope)
-- [ ] T029a [P] Add test `generic tool — result field > 500 chars` in `tests/unit/storage.test.ts`: unknown tool name, `result = JSON.stringify({ output: 'z'.repeat(600) })`; assert full 600-char string in content, no `...` (covers T026 removal)
-- [ ] T030 Run `npm test` — full test suite must pass with zero failures
-- [ ] T031 Run `npm run typecheck` — zero TypeScript errors
-- [ ] T032 Run `npm run lint` — zero lint errors
-- [ ] T033 Update `CHANGELOG.md` with a summary of this library-visible `Message.content` normalization change and note that default CLI preview behavior remains unchanged
+- [X] T025 [P] In `formatToolCall()` in `src/core/storage.ts`, generic `else` branch (~L1137–1142): remove `val.length > 100 ? val.slice(0, 100) + '...' : val` — emit `val` directly for all string params
+- [X] T026 [P] In `formatToolCall()` in `src/core/storage.ts`, generic `else` branch (~L1151–1152): remove `resultText.slice(0, 500)` — emit `resultText` directly; remove the ternary `resultText.length > 500 ? '...' : ''` suffix
+- [X] T027 [P] Add non-regression test `generic tool — string param > 100 chars` in `tests/unit/storage.test.ts`: unknown tool name, param value 150 chars; assert full value in content, no `...`
+- [X] T028 [P] Add non-regression test `list_dir — content unchanged` in `tests/unit/storage.test.ts`: assert content is identical to pre-fix expected value (path only, no truncation was ever applied here)
+- [X] T029 [P] Add non-regression test `edit_file — oldString/newString still truncated at 100` in `tests/unit/storage.test.ts`: `oldString` of 150 chars; assert content contains the 100-char truncated form with `...` (these truncations are intentional and remain in scope)
+- [X] T029a [P] Add test `generic tool — result field > 500 chars` in `tests/unit/storage.test.ts`: unknown tool name, `result = JSON.stringify({ output: 'z'.repeat(600) })`; assert full 600-char string in content, no `...` (covers T026 removal)
+- [X] T030 Run `npm test` — full test suite must pass with zero failures
+- [X] T031 Run `npm run typecheck` — zero TypeScript errors
+- [X] T032 Run `npm run lint` — zero lint errors
+- [X] T033 Update `CHANGELOG.md` with a summary of this library-visible `Message.content` normalization change and note that default CLI preview behavior remains unchanged
 
 ---
 
