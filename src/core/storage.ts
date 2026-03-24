@@ -1050,10 +1050,38 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
 /**
  * Format a tool call for display
  */
-function formatToolCall(toolData: ToolFormerData): string {
+function formatToolCall(
+  toolData: ToolFormerData,
+  codeBlocks?: Array<{ content?: unknown }>
+): string {
   const lines: string[] = [];
   const toolName = toolData.name ?? 'unknown';
-  const params = parseToolParams(toolData.params, toolData.rawArgs) ?? {};
+  const parsedParams = parseToolParams(toolData.params, toolData.rawArgs);
+  const params = parsedParams ?? {};
+  const firstCodeBlockContent = codeBlocks?.[0]?.content;
+  const pickContent = (candidates: Array<{ value: unknown }>): string | null => {
+    let stringifyCandidate: unknown;
+
+    for (const { value } of candidates) {
+      if (typeof value === 'string') {
+        if (value.trim().length > 0) {
+          return value;
+        }
+        continue;
+      }
+
+      if (value !== undefined && value !== null && stringifyCandidate === undefined) {
+        stringifyCandidate = value;
+      }
+    }
+
+    if (stringifyCandidate === undefined) {
+      return null;
+    }
+
+    const stringified = JSON.stringify(stringifyCandidate);
+    return typeof stringified === 'string' && stringified.length > 0 ? stringified : null;
+  };
 
   // Format based on tool type
   if (toolName === 'read_file') {
@@ -1061,15 +1089,45 @@ function formatToolCall(toolData: ToolFormerData): string {
     const file = getParam(params, 'targetFile', 'path', 'file');
     if (file) lines.push(`File: ${file}`);
 
-    // Show abbreviated content
+    // Show file content
     try {
       const result = JSON.parse(toolData.result ?? '{}');
       if (result.contents) {
-        const preview = result.contents.slice(0, 300).replace(/\n/g, '\\n');
-        lines.push(`Content: ${preview}${result.contents.length > 300 ? '...' : ''}`);
+        lines.push(`Content: ${result.contents}`);
       }
     } catch {
       // Ignore
+    }
+  } else if (toolName === 'read_file_v2') {
+    lines.push(`[Tool: Read File v2]`);
+    const file = getParam(params, 'targetFile', 'path', 'file', 'effectiveUri');
+    if (file) lines.push(`File: ${file}`);
+
+    let primaryContent: string | null = null;
+    let diffText: string | null = null;
+    let resultContents: unknown;
+
+    try {
+      const result = JSON.parse(toolData.result ?? '{}') as Record<string, unknown>;
+      resultContents = result['contents'];
+      if (result['diff'] && typeof result['diff'] === 'object') {
+        diffText = formatDiffBlock(result['diff'] as { chunks?: Array<{ diffString?: string }> });
+      }
+    } catch (error) {
+      if (toolData.result) {
+        debugLogStorage(`Failed to parse read_file_v2 result: ${getErrorMessage(error)}`);
+      }
+    }
+
+    primaryContent = pickContent([{ value: resultContents }, { value: firstCodeBlockContent }]);
+    if (primaryContent) {
+      lines.push(`Content: ${primaryContent}`);
+    }
+    if (diffText) {
+      if (primaryContent) {
+        lines.push('');
+      }
+      lines.push(diffText);
     }
   } else if (toolName === 'list_dir') {
     lines.push(`[Tool: List Directory]`);
@@ -1095,10 +1153,8 @@ function formatToolCall(toolData: ToolFormerData): string {
       try {
         const result = JSON.parse(toolData.result);
         if (result.output && typeof result.output === 'string') {
-          const output = result.output.trim();
-          if (output) {
-            const preview = output.slice(0, 500);
-            lines.push(`Output: ${preview}${output.length > 500 ? '...' : ''}`);
+          if (result.output.trim()) {
+            lines.push(`Output: ${result.output}`);
           }
         }
       } catch {
@@ -1126,6 +1182,28 @@ function formatToolCall(toolData: ToolFormerData): string {
       if (newString)
         lines.push(`New: ${newString.slice(0, 100)}${newString.length > 100 ? '...' : ''}`);
     }
+  } else if (toolName === 'edit_file_v2') {
+    lines.push(`[Tool: Edit File v2]`);
+    const file = getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath');
+    if (file) lines.push(`File: ${file}`);
+
+    if (
+      parsedParams &&
+      Object.prototype.hasOwnProperty.call(parsedParams, '_raw') &&
+      typeof parsedParams['_raw'] === 'string'
+    ) {
+      debugLogStorage(`Failed to parse edit_file_v2 params: ${parsedParams['_raw']}`);
+    }
+
+    const content = pickContent([
+      { value: params['streamingContent'] },
+      { value: firstCodeBlockContent },
+      { value: params['content'] },
+      { value: params['fileContent'] },
+    ]);
+    if (content) {
+      lines.push(`Content: ${content}`);
+    }
   } else if (toolName === 'create_file' || toolName === 'write_file' || toolName === 'write') {
     lines.push(`[Tool: ${toolName === 'create_file' ? 'Create File' : 'Write File'}]`);
     const file = getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath');
@@ -1137,7 +1215,7 @@ function formatToolCall(toolData: ToolFormerData): string {
     for (const [key, val] of Object.entries(params)) {
       if (typeof val === 'string' && val.trim()) {
         const label = key.charAt(0).toUpperCase() + key.slice(1);
-        lines.push(`${label}: ${val.length > 100 ? val.slice(0, 100) + '...' : val}`);
+        lines.push(`${label}: ${val}`);
       }
     }
 
@@ -1148,8 +1226,7 @@ function formatToolCall(toolData: ToolFormerData): string {
         // Check for common result fields
         const resultText = result.output || result.result || result.content || result.text;
         if (resultText && typeof resultText === 'string' && resultText.trim()) {
-          const preview = resultText.slice(0, 500);
-          lines.push(`Result: ${preview}${resultText.length > 500 ? '...' : ''}`);
+          lines.push(`Result: ${resultText}`);
         }
       } catch {
         // If result is not JSON, show it directly if it's a string
@@ -1304,12 +1381,14 @@ function extractBubbleText(data: Record<string, unknown>): string {
 
   // Check for tool call in toolFormerData (with name = tool action)
   const toolFormerData = data['toolFormerData'] as ToolFormerData | undefined;
+  const toolName = toolFormerData?.name;
+  const codeBlocks = data['codeBlocks'] as Array<{ content?: unknown }> | undefined;
 
   // Check if it's an error - but don't return yet, mark it and continue extraction
   const isError = toolFormerData?.additionalData?.status === 'error';
 
   // Priority 1: Check if toolFormerData has result with diff (write/edit operations)
-  if (toolFormerData?.result) {
+  if (toolFormerData?.result && toolName !== 'read_file_v2') {
     const toolResult = formatToolCallWithResult(toolFormerData);
     if (toolResult) {
       return toolResult;
@@ -1318,11 +1397,16 @@ function extractBubbleText(data: Record<string, unknown>): string {
 
   // Priority 2: Check if it's a tool call with name (completed, cancelled, or error)
   if (toolFormerData?.name) {
-    const toolInfo = formatToolCall(toolFormerData);
+    const toolInfo = formatToolCall(toolFormerData, codeBlocks);
 
     // Extract content from codeBlocks if available (for ANY tool type)
-    const codeBlocks = data['codeBlocks'] as Array<{ content?: string }> | undefined;
-    if (codeBlocks && codeBlocks.length > 0 && codeBlocks[0]?.content) {
+    if (
+      toolName !== 'read_file_v2' &&
+      toolName !== 'edit_file_v2' &&
+      codeBlocks &&
+      codeBlocks.length > 0 &&
+      typeof codeBlocks[0]?.content === 'string'
+    ) {
       const content = codeBlocks[0].content;
       const preview = content.slice(0, 200).replace(/\n/g, '\\n');
       return toolInfo + `\nContent: ${preview}${content.length > 200 ? '...' : ''}`;
@@ -1332,12 +1416,12 @@ function extractBubbleText(data: Record<string, unknown>): string {
   }
 
   // Extract codeBlocks content
-  const codeBlocks = data['codeBlocks'] as
+  const messageCodeBlocks = data['codeBlocks'] as
     | Array<{ content?: string; languageId?: string }>
     | undefined;
   const codeBlockParts: string[] = [];
-  if (codeBlocks && Array.isArray(codeBlocks)) {
-    for (const cb of codeBlocks) {
+  if (messageCodeBlocks && Array.isArray(messageCodeBlocks)) {
+    for (const cb of messageCodeBlocks) {
       if (typeof cb.content === 'string' && cb.content.trim().length > 0) {
         const lang = cb.languageId ?? '';
         // Wrap code blocks in markdown fences for display

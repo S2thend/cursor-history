@@ -141,6 +141,41 @@ describe('formatSessionDetail', () => {
     expect(result).toContain('Read File');
   });
 
+  it('truncates tool Content lines without fullTool', () => {
+    const longContent = 'C'.repeat(500);
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: `[Tool: Read File]\nContent: ${longContent}`,
+          timestamp: now,
+          codeBlocks: [],
+        },
+      ],
+    });
+    const result = stripAnsi(formatSessionDetail(s));
+    expect(result).toContain(`Content: ${longContent.slice(0, 100)}...`);
+    expect(result).not.toContain(`Content: ${longContent}`);
+  });
+
+  it('preserves tool Content lines with fullTool', () => {
+    const longContent = 'C'.repeat(500);
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: `[Tool: Read File]\nContent: ${longContent}`,
+          timestamp: now,
+          codeBlocks: [],
+        },
+      ],
+    });
+    const result = stripAnsi(formatSessionDetail(s, undefined, { fullTool: true }));
+    expect(result).toContain(`Content: ${longContent}`);
+  });
+
   it('formats error messages', () => {
     const s = makeSession({
       messages: [

@@ -398,6 +398,20 @@ describe('show command', () => {
     );
   });
 
+  it('shows session with --tool flag', async () => {
+    mockGetSession.mockResolvedValue(makeSession());
+
+    const program = createProgram();
+    registerShowCommand(program);
+    await program.parseAsync(['node', 'test', 'show', '1', '--tool']);
+
+    expect(mockFormatSessionDetail).toHaveBeenCalledWith(
+      expect.any(Object),
+      '/ws',
+      expect.objectContaining({ fullTool: true })
+    );
+  });
+
   it('shows session with --think flag', async () => {
     mockGetSession.mockResolvedValue(makeSession());
 

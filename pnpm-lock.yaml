@@ -21,6 +21,9 @@ importers:
         specifier: ^1.1.1
         version: 1.1.1
     devDependencies:
+      '@eslint/js':
+        specifier: 9.39.4
+        version: 9.39.4
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
