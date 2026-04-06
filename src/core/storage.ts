@@ -319,9 +319,7 @@ function parseComposerSessionUsage(
   }
 }
 
-function extractActiveBranchBubbleIds(
-  composerDataValue: string | undefined
-): string[] | undefined {
+function extractActiveBranchBubbleIds(composerDataValue: string | undefined): string[] | undefined {
   if (!composerDataValue) {
     return undefined;
   }
