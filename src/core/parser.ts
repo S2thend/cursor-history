@@ -420,6 +420,10 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
     const roleLabel = message.role === 'user' ? '**User**' : '**Assistant**';
     lines.push(`### ${roleLabel}`);
     lines.push('');
+    if (message.id) {
+      lines.push(`**ID**: \`${message.id}\``);
+      lines.push('');
+    }
     lines.push(message.content);
     lines.push('');
   }
@@ -462,10 +466,14 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
       exportData['usage'] = usage;
     }
   }
+  if (session.activeBranchBubbleIds !== undefined) {
+    exportData['activeBranchBubbleIds'] = session.activeBranchBubbleIds;
+  }
 
   // Map messages with token usage fields
   exportData['messages'] = session.messages.map((m) => {
     const msg: Record<string, unknown> = {
+      id: m.id ?? undefined,
       role: m.role,
       content: m.content,
       timestamp: m.timestamp.toISOString(),

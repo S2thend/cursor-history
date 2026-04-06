@@ -190,8 +190,19 @@ describe('getSession', () => {
     const session = await getSession(0);
     expect(session.id).toBe('c1');
     expect(session.messages).toHaveLength(1);
+    expect(session.messages[0]!.id).toBe('m1');
     expect(session.messages[0]!.role).toBe('user');
     expect(session.timestamp).toBe('2024-01-15T10:00:00.000Z');
+  });
+
+  it('omits library Message.id when the core message ID is null', async () => {
+    mockGetSession.mockResolvedValue({
+      ...makeCoreSession(),
+      messages: [{ id: null, role: 'user', content: 'Hello', timestamp: now, codeBlocks: [] }],
+    });
+
+    const session = await getSession(0);
+    expect(session.messages[0]!.id).toBeUndefined();
   });
 
   it('threads session source through the library type', async () => {
@@ -199,6 +210,16 @@ describe('getSession', () => {
 
     const session = await getSession(0);
     expect(session.source).toBe('workspace-fallback');
+  });
+
+  it('threads activeBranchBubbleIds through the library type when defined', async () => {
+    mockGetSession.mockResolvedValue({
+      ...makeCoreSession(),
+      activeBranchBubbleIds: ['m1'],
+    });
+
+    const session = await getSession(0);
+    expect(session.activeBranchBubbleIds).toEqual(['m1']);
   });
 
   it('throws DatabaseNotFoundError when session not found', async () => {

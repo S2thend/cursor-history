@@ -58,6 +58,8 @@ export interface ChatSession {
   source?: 'global' | 'workspace-fallback';
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
+  /** Ordered bubble IDs of the current active conversation branch */
+  activeBranchBubbleIds?: string[];
 }
 
 /**

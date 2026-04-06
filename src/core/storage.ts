@@ -319,6 +319,36 @@ function parseComposerSessionUsage(
   }
 }
 
+function extractActiveBranchBubbleIds(composerDataValue: string | undefined): string[] | undefined {
+  if (!composerDataValue) {
+    return undefined;
+  }
+
+  try {
+    const composerData = JSON.parse(composerDataValue) as RawComposerData;
+    if (!Array.isArray(composerData.fullConversationHeadersOnly)) {
+      return undefined;
+    }
+
+    const bubbleIds = composerData.fullConversationHeadersOnly.flatMap((header) => {
+      if (!header || typeof header !== 'object') {
+        return [];
+      }
+
+      const bubbleId = (header as { bubbleId?: unknown }).bubbleId;
+      if (typeof bubbleId !== 'string' || bubbleId.trim().length === 0) {
+        return [];
+      }
+
+      return [bubbleId];
+    });
+
+    return bubbleIds.length > 0 ? bubbleIds : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ============================================================================
 // Backup Data Source (T027)
 // ============================================================================
@@ -779,6 +809,7 @@ export async function getSession(
       if (bubbleRows.length > 0) {
         const resolvedMessages = resolveBubbleMessages(bubbleRows, summary.createdAt);
         const sessionUsage = parseComposerSessionUsage(composerDataRow?.value, resolvedMessages);
+        const activeBranchBubbleIds = extractActiveBranchBubbleIds(composerDataRow?.value);
 
         return {
           id: summary.id,
@@ -791,6 +822,7 @@ export async function getSession(
           workspaceId: summary.workspaceId,
           workspacePath: summary.workspacePath,
           usage: sessionUsage,
+          activeBranchBubbleIds,
           source: 'global',
         };
       }
@@ -831,6 +863,7 @@ export async function getSession(
       workspaceId: workspace.id,
       workspacePath: summary.workspacePath,
       source: globalLoadFailed ? 'workspace-fallback' : session.source,
+      activeBranchBubbleIds: undefined,
     };
   } catch {
     return null;
@@ -1026,6 +1059,7 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
       .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
       .get(`composerData:${summary.id}`) as { value: string } | undefined;
     const sessionUsage = parseComposerSessionUsage(composerRow?.value, resolvedMessages);
+    const activeBranchBubbleIds = extractActiveBranchBubbleIds(composerRow?.value);
 
     return {
       id: summary.id,
@@ -1037,6 +1071,7 @@ export async function getGlobalSession(index: number): Promise<ChatSession | nul
       messages: resolvedMessages,
       workspaceId: 'global',
       usage: sessionUsage,
+      activeBranchBubbleIds,
       source: 'global',
     };
   } catch (error) {
@@ -1590,6 +1625,7 @@ interface RawComposerData {
   contextTokensUsed?: number;
   contextTokenLimit?: number;
   contextUsagePercent?: number;
+  fullConversationHeadersOnly?: unknown;
 }
 
 /**
