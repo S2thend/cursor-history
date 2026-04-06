@@ -36,7 +36,9 @@ A developer building a conversation history viewer needs to distinguish which me
 
 1. **Given** a session with a linear conversation (no rewinds), **When** the session is read, **Then** the `activeBranchBubbleIds` array contains the IDs of all messages in order.
 2. **Given** a session where the user rewound and continued from an earlier point, **When** the session is read, **Then** `activeBranchBubbleIds` lists only the current active branch's message IDs, while the full message array also contains orphaned messages from the rewound branch.
-3. **Given** a session where the active branch manifest is absent from session metadata (e.g., older Cursor versions), **When** the session is read, **Then** `activeBranchBubbleIds` is absent/undefined (not an empty array), indicating the data is unavailable rather than empty.
+3. **Given** a session where the active branch manifest is absent or empty in session metadata (e.g., older Cursor versions), **When** the session is read, **Then** `activeBranchBubbleIds` is absent/undefined (not an empty array).
+4. **Given** a session where `composerData` is invalid JSON, the manifest is not an array, or some manifest entries are malformed, **When** the session is read, **Then** the session still loads without throwing, malformed entries are ignored, and `activeBranchBubbleIds` is omitted if no valid bubble IDs remain.
+5. **Given** a session read from workspace-fallback storage, **When** the session is read, **Then** `activeBranchBubbleIds` is absent/undefined even if workspace metadata contains branch information, because stable message IDs are not reliably available in degraded mode.
 
 ---
 
@@ -44,7 +46,9 @@ A developer building a conversation history viewer needs to distinguish which me
 
 - What happens when a bubble has neither a `bubbleId` field in its data nor a parseable UUID in its row key? The `id` field should be absent/undefined, indicating no stable identifier is available.
 - What happens when `activeBranchBubbleIds` contains bubble IDs that don't match any message in the session (e.g., data corruption)? The array is exposed as-is; filtering or validation is the consumer's responsibility.
-- What happens when a session is read from workspace-fallback storage (degraded mode) where global bubble data is unavailable? Messages constructed from workspace data may not have bubble UUIDs; their `id` should be absent/undefined.
+- What happens when `fullConversationHeadersOnly` is present but empty? Treat it as unavailable and omit `activeBranchBubbleIds`.
+- What happens when `composerData` or `fullConversationHeadersOnly` is malformed? Session reads must not fail; invalid manifest data should be ignored and `activeBranchBubbleIds` should be omitted if no valid IDs remain.
+- What happens when a session is read from workspace-fallback storage (degraded mode) where global bubble data is unavailable? Messages constructed from workspace data may not have bubble UUIDs; their `id` should be absent/undefined, and `activeBranchBubbleIds` should also be absent/undefined so consumers are not given a partial branch-matching contract.
 - What happens during session migration with copy mode? Copied sessions receive new bubble UUIDs; the `id` field reflects the new UUID, and `activeBranchBubbleIds` is updated to match the new IDs (existing migration behavior already handles this).
 
 ## Requirements *(mandatory)*
@@ -56,10 +60,12 @@ A developer building a conversation history viewer needs to distinguish which me
 - **FR-003**: When no bubble UUID is available (e.g., workspace-fallback sessions), the `id` field MUST be absent/undefined, not an empty string or placeholder.
 - **FR-004**: The library `Session` type MUST include an optional `activeBranchBubbleIds` field containing an ordered array of bubble UUID strings representing the current active conversation branch.
 - **FR-005**: The `activeBranchBubbleIds` field MUST be sourced from the active branch manifest stored in session metadata.
-- **FR-006**: When the active branch manifest is absent from session metadata, the `activeBranchBubbleIds` field MUST be absent/undefined (not an empty array).
+- **FR-006**: When the active branch manifest is absent or empty in session metadata, the `activeBranchBubbleIds` field MUST be absent/undefined (not an empty array).
 - **FR-007**: CLI JSON output MUST include the `id` field on each message object and the `activeBranchBubbleIds` field on the session object when available.
 - **FR-008**: Existing CLI table/text output MUST NOT change. The bubble ID and active branch data are only surfaced in JSON output and the library API.
-- **FR-009**: Exported formats (Markdown, JSON via export command) MUST include the message `id` when available.
+- **FR-009**: Exported formats (Markdown and JSON via the export command) MUST include the message `id` when available.
+- **FR-010**: Parsing of `composerData` and `fullConversationHeadersOnly` MUST fail soft. Invalid JSON, non-array manifests, or malformed header objects MUST NOT throw or block session reads; invalid entries MUST be ignored, and `activeBranchBubbleIds` MUST be absent/undefined if no valid bubble IDs remain.
+- **FR-011**: When a session is sourced from workspace-fallback storage, `activeBranchBubbleIds` MUST be absent/undefined even if workspace metadata contains branch information, because reliable branch matching requires stable message-level bubble IDs.
 
 ### Key Entities
 
@@ -75,13 +81,15 @@ A developer building a conversation history viewer needs to distinguish which me
 - **SC-003**: Message IDs are stable across repeated reads of the same session — identical IDs returned for the same messages on every read.
 - **SC-004**: Zero breaking changes to existing library consumers — the new fields are optional additions, not modifications to existing fields.
 - **SC-005**: All existing tests continue to pass without modification (additive change only).
+- **SC-006**: Sessions with malformed branch metadata still load successfully, with `activeBranchBubbleIds` omitted when valid branch IDs cannot be recovered.
 
 ## Assumptions
 
-- The active branch manifest in session metadata contains objects with a bubble ID property. The exact field name within each header object will be determined during implementation by inspecting the data structure.
+- The active branch manifest is stored in `fullConversationHeadersOnly`; valid header objects contain a `bubbleId` string which is extracted in order.
 - Bubble UUIDs in the database are unique within a session. Cross-session uniqueness is expected but not required by this feature.
 - The active branch manifest is only present in sessions created by Cursor versions that support conversation rewinding. Older sessions will simply not have this data.
 - The core `Message.id` field (which can be null) maps to an optional string in the library layer — null core values become undefined (omitted) in the library, consistent with how other optional fields are handled.
+- Workspace-fallback sessions may still contain raw branch metadata in `composer.composerData`, but this feature intentionally omits `activeBranchBubbleIds` there because stable `Message.id` values are not reliably available.
 
 ## Out of Scope
 
@@ -89,6 +97,7 @@ A developer building a conversation history viewer needs to distinguish which me
 - Filtering messages by active/orphaned status. The feature provides the data for consumers to implement their own filtering.
 - Modifying the bubble query to separate active from orphaned bubbles at the database level. All bubbles continue to be returned in insertion order.
 - Adding bubble ID display to CLI table/text output (only JSON output is affected).
+- Exposing active-branch metadata for workspace-fallback sessions. Degraded reads continue to omit `activeBranchBubbleIds`.
 
 ## Dependencies
 

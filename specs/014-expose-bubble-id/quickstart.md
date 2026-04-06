@@ -15,7 +15,7 @@ The library API now exposes two new optional fields:
 ```typescript
 import { getSession } from 'cursor-history';
 
-const session = getSession(0); // zero-based index
+const session = await getSession(0); // zero-based index
 for (const msg of session.messages) {
   console.log(msg.id, msg.role, msg.content.slice(0, 50));
   // e66f2d00-47ff-4943-94ac-c0b5ea324d38  user  "How do I..."
@@ -27,7 +27,7 @@ for (const msg of session.messages) {
 ```typescript
 import { getSession } from 'cursor-history';
 
-const session = getSession(0);
+const session = await getSession(0);
 const activeIds = new Set(session.activeBranchBubbleIds ?? []);
 
 for (const msg of session.messages) {
@@ -41,7 +41,7 @@ for (const msg of session.messages) {
 ```typescript
 import { getSession } from 'cursor-history';
 
-const session = getSession('composer-uuid-here');
+const session = await getSession('composer-uuid-here');
 
 // Use bubble UUID as a stable identifier instead of positional index
 const messageMap = new Map(
@@ -74,8 +74,15 @@ cursor-history export 1 -f json -o session.json
 cat session.json | jq '.messages[].id'
 ```
 
+### Markdown export includes message IDs
+
+```bash
+cursor-history export 1 -f markdown -o session.md
+rg '^\*\*ID\*\*:' session.md
+```
+
 ## Notes
 
 - `Message.id` is `undefined` when the bubble UUID is unavailable (workspace-fallback sessions).
-- `Session.activeBranchBubbleIds` is `undefined` when the active branch manifest is absent (older Cursor versions or workspace-fallback sessions).
+- `Session.activeBranchBubbleIds` is `undefined` when the active branch manifest is absent, empty, invalid, or when the session is sourced from `workspace-fallback`.
 - No changes to human-readable CLI output (table format).

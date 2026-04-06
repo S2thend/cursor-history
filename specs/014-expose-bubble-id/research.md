@@ -50,11 +50,13 @@ Currently both only pass the value to `parseComposerSessionUsage()`. The same pa
 
 ## R5: Export functions gap
 
-**Decision**: `exportToJson()` at `src/core/parser.ts:467-490` does not include `m.id` in its message mapping. Add it. `exportToMarkdown()` does not need changes (human-readable format, IDs not useful inline).
+**Decision**: `exportToJson()` at `src/core/parser.ts:467-490` does not include `m.id` in its message mapping. Add it. `exportToMarkdown()` should also surface message IDs when available by rendering a lightweight metadata line within each message block.
 
-**Rationale**: JSON export should include all structured data for machine consumption. Markdown export is for human reading; embedding UUIDs would add noise.
+**Rationale**: JSON export should include all structured data for machine consumption, and Markdown export needs IDs as part of the approved feature scope so exported message references remain stable across formats.
 
-**Alternatives considered**: Include IDs in Markdown as HTML comments — rejected, adds complexity for minimal value.
+**Alternatives considered**:
+- Omit IDs from Markdown: Rejected — conflicts with the agreed export contract.
+- Include IDs in Markdown as HTML comments: Rejected — harder for users to discover and copy than a visible metadata line.
 
 ## R6: Workspace-fallback path for bubble IDs
 
@@ -66,8 +68,8 @@ Currently both only pass the value to `parseComposerSessionUsage()`. The same pa
 
 ## R7: `activeBranchBubbleIds` in workspace-fallback path
 
-**Decision**: The workspace-fallback path reads composer data from `ItemTable` via `getComposerData()`, which returns the raw composer objects. The `fullConversationHeadersOnly` field should be accessible from these objects. However, the workspace-fallback `parseChatData()` pipeline constructs `ChatSession` differently and does not have access to individual composer metadata per session. For the fallback path, `activeBranchBubbleIds` will be `undefined`.
+**Decision**: The workspace-fallback path reads `composer.composerData` from `ItemTable`, and the raw composer objects may still contain `fullConversationHeadersOnly`. Even so, `activeBranchBubbleIds` will remain `undefined` for workspace-fallback sessions in this feature.
 
-**Rationale**: The fallback path's `parseChatData()` receives the full composers array but maps them to sessions without per-session metadata like `fullConversationHeadersOnly`. Adding this would require refactoring `parseChatData()`, which is out of scope for an additive feature. The global path (primary path) covers the normal case.
+**Rationale**: Workspace-fallback is already a degraded read path and does not reliably provide stable bubble-based `Message.id` values. Exposing `activeBranchBubbleIds` there would give consumers branch IDs without the corresponding stable message IDs needed to cross-reference them, producing an incomplete contract. The global path remains the fully supported branch-aware path.
 
-**Alternatives considered**: Thread `fullConversationHeadersOnly` through `parseChatData()` — deferred, significant refactor for a degraded-mode edge case.
+**Alternatives considered**: Surface `activeBranchBubbleIds` in workspace-fallback anyway — rejected, because it would expose partial branch metadata without reliable message identity.
