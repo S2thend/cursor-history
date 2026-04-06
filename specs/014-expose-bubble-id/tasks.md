@@ -21,8 +21,8 @@
 
 **Note**: No setup phase needed — this is an existing project with no new dependencies.
 
-- [ ] T001 Add `activeBranchBubbleIds?: string[]` field to `ChatSession` interface in `src/core/types.ts` (after the `usage` field, with JSDoc: "Ordered bubble IDs of the current active conversation branch")
-- [ ] T002 Add `id?: string` field to library `Message` interface in `src/lib/types.ts` (as first field, with JSDoc: "Stable bubble UUID from cursorDiskKV when available") and `activeBranchBubbleIds?: string[]` field to library `Session` interface in `src/lib/types.ts` (after `usage` field, with JSDoc: "Ordered bubble UUIDs of the active conversation branch")
+- [X] T001 Add `activeBranchBubbleIds?: string[]` field to `ChatSession` interface in `src/core/types.ts` (after the `usage` field, with JSDoc: "Ordered bubble IDs of the current active conversation branch")
+- [X] T002 Add `id?: string` field to library `Message` interface in `src/lib/types.ts` (as first field, with JSDoc: "Stable bubble UUID from cursorDiskKV when available") and `activeBranchBubbleIds?: string[]` field to library `Session` interface in `src/lib/types.ts` (after `usage` field, with JSDoc: "Ordered bubble UUIDs of the active conversation branch")
 
 **Checkpoint**: Type definitions in place. `npm run typecheck` should pass (new fields are optional).
 
@@ -36,11 +36,11 @@
 
 ### Implementation for User Story 1
 
-- [ ] T003 [P] [US1] Add `id: msg.id ?? undefined` to message mapping in `convertToLibrarySession()` function in `src/lib/index.ts` (inside the `messages.map()` callback, alongside existing `role`, `content`, `timestamp` fields)
-- [ ] T004 [P] [US1] Add `id: m.id` to message mapping in `exportToJson()` function in `src/core/parser.ts` (inside the `messages.map()` callback, as the first field before `role`)
-- [ ] T005 [US1] Update `exportToMarkdown()` in `src/core/parser.ts` to include a message ID metadata line for each message when `message.id` is available (for example, immediately under the message heading before the content)
-- [ ] T006 [P] [US1] Extend `tests/unit/lib-index.test.ts` to verify library `getSession()` returns `Message.id` and omits it when the core message ID is `null`
-- [ ] T007 [US1] Extend `tests/unit/parser.test.ts` to verify `exportToJson()` includes message IDs and `exportToMarkdown()` renders message IDs only when available
+- [X] T003 [P] [US1] Add `id: msg.id ?? undefined` to message mapping in `convertToLibrarySession()` function in `src/lib/index.ts` (inside the `messages.map()` callback, alongside existing `role`, `content`, `timestamp` fields)
+- [X] T004 [P] [US1] Add `id: m.id` to message mapping in `exportToJson()` function in `src/core/parser.ts` (inside the `messages.map()` callback, as the first field before `role`)
+- [X] T005 [US1] Update `exportToMarkdown()` in `src/core/parser.ts` to include a message ID metadata line for each message when `message.id` is available (for example, immediately under the message heading before the content)
+- [X] T006 [P] [US1] Extend `tests/unit/lib-index.test.ts` to verify library `getSession()` returns `Message.id` and omits it when the core message ID is `null`
+- [X] T007 [US1] Extend `tests/unit/parser.test.ts` to verify `exportToJson()` includes message IDs and `exportToMarkdown()` renders message IDs only when available
 
 **Checkpoint**: Library API, JSON export, and Markdown export now include message IDs when available. CLI JSON (`show --json`) already includes them via `formatSessionJson()` — no change needed there for US1. Verify with `npm run typecheck`.
 
@@ -56,15 +56,15 @@
 
 ### Implementation for User Story 2
 
-- [ ] T008 [US2] Add `extractActiveBranchBubbleIds(composerDataValue: string | undefined): string[] | undefined` helper function in `src/core/storage.ts` — parse `composerData`, read `fullConversationHeadersOnly`, extract valid `bubbleId` strings in order, ignore malformed entries, and return `undefined` for invalid JSON, non-array manifests, absent manifests, or empty result sets. Place near `parseComposerSessionUsage()`.
-- [ ] T009 [US2] Populate `activeBranchBubbleIds` in the global-path return value of `getSession()` in `src/core/storage.ts` — call `extractActiveBranchBubbleIds(composerDataRow?.value)` and add the result to the returned `ChatSession`. Keep workspace-fallback returns `undefined` for this field so degraded sessions do not expose a partial branch-matching contract.
-- [ ] T010 [US2] Populate `activeBranchBubbleIds` in `getGlobalSession()` in `src/core/storage.ts` — call `extractActiveBranchBubbleIds(composerRow?.value)` and add the result to the returned `ChatSession`.
-- [ ] T011 [P] [US2] Add `activeBranchBubbleIds` passthrough in `convertToLibrarySession()` in `src/lib/index.ts` — add `activeBranchBubbleIds: coreSession.activeBranchBubbleIds` to the returned Session object (after `usage` field). Only include if defined.
-- [ ] T012 [P] [US2] Add `activeBranchBubbleIds` to session JSON output in `formatSessionJson()` in `src/cli/formatters/json.ts` — add a conditional block after the existing `source` output when the field is defined.
-- [ ] T013 [P] [US2] Add `activeBranchBubbleIds` to export JSON output in `exportToJson()` in `src/core/parser.ts` — add a conditional block after existing `usage` output when the field is defined.
-- [ ] T014 [US2] Extend `tests/unit/storage.test.ts` to cover valid manifest extraction, invalid JSON, non-array manifests, malformed header entries, empty manifests, and the workspace-fallback omission contract
-- [ ] T015 [P] [US2] Extend `tests/unit/lib-index.test.ts` and `tests/unit/cli-formatters-json.test.ts` to verify `Session.activeBranchBubbleIds` passes through the library API and appears in CLI JSON only when defined
-- [ ] T016 [US2] Extend `tests/unit/parser.test.ts` to verify `exportToJson()` includes `activeBranchBubbleIds` when defined and omits it when undefined
+- [X] T008 [US2] Add `extractActiveBranchBubbleIds(composerDataValue: string | undefined): string[] | undefined` helper function in `src/core/storage.ts` — parse `composerData`, read `fullConversationHeadersOnly`, extract valid `bubbleId` strings in order, ignore malformed entries, and return `undefined` for invalid JSON, non-array manifests, absent manifests, or empty result sets. Place near `parseComposerSessionUsage()`.
+- [X] T009 [US2] Populate `activeBranchBubbleIds` in the global-path return value of `getSession()` in `src/core/storage.ts` — call `extractActiveBranchBubbleIds(composerDataRow?.value)` and add the result to the returned `ChatSession`. Keep workspace-fallback returns `undefined` for this field so degraded sessions do not expose a partial branch-matching contract.
+- [X] T010 [US2] Populate `activeBranchBubbleIds` in `getGlobalSession()` in `src/core/storage.ts` — call `extractActiveBranchBubbleIds(composerRow?.value)` and add the result to the returned `ChatSession`.
+- [X] T011 [P] [US2] Add `activeBranchBubbleIds` passthrough in `convertToLibrarySession()` in `src/lib/index.ts` — add `activeBranchBubbleIds: coreSession.activeBranchBubbleIds` to the returned Session object (after `usage` field). Only include if defined.
+- [X] T012 [P] [US2] Add `activeBranchBubbleIds` to session JSON output in `formatSessionJson()` in `src/cli/formatters/json.ts` — add a conditional block after the existing `source` output when the field is defined.
+- [X] T013 [P] [US2] Add `activeBranchBubbleIds` to export JSON output in `exportToJson()` in `src/core/parser.ts` — add a conditional block after existing `usage` output when the field is defined.
+- [X] T014 [US2] Extend `tests/unit/storage.test.ts` to cover valid manifest extraction, invalid JSON, non-array manifests, malformed header entries, empty manifests, and the workspace-fallback omission contract
+- [X] T015 [P] [US2] Extend `tests/unit/lib-index.test.ts` and `tests/unit/cli-formatters-json.test.ts` to verify `Session.activeBranchBubbleIds` passes through the library API and appears in CLI JSON only when defined
+- [X] T016 [US2] Extend `tests/unit/parser.test.ts` to verify `exportToJson()` includes `activeBranchBubbleIds` when defined and omits it when undefined
 
 **Checkpoint**: Sessions now include active branch bubble IDs in library API, CLI JSON, and JSON export. Verify with `npm run typecheck`.
 
@@ -74,9 +74,9 @@
 
 **Purpose**: Validation and documentation
 
-- [ ] T017 Run `npm run typecheck` and `npm test` to verify zero regressions and all types compile cleanly
+- [X] T017 Run `npm run typecheck` and `npm test` to verify zero regressions and all types compile cleanly
 - [ ] T018 Perform manual validation on real Cursor data: verify `show --json`, `export -f json`, and `export -f markdown` output for a normal session, a rewound session, and a workspace-fallback session if available
-- [ ] T019 Update `CHANGELOG.md` with the additive library/API/export changes (`Message.id`, `Session.activeBranchBubbleIds`, JSON output, Markdown export IDs)
+- [X] T019 Update `CHANGELOG.md` with the additive library/API/export changes (`Message.id`, `Session.activeBranchBubbleIds`, JSON output, Markdown export IDs)
 
 ---
 

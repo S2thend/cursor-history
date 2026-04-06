@@ -31,6 +31,9 @@ export interface Session {
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
 
+  /** Ordered bubble UUIDs of the active conversation branch */
+  activeBranchBubbleIds?: string[];
+
   /** Metadata about session origin (optional) */
   metadata?: {
     /** Cursor version that created this session */
@@ -76,6 +79,9 @@ export interface SessionUsage {
  * Represents a single message within a session (user or assistant).
  */
 export interface Message {
+  /** Stable bubble UUID from cursorDiskKV when available */
+  id?: string;
+
   /** Message role: 'user' or 'assistant' */
   role: 'user' | 'assistant';
 

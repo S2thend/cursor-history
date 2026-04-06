@@ -73,6 +73,9 @@ export function formatSessionJson(
   if (session.source !== undefined) {
     output['source'] = session.source;
   }
+  if (session.activeBranchBubbleIds !== undefined) {
+    output['activeBranchBubbleIds'] = session.activeBranchBubbleIds;
+  }
 
   // Add filter metadata if filtering is active
   if (messageFilter && messageFilter.length > 0) {

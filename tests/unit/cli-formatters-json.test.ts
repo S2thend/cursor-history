@@ -118,6 +118,18 @@ describe('formatSessionJson', () => {
     const result = JSON.parse(formatSessionJson(makeSession({ source: 'workspace-fallback' })));
     expect(result.source).toBe('workspace-fallback');
   });
+
+  it('includes activeBranchBubbleIds when present', () => {
+    const result = JSON.parse(
+      formatSessionJson(makeSession({ activeBranchBubbleIds: ['m1', 'm2'] }))
+    );
+    expect(result.activeBranchBubbleIds).toEqual(['m1', 'm2']);
+  });
+
+  it('omits activeBranchBubbleIds when undefined', () => {
+    const result = JSON.parse(formatSessionJson(makeSession()));
+    expect(result.activeBranchBubbleIds).toBeUndefined();
+  });
 });
 
 describe('formatSearchResultsJson', () => {

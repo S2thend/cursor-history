@@ -130,6 +130,7 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     workspace: coreSession.workspacePath ?? 'unknown',
     timestamp: coreSession.createdAt.toISOString(),
     messages: coreSession.messages.map((msg) => ({
+      id: msg.id ?? undefined,
       role: msg.role === 'user' ? 'user' : 'assistant',
       content: msg.content,
       timestamp: msg.timestamp.toISOString(),
@@ -143,6 +144,9 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     messageCount: coreSession.messageCount,
     source: coreSession.source,
     usage: coreSession.usage,
+    ...(coreSession.activeBranchBubbleIds
+      ? { activeBranchBubbleIds: coreSession.activeBranchBubbleIds }
+      : {}),
     metadata: {
       lastModified: coreSession.lastUpdatedAt.toISOString(),
     },

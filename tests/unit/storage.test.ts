@@ -91,11 +91,26 @@ function createWorkspaceDb(composerValue: string): Database {
 /**
  * Create a global storage mock DB with cursorDiskKV table and bubble data.
  */
-function createGlobalDb(bubbleRows: { key: string; value: string }[]): Database {
+function createGlobalDb(
+  bubbleRows: { key: string; value: string }[],
+  composerDataValue?: string
+): Database {
   return {
     prepare: vi.fn((sql: string) => {
       if (sql.includes('sqlite_master')) {
         return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
+      }
+      if (sql.includes('WHERE key = ?')) {
+        return {
+          get: vi.fn((key?: string) => {
+            if (String(key).startsWith('composerData:') && composerDataValue !== undefined) {
+              return { value: composerDataValue };
+            }
+            return undefined;
+          }),
+          all: vi.fn(() => []),
+          run: vi.fn(),
+        };
       }
       if (sql.includes('cursorDiskKV')) {
         return {
@@ -115,9 +130,13 @@ function createGlobalDb(bubbleRows: { key: string; value: string }[]): Database 
  * Setup mockOpenDatabase to return workspace DB for workspace paths
  * and global DB for global storage path.
  */
-function setupGetSessionMocks(composerData: string, bubbleRows: { key: string; value: string }[]) {
+function setupGetSessionMocks(
+  composerData: string,
+  bubbleRows: { key: string; value: string }[],
+  globalComposerData?: string
+) {
   const wsDb = createWorkspaceDb(composerData);
-  const globalDb = createGlobalDb(bubbleRows);
+  const globalDb = createGlobalDb(bubbleRows, globalComposerData);
   mockOpenDatabase.mockImplementation(async (path: string) => {
     if (String(path).includes('globalStorage')) {
       return globalDb;
@@ -591,6 +610,43 @@ describe('listWorkspaces', () => {
 // getSession
 // =============================================================================
 describe('getSession', () => {
+  function setupSessionWithGlobalComposerData(globalComposerData: string) {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const workspaceComposerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Test Chat', createdAt: 1000 }],
+    });
+
+    setupGetSessionMocks(
+      workspaceComposerData,
+      [
+        {
+          key: 'bubbleId:c1:b1',
+          value: JSON.stringify({
+            type: 1,
+            text: 'Hello from user',
+            createdAt: '2024-01-15T10:00:00Z',
+            bubbleId: 'b1',
+          }),
+        },
+        {
+          key: 'bubbleId:c1:b2',
+          value: JSON.stringify({
+            type: 2,
+            text: 'Here is my response',
+            createdAt: '2024-01-15T10:01:00Z',
+            bubbleId: 'b2',
+          }),
+        },
+      ],
+      globalComposerData
+    );
+  }
+
   it('returns null for invalid index', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([]);
@@ -691,6 +747,77 @@ describe('getSession', () => {
     expect(result!.messages).toHaveLength(2);
     expect(result!.messages[0]!.content).toBe('Hello from user');
     expect(result!.messages[1]!.content).toBe('Here is my response');
+  });
+
+  it('extracts activeBranchBubbleIds from the global branch manifest', async () => {
+    setupSessionWithGlobalComposerData(
+      JSON.stringify({
+        fullConversationHeadersOnly: [
+          { bubbleId: 'b1', type: 1 },
+          { bubbleId: 'b2', type: 2, serverBubbleId: 'server-b2' },
+        ],
+      })
+    );
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.activeBranchBubbleIds).toEqual(['b1', 'b2']);
+  });
+
+  it('omits activeBranchBubbleIds when global composer data is invalid JSON', async () => {
+    setupSessionWithGlobalComposerData('{"fullConversationHeadersOnly":');
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.activeBranchBubbleIds).toBeUndefined();
+  });
+
+  it('omits activeBranchBubbleIds when fullConversationHeadersOnly is not an array', async () => {
+    setupSessionWithGlobalComposerData(
+      JSON.stringify({
+        fullConversationHeadersOnly: { bubbleId: 'b1' },
+      })
+    );
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.activeBranchBubbleIds).toBeUndefined();
+  });
+
+  it('ignores malformed branch headers and preserves valid bubble IDs in order', async () => {
+    setupSessionWithGlobalComposerData(
+      JSON.stringify({
+        fullConversationHeadersOnly: [
+          null,
+          {},
+          { bubbleId: 123 },
+          { bubbleId: 'b1', type: 1 },
+          { bubbleId: '   ', type: 2 },
+          { bubbleId: 'b2', type: 2 },
+        ],
+      })
+    );
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.activeBranchBubbleIds).toEqual(['b1', 'b2']);
+  });
+
+  it('omits activeBranchBubbleIds when the branch manifest is empty', async () => {
+    setupSessionWithGlobalComposerData(
+      JSON.stringify({
+        fullConversationHeadersOnly: [],
+      })
+    );
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.activeBranchBubbleIds).toBeUndefined();
   });
 
   it('handles assistant bubble with tool call', async () => {
@@ -1162,6 +1289,10 @@ describe('getGlobalSession', () => {
       name: 'Global Session',
       createdAt: '2024-01-15T10:00:00Z',
       updatedAt: '2024-01-15T10:05:00Z',
+      fullConversationHeadersOnly: [
+        { bubbleId: 'b1', type: 2 },
+        { bubbleId: 'b2', type: 2 },
+      ],
     });
     const goodBubble = JSON.stringify({
       type: 2,
@@ -1227,6 +1358,7 @@ describe('getGlobalSession', () => {
 
     expect(result).not.toBeNull();
     expect(result!.source).toBe('global');
+    expect(result!.activeBranchBubbleIds).toEqual(['b1', 'b2']);
     expect(result!.messages).toHaveLength(2);
     expect(result!.messages[0]!.metadata?.bubbleType).toBe(2);
     expect(result!.messages[0]!.toolCalls?.[0]?.params).toEqual({ _raw: '{"bad"' });
@@ -2164,6 +2296,30 @@ describe('getSession (workspace fallback)', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('[cursor-history:storage] Global DB not found')
     );
+  });
+
+  it('keeps activeBranchBubbleIds undefined for workspace-fallback sessions', async () => {
+    vi.mocked(existsSync).mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes('globalStorage/state.vscdb')) return false;
+      return value === '/data' || value.includes('state.vscdb') || value.includes('workspace.json');
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Session', createdAt: 2000 }],
+      fullConversationHeadersOnly: [{ bubbleId: 'branch-1', type: 1 }],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+
+    const result = await getSession(1, '/data');
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('workspace-fallback');
+    expect(result!.activeBranchBubbleIds).toBeUndefined();
   });
 });
 

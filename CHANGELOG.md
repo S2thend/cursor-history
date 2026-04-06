@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Stable bubble IDs in public outputs**: Library `Message` objects now expose `id`, JSON exports include message IDs, and Markdown exports render a visible `**ID**` line when a stable bubble UUID is available.
+- **Active branch metadata for session reads**: Global session reads now expose `activeBranchBubbleIds`, the library threads it through, and CLI/JSON exports include the ordered active-branch bubble IDs when Cursor provides `fullConversationHeadersOnly`.
+
 ### Fixed
 
 - **Tool content normalization**: `Message.content` now preserves full payloads for `read_file_v2`, `edit_file_v2`, legacy `read_file`, terminal-command output, and generic tool params/results. Default CLI previews are unchanged; `show --tool` still expands full tool content in the terminal.
