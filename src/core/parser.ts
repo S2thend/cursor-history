@@ -74,7 +74,7 @@ export interface CursorChatBundle {
  * Handles both legacy and new Cursor formats
  */
 export function parseChatData(jsonString: string, bundle?: CursorChatBundle): ChatSession[] {
-  let data: RawChatData | ComposerData;
+  let data: RawChatData | ComposerData | ComposerHead[];
 
   try {
     data = JSON.parse(jsonString) as RawChatData | ComposerData;
@@ -82,9 +82,14 @@ export function parseChatData(jsonString: string, bundle?: CursorChatBundle): Ch
     return [];
   }
 
-  // Check if this is the new composer format
-  if ('allComposers' in data && data.allComposers) {
+  // New composer format with allComposers wrapper
+  if (isComposerData(data)) {
     return parseComposerFormat(data as ComposerData, bundle);
+  }
+
+  // Legacy composer format stored as a direct array
+  if (isComposerArray(data)) {
+    return parseComposerFormat({ allComposers: data }, bundle);
   }
 
   // Legacy format
@@ -100,6 +105,24 @@ export function parseChatData(jsonString: string, bundle?: CursorChatBundle): Ch
   }
 
   return sessions;
+}
+
+function isComposerData(data: RawChatData | ComposerData | ComposerHead[]): data is ComposerData {
+  return !!data && typeof data === 'object' && !Array.isArray(data) && 'allComposers' in data;
+}
+
+function isComposerArray(data: RawChatData | ComposerData | ComposerHead[]): data is ComposerHead[] {
+  if (!Array.isArray(data) || data.length === 0) {
+    return false;
+  }
+
+  return data.every(
+    (item) =>
+      !!item &&
+      typeof item === 'object' &&
+      !Array.isArray(item) &&
+      ('composerId' in item || 'name' in item || 'unifiedMode' in item)
+  );
 }
 
 /**

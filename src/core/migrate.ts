@@ -307,6 +307,101 @@ function isNestedPath(source: string, destination: string): boolean {
   return normalizedDest.startsWith(normalizedSource + '/');
 }
 
+function toFileUri(path: string): string {
+  const normalized = normalizePath(path);
+  return `file://${encodeURI(normalized)}`;
+}
+
+function updateComposerWorkspaceInGlobalStorage(composerId: string, workspacePath: string): void {
+  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return;
+  }
+
+  const db = new BetterSqlite3(globalDbPath, { readonly: false });
+  try {
+    const composerDataRow = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value: string } | undefined;
+    if (!composerDataRow?.value) {
+      return;
+    }
+
+    const composerData = JSON.parse(composerDataRow.value) as Record<string, unknown>;
+    composerData.workspaceUri = toFileUri(workspacePath);
+
+    db.prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ?').run(
+      JSON.stringify(composerData),
+      `composerData:${composerId}`
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function getComposerBubbleCountInGlobalStorage(composerId: string): number {
+  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return 0;
+  }
+
+  const db = new BetterSqlite3(globalDbPath, { readonly: true });
+  try {
+    const row = db
+      .prepare('SELECT COUNT(*) as count FROM cursorDiskKV WHERE key LIKE ?')
+      .get(`bubbleId:${composerId}:%`) as { count: number } | undefined;
+    return row?.count ?? 0;
+  } catch {
+    return 0;
+  } finally {
+    db.close();
+  }
+}
+
+function hydrateComposerFromGlobalStorage(
+  composer: Record<string, unknown>,
+  composerId: string
+): Record<string, unknown> {
+  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return composer;
+  }
+
+  const db = new BetterSqlite3(globalDbPath, { readonly: true });
+  try {
+    const row = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value: string } | undefined;
+    if (!row?.value) {
+      return composer;
+    }
+
+    const globalComposer = JSON.parse(row.value) as {
+      name?: string;
+      createdAt?: number;
+      updatedAt?: number;
+      unifiedMode?: string;
+    };
+
+    return {
+      ...composer,
+      composerId,
+      ...(typeof globalComposer.name === 'string' ? { name: globalComposer.name } : {}),
+      ...(typeof globalComposer.createdAt === 'number' ? { createdAt: globalComposer.createdAt } : {}),
+      ...(typeof globalComposer.updatedAt === 'number'
+        ? { lastUpdatedAt: globalComposer.updatedAt }
+        : {}),
+      ...(typeof globalComposer.unifiedMode === 'string'
+        ? { unifiedMode: globalComposer.unifiedMode }
+        : {}),
+    };
+  } catch {
+    return composer;
+  } finally {
+    db.close();
+  }
+}
+
 /**
  * Copy all bubble data for a session in global storage with new IDs.
  * This is required for copy mode to create independent session data.
@@ -350,6 +445,7 @@ function copyBubbleDataInGlobalStorage(
 
       // Update composerId in the data
       composerData.composerId = newComposerId;
+      composerData.workspaceUri = toFileUri(destWorkspace);
 
       // We'll update fullConversationHeadersOnly after generating new bubble IDs
       const oldBubbleHeaders = composerData.fullConversationHeadersOnly || [];
@@ -491,17 +587,22 @@ function updateBubblePathsInGlobalStorage(
  */
 export async function migrateSession(
   sessionId: string,
-  options: Omit<MigrateSessionOptions, 'sessionIds'>
+  options: Omit<MigrateSessionOptions, 'sessionIds'> & { sourceWorkspacePath?: string }
 ): Promise<SessionMigrationResult> {
-  const { destination, mode, dryRun, dataPath, debug = false } = options;
+  const { destination, mode, dryRun, dataPath, debug = false, sourceWorkspacePath } = options;
   // Note: force option is used at the CLI layer for validation, not in core migration
 
   // Normalize destination path
   const normalizedDest = normalizePath(destination);
 
-  // Find source workspace for this session
-  const sourceInfo = await findWorkspaceForSession(sessionId, dataPath);
+  // Find source workspace for this session (or use explicit source workspace in workspace migration mode)
+  const sourceInfo = sourceWorkspacePath
+    ? await findWorkspaceByPath(sourceWorkspacePath, dataPath)
+    : await findWorkspaceForSession(sessionId, dataPath);
   if (!sourceInfo) {
+    if (sourceWorkspacePath) {
+      throw new WorkspaceNotFoundError(sourceWorkspacePath);
+    }
     throw new SessionNotFoundError(sessionId);
   }
 
@@ -558,6 +659,10 @@ export async function migrateSession(
       }
 
       const sessionToMigrate = sourceResult.composers[sessionIndex]!;
+      const hydratedSession = hydrateComposerFromGlobalStorage(
+        sessionToMigrate as Record<string, unknown>,
+        sessionId
+      );
 
       if (mode === 'move') {
         // Remove from source
@@ -571,7 +676,10 @@ export async function migrateSession(
 
         // Add to destination
         const destComposers = destResult ? destResult.composers : [];
-        const newDestComposers = [...destComposers, sessionToMigrate];
+        const newDestComposers = [
+          ...destComposers.filter((composer) => composer.composerId !== sessionId),
+          hydratedSession,
+        ];
         updateComposerData(
           destDb,
           newDestComposers,
@@ -581,6 +689,7 @@ export async function migrateSession(
 
         // T010-T012: Update file paths in global storage bubble data for move mode
         updateBubblePathsInGlobalStorage(sessionId, sourceWorkspace, normalizedDest, debug);
+        updateComposerWorkspaceInGlobalStorage(sessionId, normalizedDest);
 
         return {
           success: true,
@@ -607,7 +716,7 @@ export async function migrateSession(
         );
 
         // Deep clone and update the session with new ID
-        const copiedSession = JSON.parse(JSON.stringify(sessionToMigrate)) as {
+        const copiedSession = JSON.parse(JSON.stringify(hydratedSession)) as {
           composerId?: string;
         };
         copiedSession.composerId = newSessionId;
@@ -747,24 +856,52 @@ export async function migrateWorkspace(
   }
 
   // Extract session IDs
-  const sessionIds = sourceResult.composers
+  let sessionIds = sourceResult.composers
     .map((s) => s.composerId)
     .filter((id): id is string => typeof id === 'string');
+
+  // If workspace data is header-only, keep only sessions that actually have global bubbles.
+  const isHeaderOnly = sourceResult.composers.every((composer) => {
+    const keys = Object.keys(composer).filter((key) => key !== 'composerId');
+    return keys.length === 0;
+  });
+  if (isHeaderOnly) {
+    const withBubbles = sessionIds.filter((sessionId) => getComposerBubbleCountInGlobalStorage(sessionId) > 0);
+    if (withBubbles.length > 0) {
+      sessionIds = withBubbles;
+    }
+  }
 
   if (sessionIds.length === 0) {
     throw new NoSessionsFoundError(normalizedSource);
   }
 
   // Migrate all sessions
-  const results = await migrateSessions({
-    sessionIds,
-    destination: normalizedDest,
-    mode,
-    dryRun,
-    force,
-    dataPath,
-    debug,
-  });
+  const results: SessionMigrationResult[] = [];
+  for (const sessionId of sessionIds) {
+    try {
+      const result = await migrateSession(sessionId, {
+        destination: normalizedDest,
+        mode,
+        dryRun,
+        force,
+        dataPath,
+        debug,
+        sourceWorkspacePath: normalizedSource,
+      });
+      results.push(result);
+    } catch (error) {
+      results.push({
+        success: false,
+        sessionId,
+        sourceWorkspace: normalizedSource,
+        destinationWorkspace: normalizedDest,
+        mode,
+        error: error instanceof Error ? error.message : String(error),
+        dryRun,
+      });
+    }
+  }
 
   // Aggregate results
   const successCount = results.filter((r) => r.success).length;

@@ -104,6 +104,15 @@ interface BubbleRow {
   value: string;
 }
 
+interface GlobalComposerSummary {
+  id: string;
+  title: string | null;
+  createdAt: Date;
+  lastUpdatedAt: Date;
+  messageCount: number;
+  preview: string;
+}
+
 type BubbleMessage = Omit<Message, 'timestamp'> & { timestamp: Date | null };
 
 function getErrorMessage(error: unknown): string {
@@ -127,6 +136,64 @@ function closeDatabase(db: Database | null): void {
 
 function getBubbleRowId(rowKey: string): string | null {
   return rowKey.split(':').pop() ?? null;
+}
+
+function extractComposerIdsFromData(
+  dataText: string | undefined
+): Array<{ composerId: string; source: 'allComposers' | 'selectedComposerIds' }> {
+  if (!dataText) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(dataText) as unknown;
+    const ids = new Map<string, 'allComposers' | 'selectedComposerIds'>();
+
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        const composerId = (entry as { composerId?: unknown }).composerId;
+        if (typeof composerId === 'string' && composerId.trim().length > 0) {
+          ids.set(composerId, 'allComposers');
+        }
+      }
+    } else if (parsed && typeof parsed === 'object') {
+      const allComposers = (parsed as { allComposers?: unknown }).allComposers;
+      if (Array.isArray(allComposers)) {
+        for (const entry of allComposers) {
+          if (!entry || typeof entry !== 'object') continue;
+          const composerId = (entry as { composerId?: unknown }).composerId;
+          if (typeof composerId === 'string' && composerId.trim().length > 0) {
+            ids.set(composerId, 'allComposers');
+          }
+        }
+      }
+
+      const selected = (parsed as { selectedComposerIds?: unknown }).selectedComposerIds;
+      if (Array.isArray(selected)) {
+        for (const composerId of selected) {
+          if (typeof composerId === 'string' && composerId.trim().length > 0 && !ids.has(composerId)) {
+            ids.set(composerId, 'selectedComposerIds');
+          }
+        }
+      }
+    }
+
+    return [...ids.entries()].map(([composerId, source]) => ({ composerId, source }));
+  } catch {
+    return [];
+  }
+}
+
+function countGlobalBubblesForComposerId(db: Database, composerId: string): number {
+  try {
+    const row = db.prepare('SELECT COUNT(*) as count FROM cursorDiskKV WHERE key LIKE ?').get(
+      `bubbleId:${composerId}:%`
+    ) as { count: number } | undefined;
+    return row?.count ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 function parseToolParams(
@@ -507,6 +574,9 @@ export async function findWorkspaces(
   }
 
   const workspaces: Workspace[] = [];
+  let globalDb: Database | null = null;
+  let globalDbChecked = false;
+  let globalDbAvailable = false;
 
   try {
     const entries = readdirSync(basePath, { withFileTypes: true });
@@ -519,8 +589,10 @@ export async function findWorkspaces(
 
       if (!existsSync(dbPath)) continue;
 
-      const workspacePath = readWorkspaceJson(workspaceDir);
-      if (!workspacePath) continue;
+      const workspacePath = readWorkspaceJson(workspaceDir) ?? `(workspace: ${entry.name})`;
+      if (workspacePath.startsWith('(workspace:')) {
+        debugLogStorage(`Using workspace ID fallback path for ${entry.name} (workspace.json missing/unknown)`);
+      }
 
       // Count sessions in this workspace
       let sessionCount = 0;
@@ -530,9 +602,52 @@ export async function findWorkspaces(
         if (result) {
           const parsed = parseChatData(result.data, result.bundle);
           sessionCount = parsed.length;
+          if (sessionCount === 0) {
+            const rawComposerData = result.bundle.composerData ?? result.data;
+            const composerRefs = extractComposerIdsFromData(rawComposerData);
+            const selectedIds = composerRefs
+              .filter((ref) => ref.source === 'selectedComposerIds')
+              .map((ref) => ref.composerId);
+            if (selectedIds.length > 0) {
+              if (!globalDbChecked) {
+                globalDbChecked = true;
+                const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+                if (existsSync(globalDbPath)) {
+                  try {
+                    globalDb = await openDatabase(globalDbPath);
+                    const tableCheck = globalDb
+                      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
+                      .get();
+                    globalDbAvailable = Boolean(tableCheck);
+                  } catch {
+                    closeDatabase(globalDb);
+                    globalDb = null;
+                    globalDbAvailable = false;
+                  }
+                }
+              }
+
+              if (globalDb && globalDbAvailable) {
+                sessionCount = selectedIds.filter((composerId) => {
+                  return countGlobalBubblesForComposerId(globalDb as Database, composerId) > 0;
+                }).length;
+              } else {
+                sessionCount = selectedIds.length;
+              }
+
+              if (sessionCount > 0) {
+                debugLogStorage(
+                  `Workspace ${entry.name} counted via selectedComposerIds fallback: ${sessionCount}`
+                );
+              }
+            }
+          }
+        } else {
+          debugLogStorage(`No chat data keys found in workspace DB ${dbPath}`);
         }
         db.close();
-      } catch {
+      } catch (error) {
+        debugLogStorage(`Skipping unreadable workspace DB ${dbPath}: ${getErrorMessage(error)}`);
         // Skip workspaces with unreadable databases
         continue;
       }
@@ -548,6 +663,8 @@ export async function findWorkspaces(
     }
   } catch {
     return [];
+  } finally {
+    closeDatabase(globalDb);
   }
 
   return workspaces;
@@ -558,29 +675,44 @@ export async function findWorkspaces(
  * Returns both the main chat data and the bundle for new format
  */
 function getChatDataFromDb(db: Database): { data: string; bundle: CursorChatBundle } | null {
-  let mainData: string | null = null;
-  const bundle: CursorChatBundle = {};
-
-  // Try to get the main chat data
+  const candidates: Array<{ key: string; value: string }> = [];
   for (const key of CHAT_DATA_KEYS) {
     try {
       const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key) as
         | { value: string }
         | undefined;
       if (row?.value) {
-        mainData = row.value;
-        if (key === 'composer.composerData') {
-          bundle.composerData = row.value;
-        }
-        break;
+        candidates.push({ key, value: row.value });
       }
     } catch {
       continue;
     }
   }
 
-  if (!mainData) {
+  if (candidates.length === 0) {
     return null;
+  }
+
+  let selected = candidates[0]!;
+  let bestSessionCount = -1;
+
+  for (const candidate of candidates) {
+    const candidateBundle: CursorChatBundle = {};
+    if (candidate.key === 'composer.composerData') {
+      candidateBundle.composerData = candidate.value;
+    }
+
+    const parsedCount = parseChatData(candidate.value, candidateBundle).length;
+    if (parsedCount > bestSessionCount) {
+      selected = candidate;
+      bestSessionCount = parsedCount;
+    }
+  }
+
+  const mainData = selected.value;
+  const bundle: CursorChatBundle = {};
+  if (selected.key === 'composer.composerData') {
+    bundle.composerData = selected.value;
   }
 
   // For new format, also get prompts and generations
@@ -607,6 +739,59 @@ function getChatDataFromDb(db: Database): { data: string; bundle: CursorChatBund
   }
 
   return { data: mainData, bundle };
+}
+
+function getGlobalComposerSummary(db: Database, composerId: string): GlobalComposerSummary | null {
+  try {
+    const composerRow = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?').get(
+      `composerData:${composerId}`
+    ) as { value: string } | undefined;
+    if (!composerRow?.value) {
+      return null;
+    }
+
+    const composerData = JSON.parse(composerRow.value) as {
+      name?: string;
+      title?: string;
+      createdAt?: string;
+      updatedAt?: string;
+    };
+
+    const bubbleCount = db
+      .prepare('SELECT COUNT(*) as count FROM cursorDiskKV WHERE key LIKE ?')
+      .get(`bubbleId:${composerId}:%`) as { count: number };
+    if (bubbleCount.count <= 0) {
+      return null;
+    }
+
+    const firstBubble = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC LIMIT 1')
+      .get(`bubbleId:${composerId}:%`) as { value: string } | undefined;
+
+    let preview = '';
+    if (firstBubble?.value) {
+      try {
+        const bubbleData = JSON.parse(firstBubble.value) as Record<string, unknown>;
+        preview = extractBubbleText(bubbleData).slice(0, 100);
+      } catch {
+        preview = '';
+      }
+    }
+
+    const createdAt = composerData.createdAt ? new Date(composerData.createdAt) : new Date();
+    const lastUpdatedAt = composerData.updatedAt ? new Date(composerData.updatedAt) : createdAt;
+
+    return {
+      id: composerId,
+      title: composerData.name ?? composerData.title ?? null,
+      createdAt,
+      lastUpdatedAt,
+      messageCount: bubbleCount.count,
+      preview,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -646,6 +831,7 @@ export async function listSessions(
   const allSessions: ChatSessionSummary[] = [];
   // When listing all workspaces (no filter), dedupe by session id; keep first occurrence (workspace order is already deterministic)
   const seenIds = options.workspacePath ? null : new Set<string>();
+  const globalFallbackCandidates: Array<{ workspace: Workspace; composerIds: string[] }> = [];
 
   for (const workspace of filteredWorkspaces) {
     try {
@@ -659,6 +845,20 @@ export async function listSessions(
       if (!result) continue;
 
       const sessions = parseChatData(result.data, result.bundle);
+
+      if (sessions.length === 0) {
+        const rawComposerData = result.bundle.composerData ?? result.data;
+        const composerRefs = extractComposerIdsFromData(rawComposerData);
+        const selectedIds = composerRefs
+          .filter((ref) => ref.source === 'selectedComposerIds')
+          .map((ref) => ref.composerId);
+        if (selectedIds.length > 0) {
+          debugLogStorage(
+            `Workspace ${workspace.id} has selectedComposerIds fallback candidates: ${selectedIds.length}`
+          );
+          globalFallbackCandidates.push({ workspace, composerIds: selectedIds });
+        }
+      }
 
       for (const session of sessions) {
         if (seenIds?.has(session.id)) continue;
@@ -675,8 +875,59 @@ export async function listSessions(
           preview: session.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
         });
       }
-    } catch {
+    } catch (error) {
+      debugLogStorage(
+        `Skipping workspace ${workspace.id} while listing sessions: ${getErrorMessage(error)}`
+      );
       continue;
+    }
+  }
+
+  if (!backupPath && globalFallbackCandidates.length > 0) {
+    const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+    if (existsSync(globalDbPath)) {
+      let globalDb: Database | null = null;
+      try {
+        globalDb = await openDatabase(globalDbPath);
+        const tableCheck = globalDb
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
+          .get();
+
+        if (tableCheck) {
+          const summaryCache = new Map<string, GlobalComposerSummary | null>();
+          for (const candidate of globalFallbackCandidates) {
+            for (const composerId of candidate.composerIds) {
+              if (seenIds?.has(composerId)) continue;
+
+              if (!summaryCache.has(composerId)) {
+                summaryCache.set(composerId, getGlobalComposerSummary(globalDb, composerId));
+              }
+
+              const summary = summaryCache.get(composerId);
+              if (!summary) {
+                continue;
+              }
+
+              seenIds?.add(summary.id);
+              allSessions.push({
+                id: summary.id,
+                index: 0,
+                title: summary.title,
+                createdAt: summary.createdAt,
+                lastUpdatedAt: summary.lastUpdatedAt,
+                messageCount: summary.messageCount,
+                workspaceId: candidate.workspace.id,
+                workspacePath: contractPath(candidate.workspace.path),
+                preview: summary.preview || '(Empty session)',
+              });
+            }
+          }
+        }
+      } catch (error) {
+        debugLogStorage(`Failed to load global fallback sessions: ${getErrorMessage(error)}`);
+      } finally {
+        closeDatabase(globalDb);
+      }
     }
   }
 
@@ -1979,20 +2230,8 @@ export async function findWorkspaceForSession(
 
       if (!result) continue;
 
-      // Parse the composerData - could be new format with allComposers or legacy format
-      const parsed = JSON.parse(result.data) as
-        | { allComposers?: Array<{ composerId?: string }> }
-        | Array<{ composerId?: string }>;
-
-      // Handle new format with allComposers array
-      let composers: Array<{ composerId?: string }>;
-      if ('allComposers' in parsed && Array.isArray(parsed.allComposers)) {
-        composers = parsed.allComposers;
-      } else if (Array.isArray(parsed)) {
-        composers = parsed;
-      } else {
-        continue;
-      }
+      const composerRefs = extractComposerIdsFromData(result.bundle.composerData ?? result.data);
+      const composers = composerRefs.map((ref) => ({ composerId: ref.composerId }));
 
       const found = composers.some((session) => session.composerId === sessionId);
 
@@ -2024,6 +2263,40 @@ export async function findWorkspaceByPath(
     if (pathsEqual(workspace.path, normalizedPath)) {
       return { workspace, dbPath: workspace.dbPath };
     }
+  }
+
+  // Fallback: include workspaces with zero sessions so migrations can target empty destinations.
+  const basePath = getCursorDataPath(customDataPath);
+  if (!existsSync(basePath)) {
+    return null;
+  }
+
+  try {
+    const entries = readdirSync(basePath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const workspaceDir = join(basePath, entry.name);
+      const dbPath = join(workspaceDir, 'state.vscdb');
+      if (!existsSync(dbPath)) continue;
+
+      const workspacePathFromJson = readWorkspaceJson(workspaceDir);
+      if (!workspacePathFromJson) continue;
+
+      if (pathsEqual(workspacePathFromJson, normalizedPath)) {
+        return {
+          workspace: {
+            id: entry.name,
+            path: workspacePathFromJson,
+            dbPath,
+            sessionCount: 0,
+          },
+          dbPath,
+        };
+      }
+    }
+  } catch {
+    return null;
   }
 
   return null;
@@ -2061,9 +2334,37 @@ export function getComposerData(db: Database): ComposerDataResult | null {
     if (rawData && typeof rawData === 'object' && 'allComposers' in rawData) {
       const data = rawData as {
         allComposers: Array<{ composerId?: string; [key: string]: unknown }>;
+        selectedComposerIds?: unknown[];
       };
+      const selectedComposers = Array.isArray(data.selectedComposerIds)
+        ? data.selectedComposerIds
+            .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+            .map((id) => ({ composerId: id }))
+        : [];
+
       return {
-        composers: data.allComposers ?? [],
+        composers:
+          Array.isArray(data.allComposers) && data.allComposers.length > 0
+            ? data.allComposers
+            : selectedComposers,
+        rawData,
+        isNewFormat: true,
+      };
+    }
+
+    // Newer workspace shape: selectedComposerIds only (no allComposers list)
+    if (
+      rawData &&
+      typeof rawData === 'object' &&
+      'selectedComposerIds' in rawData &&
+      Array.isArray((rawData as { selectedComposerIds?: unknown }).selectedComposerIds)
+    ) {
+      const selectedComposers = (rawData as { selectedComposerIds: unknown[] }).selectedComposerIds
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        .map((id) => ({ composerId: id }));
+
+      return {
+        composers: selectedComposers,
         rawData,
         isNewFormat: true,
       };
@@ -2099,7 +2400,24 @@ export function updateComposerData(
   if (isNewFormat) {
     // Preserve the original structure, just update allComposers
     if (originalRawData && typeof originalRawData === 'object') {
-      dataToWrite = { ...(originalRawData as object), allComposers: composers };
+      const original = originalRawData as Record<string, unknown>;
+      const selectedOnly =
+        Array.isArray(original['selectedComposerIds']) && !Array.isArray(original['allComposers']);
+      const nextData: Record<string, unknown> = { ...original, allComposers: composers };
+
+      if (selectedOnly) {
+        const selectedComposerIds = composers
+          .map((composer) => composer.composerId)
+          .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+        nextData['selectedComposerIds'] = selectedComposerIds;
+
+        if (Array.isArray(original['lastFocusedComposerIds'])) {
+          nextData['lastFocusedComposerIds'] =
+            selectedComposerIds.length > 0 ? [selectedComposerIds[0]!] : [];
+        }
+      }
+
+      dataToWrite = nextData;
     } else {
       dataToWrite = { allComposers: composers };
     }

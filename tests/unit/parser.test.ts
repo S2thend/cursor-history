@@ -123,6 +123,22 @@ describe('parseChatData', () => {
     expect(result[0]!.messages[0]!.content).toBe('My Chat');
   });
 
+  it('parses composer sessions from root-level composer array', () => {
+    const data = [
+      {
+        composerId: 'c-array-1',
+        name: 'Array Chat',
+        createdAt: 1705300000000,
+        lastUpdatedAt: 1705303600000,
+      },
+    ];
+
+    const result = parseChatData(JSON.stringify(data));
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe('c-array-1');
+    expect(result[0]!.title).toBe('Array Chat');
+  });
+
   it('uses (Empty session) for composer without name', () => {
     const data = {
       allComposers: [{ composerId: 'c2', createdAt: 1705300000000 }],
