@@ -16,6 +16,7 @@ import {
   openDatabaseReadWrite,
   getComposerData,
   updateComposerData,
+  getWorkspaceLinkedComposerIds,
 } from './storage.js';
 import { normalizePath, pathsEqual } from '../lib/platform.js';
 import {
@@ -322,7 +323,9 @@ function toFileUri(path: string): string {
 
 function toFileUriPath(workspacePath: string): string {
   try {
-    return new URL(toFileUri(workspacePath)).pathname;
+    // In the VS Code URI model `uri.path` is the DECODED path (it must match
+    // fsPath); only `external`/`workspaceUri` carry percent-encoding.
+    return decodeURIComponent(new URL(toFileUri(workspacePath)).pathname);
   } catch {
     return normalizePath(workspacePath);
   }
@@ -359,6 +362,32 @@ function updateComposerWorkspaceMetadata(
       scheme: 'file',
     },
   };
+}
+
+function composerExistsInGlobalStorage(composerId: string): boolean {
+  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return false;
+  }
+
+  const db = new BetterSqlite3(globalDbPath, { readonly: true });
+  try {
+    const composerRow = db
+      .prepare('SELECT 1 FROM cursorDiskKV WHERE key = ? LIMIT 1')
+      .get(`composerData:${composerId}`);
+    if (composerRow) {
+      return true;
+    }
+
+    const bubbleRow = db
+      .prepare('SELECT 1 FROM cursorDiskKV WHERE key LIKE ? LIMIT 1')
+      .get(`bubbleId:${composerId}:%`);
+    return Boolean(bubbleRow);
+  } catch {
+    return false;
+  } finally {
+    db.close();
+  }
 }
 
 function updateComposerWorkspaceInGlobalStorage(
@@ -689,27 +718,32 @@ export async function migrateSession(
         throw new Error('Source workspace has no composer data');
       }
 
-      // Find the session in source data
+      // Find the session in source data. It may live only in global storage
+      // (linked to the workspace via workspaceIdentifier), in which case there is
+      // no workspace-DB composer entry to remove.
       const sessionIndex = sourceResult.composers.findIndex((s) => s.composerId === sessionId);
-      if (sessionIndex === -1) {
+      const isGlobalOnly = sessionIndex === -1;
+      if (isGlobalOnly && !composerExistsInGlobalStorage(sessionId)) {
         throw new SessionNotFoundError(sessionId);
       }
 
-      const sessionToMigrate = sourceResult.composers[sessionIndex]!;
-      const hydratedSession = hydrateComposerFromGlobalStorage(
-        sessionToMigrate as Record<string, unknown>,
-        sessionId
-      );
+      const sessionToMigrate: Record<string, unknown> =
+        sessionIndex >= 0
+          ? (sourceResult.composers[sessionIndex]! as Record<string, unknown>)
+          : { composerId: sessionId };
+      const hydratedSession = hydrateComposerFromGlobalStorage(sessionToMigrate, sessionId);
 
       if (mode === 'move') {
-        // Remove from source
-        const newSourceComposers = sourceResult.composers.filter((_, i) => i !== sessionIndex);
-        updateComposerData(
-          sourceDb,
-          newSourceComposers,
-          sourceResult.isNewFormat,
-          sourceResult.rawData
-        );
+        // Remove from source (skip when the session is only in global storage)
+        if (!isGlobalOnly) {
+          const newSourceComposers = sourceResult.composers.filter((_, i) => i !== sessionIndex);
+          updateComposerData(
+            sourceDb,
+            newSourceComposers,
+            sourceResult.isNewFormat,
+            sourceResult.rawData
+          );
+        }
 
         // Add to destination
         const destComposers = destResult ? destResult.composers : [];
@@ -878,7 +912,24 @@ export async function migrateWorkspace(
   const sourceResult = getComposerData(sourceDb);
   sourceDb.close();
 
-  if (!sourceResult || sourceResult.composers.length === 0) {
+  // Extract session IDs from the workspace composer list, then union in any
+  // sessions discoverable only through global storage (linked to this workspace
+  // via workspaceIdentifier/workspaceUri) so migration covers everything `list`
+  // shows for the source workspace.
+  const sessionIds: string[] = sourceResult
+    ? sourceResult.composers
+        .map((s) => s.composerId)
+        .filter((id): id is string => typeof id === 'string')
+    : [];
+  const sessionIdSet = new Set(sessionIds);
+  for (const linkedId of await getWorkspaceLinkedComposerIds(sourceInfo.workspace)) {
+    if (!sessionIdSet.has(linkedId)) {
+      sessionIdSet.add(linkedId);
+      sessionIds.push(linkedId);
+    }
+  }
+
+  if (sessionIds.length === 0) {
     throw new NoSessionsFoundError(normalizedSource);
   }
 
@@ -891,15 +942,6 @@ export async function migrateWorkspace(
     if (destResult && destResult.composers.length > 0) {
       throw new DestinationHasSessionsError(normalizedDest, destResult.composers.length);
     }
-  }
-
-  // Extract session IDs
-  const sessionIds = sourceResult.composers
-    .map((s) => s.composerId)
-    .filter((id): id is string => typeof id === 'string');
-
-  if (sessionIds.length === 0) {
-    throw new NoSessionsFoundError(normalizedSource);
   }
 
   // Migrate all sessions

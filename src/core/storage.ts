@@ -129,6 +129,11 @@ interface WorkspaceGlobalCandidate {
   includeWorkspaceLinked: boolean;
 }
 
+interface GlobalComposerRecord {
+  id: string;
+  data: Record<string, unknown>;
+}
+
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -156,12 +161,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+/**
+ * A composer entry carries real metadata when it has any field beyond `composerId`.
+ * Synthetic `{ composerId }` stubs (fabricated from `selectedComposerIds` by
+ * getComposerData) must never be persisted back into `allComposers`, or they would
+ * parse to phantom sessions with a null title and a "now" timestamp.
+ */
+function isHydratedComposer(composer: { composerId?: string; [key: string]: unknown }): boolean {
+  return Object.keys(composer).some((key) => key !== 'composerId');
+}
+
 function parseDateValue(value: unknown): Date | null {
   if (typeof value !== 'string' && typeof value !== 'number') {
     return null;
   }
 
-  const date = new Date(value);
+  // Epoch-ms timestamps can arrive as numeric strings ("1778672423842"); new Date()
+  // treats those as invalid, so coerce all-digit strings to a number first.
+  const normalized =
+    typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : value;
+  const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -638,6 +657,10 @@ export async function findWorkspaces(
   let globalDb: Database | null = null;
   let globalDbChecked = false;
   let globalDbAvailable = false;
+  let globalComposerRecords: GlobalComposerRecord[] = [];
+  // Run-level set so a global composer is counted for at most one workspace,
+  // keeping `list --workspaces` counts consistent with the deduped `list` output.
+  const attributedComposerIds = new Set<string>();
 
   try {
     const entries = readdirSync(basePath, { withFileTypes: true });
@@ -667,6 +690,7 @@ export async function findWorkspaces(
           sessionCount = parsed.length;
           for (const session of parsed) {
             seenComposerIds.add(session.id);
+            attributedComposerIds.add(session.id);
           }
 
           const rawComposerData = result.bundle.composerData;
@@ -696,6 +720,9 @@ export async function findWorkspaces(
               .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
               .get();
             globalDbAvailable = Boolean(tableCheck);
+            if (globalDbAvailable) {
+              globalComposerRecords = loadGlobalComposerRecords(globalDb);
+            }
           } catch {
             closeDatabase(globalDb);
             globalDb = null;
@@ -706,9 +733,10 @@ export async function findWorkspaces(
 
       if (globalDb && globalDbAvailable) {
         for (const composerId of selectedIds) {
-          if (seenComposerIds.has(composerId)) continue;
+          if (seenComposerIds.has(composerId) || attributedComposerIds.has(composerId)) continue;
           if (countGlobalBubblesForComposerId(globalDb, composerId) > 0) {
             seenComposerIds.add(composerId);
+            attributedComposerIds.add(composerId);
             sessionCount++;
           }
         }
@@ -721,16 +749,19 @@ export async function findWorkspaces(
         };
         for (const summary of getGlobalComposerSummariesForWorkspace(
           globalDb,
-          workspaceForGlobalMatch
+          workspaceForGlobalMatch,
+          globalComposerRecords
         )) {
-          if (seenComposerIds.has(summary.id)) continue;
+          if (seenComposerIds.has(summary.id) || attributedComposerIds.has(summary.id)) continue;
           seenComposerIds.add(summary.id);
+          attributedComposerIds.add(summary.id);
           sessionCount++;
         }
       } else {
         for (const composerId of selectedIds) {
-          if (seenComposerIds.has(composerId)) continue;
+          if (seenComposerIds.has(composerId) || attributedComposerIds.has(composerId)) continue;
           seenComposerIds.add(composerId);
+          attributedComposerIds.add(composerId);
           sessionCount++;
         }
       }
@@ -892,36 +923,90 @@ function getGlobalComposerSummary(db: Database, composerId: string): GlobalCompo
   }
 }
 
-function getGlobalComposerSummariesForWorkspace(
-  db: Database,
-  workspace: Workspace
-): GlobalComposerSummary[] {
+/**
+ * Load and parse every `composerData:%` row from global storage exactly once.
+ * Callers reuse the result across all workspaces instead of re-scanning and
+ * re-parsing the full composer table per workspace (which made `list` O(W×C)).
+ */
+function loadGlobalComposerRecords(db: Database): GlobalComposerRecord[] {
   try {
     const rows = db
       .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
       .all() as { key: string; value: string }[];
-    const summaries: GlobalComposerSummary[] = [];
+    const records: GlobalComposerRecord[] = [];
 
     for (const row of rows) {
-      const composerId = row.key.replace('composerData:', '');
       try {
-        const composerData = JSON.parse(row.value) as unknown;
-        if (!isRecord(composerData) || !composerBelongsToWorkspace(composerData, workspace)) {
-          continue;
-        }
-
-        const summary = buildGlobalComposerSummary(db, composerId, composerData);
-        if (summary) {
-          summaries.push(summary);
+        const data = JSON.parse(row.value) as unknown;
+        if (isRecord(data)) {
+          records.push({ id: row.key.replace('composerData:', ''), data });
         }
       } catch {
         continue;
       }
     }
 
-    return summaries;
+    return records;
   } catch {
     return [];
+  }
+}
+
+function getGlobalComposerSummariesForWorkspace(
+  db: Database,
+  workspace: Workspace,
+  records: GlobalComposerRecord[]
+): GlobalComposerSummary[] {
+  const summaries: GlobalComposerSummary[] = [];
+
+  for (const record of records) {
+    if (!composerBelongsToWorkspace(record.data, workspace)) {
+      continue;
+    }
+
+    const summary = buildGlobalComposerSummary(db, record.id, record.data);
+    if (summary) {
+      summaries.push(summary);
+    }
+  }
+
+  return summaries;
+}
+
+/**
+ * Return the composer IDs whose global-storage record is linked to `workspace`
+ * (via workspaceIdentifier or workspaceUri). Used by workspace migration so that
+ * sessions discoverable only through global storage are migrated too, matching
+ * what `list` surfaces for the workspace.
+ */
+export async function getWorkspaceLinkedComposerIds(workspace: Workspace): Promise<string[]> {
+  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return [];
+  }
+
+  let db: Database | null = null;
+  try {
+    db = await openDatabase(globalDbPath);
+    const tableCheck = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
+      .get();
+    if (!tableCheck) {
+      return [];
+    }
+
+    const ids: string[] = [];
+    for (const record of loadGlobalComposerRecords(db)) {
+      if (composerBelongsToWorkspace(record.data, workspace)) {
+        ids.push(record.id);
+      }
+    }
+    return ids;
+  } catch (error) {
+    debugLogStorage(`Failed to load workspace-linked composer IDs: ${getErrorMessage(error)}`);
+    return [];
+  } finally {
+    closeDatabase(db);
   }
 }
 
@@ -1036,11 +1121,17 @@ export async function listSessions(
           .get();
 
         if (tableCheck) {
+          const globalComposerRecords = loadGlobalComposerRecords(globalDb);
           const summaryCache = new Map<string, GlobalComposerSummary | null>();
+          // Dedup recovered sessions across candidates even under `--workspace`
+          // (where the shared `seenIds` is intentionally null), so a single global
+          // composer matching multiple workspace dirs is listed at most once.
+          const recoveredIds = new Set<string>();
           for (const candidate of globalFallbackCandidates) {
             for (const composerId of candidate.composerIds) {
               if (candidate.existingIds.has(composerId)) continue;
               if (seenIds?.has(composerId)) continue;
+              if (recoveredIds.has(composerId)) continue;
 
               if (!summaryCache.has(composerId)) {
                 summaryCache.set(composerId, getGlobalComposerSummary(globalDb, composerId));
@@ -1053,6 +1144,7 @@ export async function listSessions(
 
               candidate.existingIds.add(summary.id);
               seenIds?.add(summary.id);
+              recoveredIds.add(summary.id);
               allSessions.push({
                 id: summary.id,
                 index: 0,
@@ -1069,13 +1161,16 @@ export async function listSessions(
             if (candidate.includeWorkspaceLinked) {
               for (const summary of getGlobalComposerSummariesForWorkspace(
                 globalDb,
-                candidate.workspace
+                candidate.workspace,
+                globalComposerRecords
               )) {
                 if (candidate.existingIds.has(summary.id)) continue;
                 if (seenIds?.has(summary.id)) continue;
+                if (recoveredIds.has(summary.id)) continue;
 
                 candidate.existingIds.add(summary.id);
                 seenIds?.add(summary.id);
+                recoveredIds.add(summary.id);
                 allSessions.push({
                   id: summary.id,
                   index: 0,
@@ -2596,7 +2691,13 @@ export function updateComposerData(
       const selectedOnly =
         Array.isArray(original['selectedComposerIds']) &&
         (!Array.isArray(original['allComposers']) || original['allComposers'].length === 0);
-      const nextData: Record<string, unknown> = { ...original, allComposers: composers };
+      // Only persist composers that carry real metadata. Synthetic `{ composerId }`
+      // stubs (surfaced by getComposerData's union of selectedComposerIds) would
+      // otherwise be written back and parse to phantom sessions on the next list.
+      const nextData: Record<string, unknown> = {
+        ...original,
+        allComposers: composers.filter(isHydratedComposer),
+      };
 
       if (Array.isArray(original['selectedComposerIds'])) {
         const composerIds = composers
@@ -2615,16 +2716,32 @@ export function updateComposerData(
           const originalFocused = original['lastFocusedComposerIds'].filter(
             (id): id is string => typeof id === 'string' && id.trim().length > 0
           );
-          const focusedComposerIds = selectedOnly
-            ? selectedComposerIds.slice(0, 1)
-            : originalFocused.filter((id) => composerIdSet.has(id));
+          // Keep the previously focused tab whenever it survives the change;
+          // only fall back to the first surviving composer when it does not.
+          const survivingFocused = originalFocused.filter((id) => composerIdSet.has(id));
+          const focusedComposerIds =
+            survivingFocused.length > 0
+              ? survivingFocused
+              : selectedOnly
+                ? selectedComposerIds.slice(0, 1)
+                : [];
           nextData['lastFocusedComposerIds'] = focusedComposerIds;
         }
       }
 
       dataToWrite = nextData;
     } else {
-      dataToWrite = { allComposers: composers };
+      // No original shape to preserve: write only real composers, but keep any
+      // id-only stubs referenced via selectedComposerIds so they remain listable.
+      const hydrated = composers.filter(isHydratedComposer);
+      const stubIds = composers
+        .filter((composer) => !isHydratedComposer(composer))
+        .map((composer) => composer.composerId)
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+      dataToWrite =
+        stubIds.length > 0
+          ? { allComposers: hydrated, selectedComposerIds: stubIds }
+          : { allComposers: hydrated };
     }
   } else {
     // Legacy format - direct array

@@ -803,6 +803,64 @@ describe('listSessions', () => {
     expect(result[0]!.lastUpdatedAt.toISOString()).toBe('2026-05-13T14:21:23.842Z');
   });
 
+  it('lists a workspace-linked global session once under --workspace when two dirs share a path', async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path.includes('state.vscdb') ||
+        path.includes('workspace.json') ||
+        path === '/data' ||
+        path.includes('globalStorage/state.vscdb')
+      );
+    });
+    // Two workspaceStorage dirs that both resolve to the same project path.
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws-a', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws-b', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/dup' }));
+
+    const wsDbA = createWorkspaceDb(JSON.stringify({ selectedComposerIds: ['a-own'] }));
+    const wsDbB = createWorkspaceDb(JSON.stringify({ selectedComposerIds: ['b-own'] }));
+    const globalDb = createGlobalDbForComposerMap({
+      // Own sessions are linked only by selectedComposerIds (no workspace metadata).
+      'a-own': {
+        composerData: { name: 'A Own', createdAt: 1778672423842, lastUpdatedAt: 1778672423842 },
+        bubbles: [{ type: 1, text: 'a own' }],
+      },
+      'b-own': {
+        composerData: { name: 'B Own', createdAt: 1778672423842, lastUpdatedAt: 1778672423842 },
+        bubbles: [{ type: 1, text: 'b own' }],
+      },
+      // Shared session is workspace-linked to the path that BOTH dirs resolve to.
+      shared: {
+        composerData: {
+          name: 'Shared Linked',
+          createdAt: 1778672423842,
+          lastUpdatedAt: 1778672423842,
+          workspaceIdentifier: {
+            uri: { fsPath: '/project/dup', external: 'file:///project/dup', path: '/project/dup' },
+          },
+        },
+        bubbles: [{ type: 1, text: 'shared' }],
+      },
+    });
+
+    mockOpenDatabase.mockImplementation(async (path: string) => {
+      if (String(path).includes('globalStorage')) return globalDb;
+      return String(path).includes('ws-a') ? wsDbA : wsDbB;
+    });
+
+    const result = await listSessions(
+      { limit: 50, all: true, workspacePath: '/project/dup' },
+      '/data'
+    );
+
+    const ids = result.map((s) => s.id);
+    expect(ids).toEqual(expect.arrayContaining(['a-own', 'b-own', 'shared']));
+    expect(ids.filter((id) => id === 'shared')).toHaveLength(1);
+  });
+
   it('skips selectedComposerIds fallback entries that have no global bubbles', async () => {
     vi.mocked(existsSync).mockImplementation((p) => {
       const path = String(p);
@@ -1607,7 +1665,7 @@ describe('updateComposerData', () => {
       runSQL: vi.fn(),
     };
 
-    const composers = [{ composerId: 'c1' }];
+    const composers = [{ composerId: 'c1', name: 'C1' }];
     const originalRaw = { allComposers: [], selectedComposerIds: ['x'] };
     updateComposerData(db, composers, true, originalRaw);
 
@@ -1616,6 +1674,25 @@ describe('updateComposerData', () => {
     const parsed = JSON.parse(writtenJson);
     expect(parsed.allComposers).toEqual(composers);
     expect(parsed.selectedComposerIds).toEqual(['c1']);
+  });
+
+  it('does not persist id-only composer stubs into allComposers', () => {
+    const mockRun = vi.fn();
+    const db: Database = {
+      prepare: vi.fn(() => ({ get: vi.fn(), all: vi.fn(() => []), run: mockRun })),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    };
+
+    // Synthetic stubs (only composerId) come from getComposerData's selectedComposerIds
+    // union; persisting them would create phantom sessions on the next list.
+    const composers = [{ composerId: 'stub-1' }];
+    const originalRaw = { allComposers: [], selectedComposerIds: ['old-1'] };
+    updateComposerData(db, composers, true, originalRaw);
+
+    const parsed = JSON.parse(mockRun.mock.calls[0]![0] as string);
+    expect(parsed.allComposers).toEqual([]);
+    expect(parsed.selectedComposerIds).toEqual(['stub-1']);
   });
 
   it('writes legacy format as direct array', () => {
@@ -1654,7 +1731,8 @@ describe('updateComposerData', () => {
 
     const writtenJson = mockRun.mock.calls[0]![0] as string;
     const parsed = JSON.parse(writtenJson);
-    expect(parsed.allComposers).toEqual(composers);
+    // Stubs stay out of allComposers; their IDs are reflected in selectedComposerIds.
+    expect(parsed.allComposers).toEqual([]);
     expect(parsed.selectedComposerIds).toEqual(['new-1', 'new-2']);
     expect(parsed.lastFocusedComposerIds).toEqual(['new-1']);
   });
@@ -1667,9 +1745,12 @@ describe('updateComposerData', () => {
       runSQL: vi.fn(),
     };
 
-    const composers = [{ composerId: 'remaining-1' }];
+    const composers = [{ composerId: 'remaining-1', name: 'Remaining' }];
     const originalRaw = {
-      allComposers: [{ composerId: 'remaining-1' }, { composerId: 'moved-1' }],
+      allComposers: [
+        { composerId: 'remaining-1', name: 'Remaining' },
+        { composerId: 'moved-1', name: 'Moved' },
+      ],
       selectedComposerIds: ['remaining-1', 'moved-1'],
       lastFocusedComposerIds: ['moved-1'],
       hasMigratedComposerData: true,
@@ -1679,9 +1760,32 @@ describe('updateComposerData', () => {
 
     const writtenJson = mockRun.mock.calls[0]![0] as string;
     const parsed = JSON.parse(writtenJson);
-    expect(parsed.allComposers).toEqual(composers);
+    expect(parsed.allComposers).toEqual([{ composerId: 'remaining-1', name: 'Remaining' }]);
     expect(parsed.selectedComposerIds).toEqual(['remaining-1']);
     expect(parsed.lastFocusedComposerIds).toEqual([]);
+  });
+
+  it('preserves the focused tab when it survives the update', () => {
+    const mockRun = vi.fn();
+    const db: Database = {
+      prepare: vi.fn(() => ({ get: vi.fn(), all: vi.fn(() => []), run: mockRun })),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    };
+
+    // Migrating a non-focused composer ('a') must not demote the still-present
+    // focused composer ('c') to the first surviving id.
+    const composers = [{ composerId: 'b' }, { composerId: 'c' }];
+    const originalRaw = {
+      selectedComposerIds: ['a', 'b', 'c'],
+      lastFocusedComposerIds: ['c'],
+    };
+
+    updateComposerData(db, composers, true, originalRaw);
+
+    const parsed = JSON.parse(mockRun.mock.calls[0]![0] as string);
+    expect(parsed.selectedComposerIds).toEqual(['b', 'c']);
+    expect(parsed.lastFocusedComposerIds).toEqual(['c']);
   });
 });
 
