@@ -8,6 +8,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import BetterSqlite3 from 'better-sqlite3';
 import {
   findWorkspaceForSession,
@@ -309,10 +310,62 @@ function isNestedPath(source: string, destination: string): boolean {
 
 function toFileUri(path: string): string {
   const normalized = normalizePath(path);
-  return `file://${encodeURI(normalized)}`;
+  const windowsDrivePath = normalized.match(/^([A-Za-z]):[\\/](.*)$/);
+  if (windowsDrivePath) {
+    const drive = windowsDrivePath[1]!.toLowerCase();
+    const rest = windowsDrivePath[2]!.replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
+    return `file:///${drive}:/${rest}`;
+  }
+
+  return pathToFileURL(normalized).href;
 }
 
-function updateComposerWorkspaceInGlobalStorage(composerId: string, workspacePath: string): void {
+function toFileUriPath(workspacePath: string): string {
+  try {
+    return new URL(toFileUri(workspacePath)).pathname;
+  } catch {
+    return normalizePath(workspacePath);
+  }
+}
+
+function updateComposerWorkspaceMetadata(
+  composerData: Record<string, unknown>,
+  workspacePath: string,
+  workspaceId?: string
+): void {
+  const normalizedPath = normalizePath(workspacePath);
+  const fileUri = toFileUri(normalizedPath);
+  composerData['workspaceUri'] = fileUri;
+
+  const existingIdentifier =
+    composerData['workspaceIdentifier'] &&
+    typeof composerData['workspaceIdentifier'] === 'object' &&
+    !Array.isArray(composerData['workspaceIdentifier'])
+      ? (composerData['workspaceIdentifier'] as Record<string, unknown>)
+      : {};
+  const existingUri =
+    existingIdentifier['uri'] && typeof existingIdentifier['uri'] === 'object'
+      ? (existingIdentifier['uri'] as Record<string, unknown>)
+      : {};
+
+  composerData['workspaceIdentifier'] = {
+    ...existingIdentifier,
+    ...(workspaceId ? { id: workspaceId } : {}),
+    uri: {
+      ...existingUri,
+      fsPath: normalizedPath,
+      external: fileUri,
+      path: toFileUriPath(normalizedPath),
+      scheme: 'file',
+    },
+  };
+}
+
+function updateComposerWorkspaceInGlobalStorage(
+  composerId: string,
+  workspacePath: string,
+  workspaceId?: string
+): void {
   const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
   if (!existsSync(globalDbPath)) {
     return;
@@ -328,31 +381,12 @@ function updateComposerWorkspaceInGlobalStorage(composerId: string, workspacePat
     }
 
     const composerData = JSON.parse(composerDataRow.value) as Record<string, unknown>;
-    composerData.workspaceUri = toFileUri(workspacePath);
+    updateComposerWorkspaceMetadata(composerData, workspacePath, workspaceId);
 
     db.prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ?').run(
       JSON.stringify(composerData),
       `composerData:${composerId}`
     );
-  } finally {
-    db.close();
-  }
-}
-
-function getComposerBubbleCountInGlobalStorage(composerId: string): number {
-  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
-  if (!existsSync(globalDbPath)) {
-    return 0;
-  }
-
-  const db = new BetterSqlite3(globalDbPath, { readonly: true });
-  try {
-    const row = db
-      .prepare('SELECT COUNT(*) as count FROM cursorDiskKV WHERE key LIKE ?')
-      .get(`bubbleId:${composerId}:%`) as { count: number } | undefined;
-    return row?.count ?? 0;
-  } catch {
-    return 0;
   } finally {
     db.close();
   }
@@ -378,19 +412,21 @@ function hydrateComposerFromGlobalStorage(
 
     const globalComposer = JSON.parse(row.value) as {
       name?: string;
-      createdAt?: number;
-      updatedAt?: number;
+      createdAt?: number | string;
+      updatedAt?: number | string;
+      lastUpdatedAt?: number | string;
       unifiedMode?: string;
     };
+    const lastUpdatedAt = globalComposer.lastUpdatedAt ?? globalComposer.updatedAt;
 
     return {
       ...composer,
       composerId,
       ...(typeof globalComposer.name === 'string' ? { name: globalComposer.name } : {}),
-      ...(typeof globalComposer.createdAt === 'number' ? { createdAt: globalComposer.createdAt } : {}),
-      ...(typeof globalComposer.updatedAt === 'number'
-        ? { lastUpdatedAt: globalComposer.updatedAt }
+      ...(globalComposer.createdAt !== undefined && globalComposer.createdAt !== null
+        ? { createdAt: globalComposer.createdAt }
         : {}),
+      ...(lastUpdatedAt !== undefined && lastUpdatedAt !== null ? { lastUpdatedAt } : {}),
       ...(typeof globalComposer.unifiedMode === 'string'
         ? { unifiedMode: globalComposer.unifiedMode }
         : {}),
@@ -419,6 +455,7 @@ function copyBubbleDataInGlobalStorage(
   newComposerId: string,
   sourceWorkspace: string,
   destWorkspace: string,
+  destWorkspaceId?: string,
   debug: boolean = false
 ): Map<string, string> {
   const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
@@ -445,7 +482,7 @@ function copyBubbleDataInGlobalStorage(
 
       // Update composerId in the data
       composerData.composerId = newComposerId;
-      composerData.workspaceUri = toFileUri(destWorkspace);
+      updateComposerWorkspaceMetadata(composerData, destWorkspace, destWorkspaceId);
 
       // We'll update fullConversationHeadersOnly after generating new bubble IDs
       const oldBubbleHeaders = composerData.fullConversationHeadersOnly || [];
@@ -689,7 +726,7 @@ export async function migrateSession(
 
         // T010-T012: Update file paths in global storage bubble data for move mode
         updateBubblePathsInGlobalStorage(sessionId, sourceWorkspace, normalizedDest, debug);
-        updateComposerWorkspaceInGlobalStorage(sessionId, normalizedDest);
+        updateComposerWorkspaceInGlobalStorage(sessionId, normalizedDest, destInfo.workspace?.id);
 
         return {
           success: true,
@@ -712,6 +749,7 @@ export async function migrateSession(
           newSessionId,
           sourceWorkspace,
           normalizedDest,
+          destInfo.workspace?.id,
           debug
         );
 
@@ -856,21 +894,9 @@ export async function migrateWorkspace(
   }
 
   // Extract session IDs
-  let sessionIds = sourceResult.composers
+  const sessionIds = sourceResult.composers
     .map((s) => s.composerId)
     .filter((id): id is string => typeof id === 'string');
-
-  // If workspace data is header-only, keep only sessions that actually have global bubbles.
-  const isHeaderOnly = sourceResult.composers.every((composer) => {
-    const keys = Object.keys(composer).filter((key) => key !== 'composerId');
-    return keys.length === 0;
-  });
-  if (isHeaderOnly) {
-    const withBubbles = sessionIds.filter((sessionId) => getComposerBubbleCountInGlobalStorage(sessionId) > 0);
-    if (withBubbles.length > 0) {
-      sessionIds = withBubbles;
-    }
-  }
 
   if (sessionIds.length === 0) {
     throw new NoSessionsFoundError(normalizedSource);

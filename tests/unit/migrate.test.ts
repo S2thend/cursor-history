@@ -260,7 +260,7 @@ describe('migrateSession', () => {
                 value: JSON.stringify({
                   name: 'Hydrated Session',
                   createdAt: 1777583348738,
-                  updatedAt: 1777584322685,
+                  lastUpdatedAt: 1777584322685,
                 }),
               };
             }
@@ -283,6 +283,7 @@ describe('migrateSession', () => {
     const destComposers = mockUpdateComposerData.mock.calls[1]![1] as Array<Record<string, unknown>>;
     expect(destComposers[0]?.['name']).toBe('Hydrated Session');
     expect(destComposers[0]?.['createdAt']).toBe(1777583348738);
+    expect(destComposers[0]?.['lastUpdatedAt']).toBe(1777584322685);
   });
 
   it('returns failure result when DB operation throws', async () => {
@@ -447,6 +448,54 @@ describe('migrateWorkspace', () => {
     expect(result.dryRun).toBe(true);
   });
 
+  it('does not silently filter bubble-less header-only sessions', async () => {
+    mockFindWorkspaceByPath.mockImplementation(async (path: string) => {
+      if (path === '/source') {
+        return {
+          workspace: { id: 'source-ws', path: '/source', dbPath: '/db1', sessionCount: 2 },
+          dbPath: '/db1',
+        };
+      }
+      return {
+        workspace: { id: 'dest-ws', path: '/dest', dbPath: '/db2', sessionCount: 0 },
+        dbPath: '/db2',
+      };
+    });
+
+    const db = createMockDb();
+    mockOpenDatabaseReadWrite.mockResolvedValue(db);
+    mockGetComposerData.mockReturnValueOnce({
+      composers: [{ composerId: 's1' }, { composerId: 's2' }],
+      isNewFormat: true,
+      rawData: { selectedComposerIds: ['s1', 's2'] },
+    });
+
+    vi.mocked(existsSync).mockImplementation((p) => String(p).includes('globalStorage'));
+    vi.mocked(BetterSqlite3).mockImplementation(function () {
+      return {
+        prepare: vi.fn(() => ({
+          get: vi.fn((pattern?: string) => ({
+            count: String(pattern).includes('s1') ? 1 : 0,
+          })),
+          all: vi.fn(() => []),
+          run: vi.fn(),
+        })),
+        close: vi.fn(),
+      } as any;
+    } as any);
+
+    const result = await migrateWorkspace({
+      source: '/source',
+      destination: '/dest',
+      mode: 'move',
+      dryRun: true,
+      force: true,
+    });
+
+    expect(result.totalSessions).toBe(2);
+    expect(result.results.map((r) => r.sessionId)).toEqual(['s1', 's2']);
+  });
+
   it('throws NestedPathError for nested paths', async () => {
     await expect(
       migrateWorkspace({
@@ -484,7 +533,10 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
       workspace: { id: 'ws1', path: '/source/project', dbPath: '/db1', sessionCount: 1 },
       dbPath: '/db1',
     });
-    mockFindWorkspaceByPath.mockResolvedValue({ dbPath: '/db2' });
+    mockFindWorkspaceByPath.mockResolvedValue({
+      workspace: { id: 'dest-ws', path: '/dest/project', dbPath: '/db2', sessionCount: 0 },
+      dbPath: '/db2',
+    });
 
     const sourceDb = createMockDb();
     const destDb = createMockDb();
@@ -514,6 +566,15 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
     // Setup BetterSqlite3 mock with bubble data containing paths
     const composerDataValue = JSON.stringify({
       composerId: 'sid',
+      workspaceIdentifier: {
+        id: 'source-ws',
+        uri: {
+          fsPath: '/source/project',
+          external: 'file:///source/project',
+          path: '/source/project',
+          scheme: 'file',
+        },
+      },
       fullConversationHeadersOnly: [
         { bubbleId: 'b1', type: 2 },
         { bubbleId: 'b2', type: 1 },
@@ -591,6 +652,9 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
     expect(composerInsertCall).toBeDefined();
     const insertedComposer = JSON.parse(String(composerInsertCall![1]));
     expect(insertedComposer.workspaceUri).toBe('file:///dest/project');
+    expect(insertedComposer.workspaceIdentifier.id).toBe('dest-ws');
+    expect(insertedComposer.workspaceIdentifier.uri.fsPath).toBe('/dest/project');
+    expect(insertedComposer.workspaceIdentifier.uri.external).toBe('file:///dest/project');
 
     // Check bubble insert has transformed paths
     // run() is called as run(key, value) - find the call where key starts with 'bubbleId:'
@@ -817,7 +881,10 @@ describe('migrateSession - global storage path transformation (move mode)', () =
       workspace: { id: 'ws1', path: '/source/project', dbPath: '/db1', sessionCount: 1 },
       dbPath: '/db1',
     });
-    mockFindWorkspaceByPath.mockResolvedValue({ dbPath: '/db2' });
+    mockFindWorkspaceByPath.mockResolvedValue({
+      workspace: { id: 'dest-ws', path: '/dest/project', dbPath: '/db2', sessionCount: 0 },
+      dbPath: '/db2',
+    });
 
     const sourceDb = createMockDb();
     const destDb = createMockDb();
@@ -846,6 +913,15 @@ describe('migrateSession - global storage path transformation (move mode)', () =
     const composerDataValue = JSON.stringify({
       composerId: 'sid',
       workspaceUri: 'file:///source/project',
+      workspaceIdentifier: {
+        id: 'source-ws',
+        uri: {
+          fsPath: '/source/project',
+          external: 'file:///source/project',
+          path: '/source/project',
+          scheme: 'file',
+        },
+      },
       fullConversationHeadersOnly: [{ bubbleId: 'b1', type: 2 }],
     });
     const bubbleWithPaths = JSON.stringify({
@@ -895,6 +971,9 @@ describe('migrateSession - global storage path transformation (move mode)', () =
     expect(composerUpdateCall).toBeDefined();
     const updatedComposer = JSON.parse(String(composerUpdateCall![0]));
     expect(updatedComposer.workspaceUri).toBe('file:///dest/project');
+    expect(updatedComposer.workspaceIdentifier.id).toBe('dest-ws');
+    expect(updatedComposer.workspaceIdentifier.uri.fsPath).toBe('/dest/project');
+    expect(updatedComposer.workspaceIdentifier.uri.external).toBe('file:///dest/project');
   });
 });
 
