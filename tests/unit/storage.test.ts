@@ -56,6 +56,7 @@ import {
   resolveSessionIdentifiers,
   findWorkspaceForSession,
   findWorkspaceByPath,
+  getWorkspaceLinkedComposerIds,
   listWorkspaces,
   listGlobalSessions,
   getGlobalSession,
@@ -104,6 +105,23 @@ function createWorkspaceDbWithKeyValues(keyValues: Record<string, string>): Data
   };
 }
 
+function createWorkspaceDbWithPointers(
+  composerValue: string,
+  pointerRows: Array<{ key: string; value: string }>
+): Database {
+  return {
+    prepare: vi.fn((sql: string) => ({
+      get: vi.fn((key?: string) =>
+        key === 'composer.composerData' ? { value: composerValue } : undefined
+      ),
+      all: vi.fn(() => (sql.includes('composerChatViewPane') ? pointerRows : [])),
+      run: vi.fn(),
+    })),
+    close: vi.fn(),
+    runSQL: vi.fn(),
+  };
+}
+
 function createGlobalDbForComposerMap(
   composerMap: Record<
     string,
@@ -127,6 +145,19 @@ function createGlobalDbForComposerMap(
               key: `composerData:${composerId}`,
               value: JSON.stringify(entry.composerData),
             }))
+          ),
+          run: vi.fn(),
+        };
+      }
+
+      // One-pass bubble key listing used by loadGlobalBubbleCounts.
+      if (sql.includes("LIKE 'bubbleId:%'")) {
+        return {
+          get: vi.fn(),
+          all: vi.fn(() =>
+            Object.entries(composerMap).flatMap(([composerId, entry]) =>
+              entry.bubbles.map((_, i) => ({ key: `bubbleId:${composerId}:${i}` }))
+            )
           ),
           run: vi.fn(),
         };
@@ -454,6 +485,78 @@ describe('findWorkspaces', () => {
     const result = await findWorkspaces('/data');
     expect(result).toHaveLength(1);
     expect(result[0]!.sessionCount).toBe(2);
+  });
+
+  it('does not count composerChatViewPane pointer GUIDs when global storage is unavailable', async () => {
+    // No globalStorage in existsSync -> global DB unavailable.
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return path.includes('state.vscdb') || path.includes('workspace.json') || path === '/data';
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/modern' }));
+
+    // Only signal is a pointer key; its GUID cannot be confirmed without global storage.
+    const wsDb = createWorkspaceDbWithPointers(JSON.stringify({ selectedComposerIds: [] }), [
+      { key: 'workbench.panel.composerChatViewPane.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', value: '{}' },
+    ]);
+    mockOpenDatabase.mockResolvedValue(wsDb);
+
+    const result = await findWorkspaces('/data');
+    // Pointer GUID is not counted (no phantom session), so the workspace is excluded.
+    expect(result).toHaveLength(0);
+  });
+});
+
+// =============================================================================
+// getWorkspaceLinkedComposerIds — ownership guard for pointer-linked composers
+// =============================================================================
+describe('getWorkspaceLinkedComposerIds', () => {
+  it('includes owned and unstamped pointer composers but excludes ones stamped for another workspace', async () => {
+    const ownedId = '11111111-1111-1111-1111-111111111111';
+    const orphanId = '22222222-2222-2222-2222-222222222222';
+    const foreignId = '33333333-3333-3333-3333-333333333333';
+
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return path.includes('state.vscdb') || path.includes('globalStorage/state.vscdb');
+    });
+
+    const wsDb = createWorkspaceDbWithPointers(JSON.stringify({ selectedComposerIds: [] }), [
+      { key: `workbench.panel.composerChatViewPane.${ownedId}`, value: '{}' },
+      { key: `workbench.panel.composerChatViewPane.${orphanId}`, value: '{}' },
+      { key: `workbench.panel.composerChatViewPane.${foreignId}`, value: '{}' },
+    ]);
+    const globalDb = createGlobalDbForComposerMap({
+      [ownedId]: {
+        composerData: { name: 'Owned', workspaceIdentifier: { uri: { fsPath: '/my/project' } } },
+        bubbles: [{ type: 1, text: 'owned' }],
+      },
+      [orphanId]: {
+        composerData: { name: 'Orphan' },
+        bubbles: [{ type: 1, text: 'orphan' }],
+      },
+      [foreignId]: {
+        composerData: { name: 'Foreign', workspaceIdentifier: { uri: { fsPath: '/other/project' } } },
+        bubbles: [{ type: 1, text: 'foreign' }],
+      },
+    });
+
+    mockOpenDatabase.mockImplementation(async (path: string) =>
+      String(path).includes('globalStorage') ? globalDb : wsDb
+    );
+
+    const result = await getWorkspaceLinkedComposerIds({
+      id: 'ws-mine',
+      path: '/my/project',
+      dbPath: '/ws-mine/state.vscdb',
+      sessionCount: 0,
+    });
+
+    expect(result).toEqual(expect.arrayContaining([ownedId, orphanId]));
+    expect(result).not.toContain(foreignId);
   });
 });
 
@@ -859,6 +962,84 @@ describe('listSessions', () => {
     const ids = result.map((s) => s.id);
     expect(ids).toEqual(expect.arrayContaining(['a-own', 'b-own', 'shared']));
     expect(ids.filter((id) => id === 'shared')).toHaveLength(1);
+  });
+
+  it('attributes global composers via composerChatViewPane pointer keys (no workspace stamp)', async () => {
+    const guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path.includes('state.vscdb') ||
+        path.includes('workspace.json') ||
+        path === '/data' ||
+        path.includes('globalStorage/state.vscdb')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/modern' }));
+
+    // Workspace composer data is essentially empty; the only link is the pointer key.
+    const wsDb = createWorkspaceDbWithPointers(JSON.stringify({ selectedComposerIds: [] }), [
+      { key: `workbench.panel.composerChatViewPane.${guid}`, value: '{}' },
+    ]);
+    // Global record has NO workspaceUri / workspaceIdentifier.
+    const globalDb = createGlobalDbForComposerMap({
+      [guid]: {
+        composerData: { name: 'Pointer Session', createdAt: 1778672423842, lastUpdatedAt: 1778682083842 },
+        bubbles: [{ type: 1, text: 'pointer-linked prompt' }],
+      },
+    });
+
+    mockOpenDatabase.mockImplementation(async (path: string) =>
+      String(path).includes('globalStorage') ? globalDb : wsDb
+    );
+
+    const result = await listSessions({ limit: 10, all: false }, '/data');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe(guid);
+    expect(result[0]!.workspaceId).toBe('ws-modern');
+    expect(result[0]!.workspacePath).toBe('/project/modern');
+  });
+
+  it('surfaces unattributed global composers via the catch-all under a global bucket', async () => {
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path.includes('state.vscdb') ||
+        path.includes('workspace.json') ||
+        path === '/data' ||
+        path.includes('globalStorage/state.vscdb')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/x' }));
+
+    const wsDb = createWorkspaceDb(JSON.stringify({ selectedComposerIds: ['ws-own'] }));
+    const globalDb = createGlobalDbForComposerMap({
+      'ws-own': {
+        composerData: { name: 'Owned', createdAt: 1778672423842, lastUpdatedAt: 1778672423842 },
+        bubbles: [{ type: 1, text: 'owned' }],
+      },
+      // Not referenced by any workspace and carries no workspace metadata.
+      'orphan-1': {
+        composerData: { name: 'Orphan', createdAt: 1778672423842, lastUpdatedAt: 1778672423842 },
+        bubbles: [{ type: 1, text: 'orphan' }],
+      },
+    });
+
+    mockOpenDatabase.mockImplementation(async (path: string) =>
+      String(path).includes('globalStorage') ? globalDb : wsDb
+    );
+
+    const result = await listSessions({ limit: 50, all: true }, '/data');
+    const byId = new Map(result.map((s) => [s.id, s]));
+    expect(byId.get('ws-own')?.workspaceId).toBe('ws1');
+    expect(byId.get('orphan-1')).toBeDefined();
+    expect(byId.get('orphan-1')!.workspaceId).toBe('global');
   });
 
   it('skips selectedComposerIds fallback entries that have no global bubbles', async () => {
