@@ -922,7 +922,7 @@ export async function migrateWorkspace(
         .filter((id): id is string => typeof id === 'string')
     : [];
   const sessionIdSet = new Set(sessionIds);
-  for (const linkedId of await getWorkspaceLinkedComposerIds(sourceInfo.workspace)) {
+  for (const linkedId of await getWorkspaceLinkedComposerIds(sourceInfo.workspace, dataPath)) {
     if (!sessionIdSet.has(linkedId)) {
       sessionIdSet.add(linkedId);
       sessionIds.push(linkedId);

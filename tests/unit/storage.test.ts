@@ -1003,6 +1003,61 @@ describe('listSessions', () => {
     expect(result[0]!.workspacePath).toBe('/project/modern');
   });
 
+  it('recovers composerChatViewPane pointer sessions under a --workspace filter', async () => {
+    // #4: workspace filtering previously returned zero for modern (pointer-linked) data.
+    const guid = 'cccccccc-dddd-eeee-ffff-000000000000';
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path.includes('state.vscdb') ||
+        path.includes('workspace.json') ||
+        path === '/data' ||
+        path.includes('globalStorage/state.vscdb')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/modern' }));
+
+    const wsDb = createWorkspaceDbWithPointers(JSON.stringify({ selectedComposerIds: [] }), [
+      { key: `workbench.panel.composerChatViewPane.${guid}`, value: '{}' },
+    ]);
+    const globalDb = createGlobalDbForComposerMap({
+      [guid]: {
+        composerData: { name: 'Pointer Filtered', createdAt: 1778672423842, lastUpdatedAt: 1778682083842 },
+        bubbles: [{ type: 1, text: 'filtered pointer prompt' }],
+      },
+    });
+
+    mockOpenDatabase.mockImplementation(async (path: string) =>
+      String(path).includes('globalStorage') ? globalDb : wsDb
+    );
+
+    const result = await listSessions({ workspacePath: '/project/modern', all: true }, '/data');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe(guid);
+    expect(result[0]!.workspaceId).toBe('ws-modern');
+  });
+
+  it('scopes global recovery to the custom --data-path (no leak from default global storage)', async () => {
+    // Only the custom data dir exists; it has no workspaces and no sibling globalStorage.
+    vi.mocked(existsSync).mockImplementation((p) => String(p) === '/custom/workspaceStorage');
+    vi.mocked(readdirSync).mockReturnValue([]);
+
+    const result = await listSessions({ all: true }, '/custom/workspaceStorage');
+
+    expect(result).toHaveLength(0);
+    // Every global-storage probe must be the sibling of the custom path, never the
+    // machine's default global DB.
+    const globalChecks = vi
+      .mocked(existsSync)
+      .mock.calls.map((call) => String(call[0]))
+      .filter((path) => path.includes('globalStorage'));
+    expect(globalChecks.length).toBeGreaterThan(0);
+    expect(globalChecks.every((path) => path.includes('/custom/globalStorage'))).toBe(true);
+  });
+
   it('surfaces unattributed global composers via the catch-all under a global bucket', async () => {
     vi.mocked(existsSync).mockImplementation((p) => {
       const path = String(p);

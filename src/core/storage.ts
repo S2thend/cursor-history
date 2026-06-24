@@ -4,7 +4,7 @@
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import JSZip from 'jszip';
 import {
@@ -50,7 +50,16 @@ const GENERATIONS_KEY = 'aiService.generations';
 /**
  * Get the global Cursor storage path
  */
-function getGlobalStoragePath(): string {
+function getGlobalStoragePath(customDataPath?: string): string {
+  // Global storage sits next to workspaceStorage under `.../User/`. When a custom
+  // data path (flag or CURSOR_DATA_PATH) is in effect, derive global storage from
+  // that same root instead of the machine default — otherwise an empty or foreign
+  // `--data-path` would still enumerate the local profile's default global DB.
+  const dataPath = customDataPath ?? process.env['CURSOR_DATA_PATH'];
+  if (dataPath) {
+    return join(dirname(dataPath), 'globalStorage');
+  }
+
   const platform = process.platform;
   const home = homedir();
 
@@ -770,7 +779,7 @@ export async function findWorkspaces(
 
       if (!globalDbChecked) {
         globalDbChecked = true;
-        const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+        const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
         if (existsSync(globalDbPath)) {
           try {
             globalDb = await openDatabase(globalDbPath);
@@ -1082,8 +1091,11 @@ function getGlobalComposerSummariesForWorkspace(
  * sessions discoverable only through global storage are migrated too, matching
  * what `list` surfaces for the workspace.
  */
-export async function getWorkspaceLinkedComposerIds(workspace: Workspace): Promise<string[]> {
-  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+export async function getWorkspaceLinkedComposerIds(
+  workspace: Workspace,
+  customDataPath?: string
+): Promise<string[]> {
+  const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
   if (!existsSync(globalDbPath)) {
     return [];
   }
@@ -1243,7 +1255,7 @@ export async function listSessions(
   }
 
   if (!backupPath && (globalFallbackCandidates.length > 0 || !options.workspacePath)) {
-    const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+    const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
     if (existsSync(globalDbPath)) {
       let globalDb: Database | null = null;
       try {
