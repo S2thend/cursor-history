@@ -19,6 +19,8 @@ vi.mock('../../src/core/storage.js', () => ({
 
 // Mock platform functions
 vi.mock('../../src/lib/platform.js', () => ({
+  getGlobalStoragePath: (customDataPath?: string) =>
+    customDataPath ? customDataPath.replace(/\/[^/]+$/, '/globalStorage') : '/default/globalStorage',
   normalizePath: (p: string) => p.replace(/\/+$/, ''),
   pathsEqual: (a: string, b: string) => a === b,
 }));
@@ -632,6 +634,49 @@ describe('migrateWorkspace', () => {
 // Path transformation in global storage (copy mode)
 // =============================================================================
 describe('migrateSession - global storage path transformation (copy mode)', () => {
+  it('copy mode: uses the sibling globalStorage for a custom dataPath', async () => {
+    mockFindWorkspaceForSession.mockResolvedValue({
+      workspace: { id: 'ws1', path: '/source/project', dbPath: '/custom/workspaceStorage/ws1/state.vscdb', sessionCount: 1 },
+      dbPath: '/custom/workspaceStorage/ws1/state.vscdb',
+    });
+    mockFindWorkspaceByPath.mockResolvedValue({
+      workspace: { id: 'dest-ws', path: '/dest/project', dbPath: '/custom/workspaceStorage/ws2/state.vscdb', sessionCount: 0 },
+      dbPath: '/custom/workspaceStorage/ws2/state.vscdb',
+    });
+
+    mockOpenDatabaseReadWrite.mockResolvedValue(createMockDb());
+    mockGetComposerData
+      .mockReturnValueOnce({
+        composers: [{ composerId: 'sid', name: 'Session' }],
+        isNewFormat: true,
+        rawData: {},
+      })
+      .mockReturnValueOnce({ composers: [], isNewFormat: true, rawData: {} });
+
+    vi.mocked(existsSync).mockImplementation(
+      (p) => String(p) === '/custom/globalStorage/state.vscdb'
+    );
+
+    vi.mocked(BetterSqlite3).mockImplementation(function () {
+      return {
+        prepare: vi.fn(() => ({ get: vi.fn(), all: vi.fn(() => []), run: vi.fn() })),
+        close: vi.fn(),
+      } as any;
+    } as any);
+
+    const result = await migrateSession('sid', {
+      destination: '/dest/project',
+      mode: 'copy',
+      dryRun: false,
+      dataPath: '/custom/workspaceStorage',
+    });
+
+    expect(result.success).toBe(true);
+    const openedPaths = vi.mocked(BetterSqlite3).mock.calls.map((call) => String(call[0]));
+    expect(openedPaths.length).toBeGreaterThan(0);
+    expect(openedPaths.every((path) => path === '/custom/globalStorage/state.vscdb')).toBe(true);
+  });
+
   it('copy mode: transforms file paths in global storage', async () => {
     // Setup workspace mocks
     mockFindWorkspaceForSession.mockResolvedValue({

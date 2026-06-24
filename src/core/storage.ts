@@ -4,8 +4,7 @@
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
+import { join } from 'node:path';
 import JSZip from 'jszip';
 import {
   openDatabase as openDatabaseAsync,
@@ -26,7 +25,13 @@ import type {
   SessionUsage,
   ContextWindowStatus,
 } from './types.js';
-import { getCursorDataPath, contractPath, normalizePath, pathsEqual } from '../lib/platform.js';
+import {
+  getCursorDataPath,
+  getGlobalStoragePath,
+  contractPath,
+  normalizePath,
+  pathsEqual,
+} from '../lib/platform.js';
 import { SessionNotFoundError } from '../lib/errors.js';
 import { parseChatData, getSearchSnippets, type CursorChatBundle } from './parser.js';
 import { openBackupDatabase, readBackupManifest } from './backup.js';
@@ -46,36 +51,6 @@ const CHAT_DATA_KEYS = [
  */
 const PROMPTS_KEY = 'aiService.prompts';
 const GENERATIONS_KEY = 'aiService.generations';
-
-/**
- * Get the global Cursor storage path
- */
-function getGlobalStoragePath(customDataPath?: string): string {
-  // Global storage sits next to workspaceStorage under `.../User/`. When a custom
-  // data path (flag or CURSOR_DATA_PATH) is in effect, derive global storage from
-  // that same root instead of the machine default — otherwise an empty or foreign
-  // `--data-path` would still enumerate the local profile's default global DB.
-  const dataPath = customDataPath ?? process.env['CURSOR_DATA_PATH'];
-  if (dataPath) {
-    return join(dirname(dataPath), 'globalStorage');
-  }
-
-  const platform = process.platform;
-  const home = homedir();
-
-  if (platform === 'win32') {
-    return join(
-      process.env['APPDATA'] ?? join(home, 'AppData', 'Roaming'),
-      'Cursor',
-      'User',
-      'globalStorage'
-    );
-  } else if (platform === 'darwin') {
-    return join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage');
-  } else {
-    return join(home, '.config', 'Cursor', 'User', 'globalStorage');
-  }
-}
 
 /**
  * Open a SQLite database file (read-only)
@@ -1443,7 +1418,7 @@ export async function getSession(
   // This works for both live data and backup (if backup includes globalStorage)
   let globalDb: Database | null = null;
   let globalLoadFailed = false;
-  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
 
   try {
     if (backupPath) {
@@ -1625,8 +1600,8 @@ export async function searchSessions(
  * List sessions from global Cursor storage (cursorDiskKV table)
  * This is where Cursor stores full conversation data including AI responses
  */
-export async function listGlobalSessions(): Promise<ChatSessionSummary[]> {
-  const globalPath = getGlobalStoragePath();
+export async function listGlobalSessions(customDataPath?: string): Promise<ChatSessionSummary[]> {
+  const globalPath = getGlobalStoragePath(customDataPath);
   const dbPath = join(globalPath, 'state.vscdb');
 
   if (!existsSync(dbPath)) {
@@ -1741,15 +1716,18 @@ export async function listGlobalSessions(): Promise<ChatSessionSummary[]> {
 /**
  * Get a session from global storage by index
  */
-export async function getGlobalSession(index: number): Promise<ChatSession | null> {
-  const summaries = await listGlobalSessions();
+export async function getGlobalSession(
+  index: number,
+  customDataPath?: string
+): Promise<ChatSession | null> {
+  const summaries = await listGlobalSessions(customDataPath);
   const summary = summaries.find((s) => s.index === index);
 
   if (!summary) {
     return null;
   }
 
-  const globalPath = getGlobalStoragePath();
+  const globalPath = getGlobalStoragePath(customDataPath);
   const dbPath = join(globalPath, 'state.vscdb');
   let db: Database | null = null;
 

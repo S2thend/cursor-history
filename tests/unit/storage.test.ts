@@ -1444,6 +1444,61 @@ describe('getSession', () => {
     expect(result!.messages[1]!.content).toBe('Here is my response');
   });
 
+  it('loads global bubbles from the sibling globalStorage for a custom dataPath', async () => {
+    const customDataPath = '/custom/workspaceStorage';
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return (
+        path === customDataPath ||
+        path === '/custom/globalStorage/state.vscdb' ||
+        path.includes('/custom/workspaceStorage/ws1/state.vscdb') ||
+        path.includes('/custom/workspaceStorage/ws1/workspace.json')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/custom/project' }));
+
+    const wsDb = createWorkspaceDb(
+      JSON.stringify({
+        allComposers: [{ composerId: 'custom-1', name: 'Custom Session', createdAt: 1000 }],
+      })
+    );
+    const globalDb = createGlobalDb(
+      [
+        {
+          key: 'bubbleId:custom-1:b1',
+          value: JSON.stringify({
+            type: 1,
+            text: 'custom profile message',
+            createdAt: '2024-01-15T10:00:00Z',
+            bubbleId: 'b1',
+          }),
+        },
+      ],
+      JSON.stringify({ name: 'Custom Session', createdAt: 1000, lastUpdatedAt: 2000 })
+    );
+
+    mockOpenDatabase.mockImplementation(async (path: string) => {
+      if (path === '/custom/globalStorage/state.vscdb') return globalDb;
+      if (path.includes('globalStorage')) {
+        throw new Error(`wrong global path: ${path}`);
+      }
+      return wsDb;
+    });
+
+    const result = await getSession('custom-1', customDataPath);
+
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('global');
+    expect(result!.messages).toHaveLength(1);
+    expect(result!.messages[0]!.content).toBe('custom profile message');
+    const openedPaths = mockOpenDatabase.mock.calls.map((call) => String(call[0]));
+    expect(openedPaths).toContain('/custom/globalStorage/state.vscdb');
+    expect(openedPaths.some((path) => path.includes('Application Support/Cursor'))).toBe(false);
+  });
+
   it('returns same session when called with composer ID string', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
