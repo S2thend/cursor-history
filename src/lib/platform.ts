@@ -3,7 +3,7 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Platform } from '../core/types.js';
 
 /**
@@ -63,6 +63,13 @@ export function getCursorDataPath(customPath?: string): string {
   }
 
   return getDefaultCursorDataPath();
+}
+
+/**
+ * Get the Cursor global storage path for the active workspaceStorage root.
+ */
+export function getGlobalStoragePath(customDataPath?: string): string {
+  return join(dirname(getCursorDataPath(customDataPath)), 'globalStorage');
 }
 
 /**

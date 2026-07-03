@@ -7,7 +7,7 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import BetterSqlite3 from 'better-sqlite3';
 import {
   findWorkspaceForSession,
@@ -15,8 +15,9 @@ import {
   openDatabaseReadWrite,
   getComposerData,
   updateComposerData,
+  getWorkspaceLinkedComposerIds,
 } from './storage.js';
-import { normalizePath, pathsEqual } from '../lib/platform.js';
+import { getGlobalStoragePath, normalizePath, pathsEqual } from '../lib/platform.js';
 import {
   SessionNotFoundError,
   WorkspaceNotFoundError,
@@ -42,27 +43,6 @@ function generateSessionId(): string {
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
-}
-
-/**
- * Get the global Cursor storage path
- */
-function getGlobalStoragePath(): string {
-  const platform = process.platform;
-  const home = homedir();
-
-  if (platform === 'win32') {
-    return join(
-      process.env['APPDATA'] ?? join(home, 'AppData', 'Roaming'),
-      'Cursor',
-      'User',
-      'globalStorage'
-    );
-  } else if (platform === 'darwin') {
-    return join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage');
-  } else {
-    return join(home, '.config', 'Cursor', 'User', 'globalStorage');
-  }
 }
 
 // ============================================================================
@@ -307,6 +287,166 @@ function isNestedPath(source: string, destination: string): boolean {
   return normalizedDest.startsWith(normalizedSource + '/');
 }
 
+function toFileUri(path: string): string {
+  const normalized = normalizePath(path);
+  const windowsDrivePath = normalized.match(/^([A-Za-z]):[\\/](.*)$/);
+  if (windowsDrivePath) {
+    const drive = windowsDrivePath[1]!.toLowerCase();
+    const rest = windowsDrivePath[2]!.replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
+    return `file:///${drive}:/${rest}`;
+  }
+
+  return pathToFileURL(normalized).href;
+}
+
+function toFileUriPath(workspacePath: string): string {
+  try {
+    // In the VS Code URI model `uri.path` is the DECODED path (it must match
+    // fsPath); only `external`/`workspaceUri` carry percent-encoding.
+    return decodeURIComponent(new URL(toFileUri(workspacePath)).pathname);
+  } catch {
+    return normalizePath(workspacePath);
+  }
+}
+
+function updateComposerWorkspaceMetadata(
+  composerData: Record<string, unknown>,
+  workspacePath: string,
+  workspaceId?: string
+): void {
+  const normalizedPath = normalizePath(workspacePath);
+  const fileUri = toFileUri(normalizedPath);
+  composerData['workspaceUri'] = fileUri;
+
+  const existingIdentifier =
+    composerData['workspaceIdentifier'] &&
+    typeof composerData['workspaceIdentifier'] === 'object' &&
+    !Array.isArray(composerData['workspaceIdentifier'])
+      ? (composerData['workspaceIdentifier'] as Record<string, unknown>)
+      : {};
+  const existingUri =
+    existingIdentifier['uri'] && typeof existingIdentifier['uri'] === 'object'
+      ? (existingIdentifier['uri'] as Record<string, unknown>)
+      : {};
+
+  composerData['workspaceIdentifier'] = {
+    ...existingIdentifier,
+    ...(workspaceId ? { id: workspaceId } : {}),
+    uri: {
+      ...existingUri,
+      fsPath: normalizedPath,
+      external: fileUri,
+      path: toFileUriPath(normalizedPath),
+      scheme: 'file',
+    },
+  };
+}
+
+function composerExistsInGlobalStorage(composerId: string, dataPath?: string): boolean {
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return false;
+  }
+
+  const db = new BetterSqlite3(globalDbPath, { readonly: true });
+  try {
+    const composerRow = db
+      .prepare('SELECT 1 FROM cursorDiskKV WHERE key = ? LIMIT 1')
+      .get(`composerData:${composerId}`);
+    if (composerRow) {
+      return true;
+    }
+
+    const bubbleRow = db
+      .prepare('SELECT 1 FROM cursorDiskKV WHERE key LIKE ? LIMIT 1')
+      .get(`bubbleId:${composerId}:%`);
+    return Boolean(bubbleRow);
+  } catch {
+    return false;
+  } finally {
+    db.close();
+  }
+}
+
+function updateComposerWorkspaceInGlobalStorage(
+  composerId: string,
+  workspacePath: string,
+  workspaceId?: string,
+  dataPath?: string
+): void {
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return;
+  }
+
+  const db = new BetterSqlite3(globalDbPath, { readonly: false });
+  try {
+    const composerDataRow = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value: string } | undefined;
+    if (!composerDataRow?.value) {
+      return;
+    }
+
+    const composerData = JSON.parse(composerDataRow.value) as Record<string, unknown>;
+    updateComposerWorkspaceMetadata(composerData, workspacePath, workspaceId);
+
+    db.prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ?').run(
+      JSON.stringify(composerData),
+      `composerData:${composerId}`
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function hydrateComposerFromGlobalStorage(
+  composer: Record<string, unknown>,
+  composerId: string,
+  dataPath?: string
+): Record<string, unknown> {
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+  if (!existsSync(globalDbPath)) {
+    return composer;
+  }
+
+  const db = new BetterSqlite3(globalDbPath, { readonly: true });
+  try {
+    const row = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value: string } | undefined;
+    if (!row?.value) {
+      return composer;
+    }
+
+    const globalComposer = JSON.parse(row.value) as {
+      name?: string;
+      createdAt?: number | string;
+      updatedAt?: number | string;
+      lastUpdatedAt?: number | string;
+      unifiedMode?: string;
+    };
+    const lastUpdatedAt = globalComposer.lastUpdatedAt ?? globalComposer.updatedAt;
+
+    return {
+      ...composer,
+      composerId,
+      ...(typeof globalComposer.name === 'string' ? { name: globalComposer.name } : {}),
+      ...(globalComposer.createdAt !== undefined && globalComposer.createdAt !== null
+        ? { createdAt: globalComposer.createdAt }
+        : {}),
+      ...(lastUpdatedAt !== undefined && lastUpdatedAt !== null ? { lastUpdatedAt } : {}),
+      ...(typeof globalComposer.unifiedMode === 'string'
+        ? { unifiedMode: globalComposer.unifiedMode }
+        : {}),
+    };
+  } catch {
+    return composer;
+  } finally {
+    db.close();
+  }
+}
+
 /**
  * Copy all bubble data for a session in global storage with new IDs.
  * This is required for copy mode to create independent session data.
@@ -324,9 +464,11 @@ function copyBubbleDataInGlobalStorage(
   newComposerId: string,
   sourceWorkspace: string,
   destWorkspace: string,
-  debug: boolean = false
+  destWorkspaceId?: string,
+  debug: boolean = false,
+  dataPath?: string
 ): Map<string, string> {
-  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
 
   if (!existsSync(globalDbPath)) {
     return new Map();
@@ -350,6 +492,7 @@ function copyBubbleDataInGlobalStorage(
 
       // Update composerId in the data
       composerData.composerId = newComposerId;
+      updateComposerWorkspaceMetadata(composerData, destWorkspace, destWorkspaceId);
 
       // We'll update fullConversationHeadersOnly after generating new bubble IDs
       const oldBubbleHeaders = composerData.fullConversationHeadersOnly || [];
@@ -434,9 +577,10 @@ function updateBubblePathsInGlobalStorage(
   composerId: string,
   sourceWorkspace: string,
   destWorkspace: string,
-  debug: boolean = false
+  debug: boolean = false,
+  dataPath?: string
 ): void {
-  const globalDbPath = join(getGlobalStoragePath(), 'state.vscdb');
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
 
   if (!existsSync(globalDbPath)) {
     return;
@@ -491,17 +635,22 @@ function updateBubblePathsInGlobalStorage(
  */
 export async function migrateSession(
   sessionId: string,
-  options: Omit<MigrateSessionOptions, 'sessionIds'>
+  options: Omit<MigrateSessionOptions, 'sessionIds'> & { sourceWorkspacePath?: string }
 ): Promise<SessionMigrationResult> {
-  const { destination, mode, dryRun, dataPath, debug = false } = options;
+  const { destination, mode, dryRun, dataPath, debug = false, sourceWorkspacePath } = options;
   // Note: force option is used at the CLI layer for validation, not in core migration
 
   // Normalize destination path
   const normalizedDest = normalizePath(destination);
 
-  // Find source workspace for this session
-  const sourceInfo = await findWorkspaceForSession(sessionId, dataPath);
+  // Find source workspace for this session (or use explicit source workspace in workspace migration mode)
+  const sourceInfo = sourceWorkspacePath
+    ? await findWorkspaceByPath(sourceWorkspacePath, dataPath)
+    : await findWorkspaceForSession(sessionId, dataPath);
   if (!sourceInfo) {
+    if (sourceWorkspacePath) {
+      throw new WorkspaceNotFoundError(sourceWorkspacePath);
+    }
     throw new SessionNotFoundError(sessionId);
   }
 
@@ -551,27 +700,39 @@ export async function migrateSession(
         throw new Error('Source workspace has no composer data');
       }
 
-      // Find the session in source data
+      // Find the session in source data. It may live only in global storage
+      // (linked to the workspace via workspaceIdentifier), in which case there is
+      // no workspace-DB composer entry to remove.
       const sessionIndex = sourceResult.composers.findIndex((s) => s.composerId === sessionId);
-      if (sessionIndex === -1) {
+      const isGlobalOnly = sessionIndex === -1;
+      if (isGlobalOnly && !composerExistsInGlobalStorage(sessionId, dataPath)) {
         throw new SessionNotFoundError(sessionId);
       }
 
-      const sessionToMigrate = sourceResult.composers[sessionIndex]!;
+      const sessionToMigrate: Record<string, unknown> =
+        sessionIndex >= 0
+          ? (sourceResult.composers[sessionIndex]! as Record<string, unknown>)
+          : { composerId: sessionId };
+      const hydratedSession = hydrateComposerFromGlobalStorage(sessionToMigrate, sessionId, dataPath);
 
       if (mode === 'move') {
-        // Remove from source
-        const newSourceComposers = sourceResult.composers.filter((_, i) => i !== sessionIndex);
-        updateComposerData(
-          sourceDb,
-          newSourceComposers,
-          sourceResult.isNewFormat,
-          sourceResult.rawData
-        );
+        // Remove from source (skip when the session is only in global storage)
+        if (!isGlobalOnly) {
+          const newSourceComposers = sourceResult.composers.filter((_, i) => i !== sessionIndex);
+          updateComposerData(
+            sourceDb,
+            newSourceComposers,
+            sourceResult.isNewFormat,
+            sourceResult.rawData
+          );
+        }
 
         // Add to destination
         const destComposers = destResult ? destResult.composers : [];
-        const newDestComposers = [...destComposers, sessionToMigrate];
+        const newDestComposers = [
+          ...destComposers.filter((composer) => composer.composerId !== sessionId),
+          hydratedSession,
+        ];
         updateComposerData(
           destDb,
           newDestComposers,
@@ -580,7 +741,13 @@ export async function migrateSession(
         );
 
         // T010-T012: Update file paths in global storage bubble data for move mode
-        updateBubblePathsInGlobalStorage(sessionId, sourceWorkspace, normalizedDest, debug);
+        updateBubblePathsInGlobalStorage(sessionId, sourceWorkspace, normalizedDest, debug, dataPath);
+        updateComposerWorkspaceInGlobalStorage(
+          sessionId,
+          normalizedDest,
+          destInfo.workspace?.id,
+          dataPath
+        );
 
         return {
           success: true,
@@ -603,11 +770,13 @@ export async function migrateSession(
           newSessionId,
           sourceWorkspace,
           normalizedDest,
-          debug
+          destInfo.workspace?.id,
+          debug,
+          dataPath
         );
 
         // Deep clone and update the session with new ID
-        const copiedSession = JSON.parse(JSON.stringify(sessionToMigrate)) as {
+        const copiedSession = JSON.parse(JSON.stringify(hydratedSession)) as {
           composerId?: string;
         };
         copiedSession.composerId = newSessionId;
@@ -731,7 +900,24 @@ export async function migrateWorkspace(
   const sourceResult = getComposerData(sourceDb);
   sourceDb.close();
 
-  if (!sourceResult || sourceResult.composers.length === 0) {
+  // Extract session IDs from the workspace composer list, then union in any
+  // sessions discoverable only through global storage (linked to this workspace
+  // via workspaceIdentifier/workspaceUri) so migration covers everything `list`
+  // shows for the source workspace.
+  const sessionIds: string[] = sourceResult
+    ? sourceResult.composers
+        .map((s) => s.composerId)
+        .filter((id): id is string => typeof id === 'string')
+    : [];
+  const sessionIdSet = new Set(sessionIds);
+  for (const linkedId of await getWorkspaceLinkedComposerIds(sourceInfo.workspace, dataPath)) {
+    if (!sessionIdSet.has(linkedId)) {
+      sessionIdSet.add(linkedId);
+      sessionIds.push(linkedId);
+    }
+  }
+
+  if (sessionIds.length === 0) {
     throw new NoSessionsFoundError(normalizedSource);
   }
 
@@ -746,25 +932,32 @@ export async function migrateWorkspace(
     }
   }
 
-  // Extract session IDs
-  const sessionIds = sourceResult.composers
-    .map((s) => s.composerId)
-    .filter((id): id is string => typeof id === 'string');
-
-  if (sessionIds.length === 0) {
-    throw new NoSessionsFoundError(normalizedSource);
-  }
-
   // Migrate all sessions
-  const results = await migrateSessions({
-    sessionIds,
-    destination: normalizedDest,
-    mode,
-    dryRun,
-    force,
-    dataPath,
-    debug,
-  });
+  const results: SessionMigrationResult[] = [];
+  for (const sessionId of sessionIds) {
+    try {
+      const result = await migrateSession(sessionId, {
+        destination: normalizedDest,
+        mode,
+        dryRun,
+        force,
+        dataPath,
+        debug,
+        sourceWorkspacePath: normalizedSource,
+      });
+      results.push(result);
+    } catch (error) {
+      results.push({
+        success: false,
+        sessionId,
+        sourceWorkspace: normalizedSource,
+        destinationWorkspace: normalizedDest,
+        mode,
+        error: error instanceof Error ? error.message : String(error),
+        dryRun,
+      });
+    }
+  }
 
   // Aggregate results
   const successCount = results.filter((r) => r.success).length;
