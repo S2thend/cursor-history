@@ -3,6 +3,28 @@
  */
 
 import type { ChatSession, Message, CodeBlock, SearchSnippet, MessageRole } from './types.js';
+import type { StoreSession } from './store-stack/types.js';
+
+/**
+ * Map a Store-stack session (transcript / store.db) to the unified ChatSession.
+ * Store sessions lack per-message timestamps / tokens / tool-results at the
+ * transcript layer; `source` reflects fidelity ('transcript' P1, 'store' P2).
+ * See specs/015-cursor-store-stack/data-model.md §2.
+ */
+export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
+  return {
+    id: ss.id,
+    index,
+    title: ss.title,
+    createdAt: ss.createdAt,
+    lastUpdatedAt: ss.createdAt, // transcript layer has no separate updatedAt
+    messageCount: ss.messages.length,
+    messages: ss.messages,
+    workspaceId: 'store',
+    workspacePath: ss.workspacePath,
+    source: ss.source,
+  };
+}
 
 /**
  * Raw JSON structure from Cursor's SQLite storage (Legacy format)
@@ -449,6 +471,15 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
     }
     lines.push(message.content);
     lines.push('');
+    if (message.toolCalls && message.toolCalls.length > 0) {
+      for (const tc of message.toolCalls) {
+        const params = tc.params
+          ? Object.entries(tc.params).map(([k, v]) => `\`${k}\`=${JSON.stringify(v)}`).join(', ')
+          : '';
+        lines.push(`- 🔧 **${tc.name}**${params ? ` — ${params}` : ''}`);
+      }
+      lines.push('');
+    }
   }
 
   return lines.join('\n');
@@ -502,6 +533,15 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
       timestamp: m.timestamp.toISOString(),
       codeBlocks: m.codeBlocks,
     };
+
+    if (m.toolCalls && m.toolCalls.length > 0) {
+      msg['toolCalls'] = m.toolCalls.map((tc) => ({
+        name: tc.name,
+        status: tc.status,
+        ...(tc.params !== undefined ? { params: tc.params } : {}),
+        ...(tc.result !== undefined ? { result: tc.result } : {}),
+      }));
+    }
 
     // Add token usage fields if present (omit if not available)
     if (m.tokenUsage && (m.tokenUsage.inputTokens > 0 || m.tokenUsage.outputTokens > 0)) {

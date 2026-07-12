@@ -54,8 +54,25 @@ export interface ChatSession {
   messages: Message[];
   workspaceId: string;
   workspacePath?: string;
-  /** Source data completeness: full global bubbles or degraded workspace fallback */
-  source?: 'global' | 'workspace-fallback';
+  /**
+   * Source data completeness:
+   * - 'global': full global bubbles (Composer stack, highest fidelity)
+   * - 'workspace-fallback': degraded, workspace storage only (Composer stack)
+   * - 'transcript': Cursor Store stack; transcript is authoritative (store.db
+   *   may have enhanced title/createdAt but messages come from transcript)
+   * - 'store-complete': Cursor Store stack, store.db fully parsed (store-only,
+   *   no transcript); safe to treat as complete
+   * - 'store-partial': Cursor Store stack, store.db partially parsed
+   *   (missing/corrupt leaf, JSON failure, orphan tool result) — degraded
+   * - 'store': legacy alias (pre-rework); avoid in new code
+   */
+  source?:
+    | 'global'
+    | 'workspace-fallback'
+    | 'transcript'
+    | 'store'
+    | 'store-complete'
+    | 'store-partial';
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
   /** Ordered bubble IDs of the current active conversation branch */
@@ -130,6 +147,14 @@ export interface ChatSessionSummary {
   workspaceId: string;
   workspacePath: string;
   preview: string;
+  /** Source stack/fidelity (same vocabulary as ChatSession.source) */
+  source?:
+    | 'global'
+    | 'workspace-fallback'
+    | 'transcript'
+    | 'store'
+    | 'store-complete'
+    | 'store-partial';
 }
 
 /**

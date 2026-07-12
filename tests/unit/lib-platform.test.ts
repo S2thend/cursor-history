@@ -9,10 +9,31 @@ import {
   contractPath,
   normalizePath,
   pathsEqual,
+  getStoreStackRoot,
 } from '../../src/lib/platform.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
+});
+
+describe('getStoreStackRoot', () => {
+  it('defaults to ~/.cursor', () => {
+    vi.unstubAllEnvs();
+    expect(getStoreStackRoot()).toBe(join(homedir(), '.cursor'));
+  });
+
+  it('honors CURSOR_STORE_ROOT override', () => {
+    vi.stubEnv('CURSOR_STORE_ROOT', '/tmp/custom-cursor');
+    expect(getStoreStackRoot()).toBe('/tmp/custom-cursor');
+  });
+
+  it('honors --data-path only when it looks like a Store root (P1-B regression guard)', () => {
+    vi.unstubAllEnvs();
+    // A non-Store path (e.g. Composer workspaceStorage) must NOT shadow ~/.cursor
+    expect(getStoreStackRoot('/some/workspaceStorage')).toBe(join(homedir(), '.cursor'));
+    // A .cursor-named path IS a Store root
+    expect(getStoreStackRoot('/home/u/.cursor')).toBe('/home/u/.cursor');
+  });
 });
 
 describe('detectPlatform', () => {

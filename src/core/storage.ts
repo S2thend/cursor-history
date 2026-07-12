@@ -31,11 +31,13 @@ import {
   contractPath,
   normalizePath,
   pathsEqual,
+  getStoreStackRoot,
 } from '../lib/platform.js';
 import { SessionNotFoundError } from '../lib/errors.js';
-import { parseChatData, getSearchSnippets, type CursorChatBundle } from './parser.js';
+import { parseChatData, getSearchSnippets, mapStoreSession, type CursorChatBundle } from './parser.js';
 import { openBackupDatabase, readBackupManifest } from './backup.js';
 import { debugLogStorage } from './database/debug.js';
+import { discoverStoreSessions } from './store-stack/discover.js';
 
 /**
  * Known SQLite keys for chat data (in priority order)
@@ -1353,6 +1355,35 @@ export async function listSessions(
     }
   }
 
+  // Merge Cursor Store-stack sessions (~/.cursor/{chats,projects}).
+  // Independent from Composer customDataPath; discovered via getStoreStackRoot().
+  // Falls back to [] when ~/.cursor is absent (pure-Composer users unaffected).
+  // Skipped in backup mode: backups capture vscdb, not the live ~/.cursor tree.
+  if (!backupPath) {
+    const storeSessions = discoverStoreSessions(getStoreStackRoot(customDataPath));
+    const storeSeenIds = new Set(allSessions.map((session) => session.id));
+    for (const ss of storeSessions) {
+      if (options.workspacePath) {
+        const wp = ss.workspacePath ?? '';
+        if (!(wp === options.workspacePath || wp.endsWith(options.workspacePath))) continue;
+      }
+      if (storeSeenIds.has(ss.id)) continue;
+      storeSeenIds.add(ss.id);
+      allSessions.push({
+        id: ss.id,
+        index: 0,
+        title: ss.title,
+        createdAt: ss.createdAt,
+        lastUpdatedAt: ss.createdAt, // transcript layer has no separate updatedAt
+        messageCount: ss.messages.length,
+        workspaceId: 'store',
+        workspacePath: ss.workspacePath ? contractPath(ss.workspacePath) : '(unknown workspace)',
+        preview: ss.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
+        source: ss.source,
+      });
+    }
+  }
+
   // Sort by most recent first
   allSessions.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
@@ -1413,6 +1444,20 @@ export async function getSession(
   }
 
   const index: number = typeof identifier === 'string' ? summary.index : identifier;
+
+  // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via discovery.
+  if (
+    summary.source === 'transcript' ||
+    summary.source === 'store' ||
+    summary.source === 'store-complete' ||
+    summary.source === 'store-partial'
+  ) {
+    const storeSession = discoverStoreSessions(getStoreStackRoot(customDataPath)).find(
+      (s) => s.id === summary.id
+    );
+    if (!storeSession) return null;
+    return mapStoreSession(storeSession, index);
+  }
 
   // Try to get full session from global storage (has AI responses)
   // This works for both live data and backup (if backup includes globalStorage)

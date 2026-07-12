@@ -1,0 +1,1 @@
+{"role":"assistant","message":{"content":[{"type":"text","text":"Step 1: search"},{"type":"tool_use","name":"Grep","input":{"pattern":"TODO","path":"/src"}},{"type":"tool_use","name":"Glob","input":{"glob_pattern":"**/*.ts","target_directory":"/src"}}]}}

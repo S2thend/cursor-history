@@ -2,8 +2,9 @@
  * Platform detection and Cursor data path resolution
  */
 
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { Platform } from '../core/types.js';
 
 /**
@@ -124,4 +125,29 @@ export function pathsEqual(path1: string, path2: string): boolean {
   const n1 = normalize(path1);
   const n2 = normalize(path2);
   return process.platform === 'win32' ? n1.toLowerCase() === n2.toLowerCase() : n1 === n2;
+}
+
+/**
+ * Get the root directory of Cursor's "Store stack" (`~/.cursor`).
+ * Contains `chats/<hash>/<uuid>/{meta.json,store.db}` and
+ * `projects/<sanitized>/agent-transcripts/<uuid>/*.jsonl`.
+ *
+ * Same path on Linux/macOS/Windows (and WSL): `~/.cursor`.
+ * The Composer stack (`workspaceStorage`/`globalStorage`) lives elsewhere
+ * (see `getDefaultCursorDataPath`); the two stacks are independent.
+ */
+export function getStoreStackRoot(customDataPath?: string): string {
+  // Honor --data-path ONLY when it actually looks like a Store root (contains
+  // chats/ and/or projects/, or is named '.cursor'). Otherwise --data-path is
+  // the Composer workspaceStorage root and must NOT shadow the real Store root
+  // (CURSOR_STORE_ROOT / ~/.cursor) — otherwise Composer users lose their
+  // Store sessions when passing --data-path.
+  if (customDataPath && isStoreRoot(customDataPath)) return customDataPath;
+  return process.env['CURSOR_STORE_ROOT'] ?? join(homedir(), '.cursor');
+}
+
+/** Heuristic: does this path look like a Cursor Store stack root? */
+function isStoreRoot(p: string): boolean {
+  if (basename(p) === '.cursor') return true;
+  return existsSync(join(p, 'chats')) || existsSync(join(p, 'projects'));
 }

@@ -25,8 +25,21 @@ export interface Session {
   /** Total number of messages in session */
   messageCount: number;
 
-  /** Source data completeness: full global bubbles or degraded workspace fallback */
-  source?: 'global' | 'workspace-fallback';
+  /**
+   * Source data completeness:
+   * - 'global': full global bubbles (Composer stack)
+   * - 'workspace-fallback': degraded, workspace storage only (Composer stack)
+   * - 'transcript': Store stack; transcript authoritative (store.db enhanced title/createdAt only)
+   * - 'store-complete' / 'store-partial': Store stack, store.db (no transcript); full or partial parse
+   * - 'store': legacy alias (pre-rework)
+   */
+  source?:
+    | 'global'
+    | 'workspace-fallback'
+    | 'transcript'
+    | 'store'
+    | 'store-complete'
+    | 'store-partial';
 
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;

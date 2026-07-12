@@ -186,12 +186,16 @@ export function isError(content: string): boolean {
 /**
  * Get the type of a message based on its role and content
  */
-export function getMessageType(message: { role: string; content: string }): MessageType {
+export function getMessageType(
+  message: { role: string; content: string; toolCalls?: unknown[] }
+): MessageType {
   if (message.role === 'user') {
     return 'user';
   }
-  // For assistant messages, check content markers
+  // For assistant messages, check content markers AND structured toolCalls
+  // (Store-stack transcripts carry tool calls as a structured field, not in content).
   if (isToolCall(message.content)) return 'tool';
+  if (Array.isArray(message.toolCalls) && message.toolCalls.length > 0) return 'tool';
   if (isThinking(message.content)) return 'thinking';
   if (isError(message.content)) return 'error';
   return 'assistant';
@@ -201,7 +205,7 @@ export function getMessageType(message: { role: string; content: string }): Mess
  * Filter messages by type
  * Returns all messages if types is empty or contains all types
  */
-export function filterMessages<T extends { role: string; content: string }>(
+export function filterMessages<T extends { role: string; content: string; toolCalls?: unknown[] }>(
   messages: T[],
   types: MessageType[]
 ): T[] {
@@ -498,6 +502,8 @@ export function formatSessionDetail(
   lines.push(`${pc.bold('Date:')} ${formatDate(session.createdAt)}`);
   if (workspacePath) {
     lines.push(`${pc.bold('Workspace:')} ${workspacePath}`);
+  } else if (session.source === 'transcript' || session.source === 'store') {
+    lines.push(`${pc.bold('Workspace:')} ${pc.dim('(unknown — Store transcript only)')}`);
   }
   // Show original message count and filter info if filtering is active
   if (messageFilter && messageFilter.length > 0 && originalMessageCount !== undefined) {
@@ -509,6 +515,14 @@ export function formatSessionDetail(
   }
   if (session.source === 'workspace-fallback') {
     lines.push(pc.yellow('⚠ Partial data - loaded from workspace fallback'));
+  } else if (session.source === 'transcript') {
+    lines.push(
+      pc.yellow('⚠ Partial data - Store-stack transcript only (no tokens / timestamps / tool results)')
+    );
+  } else if (session.source === 'store-partial') {
+    lines.push(
+      pc.yellow('⚠ Partial data - Store.db parse incomplete (some messages/results may be missing)')
+    );
   }
   lines.push('');
   lines.push(pc.dim('─'.repeat(60)));
@@ -600,6 +614,19 @@ export function formatSessionDetail(
       lines.push(truncatedContent);
     } else {
       lines.push(message.content);
+    }
+
+    // Render structured tool calls (Store-stack transcripts). Composer embeds
+    // tool info in content ([Tool:...]); skip then to avoid double display.
+    if (message.toolCalls && message.toolCalls.length > 0 && !isToolCall(message.content)) {
+      for (const tc of message.toolCalls) {
+        const params = tc.params
+          ? Object.entries(tc.params)
+              .map(([k, v]) => `${k}=${truncate(JSON.stringify(v), 60)}`)
+              .join(', ')
+          : '';
+        lines.push(pc.magenta(pc.bold(`🔧 ${tc.name}`)) + (params ? pc.dim(`  ${params}`) : ''));
+      }
     }
 
     // Append usage badge after content

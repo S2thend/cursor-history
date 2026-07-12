@@ -18,6 +18,12 @@ vi.mock('../../src/core/backup.js', () => ({
   readBackupManifest: vi.fn().mockResolvedValue(null),
 }));
 
+// Mock Store-stack discovery: these unit tests focus on the Composer stack.
+// Store-stack has its own dedicated tests (tests/unit/store-stack-*.test.ts).
+vi.mock('../../src/core/store-stack/discover.js', () => ({
+  discoverStoreSessions: vi.fn(() => []),
+}));
+
 // For backup-from-zip tests: mock zip so readWorkspaceJsonFromBackup can read workspace.json (hoisted)
 const { mockZipLoadAsync } = vi.hoisted(() => ({
   mockZipLoadAsync: vi.fn(),
@@ -3246,7 +3252,7 @@ describe('getSession (workspace fallback)', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     vi.mocked(existsSync).mockImplementation((path) => {
-      const value = String(path);
+      const value = String(path).replace(/\\/g, '/');
       if (value.includes('globalStorage/state.vscdb')) return false;
       return value === '/data' || value.includes('state.vscdb') || value.includes('workspace.json');
     });
@@ -3271,7 +3277,7 @@ describe('getSession (workspace fallback)', () => {
 
   it('keeps activeBranchBubbleIds undefined for workspace-fallback sessions', async () => {
     vi.mocked(existsSync).mockImplementation((path) => {
-      const value = String(path);
+      const value = String(path).replace(/\\/g, '/');
       if (value.includes('globalStorage/state.vscdb')) return false;
       return value === '/data' || value.includes('state.vscdb') || value.includes('workspace.json');
     });

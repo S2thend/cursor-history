@@ -17,17 +17,23 @@ import { getMessageType } from './table.js';
 export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
   const output = {
     count: sessions.length,
-    sessions: sessions.map((s) => ({
-      index: s.index,
-      id: s.id,
-      title: s.title,
-      createdAt: s.createdAt.toISOString(),
-      lastUpdatedAt: s.lastUpdatedAt.toISOString(),
-      messageCount: s.messageCount,
-      workspaceId: s.workspaceId,
-      workspacePath: s.workspacePath,
-      preview: s.preview,
-    })),
+    sessions: sessions.map((s) => {
+      const obj: Record<string, unknown> = {
+        index: s.index,
+        id: s.id,
+        title: s.title,
+        createdAt: s.createdAt.toISOString(),
+        lastUpdatedAt: s.lastUpdatedAt.toISOString(),
+        messageCount: s.messageCount,
+        workspaceId: s.workspaceId,
+        workspacePath: s.workspacePath,
+        preview: s.preview,
+      };
+      if (s.source !== undefined) {
+        obj['source'] = s.source;
+      }
+      return obj;
+    }),
   };
 
   return JSON.stringify(output, null, 2);
@@ -119,6 +125,15 @@ export function formatSessionJson(
         startLine: cb.startLine,
       })),
     };
+
+    if (m.toolCalls && m.toolCalls.length > 0) {
+      msg['toolCalls'] = m.toolCalls.map((tc) => ({
+        name: tc.name,
+        status: tc.status,
+        ...(tc.params !== undefined ? { params: tc.params } : {}),
+        ...(tc.result !== undefined ? { result: tc.result } : {}),
+      }));
+    }
 
     // Add type field when filtering is active
     if (messageFilter && messageFilter.length > 0) {

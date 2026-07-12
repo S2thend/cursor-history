@@ -1,0 +1,2 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nRead foo.txt\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Reading the file."},{"type":"tool_use","name":"Read","input":{"path":"/tmp/foo.txt"}}]}}
