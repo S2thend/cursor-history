@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
 
@@ -40,6 +40,40 @@ describe('discoverStoreSessions', () => {
 
   it('returns [] for a missing root (no throw — defensive)', () => {
     expect(discoverStoreSessions(join(ROOT(), 'does-not-exist'))).toEqual([]);
+  });
+});
+
+describe('discoverStoreSessions — metadata before transcript attachment', () => {
+  const AUUID = 'eeeeeeee-0000-0000-0000-000000000005';
+  const acpCreatedAt = new Date('2026-01-01T00:00:00.000Z');
+  const transcriptModifiedAt = new Date('2026-01-02T00:00:00.000Z');
+  let root = '';
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'ch-acp-order-'));
+    const acpDir = join(root, 'acp-sessions', AUUID);
+    mkdirSync(acpDir, { recursive: true });
+    writeFileSync(join(acpDir, 'meta.json'), JSON.stringify({ cwd: '/tmp/acp-project' }));
+    utimesSync(acpDir, acpCreatedAt, acpCreatedAt);
+
+    const transcriptDir = join(root, 'projects', 'tmp-acp-project', 'agent-transcripts', AUUID);
+    mkdirSync(transcriptDir, { recursive: true });
+    const transcript = join(transcriptDir, `${AUUID}.jsonl`);
+    writeFileSync(
+      transcript,
+      JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'hello' }] } }) + '\n'
+    );
+    utimesSync(transcript, transcriptModifiedAt, transcriptModifiedAt);
+  });
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('uses ACP metadata time as the transcript timestamp fallback', () => {
+    const session = discoverStoreSessions(root).find((s) => s.id === AUUID);
+    expect(session?.createdAt).toEqual(acpCreatedAt);
+    expect(session?.messages[0]?.timestamp).toEqual(acpCreatedAt);
   });
 });
 
@@ -109,9 +143,11 @@ describe('discoverStoreSessions — transcript authoritative (P2 rework)', () =>
     expect(s?.messages[0]?.content).toBe('transcript-1');
   });
 
-  it("source stays 'transcript' (store.db only enhanced title, not messages)", () => {
+  it("keeps transcript sessions off the store.db parse path", () => {
     const s = discoverStoreSessions(root).find((x) => x.id === TUUID);
     expect(s?.source).toBe('transcript');
-    expect(s?.title).toBe('Store Title'); // title merged from store.db
+    // The transcript path must not open store.db just to enrich metadata.
+    // This keeps Issue #31 list/show free of P2 parsing and SQLite warnings.
+    expect(s?.title).toBeNull();
   });
 });

@@ -57,30 +57,9 @@ export function discoverStoreSessions(storeRoot: string): StoreSession[] {
     }
   }
 
-  // 2. projects/<sanitized>/agent-transcripts/ → messages (nested or flat layout)
-  const projects = projectsDir(storeRoot);
-  // Discover agent transcript files from projects directory
-  if (existsSync(projects)) {
-    for (const sanitized of listDirs(projects)) {
-      const atDir = join(projects, sanitized, 'agent-transcripts');
-      if (!existsSync(atDir)) continue; // Skip if agent-transcripts dir is missing
-      // For nested or flat layout under agent-transcripts
-      for (const entry of readdirSync(atDir, { withFileTypes: true })) {
-        if (entry.isDirectory()) {
-          // Nested layout: look for agent-transcripts/uuid/uuid.jsonl
-          const uuid = entry.name;
-          const nested = join(atDir, uuid, `${uuid}.jsonl`);
-          if (existsSync(nested)) attachTranscript(byId, uuid, nested);
-        } else if (entry.name.endsWith('.jsonl')) {
-          // Flat layout: agent-transcripts/<uuid>.jsonl
-          const uuid = entry.name.slice(0, -'.jsonl'.length);
-          attachTranscript(byId, uuid, join(atDir, entry.name));
-        }
-      }
-    }
-  }
-
-  // 3. acp-sessions/<uuid>/{meta.json, store.db} (ACP variant — no workspace-hash layer)
+  // 2. acp-sessions/<uuid>/{meta.json, store.db} → metadata (no workspace-hash layer)
+  // Register every metadata source before attaching transcripts, so a transcript
+  // inherits its session timestamp instead of its file mtime fallback.
   const acp = acpSessionsDir(storeRoot);
   if (existsSync(acp)) {
     for (const uuid of listDirs(acp)) {
@@ -110,24 +89,43 @@ export function discoverStoreSessions(storeRoot: string): StoreSession[] {
     }
   }
 
-  // 4. Deep-parse store.db (P2): SAFE field-level enhancement only.
-  //    transcript is AUTHORITATIVE — store.db NEVER overrides transcript
-  //    messages. It fills title + createdAt; messages come from store.db ONLY
-  //    for store-only sessions (no transcript). Source reflects completeness.
-  for (const ss of byId.values()) {
-    if (ss.storeDbPath) {
-      const deep = parseStoreDb(ss.storeDbPath);
-      if (deep) {
-        ss.title = deep.title ?? ss.title;
-        ss.createdAt = deep.createdAt ?? ss.createdAt;
-        if (ss.messages.length === 0) {
-          // store-only (no transcript): use store.db messages; label completeness
-          ss.messages = deep.messages;
-          ss.source = deep.completeness === 'complete' ? 'store-complete' : 'store-partial';
+  // 3. projects/<sanitized>/agent-transcripts/ → messages (nested or flat layout)
+  const projects = projectsDir(storeRoot);
+  // Discover agent transcript files from projects directory
+  if (existsSync(projects)) {
+    for (const sanitized of listDirs(projects)) {
+      const atDir = join(projects, sanitized, 'agent-transcripts');
+      if (!existsSync(atDir)) continue; // Skip if agent-transcripts dir is missing
+      // For nested or flat layout under agent-transcripts
+      for (const entry of readdirSync(atDir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          // Nested layout: look for agent-transcripts/uuid/uuid.jsonl
+          const uuid = entry.name;
+          const nested = join(atDir, uuid, `${uuid}.jsonl`);
+          if (existsSync(nested)) attachTranscript(byId, uuid, nested);
+        } else if (entry.name.endsWith('.jsonl')) {
+          // Flat layout: agent-transcripts/<uuid>.jsonl
+          const uuid = entry.name.slice(0, -'.jsonl'.length);
+          attachTranscript(byId, uuid, join(atDir, entry.name));
         }
-        // else: transcript authoritative — messages unchanged, source stays 'transcript'
       }
     }
+  }
+
+  // 4. Deep-parse store.db only as the store-only fallback (P2).
+  //    Transcript-backed sessions stay entirely on the P1 path: this avoids
+  //    unnecessary SQLite work/warnings and keeps the authoritative source
+  //    independent of the best-effort P2 parser.
+  for (const ss of byId.values()) {
+    if (!ss.storeDbPath || ss.messages.length > 0) continue;
+
+    const deep = parseStoreDb(ss.storeDbPath);
+    if (!deep) continue;
+
+    ss.title = deep.title ?? ss.title;
+    ss.createdAt = deep.createdAt ?? ss.createdAt;
+    ss.messages = deep.messages;
+    ss.source = deep.completeness === 'complete' ? 'store-complete' : 'store-partial';
   }
 
   return [...byId.values()];
