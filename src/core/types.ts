@@ -7,6 +7,30 @@ export type Platform = 'windows' | 'macos' | 'linux';
 export type MessageRole = 'user' | 'assistant';
 
 /**
+ * Which Cursor storage stack a piece of data came from.
+ * - 'composer': the vscdb Composer stack (workspaceStorage / globalStorage)
+ * - 'store': the ~/.cursor Store stack (transcript JSONL / store.db)
+ */
+export type SessionStackSource = 'composer' | 'store';
+
+/**
+ * Origin of a resolved message after cross-stack merge.
+ * - 'composer' / 'store': the message came from only that stack
+ * - 'both': the two stacks produced an equivalent message that was merged
+ */
+export type MessageSource = 'composer' | 'store' | 'both';
+
+/**
+ * Provenance of a directly-stored per-message timestamp. Only attached when a
+ * timestamp is directly stored and can be mapped to that message/turn. Inferred
+ * or session-level times are NEVER tagged (and never copied onto messages).
+ */
+export type MessageTimestampSource =
+  | 'composer-created-at'
+  | 'composer-timing'
+  | 'store-turn-timing';
+
+/**
  * Valid message type filter values for filtering displayed messages
  */
 export type MessageType = 'user' | 'assistant' | 'tool' | 'thinking' | 'error';
@@ -72,7 +96,15 @@ export interface ChatSession {
     | 'transcript'
     | 'store'
     | 'store-complete'
-    | 'store-partial';
+    | 'store-partial'
+    | 'merged';
+  /**
+   * Cross-stack provenance. Present only when `source === 'merged'`: lists the
+   * stacks that contributed and which stack supplies the canonical order /
+   * wins true scalar conflicts. Additive — absent for single-source sessions.
+   */
+  sources?: SessionStackSource[];
+  preferredSource?: SessionStackSource;
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
   /** Ordered bubble IDs of the current active conversation branch */
@@ -86,8 +118,21 @@ export interface Message {
   id: string | null;
   role: MessageRole;
   content: string;
-  timestamp: Date;
+  /**
+   * Per-message timestamp. Optional: only present when a time is directly
+   * stored and mappable to this message/turn. Missing timestamps are omitted
+   * from display/export rather than replaced with a fabricated fallback
+   * (session createdAt/updatedAt/conversation_started are NEVER copied here).
+   */
+  timestamp?: Date;
+  /** Provenance of `timestamp` when it is directly stored (not inferred). */
+  timestampSource?: MessageTimestampSource;
   codeBlocks: CodeBlock[];
+  /**
+   * Which stack supplied this resolved message ('composer' | 'store'), or
+   * 'both' when an equivalent message was merged across stacks.
+   */
+  source?: MessageSource;
   /** Tool calls executed by assistant (optional, assistant-only) */
   toolCalls?: ToolCall[];
   /** AI reasoning/thinking text (optional, assistant-only) */
@@ -154,7 +199,11 @@ export interface ChatSessionSummary {
     | 'transcript'
     | 'store'
     | 'store-complete'
-    | 'store-partial';
+    | 'store-partial'
+    | 'merged';
+  /** Cross-stack provenance (present only when `source === 'merged'`). */
+  sources?: SessionStackSource[];
+  preferredSource?: SessionStackSource;
 }
 
 /**

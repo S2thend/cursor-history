@@ -70,10 +70,12 @@ describe('discoverStoreSessions — metadata before transcript attachment', () =
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('uses ACP metadata time as the transcript timestamp fallback', () => {
+  it('uses ACP metadata time for session createdAt but not for messages', () => {
     const session = discoverStoreSessions(root).find((s) => s.id === AUUID);
     expect(session?.createdAt).toEqual(acpCreatedAt);
-    expect(session?.messages[0]?.timestamp).toEqual(acpCreatedAt);
+    // Transcripts carry no per-message timestamp; session createdAt is not
+    // copied onto messages.
+    expect(session?.messages[0]?.timestamp).toBeUndefined();
   });
 });
 

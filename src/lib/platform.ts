@@ -2,7 +2,7 @@
  * Platform detection and Cursor data path resolution
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { Platform } from '../core/types.js';
@@ -19,6 +19,67 @@ export function detectPlatform(): Platform {
     default:
       return 'linux';
   }
+}
+
+/**
+ * Detect WSL (Windows Subsystem for Linux) independently of native Linux.
+ * WSL runs a Linux kernel; on this machine the Store stack lives at ~/.cursor
+ * on the Linux filesystem. Per the cross-stack conflict policy, WSL prefers
+ * the Store stack; native Linux keeps the default Composer-first resolution.
+ *
+ * Detection: /proc/version mentions microsoft/WSL, or WSL-specific env vars
+ * are set. Cached after the first read.
+ */
+let cachedIsWsl: boolean | undefined;
+export function isWSL(): boolean {
+  if (cachedIsWsl !== undefined) return cachedIsWsl;
+  if (process.platform !== 'linux') {
+    cachedIsWsl = false;
+    return false;
+  }
+  if (
+    process.env['WSL_DISTRO_NAME'] ||
+    process.env['WSLENV'] ||
+    process.env['WSL_INTEROP']
+  ) {
+    cachedIsWsl = true;
+    return true;
+  }
+  try {
+    const version = readFileSync('/proc/version', 'utf8');
+    cachedIsWsl = /microsoft|wsl/i.test(version);
+  } catch {
+    cachedIsWsl = false;
+  }
+  return cachedIsWsl;
+}
+
+/**
+ * Resolve the preferred stack source for a TRUE cross-stack conflict (same
+ * session ID in both stacks). Uses ONLY existing configuration signals — no new
+ * environment variable is introduced.
+ *
+ * Priority:
+ * 1. An explicit `--data-path` (or `CURSOR_DATA_PATH`) that is a Store root → 'store';
+ *    an explicit path that is NOT a Store root (a Composer workspaceStorage root) → 'composer'.
+ * 2. An explicit `CURSOR_STORE_ROOT` pointing somewhere other than the default
+ *    ~/.cursor → 'store' (the operator deliberately redirected the Store stack).
+ * 3. WSL → 'store' (accepted policy); otherwise (Windows / macOS / native Linux) → 'composer'.
+ */
+export function detectPreferredStackSource(customDataPath?: string): 'composer' | 'store' {
+  // 1. Explicit --data-path / CURSOR_DATA_PATH selects its tree.
+  const selected = customDataPath ?? process.env['CURSOR_DATA_PATH'];
+  if (selected) {
+    return isStoreRoot(selected) ? 'store' : 'composer';
+  }
+  // 2. Explicit CURSOR_STORE_ROOT (not the default ~/.cursor) selects Store.
+  const storeRootEnv = process.env['CURSOR_STORE_ROOT'];
+  const defaultStoreRoot = join(homedir(), '.cursor');
+  if (storeRootEnv && !pathsEqual(storeRootEnv, defaultStoreRoot)) {
+    return 'store';
+  }
+  // 3. Platform inference.
+  return isWSL() ? 'store' : 'composer';
 }
 
 /**

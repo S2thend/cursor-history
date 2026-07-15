@@ -210,7 +210,7 @@ describe('formatSessionDetail', () => {
     expect(result).toContain('Let me analyze');
   });
 
-  it('folds consecutive duplicate messages', () => {
+  it('renders consecutive duplicate messages separately without folding', () => {
     const ts1 = new Date('2024-01-15T10:00:00Z');
     const ts2 = new Date('2024-01-15T10:01:00Z');
     const ts3 = new Date('2024-01-15T10:02:00Z');
@@ -222,7 +222,39 @@ describe('formatSessionDetail', () => {
       ],
     });
     const result = formatSessionDetail(s);
-    expect(result).toContain('×3');
+    // Every resolved message is rendered once; no ×N folding marker.
+    expect(result).not.toContain('×3');
+    expect((result.match(/\bsame\b/g) ?? []).length).toBe(3);
+  });
+
+  it('--only tool renders every distinct structured tool-call message', () => {
+    // Two assistant turns with empty text but DIFFERENT tool calls; both must
+    // survive filtering and render (no folding onto one block).
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: '/a' } }],
+        },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Write', status: 'completed', params: { file: '/b' } }],
+        },
+      ],
+    });
+    const filter: MessageType[] = ['tool'];
+    const result = stripAnsi(
+      formatSessionDetail(s, undefined, { messageFilter: filter, originalMessageCount: 2 })
+    );
+    expect((result.match(/🔧 Read/g) ?? []).length).toBe(1);
+    expect((result.match(/🔧 Write/g) ?? []).length).toBe(1);
+    expect(result).not.toContain('×2');
   });
 
   it('shows filter info when messageFilter is active', () => {

@@ -523,6 +523,12 @@ export function formatSessionDetail(
     lines.push(
       pc.yellow('⚠ Partial data - Store.db parse incomplete (some messages/results may be missing)')
     );
+  } else if (session.source === 'merged') {
+    const stacks = session.sources?.join(' + ') ?? 'composer + store';
+    const backbone = session.preferredSource ?? 'composer';
+    lines.push(
+      pc.cyan(`⊕ Merged from ${stacks} (backbone: ${backbone}) — fields and messages combined`)
+    );
   }
   lines.push('');
   lines.push(pc.dim('─'.repeat(60)));
@@ -536,74 +542,55 @@ export function formatSessionDetail(
     return lines.join('\n');
   }
 
-  // Messages - with consecutive duplicate folding
-  let i = 0;
-  while (i < session.messages.length) {
-    const message = session.messages[i]!;
-    const timestamps: Date[] = [message.timestamp];
-
-    // Check for consecutive duplicates (same role and content)
-    let j = i + 1;
-    while (j < session.messages.length) {
-      const nextMsg = session.messages[j]!;
-      if (nextMsg.role === message.role && nextMsg.content === message.content) {
-        timestamps.push(nextMsg.timestamp);
-        j++;
-      } else {
-        break;
-      }
-    }
-
-    // Format timestamps
-    const timestampDisplay =
-      timestamps.length > 1
-        ? pc.dim(`${timestamps.map((t) => formatTime(t)).join(', ')} `) +
-          pc.yellow(`(×${timestamps.length})`)
-        : pc.dim(formatTime(message.timestamp));
+  // Messages — render every resolved message once in canonical array order.
+  // Consecutive-duplicate folding (×N) is removed from the default path so
+  // that distinct structured tool calls / provenance / token data are never
+  // hidden. Filtering (--only) selects by type and still renders each match.
+  for (const message of session.messages) {
+    // Per-message timestamp is only shown when directly stored. Missing
+    // times are omitted rather than replaced with a fabricated fallback.
+    const timeStr = message.timestamp ? ` ${pc.dim(formatTime(message.timestamp))}` : '';
 
     // Get usage badge for this message (if available)
     const usageBadge = formatUsageBadge(message.model, message.tokenUsage, message.durationMs);
 
     // Check if this is a tool call
     if (isToolCall(message.content)) {
-      lines.push(`${pc.cyan(pc.bold('Tool:'))} ${timestampDisplay}`);
+      lines.push(`${pc.cyan(pc.bold('Tool:'))}${timeStr}`);
       lines.push(formatToolCallDisplay(message.content, fullTool));
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));
       lines.push('');
-      i = j;
       continue;
     }
 
     // Check if this is an error message
     if (isError(message.content)) {
-      lines.push(`${pc.red(pc.bold('Error:'))} ${timestampDisplay}`);
+      lines.push(`${pc.red(pc.bold('Error:'))}${timeStr}`);
       lines.push(formatErrorDisplay(message.content, fullError));
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));
       lines.push('');
-      i = j;
       continue;
     }
 
     // Check if this is thinking/reasoning
     if (isThinking(message.content)) {
-      lines.push(`${pc.magenta(pc.bold('Thinking:'))} ${timestampDisplay}`);
+      lines.push(`${pc.magenta(pc.bold('Thinking:'))}${timeStr}`);
       lines.push(formatThinkingDisplay(message.content, fullThinking));
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));
       lines.push('');
-      i = j;
       continue;
     }
 
     const roleLabel =
       message.role === 'user'
-        ? `${pc.blue(pc.bold('You:'))} ${timestampDisplay}`
-        : `${pc.green(pc.bold('Assistant:'))} ${timestampDisplay}`;
+        ? `${pc.blue(pc.bold('You:'))}${timeStr}`
+        : `${pc.green(pc.bold('Assistant:'))}${timeStr}`;
 
     lines.push(roleLabel);
     lines.push('');
@@ -637,8 +624,6 @@ export function formatSessionDetail(
     lines.push('');
     lines.push(pc.dim('─'.repeat(40)));
     lines.push('');
-
-    i = j;
   }
 
   // Add session-level usage summary at the bottom (if available)

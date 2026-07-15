@@ -404,8 +404,9 @@ cursor-history --workspace /path/to/project list
 When browsing your chat history, you'll see:
 
 - **Complete conversations** - All messages exchanged with Cursor AI
-- **Duplicate message folding** - Consecutive identical messages are folded into one display with multiple timestamps and repeat count (e.g., "02:48:01 PM, 02:48:04 PM, 02:48:54 PM (×3)")
-- **Timestamps** - Exact time each message was sent (HH:MM:SS format), with smart fallback for pre-September 2025 sessions that extracts timing from alternative data fields and interpolates for messages without direct timestamps
+- **Every message rendered** - Each resolved message is shown once in order; consecutive duplicates are not folded, so distinct tool calls, provenance, and token data are never hidden
+- **Timestamps** - The directly-stored time of a message when available (HH:MM:SS format); messages without a directly-stored time show no timestamp rather than a fabricated fallback
+- **Merged cross-stack sessions** - When the same session exists in both the Composer (vscdb) and Store (~/.cursor) stacks, the two representations are merged field by field (neither is discarded), with the backbone source chosen per platform (WSL prefers Store; Windows/macOS/native Linux prefer Composer)
 - **AI tool actions** - Detailed view of what Cursor AI did:
   - **File edits/writes** - Full diff display with syntax highlighting showing exactly what changed
   - **File reads** - File paths and content previews (use `--fullread` for complete content)

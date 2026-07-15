@@ -129,20 +129,28 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     id: coreSession.id,
     workspace: coreSession.workspacePath ?? 'unknown',
     timestamp: coreSession.createdAt.toISOString(),
-    messages: coreSession.messages.map((msg) => ({
-      id: msg.id ?? undefined,
-      role: msg.role === 'user' ? 'user' : 'assistant',
-      content: msg.content,
-      timestamp: msg.timestamp.toISOString(),
-      toolCalls: msg.toolCalls,
-      thinking: msg.thinking,
-      tokenUsage: msg.tokenUsage,
-      model: msg.model,
-      durationMs: msg.durationMs,
-      metadata: msg.metadata,
-    })),
+    messages: coreSession.messages.map((msg) => {
+      const m: Record<string, unknown> = {
+        id: msg.id ?? undefined,
+        role: msg.role === 'user' ? 'user' : 'assistant',
+        content: msg.content,
+      };
+      // Per-message timestamp + provenance only when directly stored.
+      if (msg.timestamp) m['timestamp'] = msg.timestamp.toISOString();
+      if (msg.timestampSource) m['timestampSource'] = msg.timestampSource;
+      if (msg.source) m['source'] = msg.source;
+      if (msg.toolCalls) m['toolCalls'] = msg.toolCalls;
+      if (msg.thinking) m['thinking'] = msg.thinking;
+      if (msg.tokenUsage) m['tokenUsage'] = msg.tokenUsage;
+      if (msg.model) m['model'] = msg.model;
+      if (msg.durationMs !== undefined) m['durationMs'] = msg.durationMs;
+      if (msg.metadata) m['metadata'] = msg.metadata;
+      return m as unknown as import('./types.js').Message;
+    }),
     messageCount: coreSession.messageCount,
     source: coreSession.source,
+    ...(coreSession.sources ? { sources: coreSession.sources } : {}),
+    ...(coreSession.preferredSource ? { preferredSource: coreSession.preferredSource } : {}),
     usage: coreSession.usage,
     ...(coreSession.activeBranchBubbleIds
       ? { activeBranchBubbleIds: coreSession.activeBranchBubbleIds }

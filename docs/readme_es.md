@@ -290,8 +290,9 @@ cursor-history --workspace /ruta/a/proyecto list
 Al navegar tu historial de chat, verás:
 
 - **Conversaciones completas** - Todos los mensajes intercambiados con Cursor AI
-- **Plegado de mensajes duplicados** - Los mensajes idénticos consecutivos se pliegan en una sola visualización con múltiples marcas de tiempo y contador de repetición (ej. "02:48:01 PM, 02:48:04 PM, 02:48:54 PM (×3)")
-- **Marcas de tiempo** - Hora exacta en que se envió cada mensaje (formato HH:MM:SS), con respaldo inteligente para sesiones anteriores a septiembre 2025 que extrae timing de campos de datos alternativos e interpola para mensajes sin marca de tiempo directa
+- **Cada mensaje se renderiza** - Cada mensaje resuelto se muestra una vez en orden; los duplicados consecutivos no se pliegan, por lo que las llamadas a herramientas, la procedencia y los datos de tokens distintos nunca se ocultan
+- **Marcas de tiempo** - La hora almacenada directamente de un mensaje cuando está disponible (formato HH:MM:SS); los mensajes sin hora directa no muestran marca de tiempo en lugar de usar un respaldo fabricado
+- **Sesiones combinadas entre pilas** - Cuando la misma sesión existe tanto en la pila Composer (vscdb) como en Store (~/.cursor), ambas representaciones se combinan campo a campo (ninguna se descarta), con la fuente principal elegida por plataforma (WSL prefiere Store; Windows/macOS/Linux nativo prefieren Composer)
 - **Acciones de herramientas IA** - Vista detallada de lo que hizo Cursor AI:
   - **Ediciones/escrituras de archivos** - Visualización completa de diff con resaltado de sintaxis mostrando exactamente qué cambió
   - **Lecturas de archivos** - Rutas de archivos y previsualizaciones de contenido (usa `--fullread` para contenido completo)

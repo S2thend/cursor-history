@@ -18,6 +18,7 @@ import type {
   ChatSessionSummary,
   ListOptions,
   Message,
+  MessageTimestampSource,
   SearchOptions,
   SearchResult,
   TokenUsage,
@@ -32,12 +33,17 @@ import {
   normalizePath,
   pathsEqual,
   getStoreStackRoot,
+  detectPreferredStackSource,
 } from '../lib/platform.js';
 import { SessionNotFoundError } from '../lib/errors.js';
 import { parseChatData, getSearchSnippets, mapStoreSession, type CursorChatBundle } from './parser.js';
 import { openBackupDatabase, readBackupManifest } from './backup.js';
 import { debugLogStorage } from './database/debug.js';
 import { discoverStoreSessions } from './store-stack/discover.js';
+import {
+  mergeCrossStackSessions,
+  applyStoreMergeToSummary,
+} from './store-stack/merge.js';
 
 /**
  * Known SQLite keys for chat data (in priority order)
@@ -441,6 +447,7 @@ export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
       timestamp: null,
       codeBlocks: [],
       metadata: { corrupted: true },
+      source: 'composer',
     };
   }
 
@@ -463,13 +470,17 @@ export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
       id: data.bubbleId ?? getBubbleRowId(row.key),
       role: bubbleType === 2 ? 'assistant' : 'user',
       content: extractedContent.length > 0 ? extractedContent : '[empty message]',
+      // Per-message timestamp is only attached when directly stored; otherwise it
+      // is left null here and dropped (→ undefined) in resolveBubbleMessages.
       timestamp: extractTimestamp(data),
+      timestampSource: extractTimestampSource(data),
       codeBlocks: [],
       toolCalls: extractToolCalls(rawData),
       tokenUsage: extractTokenUsage(data),
       model: extractModelInfo(data),
       durationMs: extractTimingInfo(data),
       metadata,
+      source: 'composer',
     };
   } catch (error) {
     debugLogStorage(`Failed to map bubble row ${row.key}: ${getErrorMessage(error)}`);
@@ -480,14 +491,20 @@ export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
       timestamp: null,
       codeBlocks: [],
       metadata: { corrupted: true },
+      source: 'composer',
     };
   }
 }
 
-function resolveBubbleMessages(bubbleRows: BubbleRow[], sessionCreatedAt: Date): Message[] {
-  const messages = bubbleRows.map((row) => mapBubbleToMessage(row));
-  fillTimestampGaps(messages, sessionCreatedAt);
-  return messages as Message[];
+function resolveBubbleMessages(bubbleRows: BubbleRow[], _sessionCreatedAt: Date): Message[] {
+  // Per-message timestamps are only attached when directly stored. We do NOT
+  // call fillTimestampGaps() here — its neighbor/session-time interpolation is
+  // not a directly-stored time and must not be presented as a precise message
+  // time. Messages without a stored time keep timestamp === undefined.
+  return bubbleRows.map((row) => {
+    const m = mapBubbleToMessage(row);
+    return { ...m, timestamp: m.timestamp ?? undefined } as unknown as Message;
+  });
 }
 
 function parseComposerSessionUsage(
@@ -1362,12 +1379,33 @@ export async function listSessions(
   if (!backupPath) {
     const storeSessions = discoverStoreSessions(getStoreStackRoot(customDataPath));
     const storeSeenIds = new Set(allSessions.map((session) => session.id));
+    // Conflict priority for sessions present in BOTH stacks (same ID).
+    const preferredSource = detectPreferredStackSource(customDataPath);
     for (const ss of storeSessions) {
       if (options.workspacePath) {
         const wp = ss.workspacePath ?? '';
         if (!(wp === options.workspacePath || wp.endsWith(options.workspacePath))) continue;
       }
-      if (storeSeenIds.has(ss.id)) continue;
+      // Same ID in both stacks → merge scalar metadata and mark merged instead
+      // of discarding the lower-priority representation. The full
+      // field/message merge happens in getSession().
+      if (storeSeenIds.has(ss.id)) {
+        const existing = allSessions.find((s) => s.id === ss.id);
+        if (existing) {
+          applyStoreMergeToSummary(
+            existing,
+            {
+              id: ss.id,
+              title: ss.title,
+              createdAt: ss.createdAt,
+              workspacePath: ss.workspacePath,
+              messageCount: ss.messages.length,
+            },
+            preferredSource
+          );
+        }
+        continue;
+      }
       storeSeenIds.add(ss.id);
       allSessions.push({
         id: ss.id,
@@ -1445,6 +1483,11 @@ export async function getSession(
 
   const index: number = typeof identifier === 'string' ? summary.index : identifier;
 
+  // Merged: same ID exists in both stacks, so field-merge the two representations.
+  if (summary.source === 'merged') {
+    return loadMergedSession(summary, index, customDataPath, backupPath);
+  }
+
   // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via discovery.
   if (
     summary.source === 'transcript' ||
@@ -1459,6 +1502,20 @@ export async function getSession(
     return mapStoreSession(storeSession, index);
   }
 
+  // Composer stack: global storage (full bubbles) with workspace fallback.
+  return loadComposerSession(summary, index, customDataPath, backupPath);
+}
+
+/**
+ * Load a Composer-stack session (global bubbles, falling back to workspace
+ * storage). Extracted from getSession so the merged path can reuse it.
+ */
+async function loadComposerSession(
+  summary: ChatSessionSummary,
+  index: number,
+  customDataPath?: string,
+  backupPath?: string
+): Promise<ChatSession | null> {
   // Try to get full session from global storage (has AI responses)
   // This works for both live data and backup (if backup includes globalStorage)
   let globalDb: Database | null = null;
@@ -1586,6 +1643,31 @@ export async function getSession(
   } catch {
     return null;
   }
+}
+
+/**
+ * Load and field-merge a session whose ID exists in both stacks. Falls
+ * back to whichever single stack is available if the other cannot be loaded.
+ */
+async function loadMergedSession(
+  summary: ChatSessionSummary,
+  index: number,
+  customDataPath?: string,
+  backupPath?: string
+): Promise<ChatSession | null> {
+  const preferredSource = summary.preferredSource ?? detectPreferredStackSource(customDataPath);
+
+  const storeRaw = discoverStoreSessions(getStoreStackRoot(customDataPath)).find(
+    (s) => s.id === summary.id
+  );
+  const store = storeRaw ? mapStoreSession(storeRaw, index) : null;
+  const composer = await loadComposerSession(summary, index, customDataPath, backupPath);
+
+  if (composer && store) {
+    return mergeCrossStackSessions(composer, store, preferredSource, index);
+  }
+  // Graceful degradation: one side is unavailable — return the other as-is.
+  return composer ?? store;
 }
 
 /**
@@ -2508,6 +2590,26 @@ export function extractTimestamp(data: RawBubbleData & { createdAt?: string }): 
   }
 
   return null;
+}
+
+/**
+ * Provenance of a directly-stored per-message timestamp. Mirrors the priority
+ * chain in `extractTimestamp` — the two MUST stay in sync. Returns undefined
+ * when no directly-stored time exists (the timestamp would be absent/gap-filled).
+ */
+export function extractTimestampSource(
+  data: RawBubbleData & { createdAt?: string }
+): MessageTimestampSource | undefined {
+  if (data.createdAt) return 'composer-created-at';
+  const timingInfo = data.timingInfo;
+  if (!timingInfo) return undefined;
+  const rpc = timingInfo.clientRpcSendTime;
+  if (typeof rpc === 'number' && rpc > MIN_VALID_UNIX_MS) return 'composer-timing';
+  const settle = timingInfo.clientSettleTime;
+  if (typeof settle === 'number' && settle > MIN_VALID_UNIX_MS) return 'composer-timing';
+  const end = timingInfo.clientEndTime;
+  if (typeof end === 'number' && end > MIN_VALID_UNIX_MS) return 'composer-timing';
+  return undefined;
 }
 
 /**

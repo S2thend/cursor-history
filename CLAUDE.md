@@ -211,17 +211,17 @@ Tool calls are stored in `toolFormerData`:
 ### Display Formatters (`src/cli/formatters/table.ts`)
 
 - `formatSessionDetail(session, workspacePath, options)` - Shows full session with display options
-  - **Message folding**: Consecutive duplicate messages (same role and content) are folded into a single display with multiple timestamps and a repeat count indicator (×N)
+  - **No folding (P02)**: Every resolved message is rendered once in canonical array order. Consecutive duplicate folding (×N) was removed from the default `show` path so distinct structured tool calls, provenance, token usage, and duration are never hidden. `--only` filters by type and then renders each match without a second dedup pass.
   - `options.short` - Truncates user/assistant messages to 300 chars
   - `options.fullThinking` - Shows full thinking text (not truncated to 200 chars)
   - `options.fullRead` - Shows full file read content (not truncated to 100 chars)
   - `options.fullError` - Shows full error messages (not truncated to 300 chars)
-- `formatTime()` - Formats timestamps as HH:MM:SS
+- `formatTime()` - Formats timestamps as HH:MM:SS (only shown when a message has a directly-stored time; absent otherwise — P01)
 - `formatToolCallDisplay(content, fullRead)` - Formats tool calls with optional full read content
 - `formatThinkingDisplay(content, fullThinking)` - Formats thinking blocks with optional full text
 - `formatErrorDisplay(content, fullError)` - Formats error messages with red text and ❌ emoji
-- Role labels with timestamps: `You: HH:MM:SS`, `Assistant: HH:MM:SS`, `Tool: HH:MM:SS`, `Thinking: HH:MM:SS`, `Error: HH:MM:SS`
-- For duplicates: `You: 02:48:01 PM, 02:48:04 PM, 02:48:54 PM (×3)` (yellow highlight on repeat count)
+- Role labels with optional timestamps: `You: HH:MM:SS`, `Assistant: HH:MM:SS`, `Tool: HH:MM:SS`, `Thinking: HH:MM:SS`, `Error: HH:MM:SS` (the time segment is omitted when the message has no directly-stored timestamp)
+- Merged sessions (source `'merged'`) render a header line: `⊕ Merged from composer + store (backbone: <preferredSource>)`
 
 **Display layer detects markers from storage layer:**
 - `isToolCall()` - checks for `[Tool:` marker
@@ -374,6 +374,10 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - TypeScript 5.9+ (strict mode enabled) + commander, picocolors, better-sqlite3/node:sqlite (existing — no new deps) (014-expose-bubble-id)
 
 ## Recent Changes
+- 015-cursor-store-stack (P01+P02 incremental): Cross-stack merge + no display folding
+  - P01: When the same session ID exists in both the Composer (vscdb) and Store (~/.cursor) stacks, the two representations are now field-merged instead of one being discarded. New `src/core/store-stack/merge.ts` performs a deterministic signature-based LCS alignment (role + normalized text + ordered tool signatures [name + normalized params]); matched messages are merged field by field, unmatched messages are preserved at their relative position, and the preferred source supplies the backbone order (never timestamp sorting). Conflict priority is platform-based via `detectPreferredStackSource()` in `src/lib/platform.ts`: WSL prefers Store, Windows/macOS/native Linux prefer Composer, and an explicit `--data-path` that is a Store root selects Store (`detectPlatform()` is unchanged; `isWSL()` is separate). `listSessions` marks collisions `source:'merged'` and merges summary scalars; `getSession` loads both stacks and merges (recomputing `messageCount`, keeping the latest `lastUpdatedAt` from either side). Provenance is additive: `source:'merged'`, `sources:['composer','store']`, `preferredSource`, and per-message `source:'composer'|'store'|'both'`.
+  - Per-message timestamps are now optional and only attached when directly stored (`timestampSource: 'composer-created-at' | 'composer-timing' | 'store-turn-timing'`). `fillTimestampGaps()` is no longer called — session createdAt/updatedAt and Store conversation-start times are NOT copied onto messages. Composer keeps native `createdAt`/timing; Store transcript/store.db messages carry no fabricated time. Display, JSON, Markdown export, and the library API conditionally emit `timestamp`/`timestampSource`/`source`.
+  - P02: Removed consecutive-duplicate folding (×N) from the default `show` path. Every resolved message renders once in canonical order; `--only tool` renders each matching structured tool-call message (including empty-text ones) separately. No replacement folding flag was added.
 - 012-fix-session-data-integrity: Restored full session fidelity across storage fallbacks
   - Added shared bubble mapping in `src/core/storage.ts` so `getSession()` and `getGlobalSession()` preserve empty bubbles as `[empty message]`, retain malformed rows as `[corrupted message]`, and populate `message.metadata.bubbleType`
   - Populated structured `message.toolCalls` from `toolFormerData`, including default `completed` status handling and `{ _raw: ... }` sentinels for invalid params

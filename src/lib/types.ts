@@ -32,6 +32,7 @@ export interface Session {
    * - 'transcript': Store stack; transcript authoritative (store.db enhanced title/createdAt only)
    * - 'store-complete' / 'store-partial': Store stack, store.db (no transcript); full or partial parse
    * - 'store': legacy alias (pre-rework)
+   * - 'merged': resolved from BOTH Composer and Store stacks by session ID
    */
   source?:
     | 'global'
@@ -39,7 +40,16 @@ export interface Session {
     | 'transcript'
     | 'store'
     | 'store-complete'
-    | 'store-partial';
+    | 'store-partial'
+    | 'merged';
+
+  /**
+   * Cross-stack provenance. Present only when `source === 'merged'`:
+   * the contributing stacks and the stack that supplies canonical order /
+   * wins true scalar conflicts.
+   */
+  sources?: Array<'composer' | 'store'>;
+  preferredSource?: 'composer' | 'store';
 
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
@@ -101,8 +111,21 @@ export interface Message {
   /** Message content (text, code blocks, or structured data) */
   content: string;
 
-  /** ISO 8601 timestamp when message was created */
-  timestamp: string;
+  /**
+   * ISO 8601 timestamp when the message was created. Optional: present only
+   * when a per-message time is directly stored. Absent when no direct time
+   * exists (it is NOT fabricated from session-level times).
+   */
+  timestamp?: string;
+
+  /** Provenance of `timestamp` when it is directly stored (not inferred). */
+  timestampSource?: 'composer-created-at' | 'composer-timing' | 'store-turn-timing';
+
+  /**
+   * Which stack supplied this resolved message ('composer' | 'store'), or
+   * 'both' when an equivalent message was merged across stacks.
+   */
+  source?: 'composer' | 'store' | 'both';
 
   /** Tool calls executed by assistant (optional, assistant-only) */
   toolCalls?: ToolCall[];

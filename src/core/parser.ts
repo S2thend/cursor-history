@@ -12,14 +12,19 @@ import type { StoreSession } from './store-stack/types.js';
  * See specs/015-cursor-store-stack/data-model.md §2.
  */
 export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
+  // Tag each message with its Store origin. Store messages do not carry a
+  // directly-stored per-message timestamp at the transcript/store.db layer
+  // (turn_timings are not populated in current samples), so timestamp is left
+  // undefined rather than copied from session-level times.
+  const messages = ss.messages.map((m) => ({ ...m, source: 'store' as const }));
   return {
     id: ss.id,
     index,
     title: ss.title,
     createdAt: ss.createdAt,
     lastUpdatedAt: ss.createdAt, // transcript layer has no separate updatedAt
-    messageCount: ss.messages.length,
-    messages: ss.messages,
+    messageCount: messages.length,
+    messages,
     workspaceId: 'store',
     workspacePath: ss.workspacePath,
     source: ss.source,
@@ -179,14 +184,15 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
 
     // For now, we'll create placeholder sessions with metadata
     // The actual messages are in a flat list and hard to associate
-    // We'll include the name as preview if available
+    // We'll include the name as preview if available. Placeholder messages
+    // carry NO timestamp because it is not a directly-stored message time.
     if (composer.name) {
       sessionMessages.push({
         id: null,
         role: 'user',
         content: composer.name,
-        timestamp: createdAt,
         codeBlocks: [],
+        source: 'composer',
       });
     }
 
@@ -197,12 +203,15 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
     for (const gen of sortedGenerations) {
       if (gen.unixMs && gen.unixMs >= sessionStart && gen.unixMs <= sessionEnd + 60000) {
         if (gen.textDescription) {
+          // gen.unixMs IS a directly-stored time → keep it with its provenance.
           sessionMessages.push({
             id: gen.generationUUID ?? null,
             role: 'user', // textDescription is actually the prompt
             content: gen.textDescription,
             timestamp: new Date(gen.unixMs),
+            timestampSource: 'composer-timing',
             codeBlocks: extractCodeBlocks(gen.textDescription),
+            source: 'composer',
           });
         }
       }
@@ -223,8 +232,8 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
                 id: null,
                 role: 'user',
                 content: composer.name ?? '(Empty session)',
-                timestamp: createdAt,
                 codeBlocks: [],
+                source: 'composer',
               },
             ],
       workspaceId: '',
@@ -288,20 +297,28 @@ function parseMessage(raw: RawMessage): Message | null {
   const rawRole = raw.role ?? raw.type ?? 'user';
   const role: MessageRole = normalizeRole(rawRole);
 
-  // Parse timestamp
-  const timestamp = raw.timestamp
-    ? new Date(raw.timestamp)
-    : raw.createdAt
-      ? new Date(raw.createdAt)
-      : new Date();
+  // Per-message timestamp only when directly stored; never fabricated.
+  const timestamp =
+    raw.timestamp != null
+      ? new Date(raw.timestamp)
+      : raw.createdAt != null
+        ? new Date(raw.createdAt)
+        : undefined;
 
-  return {
+  const message: Message = {
     id: raw.id ?? null,
     role,
     content,
-    timestamp,
     codeBlocks: extractCodeBlocks(content),
+    source: 'composer',
   };
+  if (timestamp !== undefined) {
+    message.timestamp = timestamp;
+    // Legacy workspace-storage format: raw.timestamp / raw.createdAt are the
+    // directly-stored message times (createdAt-style).
+    message.timestampSource = 'composer-created-at';
+  }
+  return message;
 }
 
 /**
@@ -456,6 +473,10 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
     lines.push(`**Workspace**: ${workspacePath}`);
   }
   lines.push(`**Messages**: ${session.messageCount}`);
+  if (session.source === 'merged') {
+    const stacks = session.sources?.join(' + ') ?? 'composer + store';
+    lines.push(`**Source**: merged from ${stacks} (backbone: ${session.preferredSource ?? 'composer'})`);
+  }
   lines.push('');
   lines.push('---');
   lines.push('');
@@ -467,6 +488,11 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
     lines.push('');
     if (message.id) {
       lines.push(`**ID**: \`${message.id}\``);
+      lines.push('');
+    }
+    // Per-message time only when directly stored.
+    if (message.timestamp) {
+      lines.push(`**Time**: ${message.timestamp.toISOString()}`);
       lines.push('');
     }
     lines.push(message.content);
@@ -497,6 +523,15 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
     messageCount: session.messageCount,
     workspacePath: workspacePath ?? null,
   };
+  if (session.source !== undefined) {
+    exportData['source'] = session.source;
+  }
+  if (session.sources) {
+    exportData['sources'] = session.sources;
+  }
+  if (session.preferredSource) {
+    exportData['preferredSource'] = session.preferredSource;
+  }
 
   // Add session-level usage data if available
   if (session.usage) {
@@ -530,9 +565,19 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
       id: m.id ?? undefined,
       role: m.role,
       content: m.content,
-      timestamp: m.timestamp.toISOString(),
       codeBlocks: m.codeBlocks,
     };
+
+    // Per-message timestamp + provenance only when directly stored.
+    if (m.timestamp) {
+      msg['timestamp'] = m.timestamp.toISOString();
+    }
+    if (m.timestampSource) {
+      msg['timestampSource'] = m.timestampSource;
+    }
+    if (m.source) {
+      msg['source'] = m.source;
+    }
 
     if (m.toolCalls && m.toolCalls.length > 0) {
       msg['toolCalls'] = m.toolCalls.map((tc) => ({

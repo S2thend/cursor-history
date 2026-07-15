@@ -133,11 +133,12 @@ export function discoverStoreSessions(storeRoot: string): StoreSession[] {
 
 function attachTranscript(byId: Map<string, StoreSession>, uuid: string, file: string): void {
   const existing = byId.get(uuid);
-  // Prefer the session's known createdAt (from chats meta) as the per-message
-  // timestamp fallback (data-model §2); else file mtime; else epoch.
-  const ts = existing?.createdAt ?? safeMtime(file) ?? new Date(0);
+  // Transcripts carry no per-message timestamps; messages get none. For a
+  // transcript-only session (no chats meta), fall back to file mtime for the
+  // SESSION-level createdAt only (not copied onto messages).
+  const sessionCreatedAt = existing?.createdAt ?? safeMtime(file) ?? new Date(0);
   // Parse the transcript file into messages
-  const messages = parseTranscriptFile(file, ts);
+  const messages = parseTranscriptFile(file);
   if (existing) {
     if (existing.messages.length === 0) existing.messages = messages;
     existing.transcriptPath = file;
@@ -146,7 +147,7 @@ function attachTranscript(byId: Map<string, StoreSession>, uuid: string, file: s
       id: uuid,
       workspacePath: undefined,
       title: null,
-      createdAt: ts,
+      createdAt: sessionCreatedAt,
       messages,
       source: 'transcript',
       transcriptPath: file,

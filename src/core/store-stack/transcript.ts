@@ -5,18 +5,16 @@
  * Each line: {"role":"user"|"assistant","message":{"content":[{"type":"text"|"tool_use",...}]}}
  * Error lines {"type":"error",...} are skipped. Unknown part types are ignored
  * (forward compatibility). Per-message timestamps are NOT present in transcripts;
- * callers may pass a fallback (e.g. session createdAt).
+ * messages therefore carry NO timestamp rather than a session-level fallback.
  */
 import { readFileSync } from 'node:fs';
 import type { Message, MessageRole, ToolCall } from '../types.js';
-
-const EPOCH = new Date(0);
 
 /**
  * Parse a transcript JSONL file into Messages.
  * Returns [] for missing/unreadable files (defensive — never throws).
  */
-export function parseTranscriptFile(filePath: string, fallbackTs?: Date): Message[] {
+export function parseTranscriptFile(filePath: string): Message[] {
   let raw: string;
   try {
     raw = readFileSync(filePath, 'utf8');
@@ -24,7 +22,6 @@ export function parseTranscriptFile(filePath: string, fallbackTs?: Date): Messag
     return [];
   }
 
-  const ts = fallbackTs ?? EPOCH;
   const messages: Message[] = [];
 
   for (const line of raw.split(/\r?\n/)) {
@@ -38,14 +35,14 @@ export function parseTranscriptFile(filePath: string, fallbackTs?: Date): Messag
       continue; // unparseable line → skip (defensive parsing)
     }
 
-    const msg = mapLine(parsed, ts);
+    const msg = mapLine(parsed);
     if (msg) messages.push(msg);
   }
 
   return messages;
 }
 
-function mapLine(parsed: unknown, ts: Date): Message | null {
+function mapLine(parsed: unknown): Message | null {
   if (!parsed || typeof parsed !== 'object') return null;
   const obj = parsed as Record<string, unknown>;
 
@@ -57,11 +54,11 @@ function mapLine(parsed: unknown, ts: Date): Message | null {
 
   const { text, toolCalls } = extractContent(content);
 
+  // No per-message timestamp is stored in transcripts; leave timestamp undefined.
   const message: Message = {
     id: null,
     role: obj.role as MessageRole,
     content: text,
-    timestamp: ts,
     codeBlocks: [],
   };
   if (toolCalls.length > 0) message.toolCalls = toolCalls;

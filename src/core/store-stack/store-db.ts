@@ -89,7 +89,7 @@ export function parseStoreDb(path: string): StoreDbData | null {
         ? new Date(meta.createdAt)
         : null;
     const { messages, complete } = meta.latestRootBlobId
-      ? readMessages(db, meta.latestRootBlobId, createdAt ?? new Date(0))
+      ? readMessages(db, meta.latestRootBlobId)
       : { messages: [] as Message[], complete: true };
     return { title, messages, createdAt, completeness: complete ? 'complete' : 'partial' };
   } catch {
@@ -111,8 +111,7 @@ export function parseStoreDb(path: string): StoreDbData | null {
 /** Recursive Merkle walk: 0x0a=message leaf, 0x12=subtree (recurse, ordered). */
 function readMessages(
   db: DbType,
-  rootId: string,
-  ts: Date
+  rootId: string
 ): { messages: Message[]; complete: boolean } {
   const messages: Message[] = [];
   const visited = new Set<string>();
@@ -136,7 +135,7 @@ function readMessages(
       if ((tag === 0x0a || tag === 0x12) && len === 0x20 && i + 34 <= buf.length) {
         const childHash = buf.subarray(i + 2, i + 34).toString('hex');
         if (tag === 0x0a) {
-          const leaf = readLeaf(db, childHash, ts);
+          const leaf = readLeaf(db, childHash);
           if (!leaf) {
             complete = false;
             debugLogStorage(`store.db: missing/unparseable leaf ${childHash.slice(0, 12)}…`);
@@ -166,31 +165,31 @@ interface LeafResult {
   message?: Message;
 }
 
-function readLeaf(db: DbType, hash: string, ts: Date): LeafResult | null {
+function readLeaf(db: DbType, hash: string): LeafResult | null {
   const row = db.prepare('SELECT data FROM blobs WHERE id = ?').get(hash) as
     | { data: Uint8Array }
     | undefined;
   if (!row) return null;
   try {
     const obj = JSON.parse(Buffer.from(row.data).toString('utf8')) as LeafObj;
-    return classifyLeaf(obj, ts);
+    return classifyLeaf(obj);
   } catch {
     return null; // protobuf leaf or non-JSON → skip (defensive)
   }
 }
 
-function classifyLeaf(obj: LeafObj, ts: Date): LeafResult | null {
+function classifyLeaf(obj: LeafObj): LeafResult | null {
   if (obj.role === 'tool') {
     // OpenAI tool-result leaf. P2 does NOT attach (no tool_call_id matching).
     // Caller marks completeness 'partial'.
     return { kind: 'tool-result' };
   }
   if (obj.role !== 'user' && obj.role !== 'assistant') return null; // skip system/unknown
-  const msg = buildMessage(obj, obj.role as MessageRole, ts);
+  const msg = buildMessage(obj, obj.role as MessageRole);
   return msg ? { kind: 'message', message: msg } : null;
 }
 
-function buildMessage(obj: LeafObj, role: MessageRole, ts: Date): Message | null {
+function buildMessage(obj: LeafObj, role: MessageRole): Message | null {
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
   if (typeof obj.content === 'string') {
@@ -215,7 +214,8 @@ function buildMessage(obj: LeafObj, role: MessageRole, ts: Date): Message | null
       toolCalls.push({ name, status: 'completed', params });
     }
   }
-  const msg: Message = { id: null, role, content: texts.join(''), timestamp: ts, codeBlocks: [] };
+  // No directly-stored per-message timestamp at this layer; leave undefined.
+  const msg: Message = { id: null, role, content: texts.join(''), codeBlocks: [] };
   if (toolCalls.length > 0) msg.toolCalls = toolCalls;
   return msg;
 }

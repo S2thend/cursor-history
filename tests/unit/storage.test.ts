@@ -3617,7 +3617,7 @@ describe('timestamp fallback - US1', () => {
     expect(result!.messages[0]!.timestamp).toEqual(new Date(validEndTime));
   });
 
-  it('bubble with no timestamp source uses session creation time, not current time', async () => {
+  it('bubble with no timestamp source leaves timestamp absent without session-time fallback', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3639,11 +3639,12 @@ describe('timestamp fallback - US1', () => {
 
     const result = await getSession(1, '/data');
     expect(result).not.toBeNull();
-    // Should use session creation time, not current time
-    expect(result!.messages[0]!.timestamp).toEqual(new Date(sessionCreatedAt));
+    // No directly-stored time → no per-message timestamp (session createdAt is
+    // NOT copied onto the message).
+    expect(result!.messages[0]!.timestamp).toBeUndefined();
   });
 
-  it('mixed-format session: each bubble uses its own best available source', async () => {
+  it('mixed-format session: each bubble keeps its directly-stored time; others get none', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3691,8 +3692,8 @@ describe('timestamp fallback - US1', () => {
     expect(result!.messages[0]!.timestamp).toEqual(new Date('2025-10-15T10:00:00Z'));
     // Old format: uses clientRpcSendTime
     expect(result!.messages[1]!.timestamp).toEqual(new Date(rpcTime));
-    // No timestamp: interpolated from previous neighbor (b2's clientRpcSendTime)
-    expect(result!.messages[2]!.timestamp).toEqual(new Date(rpcTime));
+    // No directly-stored timestamp means absent, without interpolation.
+    expect(result!.messages[2]!.timestamp).toBeUndefined();
   });
 });
 
@@ -3796,7 +3797,7 @@ describe('fillTimestampGaps', () => {
 // timestamp fallback - US3 session-level
 // =============================================================================
 describe('timestamp fallback - US3 session-level', () => {
-  it('all bubbles lack any timestamp source, sessionCreatedAt provided: all get sessionCreatedAt', async () => {
+  it('all bubbles lack any timestamp source: messages get no timestamp', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3821,13 +3822,14 @@ describe('timestamp fallback - US3 session-level', () => {
     const result = await getSession(1, '/data');
     expect(result).not.toBeNull();
     expect(result!.messages).toHaveLength(3);
-    // All should get sessionCreatedAt since no bubble has any timestamp
-    for (const msg of result!.messages) {
-      expect(msg.timestamp).toEqual(new Date(sessionCreatedAt));
+    // No directly-stored time on any bubble → no per-message timestamp; the
+    // The session-level createdAt is not copied onto messages.
+    for (const m of result!.messages) {
+      expect(m.timestamp).toBeUndefined();
     }
   });
 
-  it('all bubbles lack any timestamp source, sessionCreatedAt not available: uses current time', async () => {
+  it('all bubbles without a timestamp source stay untimed when sessionCreatedAt is unavailable', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3843,17 +3845,13 @@ describe('timestamp fallback - US3 session-level', () => {
 
     setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: b1 }]);
 
-    const before = Date.now();
     const result = await getSession(1, '/data');
-    const after = Date.now();
     expect(result).not.toBeNull();
-    // Timestamp should be approximately now (either from session fallback or last resort)
-    const ts = result!.messages[0]!.timestamp.getTime();
-    expect(ts).toBeGreaterThanOrEqual(before - 1000);
-    expect(ts).toBeLessThanOrEqual(after + 1000);
+    // No directly-stored time and no session-time fabrication → absent.
+    expect(result!.messages[0]!.timestamp).toBeUndefined();
   });
 
-  it('full chain integration: createdAt + timingInfo + no-timestamp + interpolation', async () => {
+  it('keeps directly-stored times without interpolating missing timestamps', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3866,9 +3864,9 @@ describe('timestamp fallback - US3 session-level', () => {
       allComposers: [{ composerId: 'c1', name: 'Test', createdAt: sessionCreatedAt }],
     });
 
-    // b1: user msg, no timestamp → should interpolate from next (b2)
+    // b1: user msg, no timestamp → no per-message timestamp
     const b1 = JSON.stringify({ type: 1, text: 'user question', bubbleId: 'b1' });
-    // b2: assistant, has timingInfo.clientRpcSendTime → should use rpcTime
+    // b2: assistant, has timingInfo.clientRpcSendTime → uses rpcTime
     const b2 = JSON.stringify({
       type: 2,
       text: 'assistant answer',
@@ -3879,9 +3877,9 @@ describe('timestamp fallback - US3 session-level', () => {
         clientEndTime: rpcTime + 500,
       },
     });
-    // b3: user msg, no timestamp → should interpolate from prev (b2) since no next
+    // b3: user msg, no timestamp → no per-message timestamp
     const b3 = JSON.stringify({ type: 1, text: 'follow up', bubbleId: 'b3' });
-    // b4: assistant, has createdAt → should use createdAt
+    // b4: assistant, has createdAt → uses createdAt
     const b4 = JSON.stringify({
       type: 2,
       text: 'new format response',
@@ -3900,12 +3898,12 @@ describe('timestamp fallback - US3 session-level', () => {
     expect(result).not.toBeNull();
     expect(result!.messages).toHaveLength(4);
 
-    // b1: no timestamp → interpolated from next (b2's rpcTime)
-    expect(result!.messages[0]!.timestamp).toEqual(new Date(rpcTime));
+    // b1: no directly-stored time means absent, without interpolation.
+    expect(result!.messages[0]!.timestamp).toBeUndefined();
     // b2: timingInfo.clientRpcSendTime
     expect(result!.messages[1]!.timestamp).toEqual(new Date(rpcTime));
-    // b3: no timestamp → interpolated from next (b4's createdAt)
-    expect(result!.messages[2]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));
+    // b3: no directly-stored time → absent
+    expect(result!.messages[2]!.timestamp).toBeUndefined();
     // b4: createdAt
     expect(result!.messages[3]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));
   });

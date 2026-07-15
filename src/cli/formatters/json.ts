@@ -32,6 +32,12 @@ export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
       if (s.source !== undefined) {
         obj['source'] = s.source;
       }
+      if (s.sources) {
+        obj['sources'] = s.sources;
+      }
+      if (s.preferredSource) {
+        obj['preferredSource'] = s.preferredSource;
+      }
       return obj;
     }),
   };
@@ -79,6 +85,12 @@ export function formatSessionJson(
   if (session.source !== undefined) {
     output['source'] = session.source;
   }
+  if (session.sources) {
+    output['sources'] = session.sources;
+  }
+  if (session.preferredSource) {
+    output['preferredSource'] = session.preferredSource;
+  }
   if (session.activeBranchBubbleIds !== undefined) {
     output['activeBranchBubbleIds'] = session.activeBranchBubbleIds;
   }
@@ -118,13 +130,23 @@ export function formatSessionJson(
       id: m.id,
       role: m.role,
       content: m.content,
-      timestamp: m.timestamp.toISOString(),
       codeBlocks: m.codeBlocks.map((cb) => ({
         language: cb.language,
         content: cb.content,
         startLine: cb.startLine,
       })),
     };
+
+    // Per-message timestamp + provenance only when directly stored.
+    if (m.timestamp) {
+      msg['timestamp'] = m.timestamp.toISOString();
+    }
+    if (m.timestampSource) {
+      msg['timestampSource'] = m.timestampSource;
+    }
+    if (m.source) {
+      msg['source'] = m.source;
+    }
 
     if (m.toolCalls && m.toolCalls.length > 0) {
       msg['toolCalls'] = m.toolCalls.map((tc) => ({

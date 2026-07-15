@@ -144,8 +144,10 @@ describe('parseStoreDb (transcript-authoritative rework)', () => {
     expect(data?.messages[0]?.content).toBe('hi');
   });
 
-  it('uses session createdAt as the message timestamp (not epoch)', () => {
-    expect(parseStoreDb(DB_PATH)?.messages[0]?.timestamp).toEqual(new Date(1783737832293));
+  it('does not copy session createdAt onto messages', () => {
+    // store.db does not store a per-message timestamp; session createdAt must
+    // not be fabricated as a message time.
+    expect(parseStoreDb(DB_PATH)?.messages[0]?.timestamp).toBeUndefined();
   });
 
   it('returns null on missing file (defensive — no throw)', () => {
