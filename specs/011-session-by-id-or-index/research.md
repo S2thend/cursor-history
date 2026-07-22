@@ -4,17 +4,17 @@
 
 ## R1: Reuse of resolveSessionIdentifiers
 
-**Decision**: Use the existing `resolveSessionIdentifiers(input, customDataPath)` in `src/core/storage.ts` for resolving a single identifier (index or composer ID) to a composer ID. The function already supports numeric (1-based index) and non-numeric (composer ID) input and respects workspace scope via the same `listSessions(..., customDataPath)` used elsewhere.
+**Decision**: Resolve numeric identifiers from the same listing scope that displayed them, then load the selected summary by stable session ID. Resolve non-numeric stable IDs against the global discovered session set for the active data source.
 
-**Rationale**: Avoids duplicating resolution logic and keeps workspace/list scope consistent. Migrate-session already uses this for multi-session input; show/export need single-session resolution with the same rules.
+**Rationale**: Workspace-filtered indexes are local to that filtered result and cannot safely be reinterpreted against a global list. Stable IDs are unambiguous and retain their existing global lookup behavior.
 
-**Alternatives considered**: Inline resolution in show/export was rejected to keep a single source of truth and consistent error (SessionNotFoundError from core).
+**Alternatives considered**: Independent inline resolution in show/export was rejected because the two commands could drift. They share one command-level resolver and the same `SessionNotFoundError` behavior.
 
 ## R2: Core getSession API Shape
 
-**Decision**: Extend `getSession` in `src/core/storage.ts` to accept `identifier: number | string` as the first parameter (in addition to existing `customDataPath` and `backupPath`). Behavior: (1) If `identifier` is a number, use it as 1-based index (current behavior). (2) If `identifier` is a string, call `resolveSessionIdentifiers([identifier], customDataPath)` to get one composer ID, then obtain the session summary from `listSessions` for that ID and run the existing "load full session by summary" path (same as current getSession(index) after finding the summary). Return type and null semantics unchanged.
+**Decision**: Extend `getSession` in `src/core/storage.ts` to accept `identifier: number | string` as the first parameter (in addition to existing `customDataPath` and `backupPath`). Behavior: (1) If `identifier` is a number, resolve it from the operation context's current summaries when present, otherwise from the global list. (2) If `identifier` is a string, find that stable ID in the operation context/global discovered set and run the existing full-session load path. Return type and null semantics remain unchanged.
 
-**Rationale**: Single entry point for both CLI and library; no second function. Resolution and workspace filtering stay in one place. Backward compatible for callers passing a number.
+**Rationale**: Single entry point for both CLI and library; no second function. The operation context preserves the listing scope for numeric indexes while stable IDs remain global. Backward compatible for callers passing a number.
 
 **Alternatives considered**: Adding `getSessionById(id: string, ...)` alongside `getSession(index: number, ...)` would duplicate the full-session load logic and complicate the library (two functions vs one overload).
 

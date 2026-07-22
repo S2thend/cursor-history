@@ -29,7 +29,7 @@ export interface Session {
    * Source data completeness:
    * - 'global': full global bubbles (Composer stack)
    * - 'workspace-fallback': degraded, workspace storage only (Composer stack)
-   * - 'transcript': Store stack; transcript authoritative (store.db enhanced title/createdAt only)
+   * - 'transcript': Store stack; usable transcript is authoritative and store.db is not read
    * - 'store-complete' / 'store-partial': Store stack, store.db (no transcript); full or partial parse
    * - 'store': legacy alias (pre-rework)
    * - 'merged': resolved from BOTH Composer and Store stacks by session ID
@@ -50,6 +50,10 @@ export interface Session {
    */
   sources?: Array<'composer' | 'store'>;
   preferredSource?: 'composer' | 'store';
+
+  /** Parse state of the Store transcript when the Store stack contributed. */
+  transcriptState?:
+    'missing' | 'parsed' | 'partial' | 'empty' | 'error-only' | 'unsupported' | 'unreadable';
 
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;

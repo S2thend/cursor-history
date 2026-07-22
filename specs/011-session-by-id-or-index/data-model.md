@@ -35,7 +35,7 @@ Same as today; obtained by resolving identifier then loading full session. No ne
 - **Before**: `getSession(index: number, customDataPath?, backupPath?): Promise<ChatSession | null>`
 - **After**: `getSession(identifier: number | string, customDataPath?, backupPath?): Promise<ChatSession | null>`
   - If `identifier` is number: treat as 1-based index (current behavior).
-  - If `identifier` is string: resolve via `resolveSessionIdentifiers([identifier], customDataPath)`, then load session for that ID (same workspace scope as list).
+  - If `identifier` is string: resolve the stable ID against the global discovered session set, independent of any workspace-filtered numeric listing.
 
 ### Library getSession / export
 
@@ -50,7 +50,7 @@ Export functions that take a session identifier will accept `number | string` in
 
 1. **Index**: Positive integer (CLI 1-based; library 0-based). Zero or negative → error. Out of range → session not found with valid range in message (CLI) or SessionNotFoundError (library).
 2. **Composer ID**: Non-numeric string. Not found → session not found with invalid ID in message (CLI) or SessionNotFoundError with identifier (library).
-3. **Workspace**: When `dataPath`/`workspace` filter is applied, resolution (by index or ID) uses the same scope as `listSessions`.
+3. **Workspace**: A `workspace` filter scopes numeric indices to the corresponding filtered `listSessions` result. Stable ID lookup remains global. `dataPath` still selects the storage source for both forms.
 
 ## State Transitions
 

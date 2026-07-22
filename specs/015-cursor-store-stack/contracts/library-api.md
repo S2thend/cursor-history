@@ -18,7 +18,24 @@
 ```ts
 interface Session {
   // ...existing fields unchanged
-  source?: 'global' | 'workspace-fallback' | 'store' | 'transcript';
+  source?:
+    | 'global'
+    | 'workspace-fallback'
+    | 'transcript'
+    | 'store'
+    | 'store-complete'
+    | 'store-partial'
+    | 'merged';
+  sources?: Array<'composer' | 'store'>;
+  preferredSource?: 'composer' | 'store';
+  transcriptState?:
+    | 'missing'
+    | 'parsed'
+    | 'partial'
+    | 'empty'
+    | 'error-only'
+    | 'unsupported'
+    | 'unreadable';
 }
 // Message unchanged: toolCalls.result / tokenUsage / model are already optional.
 // The Store stack (P1) simply does not populate these optional fields;
@@ -37,4 +54,4 @@ interface Session {
 ## Backward Compatibility
 - The new `source` values are an **additive extension**; existing consumers can simply ignore unknown sources.
 - No existing function signatures or return structures are broken.
-- Statelessness is unchanged (each call still independently opens/closes the DB / reads files).
+- Calls remain stateless across public API invocations. Within one invocation, a private read context keeps scoped summaries and Store discovery consistent while full sessions are loaded.

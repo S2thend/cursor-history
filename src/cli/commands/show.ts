@@ -4,7 +4,6 @@
 
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { getSession, listSessions } from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
 import {
   formatSessionDetail,
@@ -12,10 +11,11 @@ import {
   filterMessages,
   validateMessageTypes,
 } from '../formatters/index.js';
-import { SessionNotFoundError, handleError } from '../errors.js';
+import { handleError } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 import type { MessageType } from '../../core/types.js';
 import { MESSAGE_TYPES } from '../../core/types.js';
+import { resolveCommandSession } from './session-lookup.js';
 
 interface ShowCommandOptions {
   json?: boolean;
@@ -45,9 +45,14 @@ export function registerShowCommand(program: Command): void {
       'Show only specified message types (user,assistant,tool,thinking,error)'
     )
     .action(async (indexArg: string, options: ShowCommandOptions, command: Command) => {
-      const globalOptions = command.parent?.opts() as { json?: boolean; dataPath?: string };
+      const globalOptions = command.parent?.opts() as {
+        json?: boolean;
+        dataPath?: string;
+        workspace?: string;
+      };
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
+      const workspaceFilter = globalOptions?.workspace;
       const backupPath = options.backup ? expandPath(options.backup) : undefined;
 
       // Only treat arg as index when the entire string is digits
@@ -98,24 +103,13 @@ export function registerShowCommand(program: Command): void {
       }
 
       try {
-        const session = await getSession(
+        const expanded = customPath ? expandPath(customPath) : undefined;
+        const session = await resolveCommandSession(
           identifier,
-          customPath ? expandPath(customPath) : undefined,
+          workspaceFilter,
+          expanded,
           backupPath
         );
-
-        if (!session) {
-          if (typeof identifier === 'number') {
-            const sessions = await listSessions(
-              { limit: 0, all: true },
-              customPath ? expandPath(customPath) : undefined,
-              backupPath
-            );
-            throw new SessionNotFoundError({ index: identifier, maxIndex: sessions.length });
-          } else {
-            throw new SessionNotFoundError({ composerId: identifier });
-          }
-        }
 
         // Show backup source indicator if reading from backup
         if (backupPath && !useJson) {

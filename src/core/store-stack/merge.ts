@@ -42,6 +42,7 @@
  * source file contains no control bytes and matching is unambiguous.
  */
 import type { ChatSession, ChatSessionSummary, Message, ToolCall } from '../types.js';
+import { findEmbeddedToolCallIndex } from '../parser.js';
 
 /** Sentinel content produced by the storage layer for a present-but-empty bubble. */
 const EMPTY_PLACEHOLDER = '[empty message]';
@@ -61,13 +62,29 @@ function normalizeText(text: string): string {
 }
 
 /**
+ * Store transcripts may preserve the transport-only wrapper used for user
+ * prompts while Composer bubbles expose only its inner text. Treat a wrapper
+ * that encloses the whole message as representation metadata, not content.
+ */
+function unwrapUserQuery(text: string): string {
+  const match = text.match(/^\s*<user_query>\s*([\s\S]*?)\s*<\/user_query>\s*$/i);
+  return match?.[1] ?? text;
+}
+
+/**
  * Content used for matching. Only the EMPTY placeholder is collapsed to '' so it
  * can match other blank messages. The CORRUPTED placeholder is kept as a
  * distinct literal (unknown content must not equal a real empty message).
  */
 function matchContent(text: string): string {
   if (text === EMPTY_PLACEHOLDER) return '';
-  return normalizeText(text);
+  return normalizeText(unwrapUserQuery(text));
+}
+
+/** Composer's rendered tool marker is metadata when structured tools exist. */
+function isSyntheticToolContent(message: Message): boolean {
+  if (!message.toolCalls?.length) return false;
+  return findEmbeddedToolCallIndex(message.content.trimStart(), message.toolCalls) >= 0;
 }
 
 /** Content class for compatibility decisions. */
@@ -226,7 +243,7 @@ function contentCompatible(a: string, b: string): boolean {
  *
  * A no-params call is a wildcard: it can absorb a differing-param call via
  * fill, so its presence clears the conflict for that name. Same name + equal
- * params: not a conflict. Different names: not a conflict (additive).
+ * params: not a conflict.
  */
 function toolsConflict(aTools: ToolCall[], bTools: ToolCall[]): boolean {
   const collect = (tools: ToolCall[]) => {
@@ -262,6 +279,19 @@ function toolsConflict(aTools: ToolCall[], bTools: ToolCall[]): boolean {
   return false;
 }
 
+/** Both non-empty sides need a real same-tool bridge before their messages can merge. */
+function hasCompatibleToolPair(aTools: ToolCall[], bTools: ToolCall[]): boolean {
+  if (aTools.length === 0 || bTools.length === 0) return true;
+  return aTools.some((a) =>
+    bTools.some((b) => {
+      if (a.name !== b.name) return false;
+      const aParams = paramsKey(a);
+      const bParams = paramsKey(b);
+      return aParams === null || bParams === null || aParams === bParams;
+    })
+  );
+}
+
 /**
  * Phase-2 compatibility: two messages can be merged if they share a role, their
  * contents are compatible, and their tool calls do not truly conflict. One side
@@ -269,8 +299,15 @@ function toolsConflict(aTools: ToolCall[], bTools: ToolCall[]): boolean {
  */
 function messagesCompatible(a: Message, b: Message): boolean {
   if (a.role !== b.role) return false;
-  if (!contentCompatible(a.content, b.content)) return false;
-  return !toolsConflict(a.toolCalls ?? [], b.toolCalls ?? []);
+  const aTools = a.toolCalls ?? [];
+  const bTools = b.toolCalls ?? [];
+  const compatibleTools = hasCompatibleToolPair(aTools, bTools) && !toolsConflict(aTools, bTools);
+  if (!compatibleTools) return false;
+  if (contentCompatible(a.content, b.content)) return true;
+  // Composer can render a structured tool call as `[Tool: ...]` while Store
+  // keeps the assistant's natural-language text plus the same structured call.
+  // The compatible tool signature is the identity bridge in that case.
+  return isSyntheticToolContent(a) || isSyntheticToolContent(b);
 }
 
 function isPresent(value: string | undefined | null): value is string {
@@ -295,6 +332,14 @@ function mergeMessage(
   // Content: if the backbone's content is missing/blank/corrupt but the other
   // side has real content, adopt it (a fidelity gap, not a conflict).
   if (contentMissing(backbone.content) && hasRealContent(other.content)) {
+    merged.content = other.content;
+  } else if (
+    isSyntheticToolContent(backbone) &&
+    hasRealContent(other.content) &&
+    !isSyntheticToolContent(other)
+  ) {
+    // Prefer the natural-language representation over a generated display
+    // marker even when Composer is the scalar-conflict backbone.
     merged.content = other.content;
   }
 
@@ -419,11 +464,13 @@ function mergeToolCalls(backbone: ToolCall[], other: ToolCall[]): ToolCall[] | u
   return merged;
 }
 
-/** Fill missing result/error/files/params on the backbone tool from the other side. */
+/** Fill non-outcome fields; conflicting outcomes remain wholly backbone-owned. */
 function mergeToolCall(backbone: ToolCall, other: ToolCall): ToolCall {
   const merged: ToolCall = { ...backbone };
-  if (merged.result === undefined && other.result !== undefined) merged.result = other.result;
-  if (merged.error === undefined && other.error !== undefined) merged.error = other.error;
+  if (backbone.status === other.status) {
+    if (merged.result === undefined && other.result !== undefined) merged.result = other.result;
+    if (merged.error === undefined && other.error !== undefined) merged.error = other.error;
+  }
   if (merged.files === undefined && other.files !== undefined) merged.files = [...other.files!];
   if (merged.params === undefined && other.params !== undefined) merged.params = other.params;
   return merged;
@@ -540,7 +587,7 @@ export function mergeCrossStackSessions(
   const workspacePath = backbone.workspacePath ?? other.workspacePath ?? composer.workspacePath;
   const createdAt = pickPreferredDate(backbone.createdAt, other.createdAt);
   // lastUpdatedAt: preferred source wins (e.g. WSL -> Store's value), not the
-  // later of the two. Store has no separate updatedAt until P04.
+  // later of the two.
   const lastUpdatedAt = pickPreferredDate(backbone.lastUpdatedAt, other.lastUpdatedAt);
 
   // Source-specific structured data is additive: keep whichever side provides it
@@ -561,6 +608,7 @@ export function mergeCrossStackSessions(
     source: 'merged',
     sources: ['composer', 'store'],
     preferredSource,
+    transcriptState: store.transcriptState,
   };
   if (usage) session.usage = usage;
   if (activeBranchBubbleIds) session.activeBranchBubbleIds = activeBranchBubbleIds;
@@ -575,8 +623,11 @@ export interface StoreSummaryInput {
   id: string;
   title: string | null;
   createdAt: Date;
+  /** Store session-level update time (`updatedAtMs` or `createdAt`). */
+  lastUpdatedAt: Date;
   workspacePath?: string;
   messageCount: number;
+  transcriptState: ChatSessionSummary['transcriptState'];
 }
 
 /**
@@ -603,9 +654,9 @@ export function applyStoreMergeToSummary(
   // createdAt: preferred source wins.
   existing.createdAt = preferStore ? store.createdAt : existing.createdAt;
 
-  // lastUpdatedAt: preferred source wins. Store's transcript layer has no
-  // separate updatedAt (its best value is createdAt until P04).
-  existing.lastUpdatedAt = preferStore ? store.createdAt : existing.lastUpdatedAt;
+  // lastUpdatedAt: preferred source wins. Store keeps its own update time
+  // (`updatedAtMs` or `createdAt`) instead of reusing another source's value.
+  existing.lastUpdatedAt = preferStore ? store.lastUpdatedAt : existing.lastUpdatedAt;
 
   // messageCount: approximate (preferred source's count); recomputed on get.
   existing.messageCount = preferStore ? store.messageCount : existing.messageCount;
@@ -613,4 +664,5 @@ export function applyStoreMergeToSummary(
   existing.source = 'merged';
   existing.sources = ['composer', 'store'];
   existing.preferredSource = preferredSource;
+  existing.transcriptState = store.transcriptState;
 }

@@ -7,6 +7,7 @@ import {
   formatExportSuccess,
   formatNoHistory,
   formatCursorNotFound,
+  filterMessages,
   supportsColor,
 } from '../../src/cli/formatters/table.js';
 import type {
@@ -257,6 +258,37 @@ describe('formatSessionDetail', () => {
     expect(result).not.toContain('×2');
   });
 
+  it('matches a mixed assistant/tool message in both filter categories', () => {
+    const mixed = {
+      id: 'm1',
+      role: 'assistant' as const,
+      content: 'I inspected the file and found the issue.',
+      codeBlocks: [],
+      toolCalls: [{ name: 'Read', status: 'completed' as const, params: { file: '/a' } }],
+    };
+
+    expect(filterMessages([mixed], ['assistant'])).toEqual([mixed]);
+    expect(filterMessages([mixed], ['tool'])).toEqual([mixed]);
+  });
+
+  it('does not treat marked tool messages as natural-language assistant responses', () => {
+    const marked = [
+      {
+        role: 'assistant',
+        content: '[Thinking]\nInspecting the repository',
+        toolCalls: [{ name: 'Read' }],
+      },
+      {
+        role: 'assistant',
+        content: '[Error]\nRead failed',
+        toolCalls: [{ name: 'Read' }],
+      },
+    ];
+
+    expect(filterMessages(marked, ['assistant'])).toEqual([]);
+    expect(filterMessages(marked, ['tool'])).toEqual(marked);
+  });
+
   it('shows filter info when messageFilter is active', () => {
     const filter: MessageType[] = ['user'];
     const s = makeSession();
@@ -266,6 +298,116 @@ describe('formatSessionDetail', () => {
     });
     expect(result).toContain('2 of 10');
     expect(result).toContain('user');
+  });
+
+  it('--tool renders full params, status, result, error, and files', () => {
+    const longParam = 'x'.repeat(120);
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [
+            {
+              name: 'Write',
+              status: 'error',
+              params: { file: longParam },
+              error: 'disk full',
+              files: ['/a.txt', '/b.txt'],
+            },
+          ],
+        },
+      ],
+    });
+    const full = stripAnsi(formatSessionDetail(s, undefined, { fullTool: true }));
+    // Full params (not truncated), status, error, and files all rendered.
+    expect(full).toContain(longParam);
+    expect(full).toContain('status: error');
+    expect(full).toContain('error: disk full');
+    expect(full).toContain('files: /a.txt, /b.txt');
+  });
+
+  it('--tool exposes structured details for an embedded Composer tool call', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Tool: Read File]\nFile: /a',
+          codeBlocks: [],
+          toolCalls: [
+            {
+              name: 'read_file',
+              status: 'completed',
+              params: { file: '/a' },
+              result: '',
+              files: [],
+            },
+          ],
+        },
+      ],
+    });
+    const full = stripAnsi(formatSessionDetail(s, undefined, { fullTool: true }));
+    expect(full).toContain('params: {"file":"/a"}');
+    expect(full).toContain('status: completed');
+    expect(full).toContain('result: ');
+    expect(full).toContain('files: []');
+  });
+
+  it('normal view suppresses only the embedded call and keeps additional merged calls', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Tool: Read File]\nFile: /a',
+          codeBlocks: [],
+          toolCalls: [
+            { name: 'read_file', status: 'completed', params: { file: '/a' } },
+            { name: 'write_file', status: 'completed', params: { file: '/b' } },
+          ],
+        },
+      ],
+    });
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).not.toContain('🔧 read_file');
+    expect(normal).toContain('🔧 write_file');
+  });
+
+  it('--tool preserves an explicitly defined empty error', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Write', status: 'error', error: '' }],
+        },
+      ],
+    });
+    const full = stripAnsi(formatSessionDetail(s, undefined, { fullTool: true }));
+    expect(full).toContain('error: ');
+  });
+
+  it('normal view truncates long structured-tool params', () => {
+    const longParam = 'y'.repeat(120);
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: longParam } }],
+        },
+      ],
+    });
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).not.toContain(longParam);
+    expect(normal).toContain('...');
   });
 
   it('shows info message when filter results in empty', () => {
@@ -285,6 +427,16 @@ describe('formatSessionDetail', () => {
     expect(result).toContain('Partial data');
     expect(result).toContain('workspace fallback');
   });
+
+  it.each(['store', 'store-complete'] as const)(
+    'shows missing metadata warning for %s sessions',
+    (source) => {
+      const result = stripAnsi(formatSessionDetail(makeSession({ source })));
+      expect(result).toContain('Partial metadata');
+      expect(result).toContain('tokens');
+      expect(result).toContain('per-message timestamps');
+    }
+  );
 });
 
 describe('formatSearchResultsTable', () => {

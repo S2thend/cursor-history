@@ -36,14 +36,17 @@ import {
   detectPreferredStackSource,
 } from '../lib/platform.js';
 import { SessionNotFoundError } from '../lib/errors.js';
-import { parseChatData, getSearchSnippets, mapStoreSession, type CursorChatBundle } from './parser.js';
+import {
+  parseChatData,
+  getSearchSnippets,
+  mapStoreSession,
+  type CursorChatBundle,
+} from './parser.js';
 import { openBackupDatabase, readBackupManifest } from './backup.js';
 import { debugLogStorage } from './database/debug.js';
 import { discoverStoreSessions } from './store-stack/discover.js';
-import {
-  mergeCrossStackSessions,
-  applyStoreMergeToSummary,
-} from './store-stack/merge.js';
+import type { StoreSession } from './store-stack/types.js';
+import { mergeCrossStackSessions, applyStoreMergeToSummary } from './store-stack/merge.js';
 
 /**
  * Known SQLite keys for chat data (in priority order)
@@ -188,7 +191,10 @@ function workspacePathMatches(candidatePath: unknown, workspacePath: string): bo
   return typeof candidatePath === 'string' && pathsEqual(uriToPath(candidatePath), workspacePath);
 }
 
-function composerBelongsToWorkspace(composerData: Record<string, unknown>, workspace: Workspace): boolean {
+function composerBelongsToWorkspace(
+  composerData: Record<string, unknown>,
+  workspace: Workspace
+): boolean {
   const workspaceIdentifier = composerData['workspaceIdentifier'];
   if (isRecord(workspaceIdentifier)) {
     if (workspaceIdentifier['id'] === workspace.id) {
@@ -276,7 +282,11 @@ function extractComposerIdsFromData(
       const selected = (parsed as { selectedComposerIds?: unknown }).selectedComposerIds;
       if (Array.isArray(selected)) {
         for (const composerId of selected) {
-          if (typeof composerId === 'string' && composerId.trim().length > 0 && !ids.has(composerId)) {
+          if (
+            typeof composerId === 'string' &&
+            composerId.trim().length > 0 &&
+            !ids.has(composerId)
+          ) {
             ids.set(composerId, 'selectedComposerIds');
           }
         }
@@ -733,7 +743,9 @@ export async function findWorkspaces(
 
       const workspacePath = readWorkspaceJson(workspaceDir) ?? `(workspace: ${entry.name})`;
       if (workspacePath.startsWith('(workspace:')) {
-        debugLogStorage(`Using workspace ID fallback path for ${entry.name} (workspace.json missing/unknown)`);
+        debugLogStorage(
+          `Using workspace ID fallback path for ${entry.name} (workspace.json missing/unknown)`
+        );
       }
 
       // Count sessions in this workspace
@@ -860,8 +872,7 @@ function getChatDataFromDb(db: Database): ChatDataResult | null {
   for (const key of CHAT_DATA_KEYS) {
     try {
       const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key) as
-        | { value: string }
-        | undefined;
+        { value: string } | undefined;
       if (row?.value) {
         candidates.push({ key, value: row.value });
       }
@@ -892,7 +903,9 @@ function getChatDataFromDb(db: Database): ChatDataResult | null {
 
   const mainData = selected.value;
   const bundle: CursorChatBundle = {};
-  const composerCandidate = candidates.find((candidate) => candidate.key === 'composer.composerData');
+  const composerCandidate = candidates.find(
+    (candidate) => candidate.key === 'composer.composerData'
+  );
   if (composerCandidate) {
     bundle.composerData = composerCandidate.value;
   }
@@ -900,8 +913,7 @@ function getChatDataFromDb(db: Database): ChatDataResult | null {
   // For new format, also get prompts and generations
   try {
     const promptsRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(PROMPTS_KEY) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (promptsRow?.value) {
       bundle.prompts = promptsRow.value;
     }
@@ -911,8 +923,7 @@ function getChatDataFromDb(db: Database): ChatDataResult | null {
 
   try {
     const gensRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(GENERATIONS_KEY) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (gensRow?.value) {
       bundle.generations = gensRow.value;
     }
@@ -931,9 +942,9 @@ function getChatDataFromDb(db: Database): ChatDataResult | null {
 function loadGlobalBubbleCounts(db: Database): Map<string, number> {
   const counts = new Map<string, number>();
   try {
-    const rows = db
-      .prepare("SELECT key FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'")
-      .all() as { key: string }[];
+    const rows = db.prepare("SELECT key FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'").all() as {
+      key: string;
+    }[];
     for (const row of rows) {
       // key form: bubbleId:<composerId>:<bubbleId>
       const composerId = row.key.split(':')[1];
@@ -955,11 +966,11 @@ function buildGlobalComposerSummary(
 ): GlobalComposerSummary | null {
   const messageCount =
     options?.bubbleCount ??
-    ((
+    (
       db
         .prepare('SELECT COUNT(*) as count FROM cursorDiskKV WHERE key LIKE ?')
         .get(`bubbleId:${composerId}:%`) as { count: number }
-    ).count);
+    ).count;
   if (messageCount <= 0) {
     return null;
   }
@@ -1006,9 +1017,9 @@ function getGlobalComposerSummary(
   bubbleCounts?: Map<string, number>
 ): GlobalComposerSummary | null {
   try {
-    const composerRow = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?').get(
-      `composerData:${composerId}`
-    ) as { value: string } | undefined;
+    const composerRow = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value: string } | undefined;
     if (!composerRow?.value) {
       return null;
     }
@@ -1145,6 +1156,127 @@ export async function getWorkspaceLinkedComposerIds(
 }
 
 /**
+ * Operation-scoped read context. Caches the Store sessions discovered for
+ * one top-level operation and, when populated, the full listing summaries, so
+ * search / export-all / library loops do not re-discover the Store corpus or
+ * re-list sessions per item. Public functions accept it as an optional trailing
+ * argument; direct public calls create one automatically.
+ */
+export interface SessionReadContext {
+  readonly customDataPath?: string;
+  readonly backupPath?: string;
+  /** Cached Store sessions (discovered at most once per operation). */
+  storeSessions: StoreSession[] | null;
+  /** In-flight Store discovery, shared by concurrent readers. */
+  storeSessionsPromise?: Promise<StoreSession[]> | null;
+  /** Cached Composer workspaces (discovered at most once per operation). */
+  workspaces?: Workspace[] | null;
+  /** In-flight Composer workspace discovery, shared by concurrent readers. */
+  workspacesPromise?: Promise<Workspace[]> | null;
+  /** Cached summaries for the operation's current listing scope. */
+  summaries: ChatSessionSummary[] | null;
+}
+
+/**
+ * Create an empty operation-scoped read context for one storage source.
+ * @param customDataPath - Optional live Cursor data path bound to this context.
+ * @param backupPath - Optional backup path bound to this context.
+ * @returns A context that lazily caches discovery and listing results for that source.
+ */
+export function createSessionReadContext(
+  customDataPath?: string,
+  backupPath?: string
+): SessionReadContext {
+  return {
+    customDataPath,
+    backupPath,
+    storeSessions: null,
+    storeSessionsPromise: null,
+    workspaces: null,
+    workspacesPromise: null,
+    summaries: null,
+  };
+}
+
+function optionalPathsEqual(left?: string, right?: string): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return pathsEqual(left, right);
+}
+
+const UNKNOWN_WORKSPACE_PATH = '(unknown workspace)';
+
+/** Workspace filters are exact after cross-platform normalization; suffixes never qualify. */
+function workspaceFilterMatches(candidatePath: string | undefined, requestedPath: string): boolean {
+  if (!candidatePath) return requestedPath === UNKNOWN_WORKSPACE_PATH;
+  return pathsEqual(candidatePath, requestedPath);
+}
+
+function assertContextSource(
+  context: SessionReadContext | undefined,
+  customDataPath?: string,
+  backupPath?: string
+): void {
+  if (!context) return;
+  if (
+    !optionalPathsEqual(context.customDataPath, customDataPath) ||
+    !optionalPathsEqual(context.backupPath, backupPath)
+  ) {
+    throw new Error(
+      'SessionReadContext source mismatch: create a new context for each dataPath/backupPath pair'
+    );
+  }
+}
+
+async function getWorkspacesCached(
+  context: SessionReadContext | undefined,
+  customDataPath?: string,
+  backupPath?: string
+): Promise<Workspace[]> {
+  assertContextSource(context, customDataPath, backupPath);
+  if (context?.workspaces) return context.workspaces;
+  if (context?.workspacesPromise) return context.workspacesPromise;
+
+  const discovery = findWorkspaces(customDataPath, backupPath);
+  if (!context) return discovery;
+
+  context.workspacesPromise = discovery;
+  try {
+    const workspaces = await discovery;
+    context.workspaces = workspaces;
+    return workspaces;
+  } finally {
+    context.workspacesPromise = null;
+  }
+}
+
+/**
+ * Return the Store sessions for the operation, discovering at most once and
+ * caching into the context when one is supplied. Backups never carry ~/.cursor.
+ */
+async function getStoreSessionsCached(
+  context: SessionReadContext | undefined,
+  customDataPath?: string,
+  backupPath?: string
+): Promise<StoreSession[]> {
+  assertContextSource(context, customDataPath, backupPath);
+  if (backupPath) return [];
+  if (context?.storeSessions) return context.storeSessions;
+  if (context?.storeSessionsPromise) return context.storeSessionsPromise;
+
+  const discovery = discoverStoreSessions(getStoreStackRoot(customDataPath));
+  if (!context) return discovery;
+
+  context.storeSessionsPromise = discovery;
+  try {
+    const sessions = await discovery;
+    context.storeSessions = sessions;
+    return sessions;
+  } finally {
+    context.storeSessionsPromise = null;
+  }
+}
+
+/**
  * List chat sessions with optional filtering
  * Uses workspace storage for listing (has correct paths and complete list)
  * When `options.workspacePath` is unset, deduplicates by session ID across workspaces (deterministic order).
@@ -1152,22 +1284,23 @@ export async function getWorkspaceLinkedComposerIds(
  * @param options - List options (limit, all, workspacePath)
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
+ * @param context - Optional operation-scoped read context for caching
  */
 export async function listSessions(
   options: ListOptions,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  context?: SessionReadContext
 ): Promise<ChatSessionSummary[]> {
+  assertContextSource(context, customDataPath, backupPath);
   // T029: Support reading from backup
-  const workspaces = await findWorkspaces(customDataPath, backupPath);
+  const workspaces = await getWorkspacesCached(context, customDataPath, backupPath);
 
   // Filter by workspace if specified
   // Deterministic order: .code-workspace paths before others, then by path (for stable attribution when deduping)
   const filteredWorkspaces = (
     options.workspacePath
-      ? workspaces.filter(
-          (w) => w.path === options.workspacePath || w.path.endsWith(options.workspacePath ?? '')
-        )
+      ? workspaces.filter((w) => workspaceFilterMatches(w.path, options.workspacePath!))
       : workspaces
   ).sort((a, b) => {
     const normA = normalizePath(a.path);
@@ -1377,14 +1510,13 @@ export async function listSessions(
   // Falls back to [] when ~/.cursor is absent (pure-Composer users unaffected).
   // Skipped in backup mode: backups capture vscdb, not the live ~/.cursor tree.
   if (!backupPath) {
-    const storeSessions = discoverStoreSessions(getStoreStackRoot(customDataPath));
+    const storeSessions = await getStoreSessionsCached(context, customDataPath, backupPath);
     const storeSeenIds = new Set(allSessions.map((session) => session.id));
     // Conflict priority for sessions present in BOTH stacks (same ID).
     const preferredSource = detectPreferredStackSource(customDataPath);
     for (const ss of storeSessions) {
       if (options.workspacePath) {
-        const wp = ss.workspacePath ?? '';
-        if (!(wp === options.workspacePath || wp.endsWith(options.workspacePath))) continue;
+        if (!workspaceFilterMatches(ss.workspacePath, options.workspacePath)) continue;
       }
       // Same ID in both stacks → merge scalar metadata and mark merged instead
       // of discarding the lower-priority representation. The full
@@ -1398,8 +1530,10 @@ export async function listSessions(
               id: ss.id,
               title: ss.title,
               createdAt: ss.createdAt,
+              lastUpdatedAt: ss.lastUpdatedAt,
               workspacePath: ss.workspacePath,
               messageCount: ss.messages.length,
+              transcriptState: ss.transcriptState,
             },
             preferredSource
           );
@@ -1412,12 +1546,13 @@ export async function listSessions(
         index: 0,
         title: ss.title,
         createdAt: ss.createdAt,
-        lastUpdatedAt: ss.createdAt, // transcript layer has no separate updatedAt
+        lastUpdatedAt: ss.lastUpdatedAt,
         messageCount: ss.messages.length,
         workspaceId: 'store',
         workspacePath: ss.workspacePath ? contractPath(ss.workspacePath) : '(unknown workspace)',
         preview: ss.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
         source: ss.source,
+        transcriptState: ss.transcriptState,
       });
     }
   }
@@ -1430,6 +1565,12 @@ export async function listSessions(
     session.index = i + 1;
   });
 
+  // Keep the exact listing scope. In particular, a workspace-filtered operation
+  // must resolve duplicate IDs against the same workspace it listed.
+  if (context) {
+    context.summaries = allSessions;
+  }
+
   // Apply limit
   if (!options.all && options.limit > 0) {
     return allSessions.slice(0, options.limit);
@@ -1439,7 +1580,12 @@ export async function listSessions(
 }
 
 /**
- * List all workspaces with chat history
+ * List all workspaces with chat history, aggregated from the resolved session
+ * set. Groups the deduplicated `listSessions({ all: true })` summaries by
+ * normalized final `workspacePath`, counting each merged session once. Composer
+ * workspace metadata (dbPath) is preserved when available; Store-only paths get
+ * a stable Store workspace identity. Transcript-only sessions without a path
+ * land in one explicit unknown-workspace bucket.
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  */
@@ -1447,15 +1593,54 @@ export async function listWorkspaces(
   customDataPath?: string,
   backupPath?: string
 ): Promise<Workspace[]> {
-  const workspaces = await findWorkspaces(customDataPath, backupPath);
+  const context = createSessionReadContext(customDataPath, backupPath);
+  const summaries = await listSessions(
+    { limit: 0, all: true },
+    customDataPath,
+    backupPath,
+    context
+  );
+  // Composer workspaces supply dbPath + canonical id when the path matches.
+  const composerWorkspaces = await getWorkspacesCached(context, customDataPath, backupPath);
 
-  // Sort by session count descending
+  const UNKNOWN_BUCKET = '(unknown workspace)';
+  const byKey = new Map<string, Workspace>();
+
+  for (const summary of summaries) {
+    const rawPath = summary.workspacePath?.trim() ? summary.workspacePath : UNKNOWN_BUCKET;
+    const normalized = normalizePath(rawPath).replace(/\\/g, '/');
+    const isWindowsPath = /^[a-zA-Z]:\//.test(normalized) || normalized.startsWith('//');
+    const key =
+      process.platform === 'win32' || isWindowsPath ? normalized.toLowerCase() : normalized;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.sessionCount++;
+      continue;
+    }
+    const composer = composerWorkspaces.find((w) => pathsEqual(w.path, rawPath));
+    const storeBacked =
+      summary.workspaceId === 'store' ||
+      summary.source === 'transcript' ||
+      summary.source === 'store' ||
+      summary.source === 'store-complete' ||
+      summary.source === 'store-partial' ||
+      summary.source === 'merged';
+    const fallbackId = storeBacked
+      ? rawPath === UNKNOWN_BUCKET
+        ? 'store:unknown'
+        : `store:${key}`
+      : summary.workspaceId || `workspace:${key}`;
+    byKey.set(key, {
+      id: composer?.id ?? fallbackId,
+      path: contractPath(rawPath),
+      dbPath: composer?.dbPath ?? '',
+      sessionCount: 1,
+    });
+  }
+
+  const workspaces = [...byKey.values()];
   workspaces.sort((a, b) => b.sessionCount - a.sessionCount);
-
-  return workspaces.map((w) => ({
-    ...w,
-    path: contractPath(w.path),
-  }));
+  return workspaces;
 }
 
 /**
@@ -1464,19 +1649,37 @@ export async function listWorkspaces(
  * @param identifier - Session index (1-based number) or composer ID (string)
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
+ * @param context - Optional operation-scoped read context for caching
  * @returns The session or null (identifier not found).
  */
 export async function getSession(
   identifier: number | string,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  context?: SessionReadContext
 ): Promise<ChatSession | null> {
-  // T030: Support reading from backup
-  const summaries = await listSessions({ limit: 0, all: true }, customDataPath, backupPath);
-  const summary: ChatSessionSummary | undefined =
-    typeof identifier === 'string'
-      ? summaries.find((s) => s.id === identifier)
-      : summaries.find((s) => s.index === identifier);
+  const operationContext = context ?? createSessionReadContext(customDataPath, backupPath);
+  assertContextSource(operationContext, customDataPath, backupPath);
+  // Resolve the summary from the cached listing when available; otherwise
+  // list once (and populate the context for downstream lookups).
+  let summary: ChatSessionSummary | undefined;
+  if (operationContext.summaries) {
+    summary =
+      typeof identifier === 'string'
+        ? operationContext.summaries.find((s) => s.id === identifier)
+        : operationContext.summaries.find((s) => s.index === identifier);
+  } else {
+    const summaries = await listSessions(
+      { limit: 0, all: true },
+      customDataPath,
+      backupPath,
+      operationContext
+    );
+    summary =
+      typeof identifier === 'string'
+        ? summaries.find((s) => s.id === identifier)
+        : summaries.find((s) => s.index === identifier);
+  }
   if (!summary) {
     return null;
   }
@@ -1485,25 +1688,26 @@ export async function getSession(
 
   // Merged: same ID exists in both stacks, so field-merge the two representations.
   if (summary.source === 'merged') {
-    return loadMergedSession(summary, index, customDataPath, backupPath);
+    return loadMergedSession(summary, index, customDataPath, backupPath, operationContext);
   }
 
-  // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via discovery.
+  // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via
+  // the cached Store discovery when available.
   if (
     summary.source === 'transcript' ||
     summary.source === 'store' ||
     summary.source === 'store-complete' ||
     summary.source === 'store-partial'
   ) {
-    const storeSession = discoverStoreSessions(getStoreStackRoot(customDataPath)).find(
-      (s) => s.id === summary.id
-    );
+    const storeSession = (
+      await getStoreSessionsCached(operationContext, customDataPath, backupPath)
+    ).find((s) => s.id === summary.id);
     if (!storeSession) return null;
     return mapStoreSession(storeSession, index);
   }
 
   // Composer stack: global storage (full bubbles) with workspace fallback.
-  return loadComposerSession(summary, index, customDataPath, backupPath);
+  return loadComposerSession(summary, index, customDataPath, backupPath, operationContext);
 }
 
 /**
@@ -1514,7 +1718,8 @@ async function loadComposerSession(
   summary: ChatSessionSummary,
   index: number,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  context?: SessionReadContext
 ): Promise<ChatSession | null> {
   // Try to get full session from global storage (has AI responses)
   // This works for both live data and backup (if backup includes globalStorage)
@@ -1610,7 +1815,7 @@ async function loadComposerSession(
   }
 
   // Fall back to workspace storage (or use backup for backup mode)
-  const workspaces = await findWorkspaces(customDataPath, backupPath);
+  const workspaces = await getWorkspacesCached(context, customDataPath, backupPath);
   const workspace = workspaces.find((w) => w.id === summary.workspaceId);
 
   if (!workspace) {
@@ -1653,15 +1858,16 @@ async function loadMergedSession(
   summary: ChatSessionSummary,
   index: number,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  context?: SessionReadContext
 ): Promise<ChatSession | null> {
   const preferredSource = summary.preferredSource ?? detectPreferredStackSource(customDataPath);
 
-  const storeRaw = discoverStoreSessions(getStoreStackRoot(customDataPath)).find(
+  const storeRaw = (await getStoreSessionsCached(context, customDataPath, backupPath)).find(
     (s) => s.id === summary.id
   );
   const store = storeRaw ? mapStoreSession(storeRaw, index) : null;
-  const composer = await loadComposerSession(summary, index, customDataPath, backupPath);
+  const composer = await loadComposerSession(summary, index, customDataPath, backupPath, context);
 
   if (composer && store) {
     return mergeCrossStackSessions(composer, store, preferredSource, index);
@@ -1681,19 +1887,27 @@ export async function searchSessions(
   query: string,
   options: SearchOptions,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  readContext?: SessionReadContext
 ): Promise<SearchResult[]> {
+  // Use one Store discovery per search. The context caches store sessions and
+  // (after the listing below) the summaries, so each getSession avoids
+  // re-discovering and re-listing.
+  const context = readContext ?? createSessionReadContext(customDataPath, backupPath);
+  assertContextSource(context, customDataPath, backupPath);
   // T031: Support reading from backup
   const summaries = await listSessions(
     { limit: 0, all: true, workspacePath: options.workspacePath },
     customDataPath,
-    backupPath
+    backupPath,
+    context
   );
   const results: SearchResult[] = [];
   const lowerQuery = query.toLowerCase();
 
   for (const summary of summaries) {
-    const session = await getSession(summary.index, customDataPath, backupPath);
+    // Resolve by stable ID via the cached context rather than mutable index.
+    const session = await getSession(summary.id, customDataPath, backupPath, context);
     if (!session) continue;
 
     const snippets = getSearchSnippets(session.messages, lowerQuery, options.contextChars);
@@ -2269,8 +2483,7 @@ function extractBubbleText(data: Record<string, unknown>): string {
 
   // Extract codeBlocks content
   const messageCodeBlocks = data['codeBlocks'] as
-    | Array<{ content?: string; languageId?: string }>
-    | undefined;
+    Array<{ content?: string; languageId?: string }> | undefined;
   const codeBlockParts: string[] = [];
   if (messageCodeBlocks && Array.isArray(messageCodeBlocks)) {
     for (const cb of messageCodeBlocks) {

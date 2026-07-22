@@ -2,7 +2,8 @@
  * Internal types for the Cursor Store stack backend (src/core/store-stack/).
  * See specs/015-cursor-store-stack/data-model.md.
  */
-import type { Message } from '../types.js';
+import type { Message, TranscriptState } from '../types.js';
+export type { TranscriptState } from '../types.js';
 
 /**
  * A content part within a transcript line's `message.content` array.
@@ -43,25 +44,50 @@ export interface StoreMetaJson {
 }
 
 /**
+ * Explicit transcript parse state. Decoupled from Store DB completeness —
+ * message count is no longer used as a proxy for transcript presence.
+ *
+ * - `parsed`: transcript messages are authoritative.
+ * - `partial`: usable messages were found, but one or more non-empty lines
+ *   were malformed or unsupported; a Store DB may provide a safer fallback.
+ * - `empty`: file readable and well-formed but contains no message/error lines.
+ * - `error-only`: only provider-error lines were present (no messages).
+ * - `unsupported`: lines were present but none recognized as messages or errors.
+ * - `missing`: the transcript file does not exist.
+ * - `unreadable`: the file exists but could not be read (permissions, I/O).
+ *
+ * Any non-`parsed` state may fall back to `store.db` when available, while
+ * retaining this state for provenance.
+ */
+/**
  * A discovered Store-stack session, prior to unification into `ChatSession`.
- * P1: `source` is always `'transcript'` (store.db deep parse is P2).
  */
 export interface StoreSession {
   /** Session UUID = transcript filename = chats/<hash>/<uuid>/ dir name. */
   id: string;
   /** Absolute workspace path (from meta.json.cwd) if available. */
   workspacePath?: string;
-  /** Session title (null in P1; store.db meta.name in P2). */
+  /** Session title (store.db meta.name when available, else null). */
   title: string | null;
   createdAt: Date;
+  /**
+   * Session-level last-update time. From a valid `updatedAtMs` when
+   * present, otherwise `createdAt`. Session metadata only — never copied onto
+   * messages.
+   */
+  lastUpdatedAt: Date;
   messages: Message[];
   /**
-   * `'transcript'` (P1; authoritative messages from transcript JSONL),
-   * `'store-complete'` / `'store-partial'` (P2 store.db, no transcript),
-   * `'store'` legacy alias.
+   * Backing data for `messages`:
+   * - `'transcript'`: authoritative transcript JSONL.
+   * - `'store-complete'` / `'store-partial'`: store.db fallback (no usable
+   *   transcript), full or partial parse.
+   * - `'store'`: legacy alias.
    */
   source: 'transcript' | 'store' | 'store-complete' | 'store-partial';
-  /** Path to store.db if present (P2 parsing target). */
+  /** Explicit transcript parse state, retained even when store.db backs messages. */
+  transcriptState: TranscriptState;
+  /** Path to store.db if present (deep-parse target / fallback). */
   storeDbPath?: string;
   /** Debug: raw on-disk locations. */
   chatDir?: string;

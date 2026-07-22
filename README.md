@@ -429,15 +429,23 @@ When browsing your chat history, you'll see:
 - **`--error` flag** - Shows full error messages instead of 300-char preview
 - **`--only <types>` flag** - Filter messages by type: `user`, `assistant`, `tool`, `thinking`, `error` (comma-separated)
 
+A natural-language assistant response that also contains structured tool calls matches both the `assistant` and `tool` filters. Tool-only records match only `tool`.
+
 ## Where Cursor Stores Data
 
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/Cursor/User/` |
-| Windows | `%APPDATA%/Cursor/User/` |
-| Linux | `~/.config/Cursor/User/` |
+| Platform | Composer stack | Store stack |
+|----------|----------------|-------------|
+| macOS | `~/Library/Application Support/Cursor/User/` | `~/.cursor/` |
+| Windows | `%APPDATA%/Cursor/User/` | `%USERPROFILE%\.cursor\` |
+| Linux / WSL | `~/.config/Cursor/User/` | `~/.cursor/` |
 
-The tool automatically finds and reads your Cursor chat history from these locations.
+The tool automatically finds and reads both stacks. Store transcripts are authoritative whenever they contain usable messages; per-session `store.db` is used only as a fallback when they do not. It does not heuristically merge Store DB messages into a usable transcript.
+
+Use `--data-path <path>` or `CURSOR_DATA_PATH` to point at a custom Cursor data tree. Use `CURSOR_STORE_ROOT` to configure the Store root independently. A Store root itself, or its `chats`, `projects`, or `acp-sessions` child, is accepted and normalized to the same root.
+
+Inside WSL, Windows-side Store data is normally mounted at `/mnt/c/Users/<windows-user>/.cursor`. For example: `CURSOR_STORE_ROOT=/mnt/c/Users/<windows-user>/.cursor cursor-history list --all`. Use the WSL-side `~/.cursor` path instead when the sessions were created by a Cursor agent running inside that WSL distribution.
+
+When running the CLI inside WSL against a Windows-mounted project, do not reuse Windows-installed native `node_modules`. Native packages are platform-specific; install dependencies with Linux Node.js in a separate WSL dependency tree before running Linux-side tests or builds. `cursor-history` never installs or removes dependencies automatically.
 
 ## Library API
 

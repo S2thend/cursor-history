@@ -13,8 +13,10 @@ function makeStore(over: Partial<StoreSession> = {}): StoreSession {
     workspacePath: '/proj',
     title: null,
     createdAt: new Date(1783737832293),
+    lastUpdatedAt: new Date(1783737832293),
     messages: [],
     source: 'transcript',
+    transcriptState: 'parsed',
     ...over,
   };
 }
@@ -29,15 +31,18 @@ describe('mapStoreSession', () => {
     expect(cs.workspaceId).toBe('store');
     expect(cs.workspacePath).toBe('/proj');
     expect(cs.source).toBe('transcript');
+    expect(cs.transcriptState).toBe('parsed');
   });
 
   it('source reflects fidelity (transcript | store)', () => {
     expect(mapStoreSession(makeStore({ source: 'store' }), 1).source).toBe('store');
   });
 
-  it('lastUpdatedAt mirrors createdAt (transcript layer has no separate updatedAt)', () => {
-    const cs = mapStoreSession(makeStore(), 0);
-    expect(cs.lastUpdatedAt).toEqual(cs.createdAt);
+  it('carries StoreSession.lastUpdatedAt from updatedAtMs or createdAt', () => {
+    const updated = new Date(1799999999999);
+    const cs = mapStoreSession(makeStore({ lastUpdatedAt: updated }), 0);
+    expect(cs.lastUpdatedAt).toEqual(updated);
+    expect(cs.lastUpdatedAt).not.toEqual(cs.createdAt);
   });
 
   it('omits token/usage fields (unavailable in transcript layer)', () => {

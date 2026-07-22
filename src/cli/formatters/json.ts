@@ -10,6 +10,7 @@ import type {
   MessageType,
 } from '../../core/types.js';
 import { getMessageType } from './table.js';
+import { serializeToolCall } from '../../core/parser.js';
 
 /**
  * Format sessions list as JSON
@@ -37,6 +38,9 @@ export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
       }
       if (s.preferredSource) {
         obj['preferredSource'] = s.preferredSource;
+      }
+      if (s.transcriptState) {
+        obj['transcriptState'] = s.transcriptState;
       }
       return obj;
     }),
@@ -90,6 +94,9 @@ export function formatSessionJson(
   }
   if (session.preferredSource) {
     output['preferredSource'] = session.preferredSource;
+  }
+  if (session.transcriptState) {
+    output['transcriptState'] = session.transcriptState;
   }
   if (session.activeBranchBubbleIds !== undefined) {
     output['activeBranchBubbleIds'] = session.activeBranchBubbleIds;
@@ -149,12 +156,8 @@ export function formatSessionJson(
     }
 
     if (m.toolCalls && m.toolCalls.length > 0) {
-      msg['toolCalls'] = m.toolCalls.map((tc) => ({
-        name: tc.name,
-        status: tc.status,
-        ...(tc.params !== undefined ? { params: tc.params } : {}),
-        ...(tc.result !== undefined ? { result: tc.result } : {}),
-      }));
+      // The shared serializer preserves every defined ToolCall field.
+      msg['toolCalls'] = m.toolCalls.map((tc) => serializeToolCall(tc));
     }
 
     // Add type field when filtering is active

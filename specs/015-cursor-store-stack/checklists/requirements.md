@@ -1,7 +1,7 @@
 # Specification Quality Checklist: Cursor Store 存储栈支持
 
-**Purpose**: Validate specification completeness and quality before proceeding to planning  
-**Created**: 2026-07-11  
+**Purpose**: Validate specification completeness and quality before proceeding to planning
+**Created**: 2026-07-11
 **Feature**: [spec.md](../spec.md)
 
 ## Content Quality

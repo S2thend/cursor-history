@@ -6,7 +6,7 @@
 
 ### `cursor-history list`
 - **New behavior**: In addition to the Composer stack, discovers and lists Store stack sessions (`~/.cursor/chats/` + transcripts).
-- **Cross-stack deduplication**: The same session ID appears only once (fidelity priority: `store` (P2) > `transcript` > composer `workspace-fallback`).
+- **Cross-stack deduplication**: The same session ID appears only once. Composer and Store representations are merged; the runtime-preferred stack supplies canonical order and true-conflict values while non-conflicting fields and unmatched messages from both stacks are preserved.
 - **Source label**: Per-session `source` field.
 - **Degraded label**: Sessions with `source='transcript'` show a degraded indicator (reuses the 012 mechanism).
 - **`--workspaces`**: Store stack workspaces are grouped by their `meta.json.cwd`.
@@ -14,7 +14,7 @@
 ### `cursor-history show <id|index>`
 - Store stack sessions: display user/assistant text in order + `tool_use` (name + input parameters).
 - Missing fields (tokens / per-msg timestamps / tool results [P1]) are rendered as placeholders or omitted, without errors.
-- P2: When `store.db` parsing succeeds, the title + tool results are backfilled.
+- When a usable transcript exists, it is authoritative for conversation messages and `store.db` is not used to backfill transcript tool results. Parsed `store.db` conversation data is a fallback only when no usable transcript is available.
 
 ### `cursor-history search <query>`
 - Covers Store stack session text (user/assistant content).
@@ -27,7 +27,8 @@
 - If `--data-path` points to `~/.cursor` or a subdirectory of it → Store stack resolution takes precedence.
 
 ## `--json` Output Schema Extension
-- The session object gains `source: 'store' | 'transcript' | 'global' | 'workspace-fallback'`.
+- The session object may report `source: 'global' | 'workspace-fallback' | 'transcript' | 'store-complete' | 'store-partial' | 'merged'` (`'store'` remains a legacy compatibility alias).
+- A merged session additionally reports `sources: ('composer' | 'store')[]` and `preferredSource: 'composer' | 'store'`.
 - Store session messages: `toolCalls[].result` (missing in P1), `tokenUsage`, and `model` may be absent.
 - The `list` top level may optionally include `storeStack: { discovered, degraded }` statistics.
 

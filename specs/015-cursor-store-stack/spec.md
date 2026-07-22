@@ -1,8 +1,8 @@
 # Feature Specification: Cursor Store Stack Support
 
-**Feature Branch**: `015-cursor-store-stack`  
-**Created**: 2026-07-11  
-**Status**: Draft  
+**Feature Branch**: `015-cursor-store-stack`
+**Created**: 2026-07-11
+**Status**: Draft
 **Input**: Add Cursor "Store stack" support to cursor-history, fixing Issue #31 (WSL/CLI/agent users see "No chat history found" from `cursor-history list`). Factual basis is in `research.md` in the same directory.
 
 ---
@@ -41,17 +41,18 @@
 
 ---
 
-### User Story 3 - Full fidelity for Store stack sessions (title/tool results/session time) (Priority: P2)
+### User Story 3 - Recover Store sessions when transcripts are unavailable (Priority: P2)
 
-**Journey**: When a Store stack session has a `store.db`, the user can see high-fidelity information beyond the pure transcript layer, such as session title, tool results, and session-level timestamps.
+**Journey**: When a Store stack session has no usable transcript messages but does have a readable `store.db`, the user can still view the recoverable conversation instead of losing the session entirely.
 
-**Why this priority**: The transcript layer (US1/US2) content is incomplete (no title/tool results/time, research §6.3). `store.db` deep parsing fills these in, but depends on blob content-graph parsing (leaf encoding to be finally confirmed), which carries higher implementation complexity and risk, hence P2.
+**Why this priority**: Transcript parsing provides the simplest and most stable primary path. `store.db` blob-graph parsing is valuable as a fallback, but cross-source enrichment would require heuristic correlation and could duplicate messages or attach tool results to the wrong call.
 
-**Independent Test**: For a session containing `store.db`, `show` reveals the title and tool results; for a transcript-only session, it degrades gracefully.
+**Independent Test**: A Store session with usable transcript messages uses those messages without Store DB enrichment; a session with no usable transcript messages falls back to `store.db`; a transcript-only session still works.
 
 **Acceptance Scenarios**:
-1. **Given** a session contains `store.db` and parsing succeeds, **When** running `show`, **Then** display the title + tool results.
-2. **Given** a session has only `meta.json` (`hasConversation:false`, no `store.db`), **When** running `show`, **Then** show a friendly "empty session" notice instead of crashing.
+1. **Given** a session has usable transcript messages and a `store.db`, **When** running `show`, **Then** use the transcript messages as authoritative and do not merge Store DB messages into them.
+2. **Given** a session has no usable transcript messages and `store.db` parsing succeeds, **When** running `show`, **Then** display the recoverable Store DB conversation.
+3. **Given** a session has only `meta.json` (`hasConversation:false`, no `store.db`), **When** running `show`, **Then** show a friendly "empty session" notice instead of crashing.
 
 ---
 
@@ -87,22 +88,22 @@
 ### Functional Requirements
 
 **Discovery & Paths**
-- **FR-001**: The system MUST discover Store stack sessions in addition to the existing Composer stack discovery: scan `~/.cursor/chats/<hash>/<uuid>/{meta.json,store.db}` and `~/.cursor/projects/<sanitized>/agent-transcripts/<uuid>/*.jsonl`.
+- **FR-001**: The system MUST discover Store stack sessions in addition to the existing Composer stack discovery: scan `~/.cursor/chats/<hash>/<uuid>/{meta.json,store.db}` and the observed main-transcript layout `~/.cursor/projects/<sanitized>/agent-transcripts/<uuid>/<uuid>.jsonl`. The legacy flat form `agent-transcripts/<uuid>.jsonl` remains supported. Files under `<uuid>/subagents/` are separate conversations and MUST NOT be merged into the main session.
 - **FR-002**: The system MUST correctly locate the `~/.cursor/` root on Linux/macOS/Windows (including WSL `/mnt/...`), and support `--data-path` override.
-- **FR-003**: The system MUST identify the workspace ownership of Store stack sessions: prefer `meta.json.cwd` (absolute path); when absent, use directory hints + heuristics; if missing, classify as "unassociated workspace".
+- **FR-003**: The system MUST identify Store workspace ownership from a reliable absolute path, preferring `meta.json.cwd`. The lossy `<sanitized>` project directory MAY be retained as provenance but MUST NOT be reverse-decoded into a guessed absolute path. When no reliable path exists, classify the session as "unassociated workspace".
 
 **Transcript Layer Parsing (MVP / P1)**
 - **FR-010**: The system MUST parse the role-nested line format of transcript JSONL and map it to the existing `Message` structure (user/assistant text + tool calls).
 - **FR-011**: The system MUST map `tool_use` content (Store stack tool vocabulary: Read/Write/StrReplace/Grep/Glob/Shell/TodoWrite, etc.) to the existing `ToolCall` representation.
 - **FR-012**: The system MUST tolerate error lines, empty files, and single-line parse failures (skip that line/file, do not abort the whole run).
 
-**store.db Deep Parsing (P2)**
-- **FR-020**: The system SHOULD parse `store.db` (session metadata + blob content graph) to fill in the title, tool results, and session-level time missing from the transcript layer.
-- **FR-021**: When `store.db` parsing fails or is missing, the system MUST degrade to the transcript layer, not block session display.
+**store.db Fallback Parsing (P2)**
+- **FR-020**: When no usable transcript messages exist, the system SHOULD parse `store.db` (session metadata + blob content graph) as a fallback source. It MUST NOT heuristically merge or enrich usable transcript messages with Store DB messages.
+- **FR-021**: When fallback `store.db` parsing fails or is missing, the system MUST preserve the session's accurate empty or degraded state and must not block other sessions.
 
 **Unification & Deduplication**
 - **FR-030**: The system MUST unify Store stack sessions into the same `ChatSession`/`Message` model as the Composer stack, and annotate the source (e.g. `source: store | transcript | composer`).
-- **FR-031**: The system MUST deduplicate across stacks by session ID; the same session is not repeated; source selection follows fidelity priority (complete store.db > transcript).
+- **FR-031**: The system MUST deduplicate across stacks by session ID so the same session is not repeated. Within the Store stack, usable transcript messages are authoritative and `store.db` is fallback-only; Composer/Store conflict resolution follows the explicit cross-stack merge policy.
 - **FR-032**: Store stack source sessions (missing token/per-message time) MUST be presented with a "degraded fidelity" marker, reusing the 012 mechanism.
 
 **Command Coverage**
@@ -112,8 +113,8 @@
 ### Key Entities
 
 - **Store stack session (Session)**: located at `~/.cursor/chats/<hash>/<uuid>/`; identifier = uuid; workspace = `meta.json.cwd`.
-- **Transcript record (Transcript)**: `~/.cursor/projects/<sanitized>/agent-transcripts/<uuid>/*.jsonl`; role-nested lines; provides text + tool calls, missing title/tool results/time/tokens.
-- **store.db**: per-session SQLite, containing session metadata tables + content-addressed blob graph (leaves = messages); provides title/tool results/session-level time (research §5).
+- **Transcript record (Transcript)**: `~/.cursor/projects/<sanitized>/agent-transcripts/<uuid>/<uuid>.jsonl` (plus the supported legacy flat form); role-nested lines; provides text + tool calls, missing title/tool results/time/tokens. Nested `subagents/` transcripts are not part of the main session.
+- **store.db**: per-session SQLite containing session metadata tables + a content-addressed blob graph (leaves = messages); used as a fallback when transcripts contain no usable messages (research §5).
 - **Source identifier (Source)**: distinguishes whether a session/message comes from the Composer stack, the Store stack store.db, or the transcript layer only — determines fidelity presentation.
 
 ---
@@ -137,6 +138,7 @@
 - `<workspace-hash>` = MD5(cwd) holds for the legacy `chats/` variant (research §4.4, precisely verified on two WSL samples).
 - The `store.db` table structure (`blobs`/`meta`) is confirmed by three sources (research §5.1); blob leaf encoding (JSON/protobuf) is an implementation-time final confirmation item and does not block the MVP (P1 does not depend on it).
 - Desktop GUI Cursor mainly uses the Composer stack; the Store stack is mainly produced by CLI/agent — the two stacks may coexist (transcript sidecars span stacks).
+- The read-only `~/.cursor/acp-sessions/` variant is retained as a low-priority compatibility path documented by external evidence; it is not required to satisfy the Issue #31 acceptance scenario.
 - The scope of this feature is limited to **read-only** (list/show/search/export); it does not write to or migrate the Store stack (migration for the Composer stack is already covered by 003/005).
 
 ---
@@ -144,6 +146,5 @@
 ## Out of Scope
 
 - Writing/migrating/deleting sessions in the Store stack (this feature is read-only).
-- The ACP `~/.cursor/acp-sessions/` variant path (research §10.1.4; not seen locally or by the Issue author, low priority, can be extended later).
 - Auxiliary data layers such as `agentKv` / checkpoint / `ai-tracking` (research §3, not the primary session data).
 - Restoring `[REDACTED]` redacted content in transcripts.

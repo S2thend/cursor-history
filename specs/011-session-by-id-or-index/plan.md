@@ -5,7 +5,7 @@
 
 ## Summary
 
-Allow users and library callers to retrieve or export a session by either its list index (existing behavior) or its composer ID. The CLI `show` and `export` commands will accept a single argument that is either a positive integer (index) or a non-numeric string (composer ID). The library will expose a single `getSession(identifier: number | string, config?)` (and equivalent for export) so the same identifier shape works in both interfaces. Error messaging: when the identifier is a composer ID and not found, show a generic message including the invalid ID; when the identifier is an index and not found, keep existing messaging with valid index range. Workspace filter applies to both index and ID lookup. Multi-session export (if present) may accept a list of all indices or all composer IDs (no mixing).
+Allow users and library callers to retrieve or export a session by either its list index (existing behavior) or its composer ID. The CLI `show` and `export` commands accept a single argument that is either a positive integer (index) or a non-numeric string (composer ID). The library exposes a single `getSession(identifier: number | string, config?)` (and equivalent for export) so the same identifier shape works in both interfaces. Error messaging: when the identifier is a composer ID and not found, show a generic message including the invalid ID; when the identifier is an index and not found, keep existing messaging with valid index range. A workspace filter scopes numeric index resolution only; stable ID lookup remains global. Multi-session export (if present) may accept a list of all indices or all composer IDs (no mixing).
 
 ## Technical Context
 
@@ -16,7 +16,7 @@ Allow users and library callers to retrieve or export a session by either its li
 **Target Platform**: Node.js 20 LTS / 22.5+
 **Project Type**: Single project (CLI + library sharing core)
 **Performance Goals**: N/A (identifier resolution is O(n) over session list, same as today)
-**Constraints**: Backward compatible; index-only usage unchanged; workspace scope same for index and ID
+**Constraints**: Backward compatible; index-only usage unchanged; workspace filters scope numeric indices without changing stable-ID lookup
 **Scale/Scope**: Core storage `getSession` signature change; CLI show/export argument parsing; library `getSession`/export overload; CLI error class extension
 
 ## Constitution Check

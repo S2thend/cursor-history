@@ -5,12 +5,14 @@ const mockListSessions = vi.fn();
 const mockGetSession = vi.fn();
 const mockSearchSessions = vi.fn();
 const mockResolveSessionIdentifiers = vi.fn();
+const mockReadContext = { storeSessions: null, summaries: null };
 
 vi.mock('../../src/core/storage.js', () => ({
   listSessions: (...args: unknown[]) => mockListSessions(...args),
   getSession: (...args: unknown[]) => mockGetSession(...args),
   searchSessions: (...args: unknown[]) => mockSearchSessions(...args),
   resolveSessionIdentifiers: (...args: unknown[]) => mockResolveSessionIdentifiers(...args),
+  createSessionReadContext: vi.fn(() => mockReadContext),
   findWorkspaces: vi.fn().mockResolvedValue([]),
   findWorkspaceForSession: vi.fn().mockResolvedValue(null),
   findWorkspaceByPath: vi.fn().mockResolvedValue(null),
@@ -67,6 +69,7 @@ import {
   DatabaseLockedError,
   DatabaseNotFoundError,
   InvalidFilterError,
+  SessionNotFoundError,
 } from '../../src/lib/errors.js';
 
 const now = new Date('2024-01-15T10:00:00Z');
@@ -167,12 +170,35 @@ describe('listSessions', () => {
 // getSession
 // =============================================================================
 describe('getSession', () => {
+  it('resolves a zero-based index inside the configured workspace scope', async () => {
+    mockListSessions.mockResolvedValue([makeCoreSummary()]);
+    mockGetSession.mockResolvedValue(makeCoreSession());
+
+    await getSession(0, { workspace: '/workspace/a' });
+
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      '/cursor/data',
+      undefined,
+      mockReadContext
+    );
+    expect(mockGetSession).toHaveBeenCalledWith(1, '/cursor/data', undefined, mockReadContext);
+  });
+
   it('converts zero-based to one-based index', async () => {
     mockGetSession.mockResolvedValue(makeCoreSession());
 
     await getSession(0);
     // Should call core getSession with index 1
     expect(mockGetSession).toHaveBeenCalledWith(1, expect.anything(), undefined);
+  });
+
+  it('interprets a numeric string as a zero-based index', async () => {
+    mockGetSession.mockResolvedValue(makeCoreSession());
+
+    await getSession('1');
+
+    expect(mockGetSession).toHaveBeenCalledWith(2, expect.anything(), undefined);
   });
 
   it('passes composer ID string through to core getSession', async () => {
@@ -182,6 +208,15 @@ describe('getSession', () => {
 
     expect(mockGetSession).toHaveBeenCalledWith('my-composer-id', expect.anything(), undefined);
     expect(session.id).toBe('my-composer-id');
+  });
+
+  it('keeps direct ID lookup global when workspace is configured', async () => {
+    mockGetSession.mockResolvedValue(makeCoreSession('outside-workspace', 1));
+
+    await getSession('outside-workspace', { workspace: '/workspace/a' });
+
+    expect(mockListSessions).not.toHaveBeenCalled();
+    expect(mockGetSession).toHaveBeenCalledWith('outside-workspace', '/cursor/data', undefined);
   });
 
   it('returns converted Session', async () => {
@@ -212,6 +247,13 @@ describe('getSession', () => {
     expect(session.source).toBe('workspace-fallback');
   });
 
+  it('threads Store transcript state through the library type', async () => {
+    mockGetSession.mockResolvedValue({ ...makeCoreSession(), transcriptState: 'partial' });
+
+    const session = await getSession(0);
+    expect(session.transcriptState).toBe('partial');
+  });
+
   it('threads activeBranchBubbleIds through the library type when defined', async () => {
     mockGetSession.mockResolvedValue({
       ...makeCoreSession(),
@@ -222,10 +264,13 @@ describe('getSession', () => {
     expect(session.activeBranchBubbleIds).toEqual(['m1']);
   });
 
-  it('throws DatabaseNotFoundError when session not found', async () => {
+  it('throws SessionNotFoundError with the caller identifier when session is not found', async () => {
     mockGetSession.mockResolvedValue(null);
 
-    await expect(getSession(99)).rejects.toThrow(DatabaseNotFoundError);
+    await expect(getSession(99)).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      identifier: 99,
+    } satisfies Partial<SessionNotFoundError>);
   });
 
   it('throws InvalidFilterError for invalid message filter', async () => {
@@ -274,6 +319,8 @@ describe('searchSessions', () => {
     const results = await searchSessions('bug');
     expect(results).toHaveLength(1);
     expect(results[0]!.session.id).toBe('c1');
+    expect(mockSearchSessions.mock.calls[0]?.[4]).toBe(mockReadContext);
+    expect(mockGetSession).toHaveBeenCalledWith('c1', '/cursor/data', undefined, mockReadContext);
   });
 
   it('returns empty for no matches', async () => {
@@ -294,6 +341,21 @@ describe('searchSessions', () => {
 // exportSessionToJson / exportSessionToMarkdown
 // =============================================================================
 describe('exportSessionToJson', () => {
+  it('resolves the export target inside the configured workspace scope', async () => {
+    mockListSessions.mockResolvedValue([makeCoreSummary()]);
+    mockGetSession.mockResolvedValue(makeCoreSession());
+
+    await exportSessionToJson(0, { workspace: '/workspace/a' });
+
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      '/cursor/data',
+      undefined,
+      mockReadContext
+    );
+    expect(mockGetSession).toHaveBeenCalledWith(1, '/cursor/data', undefined, mockReadContext);
+  });
+
   it('delegates to core exportToJson', async () => {
     mockGetSession.mockResolvedValue(makeCoreSession());
 
@@ -301,14 +363,40 @@ describe('exportSessionToJson', () => {
     expect(json).toBe('{"test": true}');
   });
 
-  it('throws when session not found', async () => {
+  it('interprets a numeric string export target as a zero-based index', async () => {
+    mockGetSession.mockResolvedValue(makeCoreSession());
+
+    await exportSessionToJson('1');
+
+    expect(mockGetSession).toHaveBeenCalledWith(2, expect.anything(), undefined);
+  });
+
+  it('keeps direct ID export global when workspace is configured', async () => {
+    mockGetSession.mockResolvedValue(makeCoreSession('outside-workspace', 1));
+
+    await exportSessionToJson('outside-workspace', { workspace: '/workspace/a' });
+
+    expect(mockListSessions).not.toHaveBeenCalled();
+    expect(mockGetSession).toHaveBeenCalledWith('outside-workspace', '/cursor/data', undefined);
+  });
+
+  it('throws SessionNotFoundError when session is not found', async () => {
     mockGetSession.mockResolvedValue(null);
 
-    await expect(exportSessionToJson(99)).rejects.toThrow(DatabaseNotFoundError);
+    await expect(exportSessionToJson(99)).rejects.toThrow(SessionNotFoundError);
   });
 });
 
 describe('exportSessionToMarkdown', () => {
+  it('resolves the export target inside the configured workspace scope', async () => {
+    mockListSessions.mockResolvedValue([makeCoreSummary()]);
+    mockGetSession.mockResolvedValue(makeCoreSession());
+
+    await exportSessionToMarkdown(0, { workspace: '/workspace/a' });
+
+    expect(mockGetSession).toHaveBeenCalledWith(1, '/cursor/data', undefined, mockReadContext);
+  });
+
   it('delegates to core exportToMarkdown', async () => {
     mockGetSession.mockResolvedValue(makeCoreSession());
 
@@ -316,10 +404,18 @@ describe('exportSessionToMarkdown', () => {
     expect(md).toBe('# Test');
   });
 
-  it('throws when session not found', async () => {
+  it('interprets a numeric string export target as a zero-based index', async () => {
+    mockGetSession.mockResolvedValue(makeCoreSession());
+
+    await exportSessionToMarkdown('1');
+
+    expect(mockGetSession).toHaveBeenCalledWith(2, expect.anything(), undefined);
+  });
+
+  it('throws SessionNotFoundError when session is not found', async () => {
     mockGetSession.mockResolvedValue(null);
 
-    await expect(exportSessionToMarkdown(99)).rejects.toThrow(DatabaseNotFoundError);
+    await expect(exportSessionToMarkdown(99)).rejects.toThrow(SessionNotFoundError);
   });
 });
 

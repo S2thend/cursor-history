@@ -1,22 +1,22 @@
 # Implementation Plan: Cursor Store Stack Support
 
-**Branch**: `015-cursor-store-stack` | **Date**: 2026-07-11 | **Spec**: [spec.md](./spec.md)  
+**Branch**: `015-cursor-store-stack` | **Date**: 2026-07-11 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `specs/015-cursor-store-stack/spec.md`; factual basis [research.md](./research.md)
 
 ## Summary
 
-Add **read-only** support for the Cursor "Store stack" (`~/.cursor/chats/<MD5(cwd)>/<uuid>/{meta.json,store.db}` + `~/.cursor/projects/<sanitized>/agent-transcripts/<uuid>/*.jsonl`) to cursor-history, fixing Issue #31 (WSL/CLI/agent users getting empty `list` results). Split into two phases: **P1** = read-only transcript JSONL discovery + `list`/`show`/`search`/`export` (text + tool calls), independent of store.db blob parsing, covering 100% of target users' sessions (local 191-file prototype verified zero parse failures); **P2** = `store.db` deep parse to complete title/tool results/session-level time. Add a standalone Store stack backend module, merged with the existing Composer stack pipeline at the `storage` layer, deduplicated across stacks by session ID, reusing 012's `session.source` + degraded warning. **No new dependencies** (reuses node:sqlite driver 006 + `node:crypto` + `node:fs`).
+Add **read-only** support for the Cursor "Store stack" (`~/.cursor/chats/<MD5(cwd)>/<uuid>/{meta.json,store.db}` + canonical `~/.cursor/projects/<sanitized>/agent-transcripts/<uuid>/<uuid>.jsonl`) to cursor-history, fixing Issue #31 (WSL/CLI/agent users getting empty `list` results). Split into two phases: **P1** = read-only transcript JSONL discovery + `list`/`show`/`search`/`export` (text + tool calls), covering 100% of the target user's sessions (local 191-file prototype verified zero parse failures); **P2** = parse `store.db` only as a recovery source when no usable transcript messages exist. Add a standalone Store stack backend module, merged with the existing Composer stack pipeline at the `storage` layer, deduplicated across stacks by session ID, reusing 012's `session.source` + fidelity warning. Store-only sessions remain explicitly marked because store.db does not provide tokens or per-message timestamps. **No new dependencies** (reuses the existing SQLite driver registry + `node:crypto` + `node:fs`).
 
 ## Technical Context
 
-**Language/Version**: TypeScript 5.9+ (strict mode)  
-**Primary Dependencies**: Existing — node:sqlite / better-sqlite3 (pluggable driver 006), commander, picocolors. New — **none** (MD5 via `node:crypto`; JSONL via `node:fs` + `JSON.parse`; all Node built-ins)  
-**Storage**: Read-only — transcript JSONL (`~/.cursor/projects/**/agent-transcripts/*.jsonl`) + `store.db` SQLite (`~/.cursor/chats/**/store.db`, P2)  
-**Testing**: vitest (existing); contract fixtures + redacted real samples  
-**Target Platform**: Linux / macOS / Windows / WSL (`/mnt/...`)  
-**Project Type**: single (CLI + library share `src/core/`)  
-**Performance Goals**: Transcript parsing ≥10k lines/sec (prototype 5246 lines completed instantly); hundreds of sessions `list` <1s  
-**Constraints**: Read-only (no writes to the Store stack), bounded memory (streaming line-by-line JSONL reads), any single file/line parse failure must not abort the whole run (defensive parsing)  
+**Language/Version**: TypeScript 5.9+ (strict mode)
+**Primary Dependencies**: Existing — node:sqlite / better-sqlite3 (pluggable driver 006), commander, picocolors. New — **none** (MD5 via `node:crypto`; JSONL via `node:fs` + `JSON.parse`; all Node built-ins)
+**Storage**: Read-only — transcript JSONL (`~/.cursor/projects/**/agent-transcripts/*.jsonl`) + `store.db` SQLite (`~/.cursor/chats/**/store.db`, P2)
+**Testing**: vitest (existing); contract fixtures + redacted real samples
+**Target Platform**: Linux / macOS / Windows / WSL (`/mnt/...`)
+**Project Type**: single (CLI + library share `src/core/`)
+**Performance Goals**: Transcript parsing ≥10k lines/sec (prototype 5246 lines completed instantly); hundreds of sessions `list` <1s
+**Constraints**: Read-only (no writes to the Store stack); transcript files are synchronously loaded with `readFileSync()` and split into lines, so memory use is proportional to a transcript file; any single file/line parse failure must not abort the whole run (defensive parsing)
 **Scale/Scope**: Personal single-machine; typically hundreds of sessions, single session ≤ several thousand lines
 
 > No NEEDS CLARIFICATION — all technical points are covered by research.md.

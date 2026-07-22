@@ -1,6 +1,8 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll, beforeEach } from 'vitest';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
   detectPlatform,
   getDefaultCursorDataPath,
@@ -10,6 +12,8 @@ import {
   normalizePath,
   pathsEqual,
   getStoreStackRoot,
+  findStoreRoot,
+  resolveStoreRoot,
 } from '../../src/lib/platform.js';
 
 afterEach(() => {
@@ -27,12 +31,85 @@ describe('getStoreStackRoot', () => {
     expect(getStoreStackRoot()).toBe('/tmp/custom-cursor');
   });
 
-  it('honors --data-path only when it looks like a Store root (P1-B regression guard)', () => {
+  it('honors --data-path only when it looks like a Store root', () => {
     vi.unstubAllEnvs();
     // A non-Store path (e.g. Composer workspaceStorage) must NOT shadow ~/.cursor
     expect(getStoreStackRoot('/some/workspaceStorage')).toBe(join(homedir(), '.cursor'));
     // A .cursor-named path IS a Store root
     expect(getStoreStackRoot('/home/u/.cursor')).toBe('/home/u/.cursor');
+  });
+});
+
+describe('resolveStoreRoot', () => {
+  let root: string;
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'ch-store-root-'));
+    mkdirSync(join(root, 'chats'), { recursive: true });
+    mkdirSync(join(root, 'projects'), { recursive: true });
+    mkdirSync(join(root, 'acp-sessions'), { recursive: true });
+  });
+  afterAll(() => {
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  });
+
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('resolves the Store root, chats/projects descendants, and CURSOR_DATA_PATH to the same root', () => {
+    const hash = 'deadbeef';
+    mkdirSync(join(root, 'chats', hash), { recursive: true });
+    mkdirSync(join(root, 'projects', 'sanitized', 'agent-transcripts'), { recursive: true });
+    // The root itself
+    expect(resolveStoreRoot(root)).toBe(root);
+    // A chats descendant
+    expect(resolveStoreRoot(join(root, 'chats', hash))).toBe(root);
+    // A projects descendant
+    expect(resolveStoreRoot(join(root, 'projects', 'sanitized'))).toBe(root);
+    // CURSOR_DATA_PATH pointing at the Store root
+    vi.stubEnv('CURSOR_DATA_PATH', root);
+    expect(resolveStoreRoot()).toBe(root);
+  });
+
+  it('falls back to default ~/.cursor when the path is a Composer workspaceStorage path', () => {
+    const composer = mkdtempSync(join(tmpdir(), 'ch-composer-'));
+    try {
+      expect(resolveStoreRoot(composer)).toBe(join(homedir(), '.cursor'));
+    } finally {
+      rmSync(composer, { recursive: true, force: true });
+    }
+  });
+
+  it('does not mistake an ordinary ancestor with a projects directory for a Store root', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'ch-ordinary-home-'));
+    const project = join(parent, 'projects', 'my-repo');
+    const composer = join(parent, 'AppData', 'Cursor', 'User', 'workspaceStorage');
+    try {
+      mkdirSync(project, { recursive: true });
+      mkdirSync(join(parent, 'chats'), { recursive: true });
+      mkdirSync(composer, { recursive: true });
+      expect(findStoreRoot(project)).toBeNull();
+      expect(findStoreRoot(composer)).toBeNull();
+      expect(resolveStoreRoot(composer)).toBe(join(homedir(), '.cursor'));
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts an explicitly supplied empty direct Store child', () => {
+    const emptyRoot = mkdtempSync(join(tmpdir(), 'ch-empty-store-'));
+    const chats = join(emptyRoot, 'chats');
+    try {
+      mkdirSync(chats);
+      expect(findStoreRoot(chats)).toBe(emptyRoot);
+      expect(resolveStoreRoot(chats)).toBe(emptyRoot);
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -55,7 +132,14 @@ describe('getDefaultCursorDataPath', () => {
 
   it('returns macos path', () => {
     const path = getDefaultCursorDataPath('macos');
-    const expected = join(homedir(), 'Library', 'Application Support', 'Cursor', 'User', 'workspaceStorage');
+    const expected = join(
+      homedir(),
+      'Library',
+      'Application Support',
+      'Cursor',
+      'User',
+      'workspaceStorage'
+    );
     expect(path).toBe(expected);
   });
 
@@ -150,5 +234,11 @@ describe('pathsEqual', () => {
 
   it('normalizes trailing slashes', () => {
     expect(pathsEqual('/a/b/', '/a/b')).toBe(true);
+  });
+
+  it('treats Windows, file-URI, and WSL drive paths as equal', () => {
+    expect(pathsEqual('D:\\repo\\project', '/D:/repo/project')).toBe(true);
+    expect(pathsEqual('D:\\repo\\project', '/mnt/d/repo/project')).toBe(true);
+    expect(pathsEqual('D:\\', '/mnt/d')).toBe(true);
   });
 });

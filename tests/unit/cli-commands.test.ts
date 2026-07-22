@@ -34,6 +34,7 @@ vi.mock('../../src/core/storage.js', () => ({
   searchSessions: (...args: unknown[]) => mockSearchSessions(...args),
   listWorkspaces: (...args: unknown[]) => mockListWorkspaces(...args),
   findWorkspaces: (...args: unknown[]) => mockFindWorkspaces(...args),
+  createSessionReadContext: vi.fn(() => ({ storeSessions: null, summaries: null })),
 }));
 
 const mockListBackups = vi.fn();
@@ -74,6 +75,7 @@ vi.mock('../../src/lib/platform.js', () => ({
   expandPath: (p: string) => p,
   contractPath: (p: string) => p,
   getCursorDataPath: () => '/mock/cursor/data',
+  getStoreStackRoot: () => '/mock/cursor/store',
 }));
 
 vi.mock('node:fs', async () => {
@@ -334,6 +336,24 @@ describe('list command', () => {
 // ==================== SHOW COMMAND ====================
 
 describe('show command', () => {
+  it('resolves a workspace-filtered index against the filtered listing', async () => {
+    mockListSessions.mockResolvedValue(makeSessions());
+    mockGetSession.mockResolvedValue(makeSession());
+
+    const program = createProgram();
+    registerShowCommand(program);
+    await program.parseAsync(['node', 'test', '--workspace', '/workspace/a', 'show', '1']);
+
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
+    const context = mockListSessions.mock.calls[0]![3];
+    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, context);
+  });
+
   it('passes composer ID string to getSession when argument is not all digits', async () => {
     const session = makeSession();
     mockGetSession.mockResolvedValue(session);
@@ -343,11 +363,18 @@ describe('show command', () => {
     await program.parseAsync(['node', 'test', 'show', 'uuid-abc-123-def']);
 
     expect(mockGetSession).toHaveBeenCalledWith('uuid-abc-123-def', undefined, undefined);
-    expect(mockFormatSessionDetail).toHaveBeenCalledWith(
-      session,
-      '/ws',
-      expect.any(Object)
-    );
+    expect(mockFormatSessionDetail).toHaveBeenCalledWith(session, '/ws', expect.any(Object));
+  });
+
+  it('keeps direct ID lookup global when a workspace filter is present', async () => {
+    mockGetSession.mockResolvedValue(makeSession());
+    const program = createProgram();
+    registerShowCommand(program);
+
+    await program.parseAsync(['node', 'test', '--workspace', '/workspace/a', 'show', 'session-b']);
+
+    expect(mockListSessions).not.toHaveBeenCalled();
+    expect(mockGetSession).toHaveBeenCalledWith('session-b', undefined, undefined);
   });
 
   it('shows session detail by index', async () => {
@@ -625,6 +652,57 @@ describe('search command', () => {
 // ==================== EXPORT COMMAND ====================
 
 describe('export command', () => {
+  it('resolves a workspace-filtered index against the filtered listing', async () => {
+    mockListSessions.mockResolvedValue(makeSessions());
+    mockGetSession.mockResolvedValue(makeSession());
+    mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
+    mockExistsSync.mockReturnValue(false);
+
+    const program = createProgram();
+    registerExportCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--workspace',
+      '/workspace/a',
+      'export',
+      '1',
+      '-o',
+      '/tmp/out.md',
+    ]);
+
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
+    const context = mockListSessions.mock.calls[0]![3];
+    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, context);
+  });
+
+  it('keeps direct export by ID global when a workspace filter is present', async () => {
+    mockGetSession.mockResolvedValue(makeSession());
+    mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
+    mockExistsSync.mockReturnValue(false);
+    const program = createProgram();
+    registerExportCommand(program);
+
+    await program.parseAsync([
+      'node',
+      'test',
+      '--workspace',
+      '/workspace/a',
+      'export',
+      'session-b',
+      '-o',
+      '/tmp/out.md',
+    ]);
+
+    expect(mockListSessions).not.toHaveBeenCalled();
+    expect(mockGetSession).toHaveBeenCalledWith('session-b', undefined, undefined);
+  });
+
   it('exports single session to markdown', async () => {
     const session = makeSession();
     mockGetSession.mockResolvedValue(session);
@@ -770,8 +848,41 @@ describe('export command', () => {
     // Use --force to avoid FileExistsError on generated filenames
     await program.parseAsync(['node', 'test', 'export', '--all', '--force', '-o', '/tmp/exports']);
 
-    expect(mockListSessions).toHaveBeenCalledWith({ limit: 0, all: true }, undefined, undefined);
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: undefined },
+      undefined,
+      undefined,
+      expect.objectContaining({ storeSessions: null, summaries: null })
+    );
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledTimes(2);
+  });
+
+  it('limits --all exports to the global workspace filter', async () => {
+    mockListSessions.mockResolvedValue([makeSessions(1)[0]]);
+    mockGetSession.mockResolvedValue(makeSession());
+    mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/workspace/a' }]);
+    mockExistsSync.mockReturnValue(true);
+
+    const program = createProgram();
+    registerExportCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--workspace',
+      '/workspace/a',
+      'export',
+      '--all',
+      '--force',
+      '-o',
+      '/tmp/exports',
+    ]);
+
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
   });
 
   it('exports all sessions exits when no sessions', async () => {

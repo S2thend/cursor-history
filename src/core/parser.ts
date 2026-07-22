@@ -2,13 +2,94 @@
  * Chat data parsing and content extraction
  */
 
-import type { ChatSession, Message, CodeBlock, SearchSnippet, MessageRole } from './types.js';
+import type {
+  ChatSession,
+  Message,
+  CodeBlock,
+  SearchSnippet,
+  MessageRole,
+  ToolCall,
+} from './types.js';
 import type { StoreSession } from './store-stack/types.js';
+
+/**
+ * Serialize a `ToolCall` to a plain object preserving EVERY defined field
+ * (name, status, params, result, error, files). Shared by CLI JSON and export
+ * JSON so tool information is complete and consistent across formats.
+ */
+export function serializeToolCall(tc: ToolCall): Record<string, unknown> {
+  const obj: Record<string, unknown> = { name: tc.name, status: tc.status };
+  if (tc.params !== undefined) obj['params'] = tc.params;
+  if (tc.result !== undefined) obj['result'] = tc.result;
+  if (tc.error !== undefined) obj['error'] = tc.error;
+  if (tc.files !== undefined) obj['files'] = tc.files;
+  return obj;
+}
+
+const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  read: 'Read File',
+  read_file: 'Read File',
+  read_file_v2: 'Read File v2',
+  list_dir: 'List Directory',
+  grep: 'Grep',
+  search: 'Search',
+  codebase_search: 'Search',
+  run_terminal_command: 'Terminal Command',
+  run_terminal_cmd: 'Terminal Command',
+  execute_command: 'Terminal Command',
+  edit_file: 'Edit File',
+  search_replace: 'Search & Replace',
+  edit_file_v2: 'Edit File v2',
+  create_file: 'Create File',
+  write: 'Write File',
+  write_file: 'Write File',
+};
+
+function normalizeToolName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function getToolDisplayName(name: string): string {
+  return TOOL_DISPLAY_NAMES[name.trim().toLowerCase()] ?? name;
+}
+
+function getToolIdentityValues(tc: ToolCall): string[] {
+  const values = [...(tc.files ?? [])];
+  for (const value of Object.values(tc.params ?? {})) {
+    if (typeof value === 'string' && value.length > 0) values.push(value);
+  }
+  return values;
+}
+
+/**
+ * Find the one structured call represented by Composer's embedded `[Tool:]`
+ * text. A merged message may carry additional structured calls, which must not
+ * be hidden just because the content starts with a tool marker.
+ */
+export function findEmbeddedToolCallIndex(content: string, toolCalls: ToolCall[]): number {
+  const header = content.match(/^\[Tool:\s*([^\]]+)\]/);
+  if (!header?.[1]) return -1;
+
+  const embeddedName = normalizeToolName(header[1]);
+  const candidates = toolCalls
+    .map((tc, index) => ({ tc, index }))
+    .filter(({ tc }) =>
+      [tc.name, getToolDisplayName(tc.name)].some(
+        (candidate) => normalizeToolName(candidate) === embeddedName
+      )
+    );
+  if (candidates.length === 0) return -1;
+
+  const identified = candidates.find(({ tc }) =>
+    getToolIdentityValues(tc).some((value) => content.includes(value))
+  );
+  return identified?.index ?? candidates[0]!.index;
+}
 
 /**
  * Map a Store-stack session (transcript / store.db) to the unified ChatSession.
  * Store sessions lack per-message timestamps / tokens / tool-results at the
- * transcript layer; `source` reflects fidelity ('transcript' P1, 'store' P2).
+ * transcript layer; `source` reflects the available Store representation.
  * See specs/015-cursor-store-stack/data-model.md §2.
  */
 export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
@@ -22,12 +103,13 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     index,
     title: ss.title,
     createdAt: ss.createdAt,
-    lastUpdatedAt: ss.createdAt, // transcript layer has no separate updatedAt
+    lastUpdatedAt: ss.lastUpdatedAt,
     messageCount: messages.length,
     messages,
     workspaceId: 'store',
     workspacePath: ss.workspacePath,
     source: ss.source,
+    transcriptState: ss.transcriptState,
   };
 }
 
@@ -138,7 +220,9 @@ function isComposerData(data: RawChatData | ComposerData | ComposerHead[]): data
   return !!data && typeof data === 'object' && !Array.isArray(data) && 'allComposers' in data;
 }
 
-function isComposerArray(data: RawChatData | ComposerData | ComposerHead[]): data is ComposerHead[] {
+function isComposerArray(
+  data: RawChatData | ComposerData | ComposerHead[]
+): data is ComposerHead[] {
   if (!Array.isArray(data) || data.length === 0) {
     return false;
   }
@@ -460,22 +544,54 @@ export function getSearchSnippets(
 }
 
 /**
+ * One readable source line for export/Markdown. Covers merged sessions and
+ * single-source Store sessions; returns '' for plain Composer (global) sessions
+ * where the source is implied.
+ */
+function describeSessionSource(session: ChatSession): string {
+  if (session.source === 'merged') {
+    const stacks = session.sources?.join(' + ') ?? 'composer + store';
+    return `merged from ${stacks} (backbone: ${session.preferredSource ?? 'composer'})`;
+  }
+  switch (session.source) {
+    case 'transcript':
+      return 'Store stack (transcript)';
+    case 'store-complete':
+      return 'Store stack (store.db — complete)';
+    case 'store-partial':
+      return 'Store stack (store.db — partial)';
+    case 'store':
+      return 'Store stack';
+    default:
+      return ''; // 'global' / 'workspace-fallback' — implied, no line
+  }
+}
+
+/**
  * Export a chat session to Markdown format
  */
 export function exportToMarkdown(session: ChatSession, workspacePath?: string): string {
   const lines: string[] = [];
+  // Fall back to the resolved session's own workspacePath when no explicit
+  // path is supplied (Store-only sessions have no Composer workspace metadata).
+  const ws = workspacePath ?? session.workspacePath;
 
   // Header
   lines.push(`# ${session.title ?? 'Untitled Chat'}`);
   lines.push('');
   lines.push(`**Date**: ${session.createdAt.toISOString().split('T')[0]}`);
-  if (workspacePath) {
-    lines.push(`**Workspace**: ${workspacePath}`);
+  lines.push(`**Last Updated**: ${session.lastUpdatedAt.toISOString()}`);
+  if (ws) {
+    lines.push(`**Workspace**: ${ws}`);
   }
   lines.push(`**Messages**: ${session.messageCount}`);
-  if (session.source === 'merged') {
-    const stacks = session.sources?.join(' + ') ?? 'composer + store';
-    lines.push(`**Source**: merged from ${stacks} (backbone: ${session.preferredSource ?? 'composer'})`);
+  // Readable source line for merged and single-source Store sessions.
+  const sourceLine = describeSessionSource(session);
+  if (sourceLine) {
+    lines.push(`**Source**: ${sourceLine}`);
+  }
+  if (session.transcriptState) {
+    lines.push(`**Transcript State**: ${session.transcriptState}`);
   }
   lines.push('');
   lines.push('---');
@@ -498,30 +614,75 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
     lines.push(message.content);
     lines.push('');
     if (message.toolCalls && message.toolCalls.length > 0) {
-      for (const tc of message.toolCalls) {
-        const params = tc.params
-          ? Object.entries(tc.params).map(([k, v]) => `\`${k}\`=${JSON.stringify(v)}`).join(', ')
-          : '';
-        lines.push(`- 🔧 **${tc.name}**${params ? ` — ${params}` : ''}`);
+      const embeddedIndex = findEmbeddedToolCallIndex(message.content, message.toolCalls);
+      const embeddedCall = embeddedIndex >= 0 ? message.toolCalls[embeddedIndex] : undefined;
+      if (embeddedCall) {
+        // Keep Composer's embedded representation, but append structured fields
+        // that the text form cannot reliably preserve. This remains one tool
+        // section and avoids silently dropping result/error/files on export.
+        if (embeddedCall.params !== undefined) {
+          lines.push(`- parameters: ${JSON.stringify(embeddedCall.params)}`);
+        }
+        if (embeddedCall.status && embeddedCall.status !== 'completed') {
+          lines.push(`- status: ${embeddedCall.status}`);
+        }
+        if (embeddedCall.error !== undefined) {
+          lines.push(`- error: ${embeddedCall.error}`);
+        } else if (embeddedCall.result !== undefined) {
+          lines.push(`- result: ${truncateForMd(embeddedCall.result)}`);
+        }
+        if (embeddedCall.files !== undefined) {
+          lines.push(`- files: ${embeddedCall.files.join(', ')}`);
+        }
       }
-      lines.push('');
+      const callsToRender = message.toolCalls.filter((_, index) => index !== embeddedIndex);
+      for (const tc of callsToRender) {
+        const params = tc.params
+          ? Object.entries(tc.params)
+              .map(([k, v]) => `\`${k}\`=${JSON.stringify(v)}`)
+              .join(', ')
+          : '';
+        let line = `- 🔧 **${tc.name}**${params ? ` — ${params}` : ''}`;
+        if (tc.status && tc.status !== 'completed') line += ` _(${tc.status})_`;
+        if (tc.error !== undefined) line += ` — error: ${tc.error}`;
+        else if (tc.result !== undefined) line += ` — result: ${truncateForMd(tc.result)}`;
+        lines.push(line);
+      }
+      if (tc0HasFiles(callsToRender)) {
+        const files = callsToRender.flatMap((tc) => tc.files ?? []);
+        if (files.length > 0) lines.push(`- files: ${files.join(', ')}`);
+      }
+      if (callsToRender.length > 0) lines.push('');
     }
   }
 
   return lines.join('\n');
 }
 
+/** Bounded result snippet for Markdown tool lines. */
+function truncateForMd(s: string, max = 200): string {
+  return s.length <= max ? s : `${s.slice(0, max - 3)}...`;
+}
+
+/** Whether any tool call in the list carries file paths. */
+function tc0HasFiles(toolCalls: ToolCall[]): boolean {
+  return toolCalls.some((tc) => tc.files && tc.files.length > 0);
+}
+
 /**
  * Export a chat session to JSON format
  */
 export function exportToJson(session: ChatSession, workspacePath?: string): string {
+  // Fall back to the resolved session's own workspacePath when no explicit
+  // path is supplied (Store-only sessions have no Composer workspace metadata).
+  const ws = workspacePath ?? session.workspacePath ?? null;
   const exportData: Record<string, unknown> = {
     id: session.id,
     title: session.title,
     createdAt: session.createdAt.toISOString(),
     lastUpdatedAt: session.lastUpdatedAt.toISOString(),
     messageCount: session.messageCount,
-    workspacePath: workspacePath ?? null,
+    workspacePath: ws,
   };
   if (session.source !== undefined) {
     exportData['source'] = session.source;
@@ -531,6 +692,9 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
   }
   if (session.preferredSource) {
     exportData['preferredSource'] = session.preferredSource;
+  }
+  if (session.transcriptState) {
+    exportData['transcriptState'] = session.transcriptState;
   }
 
   // Add session-level usage data if available
@@ -580,12 +744,7 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
     }
 
     if (m.toolCalls && m.toolCalls.length > 0) {
-      msg['toolCalls'] = m.toolCalls.map((tc) => ({
-        name: tc.name,
-        status: tc.status,
-        ...(tc.params !== undefined ? { params: tc.params } : {}),
-        ...(tc.result !== undefined ? { result: tc.result } : {}),
-      }));
+      msg['toolCalls'] = m.toolCalls.map(serializeToolCall);
     }
 
     // Add token usage fields if present (omit if not available)

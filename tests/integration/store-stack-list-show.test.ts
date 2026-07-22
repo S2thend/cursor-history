@@ -83,7 +83,7 @@ describe('Store-stack show / search / export (integration)', () => {
   });
 });
 
-describe('getMessageType — Store structured toolCalls (P1-A regression guard)', () => {
+describe('getMessageType — Store structured toolCalls regression guard', () => {
   it('classifies a Store assistant message with toolCalls as "tool"', () => {
     expect(
       getMessageType({ role: 'assistant', content: 'Reading file.', toolCalls: [{ name: 'Read' }] })

@@ -3,7 +3,7 @@
 **Feature:** `015-cursor-store-stack`
 **Baseline:** PR #32, commit `bf7d91f`
 **Created:** 2026-07-15
-**Status:** Active
+**Status:** Implemented and verified locally (pending commit)
 
 ## Purpose
 
@@ -79,21 +79,41 @@ Store discovery eagerly parses every transcript. `getSession` first lists all se
 
 **Impact:** Work grows close to quadratically with the number of Store sessions and can become slow on real histories containing hundreds of sessions.
 
+### P12 — Modern Store tool calls disappear from `show --tool`
+
+Current Cursor Store databases can place assistant message JSON inside protobuf DAG-node field 4, using `content[].type = "tool-call"`. Tool results are stored as standalone JSON blobs and linked through `toolCallId`. The parser only decodes plain-JSON leaves and the older `tool_use`/`tool_calls` forms, while treating every `role: "tool"` leaf as an orphan.
+
+**Impact:** A real tool execution can disappear entirely from normal output and `show --tool`; the session is also mislabeled as partial because the protobuf assistant node is classified as malformed.
+
+### P13 — The accepted Store fallback contract is described inconsistently
+
+Transcript messages are authoritative whenever they are usable, and `store.db` is only a fallback when no usable transcript messages exist. The feature spec and data model still contain wording that implies Store DB records enrich transcript-backed sessions.
+
+**Impact:** A future implementation may add heuristic cross-source merging, reintroducing duplicate messages or incorrectly paired tool results in a small read-only CLI.
+
+### P14 — Mixed assistant/tool messages cannot match both filters
+
+The formatter assigns every message one exclusive display type. An assistant response containing natural-language text and structured tool calls is labeled only as `tool`, so `--only assistant` hides valid assistant content.
+
+**Impact:** Filtering loses part of a mixed response depending on which single category the formatter chooses.
+
 ## Verification and Documentation Gaps
 
 - PR #32 currently has no associated GitHub Actions run or commit status.
 - Local type checking and linting pass, and the new Store-focused tests pass.
-- The full test suite in the current Windows environment reports 697 passing and 5 failing tests. The failures concern existing custom `dataPath`/`globalStorage` and Windows file-URI behavior; their relationship to this PR has not been established.
-- `git diff --check` reports trailing whitespace in several feature documents.
-- Public README coverage for Store paths and configuration is missing.
-- The implementation reads complete transcript files with `readFileSync().split(...)`, while the plan describes streaming, bounded-memory parsing.
+- The five Windows custom `dataPath`/`globalStorage` and file-URI failures were POSIX-only test expectations; they now use native path/URI construction and pass on Windows and Linux.
+- Windows Node 24, Windows Node 20 fallback, and isolated Ubuntu WSL Node 24 have all passed their respective full suites; exact current counts are recorded in `tasks.md` after the final verification run.
+- `git diff --check` passes for the incremental worktree.
+- Public README documents native Store roots, WSL-mounted Windows Store roots, configuration precedence, and native dependency boundaries.
+- The plan and implementation both describe synchronous whole-file transcript parsing and its proportional memory use.
 
 ## Current Discussion State
 
 | Problem | State |
 |---|---|
-| P01–P04 | Initial direction provided; ready for ordered design and implementation |
-| P05 | Deliberately deferred for further discussion |
-| P06 | Initial architectural direction provided |
-| P07–P08 | Problem confirmed; solution direction not discussed yet |
-| P09–P11 | Retained for later discussion |
+| P01–P02 | Implemented and verified in commit `cb65226` |
+| P03–P11 | Implemented and verified locally (pending commit) — see `solutions.md` |
+| P12 | Implemented and verified against the reporting WSL session (pending commit) |
+| P13–P14 | Implemented and verified locally (pending commit) |
+
+The final hybrid integration fixture also caught a representation mismatch not visible in the direct merge tests: Store preserved a `<user_query>` wrapper and natural-language assistant text, while Composer exposed the inner user text plus a generated `[Tool: ...]` marker. Alignment now treats the wrapper and marker as transport/display metadata when the structured tool signature agrees, so the merged session contains one user turn and one assistant tool turn instead of four duplicates.

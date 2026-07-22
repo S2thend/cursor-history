@@ -3,7 +3,8 @@
 **Feature:** `015-cursor-store-stack`
 **Baseline:** PR #32, commit `bf7d91f`
 **Created:** 2026-07-15
-**Status:** Incremental
+**Updated:** 2026-07-20
+**Status:** Implemented and verified locally (pending commit)
 
 ## Purpose
 
@@ -11,7 +12,7 @@ This document records accepted solutions for the problems in [`problems.md`](./p
 
 ## P01 — Merge Composer and Store representations without silent loss & P02 — Preserve every rendered message
 
-**Status:** Accepted (implementation in progress — pending review)
+**Status:** Implemented and verified in commit `cb65226`
 
 ### Decision
 
@@ -135,9 +136,175 @@ This provenance is additive. Existing single-source values such as `global`, `wo
 - Consecutive messages with identical role and content are each rendered separately and no default `×N` folding marker is produced.
 - `--only tool` preserves and renders every matching structured tool-call message in source-native order.
 
+## P03 — Export the resolved session without re-resolving metadata
+
+**Status:** Implemented and verified locally (pending commit)
+
+Export uses the already resolved `ChatSession` as its authoritative input. It must not independently choose between Composer and Store metadata.
+
+- Resolve the export workspace as `Composer workspace path ?? session.workspacePath`.
+- Make `exportToJson()` and `exportToMarkdown()` fall back to `session.workspacePath` when no explicit workspace path is supplied.
+- Preserve `source`, `sources`, and `preferredSource` in JSON.
+- Include a readable source line in Markdown for both merged and single-source Store sessions.
+- Apply the same behavior to single export, export-all, and library exports.
+
+This completes export consistency without creating a second cross-stack conflict policy.
+
+## P04 — Preserve Store update time as session metadata
+
+**Status:** Implemented and verified locally (pending commit)
+
+`StoreSession` gains `lastUpdatedAt`. For chat metadata, use a valid `updatedAtMs`; otherwise use `createdAt`. ACP or transcript-only sessions use their best session-level filesystem time and fall back to `createdAt`.
+
+When multiple Store metadata locations contribute to one session, retain the latest valid update time. `mapStoreSession()`, list summaries, cross-stack summary merge, JSON output, Markdown output, and library conversion all use this field. It remains session metadata and is never copied onto messages.
+
+## P05 — Separate transcript state from Store DB completeness
+
+**Status:** Implemented and verified locally (pending commit)
+
+Transcript parsing returns both messages and an explicit state:
+
+```ts
+type TranscriptState =
+  | 'missing'
+  | 'parsed'
+  | 'partial'
+  | 'empty'
+  | 'error-only'
+  | 'unsupported'
+  | 'unreadable';
+```
+
+`StoreSession` records `transcriptState` separately from Store DB `completeness`.
+
+- `parsed`: transcript messages remain authoritative.
+- `partial`: usable messages coexist with malformed or unsupported lines; those usable transcript messages remain authoritative and the partial state stays visible as provenance.
+- Only transcript states with no usable messages may use `store.db` as an explicit fallback, while retaining the transcript state for provenance.
+- A valid `system` Store DB leaf is intentionally ignored and does not make the database partial.
+- Missing blobs, malformed leaves, and unmatched tool results remain partial.
+- If no fallback succeeds, the session remains visible with its accurate empty/degraded state.
+
+Message count is no longer used as a proxy for transcript presence.
+
+## P06 — Build workspaces from the resolved session set
+
+**Status:** Implemented and verified locally (pending commit)
+
+`list --workspaces` aggregates the same deduplicated summaries returned by `listSessions({ all: true })`.
+
+- Group by normalized final `workspacePath` after cross-stack resolution.
+- Count a merged session once.
+- Preserve existing Composer workspace metadata when available.
+- Create a stable Store workspace identity for Store-only paths.
+- Keep transcript-only sessions without a path in one explicit unknown workspace bucket.
+- The CLI preflight succeeds when either the Composer root or the resolved Store root exists.
+
+No separate Composer-only workspace discovery result is allowed to define user-visible workspace counts.
+
+## P07 — Normalize every supported Store path through one resolver
+
+**Status:** Implemented and verified locally (pending commit)
+
+Introduce one Store-root resolver used by discovery and conflict-priority detection.
+
+Resolution order:
+
+1. Explicit CLI data path when it identifies a Store tree.
+2. `CURSOR_DATA_PATH` when it identifies a Store tree.
+3. `CURSOR_STORE_ROOT`.
+4. Default `~/.cursor`.
+
+The resolver accepts the Store root itself and descendants under `chats`, `projects`, or `acp-sessions`, then normalizes them back to the Store root. A Composer `workspaceStorage` path does not hide an independently configured or default Store root.
+
+## P08 — Use one complete structured-tool representation
+
+**Status:** Implemented and verified locally (pending commit)
+
+Add shared structured-tool serialization/formatting helpers and use them from human-readable output, CLI JSON, and export JSON.
+
+- Normal `show` remains concise and may truncate long parameters.
+- `show --tool` renders full parameters, status, result, error, and files.
+- JSON preserves every defined `ToolCall` field.
+- Markdown renders structured calls once.
+- When embedded Composer `[Tool: ...]` content already represents a call, Markdown does not append the same structured call again.
+
+This work does not change message order or perform message deduplication.
+
+## P09 — Parse Store DB through the shared SQLite registry
+
+**Status:** Implemented and verified locally (pending commit)
+
+Remove the direct `node:sqlite` dependency from `store-db.ts`.
+
+`parseStoreDb()` becomes asynchronous and performs this flow:
+
+1. Create a temporary destination path.
+2. Use `backupDatabase(source, destination)` for a WAL-consistent snapshot.
+3. Open the snapshot with `openDatabase(destination)`.
+4. Parse through the shared `Database` interface.
+5. Close the database and remove the temporary snapshot in `finally`.
+
+This makes Node 20 use the available `better-sqlite3` fallback and respects `CURSOR_HISTORY_SQLITE_DRIVER`. Store discovery and its callers become asynchronous as required; no parallel duplicate parsing of the same Store root is introduced.
+
+## P10 — Isolate filesystem failures per Store directory
+
+**Status:** Implemented and verified locally (pending commit)
+
+All Store directory enumeration uses safe helpers that catch errors at the narrowest directory boundary, write a debug diagnostic through `debugLogStorage`, and continue with sibling directories.
+
+An unreadable or concurrently removed `agent-transcripts` directory skips only that directory. Valid Store projects and all Composer results remain available.
+
+## P11 — Reuse one Store discovery result per top-level operation
+
+**Status:** Implemented and verified locally (pending commit)
+
+Add an operation-scoped `SessionReadContext` in the core storage layer. It holds the Store sessions discovered for the operation and, when relevant, the already listed summaries.
+
+- `listSessions()` and `getSession()` accept an optional internal context.
+- Direct public calls create a context automatically, preserving current signatures for callers.
+- Search, CLI export-all, library listing, and library export-all create one context and reuse it for every resolved session.
+- Per-session resolution uses the known summary and cached Store session instead of calling `listSessions()` and `discoverStoreSessions()` again.
+- Use session IDs inside loops rather than re-resolving mutable list indexes.
+
+The required result is one Store corpus discovery per top-level operation. Composer database reads may remain per session in this increment.
+
+## Implementation Chain
+
+The remaining work is intentionally grouped by shared files and dependency direction:
+
+1. **Path and discovery safety:** P07 + P10.
+2. **Store data foundation:** P09 + P05 + P04.
+3. **Operation-scoped resolution:** P11 + P06.
+4. **Resolved export:** P03.
+5. **Tool output completeness:** P08.
+
+P09 precedes P11 so the context is designed around the final asynchronous Store discovery API. P05 and P04 are completed in the same Store model pass. P03 consumes the final resolved session and therefore follows P01, P06, and P11.
+
+### P12 — Decode modern Store tool records
+
+**Status:** Implemented and verified against the reporting WSL session (pending commit).
+
+The Store DB reader now supports both legacy plain-JSON leaves and current protobuf assistant nodes whose field 4 contains the message JSON. It recognizes `tool-call` blocks, preserves their arguments, indexes standalone `tool-result` blobs, and joins results strictly by `toolCallId`. A keyed result leaf consumed by a matching call is not classified as an orphan; unkeyed or unmatched results remain unattached and keep the database partial.
+
+### P13 — Keep Store DB as a fallback-only source
+
+**Status:** Implemented and verified locally (pending commit)
+
+Transcript messages remain authoritative whenever parsing yields usable messages. `store.db` is consulted only when no usable transcript messages are available. The feature spec, data model, and README will be aligned with that behavior; transcript and Store messages will not be heuristically merged or enriched.
+
+### P14 — Use category membership for message filtering
+
+**Status:** Implemented and verified locally (pending commit)
+
+Display formatting may retain one primary label, but filter matching becomes multi-category. A natural-language assistant response with structured tool calls matches both `assistant` and `tool`; a tool-only marker or structured tool-only message matches only `tool`. Existing user, thinking, and error behavior remains unchanged.
+
 ## Solution Status
 
 | Problem | Solution status |
 |---|---|
-| P01–P02 | Accepted (in progress) |
-| P03–P11 | Not recorded yet |
+| P01–P02 | Implemented and verified (`cb65226`) |
+| P03–P11 | Implemented and verified locally (pending commit) — Windows, Node 20 fallback, and isolated WSL gates are recorded in `tasks.md`; the five former Windows path failures are fixed |
+| P12 | Implemented and verified on the reporting WSL Store session: `Grep` params/result/files render, both SQLite drivers pass, and Store completeness is `complete` |
+| P13–P14 | Implemented and verified locally (pending commit) |
+
+Hybrid end-to-end coverage now uses an actual temporary Composer `globalStorage/state.vscdb` together with the checked-in Store transcript fixture. Matching strips an enclosing Store `<user_query>` transport wrapper and treats a Composer `[Tool: ...]` display marker as equivalent to the same structured Store tool turn, preserving the Store natural-language text while retaining Composer metadata.

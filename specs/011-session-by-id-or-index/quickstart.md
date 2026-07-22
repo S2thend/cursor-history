@@ -55,7 +55,7 @@
 
 ## Step 6: Tests
 
-- **Core**: getSession with string ID (valid / invalid); getSession with number (unchanged); workspace filter applied for ID lookup.
+- **Core**: getSession with string ID (valid / invalid); getSession with number (unchanged); workspace filter applied only to numeric index lookup; stable ID lookup remains global.
 - **CLI**: show with ID (valid / invalid); show with index (unchanged); export with ID; error message content for ID vs index.
 - **Library**: getSession(0), getSession(id); export by ID; SessionNotFoundError thrown with correct identifier.
 

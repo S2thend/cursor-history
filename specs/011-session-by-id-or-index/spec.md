@@ -12,7 +12,7 @@
 - Q: Are "composer ID" and "session ID" the same identifier or two different identifiers for lookup? → A: One canonical identifier per session; "composer ID" and "session ID" mean the same value (two names for it).
 - Q: When session is not found, should the error always include the valid index range or be generic? → A: When a composer ID is provided: generic session-not-found message including the invalid composer ID. When an index is provided: use existing messaging that includes the valid index range.
 - Q: Library API shape: one function (index or ID) or separate functions? → A: Single function that accepts either type (e.g. getSession(identifier: number | string)).
-- Q: When resolving by composer ID, search only current workspace or all workspaces? → A: Match existing behavior for index: if a workspace filter is applied, apply the same filter when resolving by ID.
+- Q: When resolving by composer ID, search only current workspace or all workspaces? → A: Search globally by stable ID. A workspace filter scopes numeric indices only; direct ID lookup remains unchanged.
 - Q: Should multi-session export accept a mix of indices and IDs? → A: If multi-session export exists, allow the list to support either indices or composer IDs but no mixing; otherwise no change.
 
 ## User Scenarios & Testing *(mandatory)*
@@ -80,7 +80,7 @@ A developer or script uses the library API to fetch a session via a single funct
 - **FR-001**: The show command MUST accept either a session index (positive integer) or a composer ID and display that session’s conversation.
 - **FR-002**: The export command MUST accept either a session index or a composer ID and export that session to the requested format. If multi-session export is supported, a single invocation MAY accept a list of identifiers that are either all indices or all composer IDs (no mixing within one list).
 - **FR-003**: When the user provides a numeric value (e.g. "1", "2"), the system MUST interpret it as an index (position in the list), not as an ID.
-- **FR-004**: When the user provides a non-numeric identifier that matches a known composer ID, the system MUST retrieve that session by ID. When a workspace filter is in effect, composer ID lookup MUST use the same workspace scope as index lookup (same as existing list/show behavior).
+- **FR-004**: When the user provides a non-numeric identifier that matches a known composer ID, the system MUST retrieve that session globally by ID. Workspace filters MUST scope numeric index resolution without changing direct ID lookup.
 - **FR-005**: The library API MUST expose a single retrieval function that accepts either an index (e.g. zero-based number) or a composer ID (string), consistent with CLI behavior.
 - **FR-006**: The library API MUST allow exporting a session by the same single-identifier shape (index or composer ID) when export is supported.
 - **FR-007**: When an identifier does not match any session, the system MUST report a session-not-found error and MUST NOT return or export a different session. When the user provided a composer ID: the message MUST be a generic session-not-found message that includes the invalid composer ID. When the user provided an index: the message MUST use existing behavior that includes the valid index range.
@@ -97,7 +97,7 @@ A developer or script uses the library API to fetch a session via a single funct
 - There is one canonical identifier per session (referred to as composer ID); this feature accepts that ID for lookup alongside index.
 - Index ordering (e.g. 1 = first/most recent) and ID format are already defined by the existing product; this feature only adds ID as an accepted input alongside index.
 - Export formats (e.g. Markdown, JSON) and options do not change; only the way the target session is specified (index or ID).
-- The same distinction between index and ID applies in both CLI and library (numeric → index, non-numeric → ID). When a workspace filter is configured, resolving by composer ID uses the same workspace scope as resolving by index.
+- The same distinction between index and ID applies in both CLI and library (numeric → workspace-scoped index when configured, non-numeric → stable global ID).
 
 ## Success Criteria *(mandatory)*
 

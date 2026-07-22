@@ -40,11 +40,11 @@ type TranscriptPart =
 |---|---|---|
 | id | string | uuid = transcript file name = chats/<hash>/<uuid>/ directory name |
 | workspacePath | string | `meta.json.cwd` |
-| title | string \| null | P1: null; P2: store.db `meta.name` |
-| createdAt | Date | `meta.json.createdAtMs`; P2 may use store.db |
-| messages | Message[] | Transcript parsing; P2 may be enhanced by store.db |
+| title | string \| null | Transcript/meta value; Store DB value only on fallback |
+| createdAt | Date | `meta.json.createdAtMs`; Store DB value only when metadata is unavailable on fallback |
+| messages | Message[] | Usable transcript messages are authoritative; otherwise Store DB fallback messages |
 | storeDbPath? | string | `chatDir/store.db` |
-| source | 'transcript' \| 'store' | P2 store.db parsed successfully upgrades to 'store' |
+| source | Store source variant | `'transcript'` for usable JSONL; `'store-complete'`/`'store-partial'` when Store DB supplies fallback conversation data; `'store'` for metadata-only compatibility |
 
 ---
 
@@ -55,7 +55,7 @@ type TranscriptPart =
 | `role` | `role` | Direct (user/assistant) |
 | `content[type=text].text` | `content` | Multiple text parts concatenated in order |
 | `content[type=tool_use]` | `toolCalls[]` | `{ name, params: input, status: 'completed' }`; no `result`/`id` (absent at transcript layer) |
-| — | `timestamp` | Transcript layer has no per-msg time; use session `createdAt` as placeholder or null |
+| — | `timestamp` | Transcript layer has no directly stored per-message time; leave the field absent |
 | — | `tokenUsage`/`model`/`thinking` | `undefined` (absent at transcript layer) |
 
 > A single TranscriptLine containing multiple text + tool_use parts: text is concatenated into `content`, each tool_use becomes its own `ToolCall`, all attached to the same Message.
@@ -67,11 +67,22 @@ type TranscriptPart =
 `ChatSession.source` currently (012): `'global' | 'workspace-fallback'`. **Extend**:
 
 ```ts
-source?: 'global' | 'workspace-fallback' | 'store' | 'transcript';
+source?:
+  | 'global'
+  | 'workspace-fallback'
+  | 'transcript'
+  | 'store'
+  | 'store-complete'
+  | 'store-partial'
+  | 'merged';
 ```
 
-- `'store'`: Store stack + store.db parsed successfully (highest Store stack fidelity, P2)
+- `'store-complete'` / `'store-partial'`: Store DB supplied fallback conversation data because no usable transcript messages existed
+- `'store'`: metadata-only Store compatibility state
 - `'transcript'`: Transcript layer only (degraded fidelity, P1) → triggers degraded warning (reuses 012 mechanism)
+- `'merged'`: same stable ID resolved from both Composer and Store stacks
+
+Store DB parsing does not upgrade or enrich a session whose transcript already contains usable messages. This avoids heuristic message correlation, duplicate turns, and incorrect tool-result attachment.
 
 ---
 

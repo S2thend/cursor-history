@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 // Mock storage functions used by migrate
 const mockFindWorkspaceForSession = vi.fn();
@@ -20,7 +22,9 @@ vi.mock('../../src/core/storage.js', () => ({
 // Mock platform functions
 vi.mock('../../src/lib/platform.js', () => ({
   getGlobalStoragePath: (customDataPath?: string) =>
-    customDataPath ? customDataPath.replace(/\/[^/]+$/, '/globalStorage') : '/default/globalStorage',
+    customDataPath
+      ? customDataPath.replace(/\/[^/]+$/, '/globalStorage')
+      : '/default/globalStorage',
   normalizePath: (p: string) => p.replace(/\/+$/, ''),
   pathsEqual: (a: string, b: string) => a === b,
 }));
@@ -286,7 +290,9 @@ describe('migrateSession', () => {
     });
 
     expect(result.success).toBe(true);
-    const destComposers = mockUpdateComposerData.mock.calls[1]![1] as Array<Record<string, unknown>>;
+    const destComposers = mockUpdateComposerData.mock.calls[1]![1] as Array<
+      Record<string, unknown>
+    >;
     expect(destComposers[0]?.['name']).toBe('Hydrated Session');
     expect(destComposers[0]?.['createdAt']).toBe(1777583348738);
     expect(destComposers[0]?.['lastUpdatedAt']).toBe(1777584322685);
@@ -328,10 +334,7 @@ describe('migrateSession', () => {
             if (sql.includes('SELECT 1 FROM cursorDiskKV') && key.startsWith('composerData:')) {
               return { 1: 1 };
             }
-            if (
-              sql.includes('SELECT value FROM cursorDiskKV') &&
-              key.startsWith('composerData:')
-            ) {
+            if (sql.includes('SELECT value FROM cursorDiskKV') && key.startsWith('composerData:')) {
               return {
                 value: JSON.stringify({ name: 'Global Only', createdAt: 1, lastUpdatedAt: 2 }),
               };
@@ -354,7 +357,9 @@ describe('migrateSession', () => {
     expect(result.success).toBe(true);
     // Source has no composer entry to remove, so updateComposerData runs only for dest.
     expect(mockUpdateComposerData).toHaveBeenCalledTimes(1);
-    const destComposers = mockUpdateComposerData.mock.calls[0]![1] as Array<Record<string, unknown>>;
+    const destComposers = mockUpdateComposerData.mock.calls[0]![1] as Array<
+      Record<string, unknown>
+    >;
     expect(destComposers[0]?.['composerId']).toBe('global-sid');
     expect(destComposers[0]?.['name']).toBe('Global Only');
   });
@@ -635,12 +640,23 @@ describe('migrateWorkspace', () => {
 // =============================================================================
 describe('migrateSession - global storage path transformation (copy mode)', () => {
   it('copy mode: uses the sibling globalStorage for a custom dataPath', async () => {
+    const expectedGlobalDbPath = join('/custom/globalStorage', 'state.vscdb');
     mockFindWorkspaceForSession.mockResolvedValue({
-      workspace: { id: 'ws1', path: '/source/project', dbPath: '/custom/workspaceStorage/ws1/state.vscdb', sessionCount: 1 },
+      workspace: {
+        id: 'ws1',
+        path: '/source/project',
+        dbPath: '/custom/workspaceStorage/ws1/state.vscdb',
+        sessionCount: 1,
+      },
       dbPath: '/custom/workspaceStorage/ws1/state.vscdb',
     });
     mockFindWorkspaceByPath.mockResolvedValue({
-      workspace: { id: 'dest-ws', path: '/dest/project', dbPath: '/custom/workspaceStorage/ws2/state.vscdb', sessionCount: 0 },
+      workspace: {
+        id: 'dest-ws',
+        path: '/dest/project',
+        dbPath: '/custom/workspaceStorage/ws2/state.vscdb',
+        sessionCount: 0,
+      },
       dbPath: '/custom/workspaceStorage/ws2/state.vscdb',
     });
 
@@ -653,9 +669,7 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
       })
       .mockReturnValueOnce({ composers: [], isNewFormat: true, rawData: {} });
 
-    vi.mocked(existsSync).mockImplementation(
-      (p) => String(p) === '/custom/globalStorage/state.vscdb'
-    );
+    vi.mocked(existsSync).mockImplementation((p) => String(p) === expectedGlobalDbPath);
 
     vi.mocked(BetterSqlite3).mockImplementation(function () {
       return {
@@ -674,7 +688,7 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
     expect(result.success).toBe(true);
     const openedPaths = vi.mocked(BetterSqlite3).mock.calls.map((call) => String(call[0]));
     expect(openedPaths.length).toBeGreaterThan(0);
-    expect(openedPaths.every((path) => path === '/custom/globalStorage/state.vscdb')).toBe(true);
+    expect(openedPaths.every((path) => path === expectedGlobalDbPath)).toBe(true);
   });
 
   it('copy mode: transforms file paths in global storage', async () => {
@@ -801,10 +815,11 @@ describe('migrateSession - global storage path transformation (copy mode)', () =
     });
     expect(composerInsertCall).toBeDefined();
     const insertedComposer = JSON.parse(String(composerInsertCall![1]));
-    expect(insertedComposer.workspaceUri).toBe('file:///dest/project');
+    const expectedDestinationUri = pathToFileURL('/dest/project').href;
+    expect(insertedComposer.workspaceUri).toBe(expectedDestinationUri);
     expect(insertedComposer.workspaceIdentifier.id).toBe('dest-ws');
     expect(insertedComposer.workspaceIdentifier.uri.fsPath).toBe('/dest/project');
-    expect(insertedComposer.workspaceIdentifier.uri.external).toBe('file:///dest/project');
+    expect(insertedComposer.workspaceIdentifier.uri.external).toBe(expectedDestinationUri);
 
     // Check bubble insert has transformed paths
     // run() is called as run(key, value) - find the call where key starts with 'bubbleId:'
@@ -1120,10 +1135,11 @@ describe('migrateSession - global storage path transformation (move mode)', () =
     });
     expect(composerUpdateCall).toBeDefined();
     const updatedComposer = JSON.parse(String(composerUpdateCall![0]));
-    expect(updatedComposer.workspaceUri).toBe('file:///dest/project');
+    const expectedDestinationUri = pathToFileURL('/dest/project').href;
+    expect(updatedComposer.workspaceUri).toBe(expectedDestinationUri);
     expect(updatedComposer.workspaceIdentifier.id).toBe('dest-ws');
     expect(updatedComposer.workspaceIdentifier.uri.fsPath).toBe('/dest/project');
-    expect(updatedComposer.workspaceIdentifier.uri.external).toBe('file:///dest/project');
+    expect(updatedComposer.workspaceIdentifier.uri.external).toBe(expectedDestinationUri);
   });
 });
 

@@ -13,6 +13,10 @@ export type MessageRole = 'user' | 'assistant';
  */
 export type SessionStackSource = 'composer' | 'store';
 
+/** Parse state of the Store transcript associated with a resolved session. */
+export type TranscriptState =
+  'missing' | 'parsed' | 'partial' | 'empty' | 'error-only' | 'unsupported' | 'unreadable';
+
 /**
  * Origin of a resolved message after cross-stack merge.
  * - 'composer' / 'store': the message came from only that stack
@@ -26,9 +30,7 @@ export type MessageSource = 'composer' | 'store' | 'both';
  * or session-level times are NEVER tagged (and never copied onto messages).
  */
 export type MessageTimestampSource =
-  | 'composer-created-at'
-  | 'composer-timing'
-  | 'store-turn-timing';
+  'composer-created-at' | 'composer-timing' | 'store-turn-timing';
 
 /**
  * Valid message type filter values for filtering displayed messages
@@ -105,6 +107,8 @@ export interface ChatSession {
    */
   sources?: SessionStackSource[];
   preferredSource?: SessionStackSource;
+  /** Store transcript state, retained even when store.db supplies the messages. */
+  transcriptState?: TranscriptState;
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
   /** Ordered bubble IDs of the current active conversation branch */
@@ -204,6 +208,8 @@ export interface ChatSessionSummary {
   /** Cross-stack provenance (present only when `source === 'merged'`). */
   sources?: SessionStackSource[];
   preferredSource?: SessionStackSource;
+  /** Store transcript state when the Store stack contributes to this session. */
+  transcriptState?: TranscriptState;
 }
 
 /**

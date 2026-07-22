@@ -2,7 +2,7 @@
  * Platform detection and Cursor data path resolution
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { Platform } from '../core/types.js';
@@ -37,11 +37,7 @@ export function isWSL(): boolean {
     cachedIsWsl = false;
     return false;
   }
-  if (
-    process.env['WSL_DISTRO_NAME'] ||
-    process.env['WSLENV'] ||
-    process.env['WSL_INTEROP']
-  ) {
+  if (process.env['WSL_DISTRO_NAME'] || process.env['WSLENV'] || process.env['WSL_INTEROP']) {
     cachedIsWsl = true;
     return true;
   }
@@ -60,17 +56,18 @@ export function isWSL(): boolean {
  * environment variable is introduced.
  *
  * Priority:
- * 1. An explicit `--data-path` (or `CURSOR_DATA_PATH`) that is a Store root → 'store';
- *    an explicit path that is NOT a Store root (a Composer workspaceStorage root) → 'composer'.
+ * 1. An explicit `--data-path` (or `CURSOR_DATA_PATH`) that identifies a Store
+ *    tree (root or descendant) → 'store'; an explicit path that is NOT a Store
+ *    tree (a Composer workspaceStorage root) → 'composer'.
  * 2. An explicit `CURSOR_STORE_ROOT` pointing somewhere other than the default
  *    ~/.cursor → 'store' (the operator deliberately redirected the Store stack).
  * 3. WSL → 'store' (accepted policy); otherwise (Windows / macOS / native Linux) → 'composer'.
  */
 export function detectPreferredStackSource(customDataPath?: string): 'composer' | 'store' {
   // 1. Explicit --data-path / CURSOR_DATA_PATH selects its tree.
-  const selected = customDataPath ?? process.env['CURSOR_DATA_PATH'];
-  if (selected) {
-    return isStoreRoot(selected) ? 'store' : 'composer';
+  const explicit = customDataPath ?? process.env['CURSOR_DATA_PATH'];
+  if (explicit) {
+    return findStoreRoot(explicit) ? 'store' : 'composer';
   }
   // 2. Explicit CURSOR_STORE_ROOT (not the default ~/.cursor) selects Store.
   const storeRootEnv = process.env['CURSOR_STORE_ROOT'];
@@ -179,13 +176,21 @@ export function normalizePath(filePath: string): string {
 }
 
 /**
- * Compare two paths for equality (case-sensitive on Unix, case-insensitive on Windows)
+ * Compare two paths for equality across native Windows, file-URI, and WSL spellings.
  */
 export function pathsEqual(path1: string, path2: string): boolean {
-  const normalize = (p: string) => normalizePath(p).replace(/\\/g, '/');
-  const n1 = normalize(path1);
-  const n2 = normalize(path2);
-  return process.platform === 'win32' ? n1.toLowerCase() === n2.toLowerCase() : n1 === n2;
+  const normalize = (p: string): string => {
+    let normalized = normalizePath(p).replace(/\\/g, '/');
+    if (/^\/[a-z]:\//i.test(normalized)) normalized = normalized.slice(1);
+    const wsl = normalized.match(/^\/mnt\/([a-z])(?:\/(.*))?$/i);
+    if (wsl) normalized = `${wsl[1]}:/${wsl[2] ?? ''}`;
+    if (/^[a-z]:$/i.test(normalized)) normalized += '/';
+    if (/^[a-z]:\//i.test(normalized) || process.platform === 'win32') {
+      normalized = normalized.toLowerCase();
+    }
+    return normalized;
+  };
+  return normalize(path1) === normalize(path2);
 }
 
 /**
@@ -196,19 +201,118 @@ export function pathsEqual(path1: string, path2: string): boolean {
  * Same path on Linux/macOS/Windows (and WSL): `~/.cursor`.
  * The Composer stack (`workspaceStorage`/`globalStorage`) lives elsewhere
  * (see `getDefaultCursorDataPath`); the two stacks are independent.
+ *
+ * Delegates to `resolveStoreRoot()` so every supported Store path form (explicit
+ * root, `chats`/`projects`/`acp-sessions` descendant, `CURSOR_DATA_PATH`,
+ * `CURSOR_STORE_ROOT`, default) resolves through ONE resolver.
  */
 export function getStoreStackRoot(customDataPath?: string): string {
-  // Honor --data-path ONLY when it actually looks like a Store root (contains
-  // chats/ and/or projects/, or is named '.cursor'). Otherwise --data-path is
-  // the Composer workspaceStorage root and must NOT shadow the real Store root
-  // (CURSOR_STORE_ROOT / ~/.cursor) — otherwise Composer users lose their
-  // Store sessions when passing --data-path.
-  if (customDataPath && isStoreRoot(customDataPath)) return customDataPath;
-  return process.env['CURSOR_STORE_ROOT'] ?? join(homedir(), '.cursor');
+  return resolveStoreRoot(customDataPath);
+}
+
+const STORE_CHILDREN = ['chats', 'projects', 'acp-sessions'] as const;
+
+/** Best-effort directory listing used only for Store-shape detection. */
+function listSubdirs(p: string): string[] {
+  try {
+    return readdirSync(p, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+/** Does a single Store child contain a Store-specific layout? */
+function hasStoreStructure(root: string): boolean {
+  const chats = join(root, 'chats');
+  for (const hash of listSubdirs(chats)) {
+    for (const session of listSubdirs(join(chats, hash))) {
+      const sessionDir = join(chats, hash, session);
+      if (existsSync(join(sessionDir, 'meta.json')) || existsSync(join(sessionDir, 'store.db'))) {
+        return true;
+      }
+    }
+  }
+
+  const projects = join(root, 'projects');
+  for (const project of listSubdirs(projects)) {
+    if (existsSync(join(projects, project, 'agent-transcripts'))) return true;
+  }
+
+  const acp = join(root, 'acp-sessions');
+  for (const session of listSubdirs(acp)) {
+    const sessionDir = join(acp, session);
+    if (existsSync(join(sessionDir, 'meta.json')) || existsSync(join(sessionDir, 'store.db'))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Heuristic: does this path look like a Cursor Store stack root? */
 function isStoreRoot(p: string): boolean {
   if (basename(p) === '.cursor') return true;
-  return existsSync(join(p, 'chats')) || existsSync(join(p, 'projects'));
+  const childCount = STORE_CHILDREN.filter((child) => existsSync(join(p, child))).length;
+  return childCount >= 2 || hasStoreStructure(p);
+}
+
+/** Stronger proof required when deriving a root from a deep descendant. */
+function isProvenStoreRoot(p: string): boolean {
+  return basename(p) === '.cursor' || hasStoreStructure(p);
+}
+
+/**
+ * Find a Store root from the root itself or an explicit descendant beneath
+ * `chats`, `projects`, or `acp-sessions`. Merely having an unrelated directory
+ * with one of those common names is not enough to classify an ancestor as a
+ * Store root.
+ */
+export function findStoreRoot(p: string): string | null {
+  if (isStoreRoot(p)) return p;
+  // An explicitly supplied direct Store child is unambiguous even when the
+  // Store is new and that directory is still empty.
+  if (STORE_CHILDREN.includes(basename(p) as (typeof STORE_CHILDREN)[number])) {
+    return dirname(p);
+  }
+
+  let cur = p;
+  for (let depth = 0; depth < 8 && cur; depth++) {
+    if (basename(cur) === '.cursor') return cur;
+    if (STORE_CHILDREN.includes(basename(cur) as (typeof STORE_CHILDREN)[number])) {
+      const candidate = dirname(cur);
+      if (isProvenStoreRoot(candidate)) return candidate;
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break; // reached filesystem root
+    cur = parent;
+  }
+  return null;
+}
+
+/**
+ * The single Store-root resolver used by discovery and conflict-priority
+ * detection. Resolution order:
+ *   1. Explicit CLI data path when it identifies a Store tree (root or a
+ *      descendant under chats/projects/acp-sessions, normalized back to root).
+ *   2. `CURSOR_DATA_PATH` when it identifies a Store tree.
+ *   3. `CURSOR_STORE_ROOT`.
+ *   4. Default `~/.cursor`.
+ * A Composer `workspaceStorage` path matches none of the Store checks and is
+ * skipped, so it never shadows an independently configured or default Store root.
+ */
+export function resolveStoreRoot(customDataPath?: string): string {
+  const fromCustom = customDataPath ? findStoreRoot(customDataPath) : null;
+  if (fromCustom) return fromCustom;
+
+  const envData = process.env['CURSOR_DATA_PATH'];
+  if (envData) {
+    const fromEnv = findStoreRoot(envData);
+    if (fromEnv) return fromEnv;
+  }
+
+  const storeEnv = process.env['CURSOR_STORE_ROOT'];
+  if (storeEnv) return findStoreRoot(storeEnv) ?? storeEnv;
+
+  return join(homedir(), '.cursor');
 }

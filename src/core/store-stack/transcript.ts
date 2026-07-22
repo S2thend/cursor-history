@@ -3,56 +3,95 @@
  * See specs/015-cursor-store-stack/research.md §6 / data-model.md §2.
  *
  * Each line: {"role":"user"|"assistant","message":{"content":[{"type":"text"|"tool_use",...}]}}
- * Error lines {"type":"error",...} are skipped. Unknown part types are ignored
- * (forward compatibility). Per-message timestamps are NOT present in transcripts;
- * messages therefore carry NO timestamp rather than a session-level fallback.
+ * Error lines {"type":"error",...} are recognized but do not yield messages.
+ * Unknown part types are ignored (forward compatibility).
+ *
+ * Per-message timestamps are NOT present in transcripts; messages carry NO
+ * timestamp rather than a session-level fallback.
+ *
+ * Returns an explicit TranscriptState alongside the messages so callers
+ * no longer infer transcript presence from message count.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { Message, MessageRole, ToolCall } from '../types.js';
+import type { TranscriptState } from './types.js';
+
+export interface TranscriptParseResult {
+  messages: Message[];
+  state: TranscriptState;
+}
 
 /**
- * Parse a transcript JSONL file into Messages.
- * Returns [] for missing/unreadable files (defensive — never throws).
+ * Parse a transcript JSONL file into messages plus an explicit state.
+ * Never throws — unreadable/missing files return their degraded state.
  */
-export function parseTranscriptFile(filePath: string): Message[] {
+export function parseTranscriptFile(filePath: string): TranscriptParseResult {
   let raw: string;
   try {
     raw = readFileSync(filePath, 'utf8');
-  } catch {
-    return [];
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    const state: TranscriptState =
+      code === 'ENOENT' || !existsSync(filePath) ? 'missing' : 'unreadable';
+    return { messages: [], state };
   }
 
   const messages: Message[] = [];
+  let errorLines = 0;
+  let unsupportedLines = 0;
+  let malformedLines = 0;
+  let nonEmptyLines = 0;
 
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
+    nonEmptyLines++;
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(trimmed);
     } catch {
-      continue; // unparseable line → skip (defensive parsing)
+      malformedLines++;
+      continue;
     }
 
-    const msg = mapLine(parsed);
-    if (msg) messages.push(msg);
+    const result = mapLine(parsed);
+    if (result.kind === 'message') {
+      messages.push(result.message);
+    } else if (result.kind === 'error') {
+      errorLines++;
+    } else {
+      unsupportedLines++;
+    }
   }
 
-  return messages;
+  let state: TranscriptState;
+  if (messages.length > 0) {
+    state = malformedLines > 0 || unsupportedLines > 0 || errorLines > 0 ? 'partial' : 'parsed';
+  } else if (errorLines > 0 && malformedLines === 0 && unsupportedLines === 0) {
+    state = 'error-only';
+  } else if (nonEmptyLines > 0) {
+    state = 'unsupported';
+  } else {
+    state = 'empty';
+  }
+  return { messages, state };
 }
 
-function mapLine(parsed: unknown): Message | null {
-  if (!parsed || typeof parsed !== 'object') return null;
+type LineResult = { kind: 'message'; message: Message } | { kind: 'error' } | { kind: 'skip' };
+
+function mapLine(parsed: unknown): LineResult {
+  if (!parsed || typeof parsed !== 'object') return { kind: 'skip' };
   const obj = parsed as Record<string, unknown>;
 
-  if (obj.type === 'error') return null; // skip provider-error lines
-  if (obj.role !== 'user' && obj.role !== 'assistant') return null;
+  if (obj.type === 'error') return { kind: 'error' }; // provider-error line
+  if (obj.role !== 'user' && obj.role !== 'assistant') return { kind: 'skip' };
 
   const content = (obj as { message?: { content?: unknown } }).message?.content;
-  if (!Array.isArray(content)) return null;
+  if (!Array.isArray(content)) return { kind: 'skip' };
 
   const { text, toolCalls } = extractContent(content);
+  if (text.length === 0 && toolCalls.length === 0) return { kind: 'skip' };
 
   // No per-message timestamp is stored in transcripts; leave timestamp undefined.
   const message: Message = {
@@ -62,7 +101,7 @@ function mapLine(parsed: unknown): Message | null {
     codeBlocks: [],
   };
   if (toolCalls.length > 0) message.toolCalls = toolCalls;
-  return message;
+  return { kind: 'message', message };
 }
 
 function extractContent(parts: unknown[]): { text: string; toolCalls: ToolCall[] } {
@@ -82,7 +121,7 @@ function extractContent(parts: unknown[]): { text: string; toolCalls: ToolCall[]
       }
       toolCalls.push(toolCall);
     }
-    // unknown part types ignored (forward compatibility, constitution V)
+    // unknown part types ignored (forward compatibility)
   }
 
   return { text: texts.join(''), toolCalls };

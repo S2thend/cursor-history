@@ -42,7 +42,7 @@ npm run typecheck    # Type check
    - `thinking.text` → reasoning blocks (marked as `[Thinking]`)
    - **Last resort**: Recursive walk through all fields to find longest string with markdown features (catches error messages)
    - If marked as error, prefix result with `[Error]` marker
-   - All extractions include timestamps for display
+   - Extractions include timestamps for display only when the source stores a message-level time
 
 ### Project Structure
 

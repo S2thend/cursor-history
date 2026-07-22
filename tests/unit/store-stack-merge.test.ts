@@ -24,11 +24,15 @@ function msg(partial: Partial<Message> & { role: 'user' | 'assistant'; content: 
 describe('mergeCrossStackSessions', () => {
   it('marks the result merged with both stacks + preferred source', () => {
     const composer = makeSession({ messages: [msg({ role: 'user', content: 'hi' })] });
-    const store = makeSession({ messages: [msg({ role: 'user', content: 'hi' })] });
+    const store = makeSession({
+      messages: [msg({ role: 'user', content: 'hi' })],
+      transcriptState: 'partial',
+    });
     const merged = mergeCrossStackSessions(composer, store, 'composer', 7);
     expect(merged.source).toBe('merged');
     expect(merged.sources).toEqual(['composer', 'store']);
     expect(merged.preferredSource).toBe('composer');
+    expect(merged.transcriptState).toBe('partial');
     expect(merged.index).toBe(7);
   });
 
@@ -206,6 +210,35 @@ describe('mergeCrossStackSessions', () => {
     expect(merged.messages[0]!.toolCalls?.[0]?.name).toBe('Read');
   });
 
+  it('matches a Composer tool display alias to the structured internal name', () => {
+    const composer = makeSession({
+      messages: [
+        msg({
+          role: 'assistant',
+          content: '[Tool: Read File]',
+          toolCalls: [{ name: 'read_file', status: 'completed' }],
+        }),
+      ],
+    });
+    const store = makeSession({
+      messages: [
+        msg({
+          role: 'assistant',
+          content: 'Reading the file.',
+          toolCalls: [{ name: 'read_file', status: 'completed' }],
+        }),
+      ],
+    });
+
+    const merged = mergeCrossStackSessions(composer, store, 'composer', 0);
+
+    expect(merged.messages).toHaveLength(1);
+    expect(merged.messages[0]).toMatchObject({
+      content: 'Reading the file.',
+      source: 'both',
+    });
+  });
+
   it('same-role empty messages with DIFFERENT tool calls stay distinct', () => {
     // Two separate assistant turns, each with a different tool — must NOT merge.
     const composer = makeSession({
@@ -238,6 +271,54 @@ describe('mergeCrossStackSessions', () => {
     expect(merged.messages.find((m) => m.toolCalls?.[0]?.name === 'Write')?.source).toBe(
       'composer'
     );
+  });
+
+  it('does not merge one Read-only turn with one Write-only turn', () => {
+    const composer = makeSession({
+      messages: [
+        msg({
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: '/a' } }],
+        }),
+      ],
+    });
+    const store = makeSession({
+      messages: [
+        msg({
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ name: 'Write', status: 'completed', params: { file: '/b' } }],
+        }),
+      ],
+    });
+    const merged = mergeCrossStackSessions(composer, store, 'composer', 0);
+    expect(merged.messages).toHaveLength(2);
+    expect(merged.messages.map((message) => message.source).sort()).toEqual(['composer', 'store']);
+  });
+
+  it('does not mix an error payload into a preferred completed outcome', () => {
+    const composer = makeSession({
+      messages: [
+        msg({
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: '/a' }, result: 'ok' }],
+        }),
+      ],
+    });
+    const store = makeSession({
+      messages: [
+        msg({
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ name: 'Read', status: 'error', params: { file: '/a' }, error: 'boom' }],
+        }),
+      ],
+    });
+    const tool = mergeCrossStackSessions(composer, store, 'composer', 0).messages[0]?.toolCalls?.[0];
+    expect(tool).toMatchObject({ status: 'completed', result: 'ok' });
+    expect(tool?.error).toBeUndefined();
   });
 
   it('a corrupted message does not merge with a legitimate empty message', () => {
