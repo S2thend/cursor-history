@@ -14,7 +14,7 @@
 ### `cursor-history show <id|index>`
 - Store stack sessions: display user/assistant text in order + `tool_use` (name + input parameters).
 - Missing fields (tokens / per-msg timestamps / tool results [P1]) are rendered as placeholders or omitted, without errors.
-- When a usable transcript exists, it is authoritative for conversation messages and `store.db` is not used to backfill transcript tool results. Parsed `store.db` conversation data is a fallback only when no usable transcript is available.
+- `store.db` is the primary conversation message source; when it yields messages they are authoritative and the transcript is not used to backfill them. The transcript supplies messages only as a fallback when `store.db` is absent, unreadable, or yields no messages (store.db metadata may still contribute title/createdAt).
 
 ### `cursor-history search <query>`
 - Covers Store stack session text (user/assistant content).

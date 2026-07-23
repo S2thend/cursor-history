@@ -29,8 +29,10 @@ export interface Session {
    * Source data completeness:
    * - 'global': full global bubbles (Composer stack)
    * - 'workspace-fallback': degraded, workspace storage only (Composer stack)
-   * - 'transcript': Store stack; usable transcript is authoritative and store.db is not read
-   * - 'store-complete' / 'store-partial': Store stack, store.db (no transcript); full or partial parse
+   * - 'transcript': Store stack; the transcript supplies the messages (sole source when no store.db
+   *   exists, or fallback when store.db is unreadable/yields no messages)
+   * - 'store-complete' / 'store-partial': Store stack, store.db supplies the messages (primary
+   *   source); full or partial parse
    * - 'store': legacy alias (pre-rework)
    * - 'merged': resolved from BOTH Composer and Store stacks by session ID
    */

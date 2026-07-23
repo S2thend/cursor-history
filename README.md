@@ -439,7 +439,7 @@ A natural-language assistant response that also contains structured tool calls m
 | Windows | `%APPDATA%/Cursor/User/` | `%USERPROFILE%\.cursor\` |
 | Linux / WSL | `~/.config/Cursor/User/` | `~/.cursor/` |
 
-The tool automatically finds and reads both stacks. Store transcripts are authoritative whenever they contain usable messages; per-session `store.db` is used only as a fallback when they do not. It does not heuristically merge Store DB messages into a usable transcript.
+The tool automatically finds and reads both stacks. Per-session `store.db` is the primary Store message source; the transcript is used only as a fallback when `store.db` is absent, unreadable, or yields no messages. It does not heuristically merge the two sources.
 
 Use `--data-path <path>` or `CURSOR_DATA_PATH` to point at a custom Cursor data tree. Use `CURSOR_STORE_ROOT` to configure the Store root independently. A Store root itself, or its `chats`, `projects`, or `acp-sessions` child, is accepted and normalized to the same root.
 

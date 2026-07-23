@@ -84,12 +84,15 @@ export interface ChatSession {
    * Source data completeness:
    * - 'global': full global bubbles (Composer stack, highest fidelity)
    * - 'workspace-fallback': degraded, workspace storage only (Composer stack)
-   * - 'transcript': Cursor Store stack; transcript is authoritative (store.db
-   *   may have enhanced title/createdAt but messages come from transcript)
-   * - 'store-complete': Cursor Store stack, store.db fully parsed (store-only,
-   *   no transcript); safe to treat as complete
-   * - 'store-partial': Cursor Store stack, store.db partially parsed
-   *   (missing/corrupt leaf, JSON failure, orphan tool result) — degraded
+   * - 'transcript': Cursor Store stack; the transcript supplies the messages
+   *   (sole source when no store.db exists, or fallback when store.db is
+   *   unreadable/yields no messages; store.db metadata may still contribute
+   *   title/createdAt)
+   * - 'store-complete': Cursor Store stack, store.db supplied the messages
+   *   (primary source), fully parsed
+   * - 'store-partial': Cursor Store stack, store.db supplied the messages
+   *   (primary source) but partially parsed (missing/corrupt leaf, JSON
+   *   failure, orphan tool result) — degraded
    * - 'store': legacy alias (pre-rework); avoid in new code
    */
   source?:

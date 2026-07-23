@@ -166,7 +166,7 @@ function buildModernToolStoreDb(db: TestDatabase): void {
   );
 }
 
-describe('parseStoreDb (transcript-authoritative rework)', () => {
+describe('parseStoreDb (store.db primary source)', () => {
   beforeAll(() => {
     makeDb(DB_PATH, buildContractStoreDb);
     makeDb(DB_PARTIAL, buildPartialStoreDb);

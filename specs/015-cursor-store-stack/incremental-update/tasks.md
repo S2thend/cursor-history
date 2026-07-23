@@ -152,6 +152,17 @@
 - [x] Run the focused regressions, full Windows gates, both SQLite drivers, and package dry runs. The shared Windows `node_modules` mismatch was confirmed as environmental; a fresh isolated WSL install and full suite now pass.
 - [ ] Do not add or commit Superpowers planning documents; do not commit any implementation without explicit developer approval.
 
+## P15 — store.db primary source (transcript fallback)
+
+- [x] Translate `research-store-db-vs-transcript.md` to English, preserving all evidence, links, code samples, and conclusions (no change to research meaning).
+- [x] Reverse the Store source-selection order in `src/core/store-stack/discover.ts`: a present `store.db` is parsed first; when it yields ≥1 message (complete or partial) its messages win and the transcript does not participate; DB metadata is adopted whenever the DB parses; the transcript fills in only when the DB is absent, unreadable, or empty.
+- [x] Add internal diagnostics-only `StoreDbState` and `TranscriptUse` types to `src/core/store-stack/types.ts` and emit the resolution reason via `debugLogStorage`.
+- [x] Update `source` semantics doc in `src/core/types.ts`, `src/lib/types.ts`, and `src/core/store-stack/types.ts`; update module header comments in `discover.ts` and `store-db.ts`.
+- [x] Rewrite the `store-stack-discover.test.ts` regression block from "transcript authoritative" to "store.db authoritative (P15)": complete-DB-wins, complete-DB-over-partial-transcript, partial-DB-wins (`store-partial`), empty-DB → transcript fallback (DB metadata retained), unreadable-DB → transcript fallback, and accurate empty/degraded sources when no transcript fallback exists. Update the stale `store-stack-store-db.test.ts` describe label.
+- [x] Update `spec.md` (US3, FR-020/021/031, store.db entity), `data-model.md`, `plan.md` (superseded note at the P2 decision; history preserved), `contracts/cli-api.md`, `contracts/library-api.md`, and `README.md` to DB-first semantics.
+- [x] Append P15 to `problems.md` and `solutions.md`, preserving the completed P13 history; do not overwrite existing user edits to `problems.md` / `solutions.md` / `quickstart.md`.
+- [x] Keep `store.db` DAG decoding rules unchanged; add no CLI params, public parse state, or migration steps.
+
 ## Final Verification
 
 - [x] Run `npm run typecheck`.
@@ -161,7 +172,7 @@
 - [x] Run `npm run build`.
 - [x] Run `git diff --check` for the incremental change.
 - [x] Update `solutions.md` statuses to Implemented/Verified only after the matching checks pass.
-- [x] Run the complete Windows Node 24 suite: 29 files and 808 tests pass after the workspace-scoped custom-path/backup integration coverage was added.
+- [x] Run the complete Windows Node 24 suite: 29 files and 811 tests pass after the P15 source-resolution regressions were added.
 - [x] Run the complete Windows Node 20 fallback suite before the latest two integration cases were added: 28 files, 788 tests pass, and the unavailable `node:sqlite` driver test is skipped as expected; `better-sqlite3` ABI 115 read/write succeeds. A current Node 20 runtime is not installed in this checkout's Windows environment, so the new cases remain covered by the current Windows and isolated WSL Node 24 runs rather than being claimed as rerun on Node 20.
 - [x] Run the complete Ubuntu WSL Node 24 isolated suite from a fresh install: 29 files and 808 tests pass; typecheck, lint, format check, and build are clean. This WSL checkpoint immediately predates the final platform-neutral Library error-semantics correction and expanded assertions, which were rerun through the current full Windows suite only.
 - [x] Pin Prettier 3.9.5 in `package.json` and `package-lock.json` so fresh Windows/WSL installs use the same formatter implementation.

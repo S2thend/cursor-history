@@ -96,6 +96,14 @@ tests/
 
 - **P1 (MVP, unblocks the Issue #31 fix)**: `discover.ts` first registers `chats` and ACP session metadata, then attaches transcript JSONL messages using that metadata; it then flows through `storage.ts` merge/dedup → `parser.ts` mapping → `lib`/types source extension → tests (contract fixtures + redacted samples) → README.
   - On completion, `list`/`show`/`search`/`export` are usable for Store stack sessions (text + tool calls).
+
+> **⚠️ Superseded by P15** (`incremental-update/`): the P2 priority below assumed
+> transcripts were the primary message source and `store.db` was fallback-only.
+> Primary-source research (`research-store-db-vs-transcript.md`) reversed this:
+> `store.db` is now the PRIMARY message source and the transcript is the fallback.
+> The historical P2 text below is preserved as-is for provenance; see P15 in
+> `incremental-update/problems.md` / `solutions.md` for the current decision.
+
 - **P2 (store-only fallback)**: after transcript discovery completes, `store-db.ts` (meta hex + blobs Merkle + leaf decoding) supplies messages only for sessions without a transcript. Transcript-backed sessions do not open `store.db`; this keeps the Issue #31 P1 path independent of best-effort P2 parsing.
 
 ### store.db Parser Design (P2)

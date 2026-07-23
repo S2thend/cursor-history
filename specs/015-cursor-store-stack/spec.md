@@ -41,17 +41,17 @@
 
 ---
 
-### User Story 3 - Recover Store sessions when transcripts are unavailable (Priority: P2)
+### User Story 3 - Reconstruct Store sessions from `store.db` first (Priority: P2)
 
-**Journey**: When a Store stack session has no usable transcript messages but does have a readable `store.db`, the user can still view the recoverable conversation instead of losing the session entirely.
+**Journey**: A Store stack session's conversation is reconstructed from `store.db` (the primary message source). When `store.db` is absent, unreadable, or yields no recoverable messages, the transcript JSONL supplies the messages instead; a transcript-only session still works.
 
-**Why this priority**: Transcript parsing provides the simplest and most stable primary path. `store.db` blob-graph parsing is valuable as a fallback, but cross-source enrichment would require heuristic correlation and could duplicate messages or attach tool results to the wrong call.
+**Why this priority**: `store.db` holds the authoritative, branch-aware session state (active-root DAG, tool results keyed by `toolCallId`, full content). Transcripts are a lossy, version-dependent Agent-side export; treating them as the message backbone would drop tool results, reorder retries, and mis-pair tool calls. The transcript is therefore a fallback, not the primary source. Cross-source message-level enrichment is out of scope for this increment — it requires deterministic matching that is unsafe across branches, retries, and compaction.
 
-**Independent Test**: A Store session with usable transcript messages uses those messages without Store DB enrichment; a session with no usable transcript messages falls back to `store.db`; a transcript-only session still works.
+**Independent Test**: A Store session with both a readable `store.db` (with messages) and a transcript uses only the `store.db` messages and title; a session whose `store.db` yields no messages falls back to the transcript (keeping `store.db` metadata); a session with no `store.db` uses the transcript; a session with neither shows an accurate empty or degraded state.
 
 **Acceptance Scenarios**:
-1. **Given** a session has usable transcript messages and a `store.db`, **When** running `show`, **Then** use the transcript messages as authoritative and do not merge Store DB messages into them.
-2. **Given** a session has no usable transcript messages and `store.db` parsing succeeds, **When** running `show`, **Then** display the recoverable Store DB conversation.
+1. **Given** a session has a readable `store.db` (with messages) and a transcript, **When** running `show`, **Then** use the `store.db` messages as authoritative and do not merge transcript messages into them.
+2. **Given** a session's `store.db` yields no messages (or is unreadable) but a transcript is available, **When** running `show`, **Then** fall back to the transcript messages while keeping any `store.db` metadata.
 3. **Given** a session has only `meta.json` (`hasConversation:false`, no `store.db`), **When** running `show`, **Then** show a friendly "empty session" notice instead of crashing.
 
 ---
@@ -97,13 +97,13 @@
 - **FR-011**: The system MUST map `tool_use` content (Store stack tool vocabulary: Read/Write/StrReplace/Grep/Glob/Shell/TodoWrite, etc.) to the existing `ToolCall` representation.
 - **FR-012**: The system MUST tolerate error lines, empty files, and single-line parse failures (skip that line/file, do not abort the whole run).
 
-**store.db Fallback Parsing (P2)**
-- **FR-020**: When no usable transcript messages exist, the system SHOULD parse `store.db` (session metadata + blob content graph) as a fallback source. It MUST NOT heuristically merge or enrich usable transcript messages with Store DB messages.
-- **FR-021**: When fallback `store.db` parsing fails or is missing, the system MUST preserve the session's accurate empty or degraded state and must not block other sessions.
+**store.db Primary Parsing (P2)**
+- **FR-020**: A present `store.db` MUST be parsed first as the PRIMARY message source (session metadata + active-root blob DAG). When it yields any messages (complete or partial), those messages are authoritative and the transcript MUST NOT participate. The transcript supplies messages only as a fallback when the DB is unreadable or yields zero messages. The system MUST NOT heuristically merge or enrich across the two sources.
+- **FR-021**: When `store.db` parsing fails, yields no messages, or is missing, the system MUST preserve the session's accurate empty or degraded state (falling back to the transcript when available) and must not block other sessions.
 
 **Unification & Deduplication**
 - **FR-030**: The system MUST unify Store stack sessions into the same `ChatSession`/`Message` model as the Composer stack, and annotate the source (e.g. `source: store | transcript | composer`).
-- **FR-031**: The system MUST deduplicate across stacks by session ID so the same session is not repeated. Within the Store stack, usable transcript messages are authoritative and `store.db` is fallback-only; Composer/Store conflict resolution follows the explicit cross-stack merge policy.
+- **FR-031**: The system MUST deduplicate across stacks by session ID so the same session is not repeated. Within the Store stack, `store.db` is the primary message source and the transcript is fallback-only; Composer/Store conflict resolution follows the explicit cross-stack merge policy.
 - **FR-032**: Store stack source sessions (missing token/per-message time) MUST be presented with a "degraded fidelity" marker, reusing the 012 mechanism.
 
 **Command Coverage**
@@ -114,7 +114,7 @@
 
 - **Store stack session (Session)**: located at `~/.cursor/chats/<hash>/<uuid>/`; identifier = uuid; workspace = `meta.json.cwd`.
 - **Transcript record (Transcript)**: `~/.cursor/projects/<sanitized>/agent-transcripts/<uuid>/<uuid>.jsonl` (plus the supported legacy flat form); role-nested lines; provides text + tool calls, missing title/tool results/time/tokens. Nested `subagents/` transcripts are not part of the main session.
-- **store.db**: per-session SQLite containing session metadata tables + a content-addressed blob graph (leaves = messages); used as a fallback when transcripts contain no usable messages (research §5).
+- **store.db**: per-session SQLite containing session metadata tables + a content-addressed blob graph (leaves = messages, tool results joined by `toolCallId`); the PRIMARY Store message source — the transcript is used only when it is absent, unreadable, or empty (research §5, P15).
 - **Source identifier (Source)**: distinguishes whether a session/message comes from the Composer stack, the Store stack store.db, or the transcript layer only — determines fidelity presentation.
 
 ---

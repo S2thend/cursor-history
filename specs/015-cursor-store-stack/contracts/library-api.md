@@ -7,7 +7,7 @@
 | Function | Change |
 |---|---|
 | `listSessions(config?)` | Return results include Store stack sessions (merged with the Composer stack, deduplicated by ID) |
-| `getSession(identifier, config?)` | When the identifier is a Store stack uuid, returns that session (transcript parsing; P2 includes store.db) |
+| `getSession(identifier, config?)` | When the identifier is a Store stack uuid, returns that session (`store.db` is the primary message source; transcript is the fallback) |
 | `searchSessions(query, config?)` | Covers Store stack session text |
 | `exportSessionToMarkdown / ToJson / exportAllSessions*` | Covers Store stack sessions |
 

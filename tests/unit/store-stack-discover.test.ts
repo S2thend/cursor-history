@@ -112,14 +112,19 @@ describe('discoverStoreSessions — metadata before transcript attachment', () =
   });
 });
 
-describe('discoverStoreSessions — transcript authoritative', () => {
-  // Hard regression #1 (per review): a session with BOTH a transcript AND a
-  // store.db must keep the transcript's messages and is not read as a second
-  // conversation source. Construct: transcript=2 msgs, store.db=3 msgs →
-  // discover must surface 2 (transcript), source 'transcript'.
-  const TUUID = 'cccccccc-0000-0000-0000-000000000003';
-  const PUUID = 'cccccccc-0000-0000-0000-000000000004';
-  const EUUID = 'cccccccc-0000-0000-0000-000000000005';
+describe('discoverStoreSessions — store.db authoritative (P15)', () => {
+  // P15 regression: store.db is the PRIMARY message source. A present store.db
+  // is always parsed first; when it yields any messages (complete OR partial)
+  // those win and the transcript does NOT participate. The transcript supplies
+  // messages only when the DB is unreadable or yields zero messages, while DB
+  // metadata (title/createdAt) is still adopted whenever the DB parses.
+  const TUUID = 'cccccccc-0000-0000-0000-000000000003'; // complete DB (3) + transcript (2)
+  const PUUID = 'cccccccc-0000-0000-0000-000000000004'; // complete DB (3) + partial transcript
+  const EUUID = 'cccccccc-0000-0000-0000-000000000005'; // empty DB (0) + partial transcript
+  const FUUID = 'cccccccc-0000-0000-0000-000000000006'; // partial DB (1) + longer transcript
+  const XUUID = 'cccccccc-0000-0000-0000-000000000007'; // unreadable DB + transcript
+  const NUUID = 'cccccccc-0000-0000-0000-000000000008'; // empty DB + no transcript
+  const RUUID = 'cccccccc-0000-0000-0000-000000000009'; // unreadable DB + no transcript
   const CWD = '/tmp/proj';
   let root = '';
 
@@ -152,51 +157,72 @@ describe('discoverStoreSessions — transcript authoritative', () => {
     db.close();
   }
 
+  /** Partial DB: root references a missing leaf → 'partial', 1 recoverable msg. */
+  function buildPartialMessageStoreDb(path: string): void {
+    const db = new BetterSqlite3(path);
+    db.exec('CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)');
+    db.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+    const s = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+    const ins = (id: string, d: Buffer) =>
+      db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(id, d);
+    const frame = (h: string) => Buffer.concat([Buffer.from([0x0a, 0x20]), Buffer.from(h, 'hex')]);
+    const l1 = Buffer.from(JSON.stringify({ role: 'user', content: 'partial-db-msg' }));
+    const h1 = s(l1);
+    ins(h1, l1);
+    const missingHash = s(Buffer.from('not-present'));
+    const r = Buffer.concat([frame(h1), frame(missingHash)]);
+    const rh = s(r);
+    ins(rh, r);
+    db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(
+      '0',
+      Buffer.from(
+        JSON.stringify({ name: 'Partial DB Title', latestRootBlobId: rh, createdAt: 1783737832293 })
+      ).toString('hex')
+    );
+    db.close();
+  }
+
+  /** Unreadable DB: valid SQLite with no meta table → parseStoreDb returns null. */
+  function buildUnreadableStoreDb(path: string): void {
+    const db = new BetterSqlite3(path);
+    db.exec('CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)');
+    db.close();
+  }
+
+  /** Write a transcript JSONL with N messages (alternating user/assistant). */
+  function writeTranscript(dir: string, uuid: string, texts: string[]): void {
+    mkdirSync(dir, { recursive: true });
+    const lines = texts.map((text, i) =>
+      JSON.stringify({
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        message: { content: [{ type: 'text', text }] },
+      })
+    );
+    writeFileSync(join(dir, `${uuid}.jsonl`), lines.join('\n') + '\n');
+  }
+
+  function chatMeta(createdAtMs: number): string {
+    return JSON.stringify({ schemaVersion: 1, createdAtMs, hasConversation: true, cwd: CWD });
+  }
+
   beforeAll(() => {
-    root = mkdtempSync(join(tmpdir(), 'ch-transcript-'));
+    root = mkdtempSync(join(tmpdir(), 'ch-store-authoritative-'));
     const hash = createHash('md5').update(CWD).digest('hex');
+    const atBase = join(root, 'projects', 'tmp-proj', 'agent-transcripts');
+
+    // TUUID: complete DB (3 msgs) + transcript (2 msgs). DB must win.
     const chatDir = join(root, 'chats', hash, TUUID);
     mkdirSync(chatDir, { recursive: true });
-    writeFileSync(
-      join(chatDir, 'meta.json'),
-      JSON.stringify({
-        schemaVersion: 1,
-        createdAtMs: 1783737832293,
-        hasConversation: true,
-        cwd: CWD,
-      })
-    );
+    writeFileSync(join(chatDir, 'meta.json'), chatMeta(1783737832293));
     buildStoreDb(join(chatDir, 'store.db')); // 3 messages
-    // transcript (2 messages) — AUTHORITATIVE
-    const atDir = join(root, 'projects', 'tmp-proj', 'agent-transcripts', TUUID);
-    mkdirSync(atDir, { recursive: true });
-    writeFileSync(
-      join(atDir, `${TUUID}.jsonl`),
-      JSON.stringify({
-        role: 'user',
-        message: { content: [{ type: 'text', text: 'transcript-1' }] },
-      }) +
-        '\n' +
-        JSON.stringify({
-          role: 'assistant',
-          message: { content: [{ type: 'text', text: 'transcript-2' }] },
-        }) +
-        '\n'
-    );
+    writeTranscript(join(atBase, TUUID), TUUID, ['transcript-1', 'transcript-2']);
 
+    // PUUID: complete DB (3 msgs) + partial transcript (1 usable msg). DB wins.
     const partialChatDir = join(root, 'chats', hash, PUUID);
     mkdirSync(partialChatDir, { recursive: true });
-    writeFileSync(
-      join(partialChatDir, 'meta.json'),
-      JSON.stringify({
-        schemaVersion: 1,
-        createdAtMs: 1783000000000,
-        hasConversation: true,
-        cwd: CWD,
-      })
-    );
+    writeFileSync(join(partialChatDir, 'meta.json'), chatMeta(1783000000000));
     buildStoreDb(join(partialChatDir, 'store.db'));
-    const partialTranscriptDir = join(root, 'projects', 'tmp-proj', 'agent-transcripts', PUUID);
+    const partialTranscriptDir = join(atBase, PUUID);
     mkdirSync(partialTranscriptDir, { recursive: true });
     writeFileSync(
       join(partialTranscriptDir, `${PUUID}.jsonl`),
@@ -206,19 +232,12 @@ describe('discoverStoreSessions — transcript authoritative', () => {
       }) + '\n{"role":"assistant"'
     );
 
+    // EUUID: empty DB (0 msgs) + partial transcript (1 usable msg). Transcript fills.
     const emptyChatDir = join(root, 'chats', hash, EUUID);
     mkdirSync(emptyChatDir, { recursive: true });
-    writeFileSync(
-      join(emptyChatDir, 'meta.json'),
-      JSON.stringify({
-        schemaVersion: 1,
-        createdAtMs: 1783000000000,
-        hasConversation: true,
-        cwd: CWD,
-      })
-    );
+    writeFileSync(join(emptyChatDir, 'meta.json'), chatMeta(1783000000000));
     buildStoreDb(join(emptyChatDir, 'store.db'), false);
-    const partialWithEmptyDbDir = join(root, 'projects', 'tmp-proj', 'agent-transcripts', EUUID);
+    const partialWithEmptyDbDir = join(atBase, EUUID);
     mkdirSync(partialWithEmptyDbDir, { recursive: true });
     writeFileSync(
       join(partialWithEmptyDbDir, `${EUUID}.jsonl`),
@@ -227,6 +246,32 @@ describe('discoverStoreSessions — transcript authoritative', () => {
         message: { content: [{ type: 'text', text: 'keep-this-message' }] },
       }) + '\n{"role":"assistant"'
     );
+
+    // FUUID: partial DB (1 recoverable msg) + LONGER transcript (3 msgs). DB wins, partial.
+    const fChatDir = join(root, 'chats', hash, FUUID);
+    mkdirSync(fChatDir, { recursive: true });
+    writeFileSync(join(fChatDir, 'meta.json'), chatMeta(1783000000000));
+    buildPartialMessageStoreDb(join(fChatDir, 'store.db'));
+    writeTranscript(join(atBase, FUUID), FUUID, ['transcript-a', 'transcript-b', 'transcript-c']);
+
+    // XUUID: unreadable DB + transcript (1 msg). DB fails → transcript fallback.
+    const xChatDir = join(root, 'chats', hash, XUUID);
+    mkdirSync(xChatDir, { recursive: true });
+    writeFileSync(join(xChatDir, 'meta.json'), chatMeta(1783000000000));
+    buildUnreadableStoreDb(join(xChatDir, 'store.db'));
+    writeTranscript(join(atBase, XUUID), XUUID, ['transcript-only-msg']);
+
+    // NUUID: empty DB and no transcript. Preserve the accurate empty DB state.
+    const nChatDir = join(root, 'chats', hash, NUUID);
+    mkdirSync(nChatDir, { recursive: true });
+    writeFileSync(join(nChatDir, 'meta.json'), chatMeta(1783000000000));
+    buildStoreDb(join(nChatDir, 'store.db'), false);
+
+    // RUUID: unreadable DB and no transcript. Report a degraded DB-backed session.
+    const rChatDir = join(root, 'chats', hash, RUUID);
+    mkdirSync(rChatDir, { recursive: true });
+    writeFileSync(join(rChatDir, 'meta.json'), chatMeta(1783000000000));
+    buildUnreadableStoreDb(join(rChatDir, 'store.db'));
   });
   afterAll(() => {
     try {
@@ -236,36 +281,82 @@ describe('discoverStoreSessions — transcript authoritative', () => {
     }
   });
 
-  it('store.db does NOT overwrite transcript messages', async () => {
+  it('store.db messages win over transcript messages when both are present', async () => {
     const sessions = await discoverStoreSessions(root);
     const s = sessions.find((x) => x.id === TUUID);
-    expect(s?.messages).toHaveLength(2); // transcript (NOT store.db's 3)
-    expect(s?.messages[0]?.content).toBe('transcript-1');
+    // store.db (3 msgs) is primary; the transcript (2 msgs) does NOT participate.
+    expect(s?.messages).toHaveLength(3);
+    expect(s?.messages.map((m) => m.content)).toEqual([
+      'store-msg-1',
+      'store-msg-2',
+      'store-msg-3',
+    ]);
+    expect(s?.source).toBe('store-complete');
+    // DB metadata is adopted even though a transcript also exists.
+    expect(s?.title).toBe('Store Title');
+    expect(s?.messages.some((m) => m.content === 'transcript-1')).toBe(false);
   });
 
-  it('keeps transcript sessions off the store.db parse path', async () => {
-    const s = (await discoverStoreSessions(root)).find((x) => x.id === TUUID);
-    expect(s?.source).toBe('transcript');
-    // The transcript path must not open store.db just to enrich metadata.
-    // This keeps Issue #31 list/show free of unnecessary SQLite parsing and warnings.
-    expect(s?.title).toBeNull();
-  });
-
-  it('keeps usable partial transcript messages authoritative over store.db', async () => {
+  it('a complete store.db overrides a usable partial transcript', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === PUUID);
-    expect(s?.transcriptState).toBe('partial');
-    expect(s?.source).toBe('transcript');
-    expect(s?.messages.map((message) => message.content)).toEqual(['incomplete']);
-    expect(s?.createdAt).toEqual(new Date(1783000000000));
-    expect(s?.lastUpdatedAt).toEqual(new Date(1783000000000));
+    expect(s?.transcriptState).toBe('partial'); // retained for provenance
+    expect(s?.source).toBe('store-complete');
+    expect(s?.messages.map((message) => message.content)).toEqual([
+      'store-msg-1',
+      'store-msg-2',
+      'store-msg-3',
+    ]);
+    // DB metadata/time are adopted; transcript-only content is NOT mixed in.
+    expect(s?.title).toBe('Store Title');
+    expect(s?.createdAt).toEqual(new Date(1783737832293));
+    expect(s?.lastUpdatedAt).toEqual(new Date(1783737832293));
+    expect(s?.messages.some((m) => m.content === 'incomplete')).toBe(false);
   });
 
-  it('does not replace usable partial transcript messages with an empty database result', async () => {
+  it('a partial store.db with messages still wins and reports store-partial', async () => {
+    const s = (await discoverStoreSessions(root)).find((item) => item.id === FUUID);
+    expect(s?.source).toBe('store-partial');
+    // Only the 1 recoverable DB message; the longer transcript does not override.
+    expect(s?.messages).toHaveLength(1);
+    expect(s?.messages[0]?.content).toBe('partial-db-msg');
+    expect(s?.messages.some((m) => m.content === 'transcript-a')).toBe(false);
+    expect(s?.title).toBe('Partial DB Title');
+  });
+
+  it('falls back to transcript messages when store.db yields none, keeping DB metadata', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === EUUID);
     expect(s?.transcriptState).toBe('partial');
     expect(s?.source).toBe('transcript');
     expect(s?.messages).toHaveLength(1);
     expect(s?.messages[0]?.content).toBe('keep-this-message');
+    // DB parsed (metadata-only) → its title is still adopted.
+    expect(s?.title).toBe('Store Title');
+  });
+
+  it('falls back to transcript when store.db is unreadable, without adopting DB metadata', async () => {
+    const s = (await discoverStoreSessions(root)).find((item) => item.id === XUUID);
+    expect(s?.source).toBe('transcript');
+    expect(s?.messages).toHaveLength(1);
+    expect(s?.messages[0]?.content).toBe('transcript-only-msg');
+    // DB failed to parse → its metadata is NOT adopted; chat meta time stands.
+    expect(s?.title).toBeNull();
+    expect(s?.createdAt).toEqual(new Date(1783000000000));
+  });
+
+  it('preserves store-complete when an empty store.db has no transcript fallback', async () => {
+    const s = (await discoverStoreSessions(root)).find((item) => item.id === NUUID);
+    expect(s?.source).toBe('store-complete');
+    expect(s?.transcriptState).toBe('missing');
+    expect(s?.messages).toHaveLength(0);
+    expect(s?.title).toBe('Store Title');
+  });
+
+  it('reports store-partial when store.db fails and no transcript fallback exists', async () => {
+    const s = (await discoverStoreSessions(root)).find((item) => item.id === RUUID);
+    expect(s?.source).toBe('store-partial');
+    expect(s?.transcriptState).toBe('missing');
+    expect(s?.messages).toHaveLength(0);
+    expect(s?.title).toBeNull();
   });
 });
 

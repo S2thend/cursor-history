@@ -1,16 +1,19 @@
 /**
  * Discover Cursor Store-stack sessions under ~/.cursor.
- * See specs/015-cursor-store-stack/research.md §4 / data-model.md §1.
+ * See specs/015-cursor-store-stack/research.md §4 / data-model.md §1 / P15.
  *
  *   chats/<hash>/<uuid>/meta.json        → id + workspacePath (cwd) + createdAt + updatedAt
  *   acp-sessions/<uuid>/{meta.json,...}   → metadata (no workspace-hash layer)
  *   projects/<sanitized>/agent-transcripts/<uuid>/*.jsonl → messages + TranscriptState
  *
- * Sessions are merged by UUID. Any usable transcript messages are authoritative;
- * `store.db` is used only when the transcript yields no messages, while retaining
- * the transcript state for provenance. Discovery is asynchronous
- * because store.db parsing goes through the shared SQLite registry. Session-level
- * `lastUpdatedAt` comes from `updatedAtMs` when available.
+ * Sessions are merged by UUID. `store.db` is the PRIMARY message source (P15): a
+ * present store.db is always parsed first, and when it yields any messages
+ * (complete OR partial) those messages win while the transcript does NOT
+ * participate. Only when the DB is unreadable or yields zero messages does the
+ * transcript supply messages. The transcript state is retained for provenance in
+ * every case. Discovery is asynchronous because store.db parsing goes through
+ * the shared SQLite registry. Session-level `lastUpdatedAt` comes from
+ * `updatedAtMs` when available.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
@@ -19,7 +22,7 @@ import { chatsDir, projectsDir, acpSessionsDir } from './paths.js';
 import { parseTranscriptFile } from './transcript.js';
 import { parseStoreDb } from './store-db.js';
 import { debugLogStorage } from '../database/debug.js';
-import type { StoreMetaJson, StoreSession } from './types.js';
+import type { StoreDbState, StoreMetaJson, StoreSession, TranscriptUse } from './types.js';
 
 /** Best-effort error message for debug diagnostics. */
 function errMsg(error: unknown): string {
@@ -139,36 +142,88 @@ export async function discoverStoreSessions(storeRoot: string): Promise<StoreSes
     }
   }
 
-  // 4. Resolve backing data per session: any usable transcript messages first,
-  //    then store.db fallback, else degraded. Source reflects the backing data;
-  //    transcriptState is retained for provenance in all cases.
+  // 4. Resolve backing data per session: store.db is the PRIMARY message source
+  //    (P15). A present store.db is always parsed first. When it yields any
+  //    messages (complete OR partial) those messages win and the transcript does
+  //    NOT participate. When the DB parses but yields no messages, the transcript
+  //    supplies messages while the DB metadata (title/createdAt) is still
+  //    adopted. When the DB is unreadable or absent, the transcript (or
+  //    metadata) is the sole source. transcriptState is retained for provenance
+  //    in every case; the DB/transcript decision is recorded as a debug
+  //    diagnostic (StoreDbState + TranscriptUse).
   for (const ss of byId.values()) {
-    if (ss.messages.length > 0) {
-      ss.source = 'transcript';
+    if (!ss.storeDbPath) {
+      // No store.db → the transcript (or metadata) is the sole message source.
+      ss.source = transcriptMessageSource(ss);
+      logStoreResolution(
+        ss,
+        'missing',
+        ss.transcriptState === 'missing' ? 'unused' : 'only-source'
+      );
       continue;
     }
-    if (ss.storeDbPath) {
-      const deep = await parseStoreDb(ss.storeDbPath);
-      if (deep) {
-        ss.title = deep.title ?? ss.title;
-        if (deep.createdAt) {
-          ss.createdAt = deep.createdAt;
-          if (!explicitUpdatedAt.has(ss.id)) ss.lastUpdatedAt = deep.createdAt;
-        }
-        ss.messages = deep.messages;
-        ss.source = deep.completeness === 'complete' ? 'store-complete' : 'store-partial';
-      } else {
-        ss.source = 'store-partial'; // store.db unreadable → degraded
-      }
+
+    const deep = await parseStoreDb(ss.storeDbPath);
+    if (!deep) {
+      // store.db unreadable/unsupported → transcript fallback (or degraded).
+      const transcriptUse: TranscriptUse = ss.messages.length > 0 ? 'fallback' : 'unused';
+      ss.source = transcriptUse === 'fallback' ? 'transcript' : 'store-partial';
+      logStoreResolution(ss, 'failed', transcriptUse);
       continue;
     }
-    // With no store.db, retain the actual provenance. A degraded transcript
-    // may still contain useful messages (`partial`); metadata-only sessions use
-    // the legacy generic Store source instead of claiming a DB parse occurred.
-    ss.source = ss.transcriptState === 'missing' ? 'store' : 'transcript';
+
+    // Adopt DB metadata whenever the DB parsed, even if it supplies no messages.
+    if (deep.title) ss.title = deep.title;
+    if (deep.createdAt) {
+      ss.createdAt = deep.createdAt;
+      if (!explicitUpdatedAt.has(ss.id)) ss.lastUpdatedAt = deep.createdAt;
+    }
+
+    if (deep.messages.length > 0) {
+      // DB is the primary source: its messages win and the transcript does not
+      // enrich them (no heuristic cross-source merging in this increment).
+      ss.messages = deep.messages;
+      ss.source = deep.completeness === 'complete' ? 'store-complete' : 'store-partial';
+      logStoreResolution(ss, deep.completeness, 'unused');
+      continue;
+    }
+
+    // DB parsed but yielded zero recoverable messages. A usable transcript
+    // fills the messages; otherwise preserve the DB's accurate empty/degraded
+    // completeness instead of presenting the session as metadata-only.
+    const transcriptUse: TranscriptUse = ss.messages.length > 0 ? 'fallback' : 'unused';
+    ss.source =
+      transcriptUse === 'fallback'
+        ? 'transcript'
+        : deep.completeness === 'complete'
+          ? 'store-complete'
+          : 'store-partial';
+    logStoreResolution(ss, 'empty', transcriptUse);
   }
 
   return [...byId.values()];
+}
+
+/**
+ * `source` for a session whose messages come from the transcript layer (no
+ * store.db, or the DB was unreadable/yielded no messages). Sessions with usable
+ * transcript messages report `'transcript'`; metadata-only sessions (no
+ * transcript file at all) use the generic `'store'` alias.
+ */
+function transcriptMessageSource(ss: StoreSession): StoreSession['source'] {
+  if (ss.messages.length > 0) return 'transcript';
+  return ss.transcriptState === 'missing' ? 'store' : 'transcript';
+}
+
+/** Emit one type-checked diagnostic for the Store DB/transcript resolution. */
+function logStoreResolution(
+  ss: Pick<StoreSession, 'id' | 'source'>,
+  dbState: StoreDbState,
+  transcriptUse: TranscriptUse
+): void {
+  debugLogStorage(
+    `store: ${ss.id} dbState=${dbState} transcriptUse=${transcriptUse} source=${ss.source}`
+  );
 }
 
 function attachTranscript(

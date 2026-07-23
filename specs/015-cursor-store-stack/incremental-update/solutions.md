@@ -298,6 +298,49 @@ Transcript messages remain authoritative whenever parsing yields usable messages
 
 Display formatting may retain one primary label, but filter matching becomes multi-category. A natural-language assistant response with structured tool calls matches both `assistant` and `tool`; a tool-only marker or structured tool-only message matches only `tool`. Existing user, thinking, and error behavior remains unchanged.
 
+## P15 — Make `store.db` the primary Store message source (transcript is fallback)
+
+**Status:** Implemented and verified locally (pending commit)
+
+Primary-source research reversed the Store-internal source priority established by P13 and the original P1–P2 design. `store.db` is now the PRIMARY message source; the transcript is consulted only as a fallback. No message-level merging or cross-source enrichment is performed in this increment (the P13 "do not heuristically merge" invariant is preserved).
+
+`discoverStoreSessions()` resolves each session's backing data in this order:
+
+1. A present `store.db` is always parsed first.
+2. If the database returns one or more messages — whether its completeness is `complete` or `partial` — those messages are authoritative, the transcript does NOT participate, and `source` is `'store-complete'` or `'store-partial'`. DB metadata (`meta.name`, `meta.createdAt`) is adopted.
+3. If the database parses but returns zero messages, its metadata (title/createdAt) is still adopted and the transcript supplies the messages (`source='transcript'`).
+4. If the database parse fails (any exception → `failed`) or there is no `store.db`, the transcript (or metadata) is the sole message source.
+5. When neither source yields messages, the session remains visible with its accurate empty/degraded state.
+
+Two internal, diagnostics-only states are introduced in `src/core/store-stack/types.ts` and emitted through `debugLogStorage`:
+
+```ts
+type StoreDbState = 'missing' | 'failed' | 'empty' | 'partial' | 'complete';
+type TranscriptUse = 'unused' | 'fallback' | 'only-source';
+```
+
+Public interface compatibility is preserved: the `source` union is unchanged, no field becomes required, and `transcriptState` is always retained for provenance (it describes the transcript file, not whether it supplied the final messages). `store-complete`/`store-partial` now mean the database supplied the messages (primary); `transcript` means the transcript supplied them (sole source, or DB fallback). The cross-stack merge (`merge.ts`) is unchanged — it consumes the resolved Store messages regardless of which Store source produced them.
+
+### Expected behavior
+
+- A session with both a readable `store.db` (messages) and a transcript surfaces only the DB messages and DB title; transcript-only content never leaks in.
+- A `partial` DB with recoverable messages still wins and reports `source='store-partial'`.
+- A DB that parses but yields no messages falls back to the transcript while keeping DB metadata.
+- An unreadable/missing DB falls back to the transcript (or degrades); the session is never dropped.
+- `transcriptState` is retained in every case.
+
+### Minimal verification
+
+- Rewrote the discover regression block (`store-stack-discover.test.ts`) from "transcript authoritative" to "store.db authoritative (P15)", covering: complete-DB-wins, complete-DB-over-partial-transcript, partial-DB-wins (`store-partial`), empty-DB → transcript fallback with DB metadata retained, and unreadable-DB → transcript fallback.
+- Store DB DAG / tool-result / completeness tests (`store-stack-store-db.test.ts`) are unchanged; only the stale describe label was updated.
+- Store discovery, store DB, cross-stack dedup, list/show integration, storage, and parser suites pass.
+
+### Related boundaries
+
+- The `store.db` DAG decoding rules are unchanged — only the source-selection order and its semantics changed.
+- Transcript whitelist enhancement, position-based matching, and cross-source message merging remain out of scope (evaluated as a separate follow-up).
+- No new CLI parameters, public parse state, or migration steps are added.
+
 ## Solution Status
 
 | Problem | Solution status |

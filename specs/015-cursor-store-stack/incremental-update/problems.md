@@ -97,6 +97,14 @@ The formatter assigns every message one exclusive display type. An assistant res
 
 **Impact:** Filtering loses part of a mixed response depending on which single category the formatter chooses.
 
+### P15 — Store DB was demoted below the transcript despite being the authoritative session store
+
+Primary-source research (`research-store-db-vs-transcript.md`) shows `store.db` holds the authoritative, branch-aware session state (active-root DAG, tool results keyed by `toolCallId`, full content), while the agent transcript JSONL is a lossy, version-dependent Agent-side export that drops tool results, images, reasoning, model/token data, and stable message IDs. The P13 contract (and the original P1/P2 design) made the transcript authoritative and treated `store.db` as a fallback only when the transcript had no usable messages. For a session that has both sources, this discards the richer DB representation and can lose tool results and the current-branch order.
+
+**Impact:** A mixed-source Store session surfaces the lossy transcript instead of the authoritative `store.db` conversation; tool results, branch order, and richer content can be silently dropped. This also inverts the priority documented by the evidence — vibe-replay, VibeLens, and VibeCodingTracker all treat the DB as the primary source.
+
+This supersedes the *direction* of P13 (which is retained as completed history): P13 established that the two sources must not be heuristically merged, and that invariant still holds. P15 only reverses which source is primary.
+
 ## Verification and Documentation Gaps
 
 - PR #32 currently has no associated GitHub Actions run or commit status.

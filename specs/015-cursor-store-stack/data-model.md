@@ -40,11 +40,11 @@ type TranscriptPart =
 |---|---|---|
 | id | string | uuid = transcript file name = chats/<hash>/<uuid>/ directory name |
 | workspacePath | string | `meta.json.cwd` |
-| title | string \| null | Transcript/meta value; Store DB value only on fallback |
-| createdAt | Date | `meta.json.createdAtMs`; Store DB value only when metadata is unavailable on fallback |
-| messages | Message[] | Usable transcript messages are authoritative; otherwise Store DB fallback messages |
+| title | string \| null | Store DB `meta.name` when the DB parses; otherwise transcript/meta value |
+| createdAt | Date | Store DB `meta.createdAt` when the DB parses; otherwise `meta.json.createdAtMs` |
+| messages | Message[] | Store DB messages are authoritative; transcript messages are a fallback when the DB is absent, unreadable, or empty |
 | storeDbPath? | string | `chatDir/store.db` |
-| source | Store source variant | `'transcript'` for usable JSONL; `'store-complete'`/`'store-partial'` when Store DB supplies fallback conversation data; `'store'` for metadata-only compatibility |
+| source | Store source variant | `'store-complete'`/`'store-partial'` when Store DB supplies the messages (primary); `'transcript'` for transcript-only or DB-fallback sessions; `'store'` for metadata-only compatibility |
 
 ---
 
@@ -77,12 +77,12 @@ source?:
   | 'merged';
 ```
 
-- `'store-complete'` / `'store-partial'`: Store DB supplied fallback conversation data because no usable transcript messages existed
-- `'store'`: metadata-only Store compatibility state
-- `'transcript'`: Transcript layer only (degraded fidelity, P1) → triggers degraded warning (reuses 012 mechanism)
+- `'store-complete'` / `'store-partial'`: Store DB supplied the conversation messages (primary source), fully or partially parsed
+- `'store'`: metadata-only Store compatibility state (no store.db and no transcript)
+- `'transcript'`: the transcript supplied the messages — sole source when no store.db exists, or fallback when store.db is unreadable or empty (degraded fidelity) → triggers degraded warning (reuses 012 mechanism)
 - `'merged'`: same stable ID resolved from both Composer and Store stacks
 
-Store DB parsing does not upgrade or enrich a session whose transcript already contains usable messages. This avoids heuristic message correlation, duplicate turns, and incorrect tool-result attachment.
+Store DB messages are the primary source; the transcript never overrides them when the DB yields messages, and the two sources are never heuristically merged or enriched in this increment. This avoids message-correlation errors, duplicate turns, and incorrect tool-result attachment.
 
 ---
 

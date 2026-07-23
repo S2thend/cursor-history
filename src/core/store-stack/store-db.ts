@@ -1,11 +1,12 @@
 /**
- * Parse a Cursor Store stack `store.db` as a fallback conversation source.
- * See specs/015-cursor-store-stack/research.md §5.
+ * Parse a Cursor Store stack `store.db` as the PRIMARY conversation source.
+ * See specs/015-cursor-store-stack/research.md §5 / P15.
  *
- * DESIGN: store.db is consulted ONLY when no usable transcript messages are
- * available. Tool results are NOT guessed — an orphan role:'tool'
- * leaf (no stable tool_call_id matching) marks the parse 'partial' rather than
- * attaching to the wrong tool call.
+ * DESIGN: store.db is the primary message source; the transcript is consulted
+ * only as a fallback when this parse is unreadable or yields no messages (the
+ * source selection order lives in discover.ts). Tool results are NOT guessed —
+ * an orphan role:'tool' leaf (no stable tool_call_id matching) marks the parse
+ * 'partial' rather than attaching to the wrong tool call.
  *
  * Completeness is tracked explicitly: missing blobs, malformed leaves, and
  * unmatched tool results → 'partial'. A valid `system` leaf is intentionally

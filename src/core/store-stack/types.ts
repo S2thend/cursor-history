@@ -44,21 +44,52 @@ export interface StoreMetaJson {
 }
 
 /**
- * Explicit transcript parse state. Decoupled from Store DB completeness —
- * message count is no longer used as a proxy for transcript presence.
+ * Explicit transcript parse state. Decoupled from Store DB completeness and
+ * from whether the transcript ends up supplying the session's messages: under
+ * P15 `store.db` is the primary message source and the transcript is a fallback.
  *
- * - `parsed`: transcript messages are authoritative.
- * - `partial`: usable messages were found, but one or more non-empty lines
- *   were malformed or unsupported; a Store DB may provide a safer fallback.
+ * - `parsed`: the transcript yielded usable messages (used only when store.db
+ *   is absent, unreadable, or yields no messages).
+ * - `partial`: usable messages were found alongside malformed/unsupported lines;
+ *   those usable messages are a fallback source as above.
  * - `empty`: file readable and well-formed but contains no message/error lines.
  * - `error-only`: only provider-error lines were present (no messages).
  * - `unsupported`: lines were present but none recognized as messages or errors.
  * - `missing`: the transcript file does not exist.
  * - `unreadable`: the file exists but could not be read (permissions, I/O).
  *
- * Any non-`parsed` state may fall back to `store.db` when available, while
- * retaining this state for provenance.
+ * `transcriptState` is retained for provenance in every case, including when
+ * `store.db` supplies the final messages.
  */
+/**
+ * Internal Store DB parse outcome (P15). Diagnostics-only — never serialized.
+ * `store.db` is the primary message source; this records how its parse fared.
+ *
+ * - `missing`:  no store.db path is present for the session.
+ * - `failed`:   the database could not be opened or parsed (any exception is
+ *               collapsed to `failed` in this increment).
+ * - `empty`:    parsed successfully but yielded zero recoverable messages.
+ * - `partial`:  parsed with recoverable messages, but at least one reachable
+ *               leaf/blob was missing or malformed, or an orphan tool result
+ *               was present.
+ * - `complete`: parsed and every reachable message shape was handled.
+ */
+export type StoreDbState = 'missing' | 'failed' | 'empty' | 'partial' | 'complete';
+
+/**
+ * Internal role the transcript played in resolving a session's messages (P15).
+ * Diagnostics-only — never serialized.
+ *
+ * - `unused`:      the transcript did not supply messages; store.db supplied
+ *                  them, or the session has only metadata/empty DB state.
+ * - `fallback`:    store.db was present but unreadable or empty, so the
+ *                  transcript's messages filled the gap (DB metadata may still
+ *                  contribute title/createdAt).
+ * - `only-source`: no store.db exists and a transcript file is the only
+ *                  available Store conversation source.
+ */
+export type TranscriptUse = 'unused' | 'fallback' | 'only-source';
+
 /**
  * A discovered Store-stack session, prior to unification into `ChatSession`.
  */
@@ -78,11 +109,14 @@ export interface StoreSession {
   lastUpdatedAt: Date;
   messages: Message[];
   /**
-   * Backing data for `messages`:
-   * - `'transcript'`: authoritative transcript JSONL.
-   * - `'store-complete'` / `'store-partial'`: store.db fallback (no usable
-   *   transcript), full or partial parse.
-   * - `'store'`: legacy alias.
+   * Backing data for `messages` (P15 — `store.db` is the primary source):
+   * - `'store-complete'` / `'store-partial'`: `store.db` supplied the messages
+   *   (primary source), fully or partially parsed.
+   * - `'transcript'`: the transcript supplied the messages — the sole source
+   *   when no `store.db` exists, or the fallback when `store.db` is unreadable
+   *   or yields no messages (`store.db` metadata may still contribute
+   *   title/createdAt).
+   * - `'store'`: metadata-only legacy alias (no `store.db` and no transcript).
    */
   source: 'transcript' | 'store' | 'store-complete' | 'store-partial';
   /** Explicit transcript parse state, retained even when store.db backs messages. */
