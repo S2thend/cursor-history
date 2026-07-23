@@ -1361,6 +1361,60 @@ describe('listSessions', () => {
   });
 });
 
+describe('SessionReadContext final session cache', () => {
+  it('removes a rejected resolution so the same operation can retry', async () => {
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000088';
+    const context = createSessionReadContext('/data');
+    context.workspaceScope = null;
+    context.summaries = [
+      {
+        id: sessionId,
+        index: 1,
+        title: 'Retry fixture',
+        createdAt: new Date(1783000000000),
+        lastUpdatedAt: new Date(1783000000000),
+        messageCount: 1,
+        workspaceId: 'store',
+        workspacePath: '/project',
+        preview: 'recovered',
+        source: 'store-complete',
+      },
+    ];
+
+    vi.mocked(discoverStoreSessions)
+      .mockRejectedValueOnce(new Error('transient discovery failure'))
+      .mockResolvedValueOnce([
+        {
+          id: sessionId,
+          title: 'Retry fixture',
+          createdAt: new Date(1783000000000),
+          lastUpdatedAt: new Date(1783000000000),
+          workspacePath: '/project',
+          messages: [
+            {
+              id: null,
+              role: 'user',
+              content: 'recovered',
+              codeBlocks: [],
+            },
+          ],
+          source: 'store-complete',
+          transcriptState: 'parsed',
+        },
+      ]);
+
+    await expect(getSession(sessionId, '/data', undefined, context)).rejects.toThrow(
+      'transient discovery failure'
+    );
+    expect(context.resolvedSessions.size).toBe(0);
+
+    const recovered = await getSession(sessionId, '/data', undefined, context);
+    expect(recovered?.messages[0]?.content).toBe('recovered');
+    expect(discoverStoreSessions).toHaveBeenCalledTimes(2);
+    expect(context.resolvedSessions.size).toBe(1);
+  });
+});
+
 // =============================================================================
 // listWorkspaces
 // =============================================================================

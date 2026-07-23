@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import BetterSqlite3 from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import * as storage from '../../src/core/storage.js';
 
 // Real Store-stack fixture (no Composer vscdb): two Store sessions.
@@ -90,19 +92,26 @@ describe('SessionReadContext — one Store discovery per operation', () => {
 
   it('caches Store sessions; a second listing reuses the cached discovery', async () => {
     const ctx = storage.createSessionReadContext(STORE_ROOT());
-    await storage.listSessions({ limit: 0, all: true }, STORE_ROOT(), undefined, ctx);
+    const first = await storage.listSessions({ limit: 0, all: true }, STORE_ROOT(), undefined, ctx);
     expect(ctx.storeSessions).not.toBeNull();
     expect(ctx.summaries).not.toBeNull();
     const firstStore = ctx.storeSessions;
+    const firstSummaries = ctx.summaries;
 
-    // Re-list with the SAME context: the cached Store corpus is reused (same
-    // reference), proving discovery did not run again. (Summaries are rebuilt
-    // per listing — that is cheap; the Store discovery is the expensive part.)
-    await storage.listSessions({ limit: 0, all: true }, STORE_ROOT(), undefined, ctx);
+    // Re-list with the same scope: both discovery and the complete directory
+    // summary are reused; only the requested limit is applied to the result.
+    const limited = await storage.listSessions(
+      { limit: 1, all: false },
+      STORE_ROOT(),
+      undefined,
+      ctx
+    );
     expect(ctx.storeSessions).toBe(firstStore);
+    expect(ctx.summaries).toBe(firstSummaries);
+    expect(limited).toEqual(first.slice(0, 1));
   });
 
-  it('getSession resolves by ID through the cache without re-listing', async () => {
+  it('caches the final Store session and returns isolated copies', async () => {
     const ctx = storage.createSessionReadContext(STORE_ROOT());
     const summaries = await storage.listSessions(
       { limit: 0, all: true },
@@ -113,11 +122,85 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     expect(summaries.length).toBeGreaterThan(0);
     const before = ctx.storeSessions;
 
-    const session = await storage.getSession(UUID1, STORE_ROOT(), undefined, ctx);
-    expect(session).not.toBeNull();
-    expect(session!.id).toBe(UUID1);
+    const [first, concurrent] = await Promise.all([
+      storage.getSession(UUID1, STORE_ROOT(), undefined, ctx),
+      storage.getSession(UUID1, STORE_ROOT(), undefined, ctx),
+    ]);
+    expect(first).not.toBeNull();
+    expect(concurrent).not.toBeNull();
+    expect(first!.id).toBe(UUID1);
+    expect(ctx.resolvedSessions.size).toBe(1);
+    expect(concurrent).not.toBe(first);
+
+    const originalContent = concurrent!.messages[0]!.content;
+    first!.messages[0]!.content = 'caller mutation';
+    const cached = await storage.getSession(UUID1, STORE_ROOT(), undefined, ctx);
+    expect(cached!.messages[0]!.content).toBe(originalContent);
+    expect(cached).not.toBe(first);
     // The cached Store corpus is unchanged (no re-discovery during getSession).
     expect(ctx.storeSessions).toBe(before);
+  });
+
+  it('keeps a Composer resolution stable within one context and refreshes in a new context', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-composer-context-'));
+    const workspaceStorage = join(root, 'User', 'workspaceStorage');
+    const workspaceDir = join(workspaceStorage, 'workspace-a');
+    const projectPath = join(root, 'project-a');
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000099';
+    mkdirSync(workspaceDir, { recursive: true });
+    mkdirSync(projectPath, { recursive: true });
+    writeFileSync(
+      join(workspaceDir, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(projectPath).href })
+    );
+
+    const db = new BetterSqlite3(join(workspaceDir, 'state.vscdb'));
+    db.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    const writeComposer = (name: string): void => {
+      db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(
+        'composer.composerData',
+        JSON.stringify({
+          allComposers: [
+            {
+              composerId: sessionId,
+              name,
+              createdAt: 1783000000000,
+              lastUpdatedAt: 1783000000000,
+            },
+          ],
+        })
+      );
+    };
+
+    try {
+      writeComposer('initial content');
+      const context = storage.createSessionReadContext(workspaceStorage);
+      await storage.listSessions(
+        { limit: 0, all: true, workspacePath: projectPath },
+        workspaceStorage,
+        undefined,
+        context
+      );
+      const initial = await storage.getSession(1, workspaceStorage, undefined, context);
+      expect(initial?.messages[0]?.content).toBe('initial content');
+
+      writeComposer('updated content');
+      const cached = await storage.getSession(1, workspaceStorage, undefined, context);
+      expect(cached?.messages[0]?.content).toBe('initial content');
+
+      const freshContext = storage.createSessionReadContext(workspaceStorage);
+      await storage.listSessions(
+        { limit: 0, all: true, workspacePath: projectPath },
+        workspaceStorage,
+        undefined,
+        freshContext
+      );
+      const refreshed = await storage.getSession(1, workspaceStorage, undefined, freshContext);
+      expect(refreshed?.messages[0]?.content).toBe('updated content');
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('resolves a workspace-filtered numeric index against the cached filtered summaries', async () => {
@@ -137,9 +220,18 @@ describe('SessionReadContext — one Store discovery per operation', () => {
   });
 
   it('normalizes equivalent WSL and Windows workspace filters without suffix matches', async () => {
+    const context = storage.createSessionReadContext(STORE_ROOT());
     const equivalent = await storage.listSessions(
       { limit: 0, all: true, workspacePath: 'D:\\1_yuyu_proj\\cursor-history' },
-      STORE_ROOT()
+      STORE_ROOT(),
+      undefined,
+      context
+    );
+    const sameScope = await storage.listSessions(
+      { limit: 0, all: true, workspacePath: '/mnt/d/1_yuyu_proj/cursor-history' },
+      STORE_ROOT(),
+      undefined,
+      context
     );
     const suffixOnly = await storage.listSessions(
       { limit: 0, all: true, workspacePath: '/1_yuyu_proj/cursor-history' },
@@ -147,7 +239,27 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     );
 
     expect(equivalent.map((session) => session.id)).toEqual([UUID1]);
+    expect(sameScope).toBe(context.summaries);
     expect(suffixOnly).toEqual([]);
+  });
+
+  it('rejects reusing a context for a different workspace scope', async () => {
+    const ctx = storage.createSessionReadContext(STORE_ROOT());
+    await storage.listSessions(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      STORE_ROOT(),
+      undefined,
+      ctx
+    );
+
+    await expect(
+      storage.listSessions(
+        { limit: 0, all: true, workspacePath: '/workspace/b' },
+        STORE_ROOT(),
+        undefined,
+        ctx
+      )
+    ).rejects.toThrow('SessionReadContext workspace scope mismatch');
   });
 
   it('rejects reusing a context for a different data source', async () => {

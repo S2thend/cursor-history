@@ -80,13 +80,16 @@
 
 **Work:**
 
-- [x] Add an internal operation-scoped `SessionReadContext` containing cached Store sessions and current summaries.
+- [x] Add an internal operation-scoped `SessionReadContext` containing cached Composer workspaces, Store sessions, complete scoped summaries, and lazily resolved final sessions.
 - [x] Reuse it in search, library listing, CLI export-all, and library export-all.
 - [x] Resolve looped sessions by ID and known summary without rediscovering the Store corpus.
+- [x] Bind each context to one normalized workspace scope, reuse summaries for equivalent scopes and different limits, and reject reuse across different scopes.
+- [x] Cache one in-flight/final Promise per stable session ID after Composer-only, Store-only, or merged resolution completes.
+- [x] Return deep copies of cached sessions, remove rejected entries for retry, and keep a fresh context independent from earlier source snapshots.
 - [x] Build `listWorkspaces()` from deduplicated session summaries and group by normalized final workspace path.
 - [x] Make workspace preflight accept either a Composer root or Store root.
 - [x] Verify Store-only, Composer-only, and mixed-stack workspace counts.
-- [x] Instrument one multi-session operation and verify Store discovery runs once, including concurrent readers.
+- [x] Verify concurrent readers share one resolution, caller mutation does not leak, Composer refresh occurs only with a new context, and merged results are reused.
 
 ## Task 4 — Export the resolved session consistently
 
@@ -172,7 +175,7 @@
 - [x] Run `npm run build`.
 - [x] Run `git diff --check` for the incremental change.
 - [x] Update `solutions.md` statuses to Implemented/Verified only after the matching checks pass.
-- [x] Run the complete Windows Node 24 suite: 29 files and 811 tests pass after the P15 source-resolution regressions were added.
+- [x] Run the complete Windows Node 24 suite after the P15 source-resolution and operation-scoped final-session cache regressions: 29 files and 814 tests pass.
 - [x] Run the complete Windows Node 20 fallback suite before the latest two integration cases were added: 28 files, 788 tests pass, and the unavailable `node:sqlite` driver test is skipped as expected; `better-sqlite3` ABI 115 read/write succeeds. A current Node 20 runtime is not installed in this checkout's Windows environment, so the new cases remain covered by the current Windows and isolated WSL Node 24 runs rather than being claimed as rerun on Node 20.
 - [x] Run the complete Ubuntu WSL Node 24 isolated suite from a fresh install: 29 files and 808 tests pass; typecheck, lint, format check, and build are clean. This WSL checkpoint immediately predates the final platform-neutral Library error-semantics correction and expanded assertions, which were rerun through the current full Windows suite only.
 - [x] Pin Prettier 3.9.5 in `package.json` and `package-lock.json` so fresh Windows/WSL installs use the same formatter implementation.
@@ -180,3 +183,11 @@
 - [x] Verify real WSL discovery from the Store root, `chats`, `projects`, `CURSOR_DATA_PATH`, and the mounted Windows Composer path.
 - [x] Verify real WSL search, workspace aggregation, single JSON/Markdown export, and 10-session export-all.
 - [x] Verify real Windows merged data (`48/50` sampled sessions merged). The mounted Windows Composer and WSL Store datasets have no overlapping IDs, so their combined WSL listing correctly remains single-source; merged behavior is covered by the real Windows run and the hybrid SQLite/Store fixture.
+
+## P16 — Final review readiness corrections
+
+- [x] Keep an omitted Library `dataPath` implicit so WSL and explicit `CURSOR_STORE_ROOT` preference are not masked by a synthesized Composer path.
+- [x] Update Library unit expectations to verify the core receives `undefined` for the implicit default while explicit `dataPath` values remain unchanged.
+- [x] Add compact fidelity labels to the default text session list and cover partial and metadata-limited Store sessions.
+- [x] Align `CLAUDE.md`, the CLI contract, and the Library contract with the implemented conflict-priority and default-path semantics.
+- [x] Run the final full Windows validation after P16: typecheck, lint, format check, build, 29 test files / 816 tests, package dry run, runtime preference/list-format smoke checks, and `git diff --check` all pass.

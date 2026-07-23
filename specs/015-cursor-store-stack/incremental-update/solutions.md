@@ -254,19 +254,24 @@ All Store directory enumeration uses safe helpers that catch errors at the narro
 
 An unreadable or concurrently removed `agent-transcripts` directory skips only that directory. Valid Store projects and all Composer results remain available.
 
-## P11 — Reuse one Store discovery result per top-level operation
+## P11 — Reuse one scoped listing and final session resolution per top-level operation
 
 **Status:** Implemented and verified locally (pending commit)
 
-Add an operation-scoped `SessionReadContext` in the core storage layer. It holds the Store sessions discovered for the operation and, when relevant, the already listed summaries.
+Add an operation-scoped `SessionReadContext` in the core storage layer. One context is bound to a single `customDataPath` / `backupPath` pair and one normalized workspace scope. It holds the Composer workspace discovery, the eager Store discovery result, the complete unpaginated summaries for that scope, and lazily resolved final sessions.
 
 - `listSessions()` and `getSession()` accept an optional internal context.
 - Direct public calls create a context automatically, preserving current signatures for callers.
 - Search, CLI export-all, library listing, and library export-all create one context and reuse it for every resolved session.
-- Per-session resolution uses the known summary and cached Store session instead of calling `listSessions()` and `discoverStoreSessions()` again.
+- A repeated listing in the same workspace scope reuses the complete cached summaries and applies only the requested limit. Reusing a context with a different workspace scope fails explicitly instead of mixing indexes and workspace attribution.
+- Per-session resolution uses the known summary and stable session ID instead of calling `listSessions()` again.
+- `resolvedSessions` stores one Promise per session ID. This coalesces concurrent readers and caches the final Composer-only, Store-only, or cross-stack merged `ChatSession`; incomplete merge intermediates are never cached.
+- `getSession()` returns a deep copy of the cached result so caller mutations cannot change later reads. A rejected resolution is removed from the map so a transient failure can be retried in the same operation; a normal `null` result remains cached.
 - Use session IDs inside loops rather than re-resolving mutable list indexes.
 
-The required result is one Store corpus discovery per top-level operation. Composer database reads may remain per session in this increment.
+The cache lifetime is exactly one top-level CLI command or one public library invocation. It has no TTL, no process-global state, and no explicit disposal requirement; the context and its cached sessions become collectible when the operation returns. Separate pagination calls and separate API calls create fresh contexts and therefore observe later source changes.
+
+Store discovery remains eager because the current Store listing path parses the corpus as one unit. Composer messages are not loaded eagerly merely for structural symmetry: the first request for a session loads Composer bubbles and performs any Store merge, then records the final result. This provides repeatable reads after first resolution without claiming a transactionally synchronized snapshot across the Composer database and Store files.
 
 ## Implementation Chain
 
@@ -340,6 +345,16 @@ Public interface compatibility is preserved: the `source` union is unchanged, no
 - The `store.db` DAG decoding rules are unchanged — only the source-selection order and its semantics changed.
 - Transcript whitelist enhancement, position-based matching, and cross-source message merging remain out of scope (evaluated as a separate follow-up).
 - No new CLI parameters, public parse state, or migration steps are added.
+
+## P16 — Preserve implicit Library defaults and surface list fidelity
+
+**Status:** Implemented and verified locally (pending commit)
+
+Library configuration keeps an omitted `dataPath` as `undefined` when calling the core. The core already resolves the platform Composer path, but `detectPreferredStackSource()` can now distinguish the implicit default from an explicit Composer or Store selection. This keeps Library and CLI conflict priority aligned on WSL and when `CURSOR_STORE_ROOT` deliberately redirects the Store stack.
+
+The text session list adds a compact fidelity column. Composer-global and merged sessions remain unflagged as degraded; workspace fallback, transcript, and partial Store sessions are marked `partial`, while complete Store DB sessions are marked `metadata` because token usage and per-message timestamps are still unavailable.
+
+`CLAUDE.md` is aligned with the accepted scalar merge rule: true conflicts, including `lastUpdatedAt`, follow the preferred source rather than choosing the later date independently.
 
 ## Solution Status
 

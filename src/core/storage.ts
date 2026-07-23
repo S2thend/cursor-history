@@ -1165,6 +1165,11 @@ export async function getWorkspaceLinkedComposerIds(
 export interface SessionReadContext {
   readonly customDataPath?: string;
   readonly backupPath?: string;
+  /**
+   * Workspace scope bound to this operation. `null` means an unfiltered
+   * listing; `undefined` means no listing has been performed yet.
+   */
+  workspaceScope: string | null | undefined;
   /** Cached Store sessions (discovered at most once per operation). */
   storeSessions: StoreSession[] | null;
   /** In-flight Store discovery, shared by concurrent readers. */
@@ -1175,6 +1180,11 @@ export interface SessionReadContext {
   workspacesPromise?: Promise<Workspace[]> | null;
   /** Cached summaries for the operation's current listing scope. */
   summaries: ChatSessionSummary[] | null;
+  /**
+   * Lazily resolved final sessions, after Composer/Store loading and any
+   * cross-stack merge. Promises coalesce concurrent reads of the same ID.
+   */
+  resolvedSessions: Map<string, Promise<ChatSession | null>>;
 }
 
 /**
@@ -1190,11 +1200,13 @@ export function createSessionReadContext(
   return {
     customDataPath,
     backupPath,
+    workspaceScope: undefined,
     storeSessions: null,
     storeSessionsPromise: null,
     workspaces: null,
     workspacesPromise: null,
     summaries: null,
+    resolvedSessions: new Map(),
   };
 }
 
@@ -1225,6 +1237,39 @@ function assertContextSource(
       'SessionReadContext source mismatch: create a new context for each dataPath/backupPath pair'
     );
   }
+}
+
+function bindContextWorkspaceScope(
+  context: SessionReadContext | undefined,
+  workspacePath?: string
+): void {
+  if (!context) return;
+
+  const requestedScope = workspacePath ?? null;
+  if (context.workspaceScope === undefined) {
+    context.workspaceScope = requestedScope;
+    return;
+  }
+
+  const sameScope =
+    context.workspaceScope === null
+      ? requestedScope === null
+      : requestedScope !== null && pathsEqual(context.workspaceScope, requestedScope);
+  if (!sameScope) {
+    throw new Error(
+      'SessionReadContext workspace scope mismatch: create a new context for each workspace scope'
+    );
+  }
+}
+
+function applySessionListLimit(
+  summaries: ChatSessionSummary[],
+  options: ListOptions
+): ChatSessionSummary[] {
+  if (!options.all && options.limit > 0) {
+    return summaries.slice(0, options.limit);
+  }
+  return summaries;
 }
 
 async function getWorkspacesCached(
@@ -1293,6 +1338,11 @@ export async function listSessions(
   context?: SessionReadContext
 ): Promise<ChatSessionSummary[]> {
   assertContextSource(context, customDataPath, backupPath);
+  bindContextWorkspaceScope(context, options.workspacePath);
+  if (context?.summaries) {
+    return applySessionListLimit(context.summaries, options);
+  }
+
   // T029: Support reading from backup
   const workspaces = await getWorkspacesCached(context, customDataPath, backupPath);
 
@@ -1571,12 +1621,7 @@ export async function listSessions(
     context.summaries = allSessions;
   }
 
-  // Apply limit
-  if (!options.all && options.limit > 0) {
-    return allSessions.slice(0, options.limit);
-  }
-
-  return allSessions;
+  return applySessionListLimit(allSessions, options);
 }
 
 /**
@@ -1685,10 +1730,37 @@ export async function getSession(
   }
 
   const index: number = typeof identifier === 'string' ? summary.index : identifier;
+  let resolution = operationContext.resolvedSessions.get(summary.id);
+  if (!resolution) {
+    resolution = resolveFinalSession(summary, index, customDataPath, backupPath, operationContext);
+    operationContext.resolvedSessions.set(summary.id, resolution);
+  }
 
+  try {
+    const session = await resolution;
+    return session ? structuredClone(session) : null;
+  } catch (error) {
+    if (operationContext.resolvedSessions.get(summary.id) === resolution) {
+      operationContext.resolvedSessions.delete(summary.id);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Resolve one canonical session for the operation cache. Callers receive a
+ * deep clone from getSession(), so mutations cannot leak back into the cache.
+ */
+async function resolveFinalSession(
+  summary: ChatSessionSummary,
+  index: number,
+  customDataPath: string | undefined,
+  backupPath: string | undefined,
+  context: SessionReadContext
+): Promise<ChatSession | null> {
   // Merged: same ID exists in both stacks, so field-merge the two representations.
   if (summary.source === 'merged') {
-    return loadMergedSession(summary, index, customDataPath, backupPath, operationContext);
+    return loadMergedSession(summary, index, customDataPath, backupPath, context);
   }
 
   // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via
@@ -1699,15 +1771,15 @@ export async function getSession(
     summary.source === 'store-complete' ||
     summary.source === 'store-partial'
   ) {
-    const storeSession = (
-      await getStoreSessionsCached(operationContext, customDataPath, backupPath)
-    ).find((s) => s.id === summary.id);
+    const storeSession = (await getStoreSessionsCached(context, customDataPath, backupPath)).find(
+      (s) => s.id === summary.id
+    );
     if (!storeSession) return null;
     return mapStoreSession(storeSession, index);
   }
 
   // Composer stack: global storage (full bubbles) with workspace fallback.
-  return loadComposerSession(summary, index, customDataPath, backupPath, operationContext);
+  return loadComposerSession(summary, index, customDataPath, backupPath, context);
 }
 
 /**

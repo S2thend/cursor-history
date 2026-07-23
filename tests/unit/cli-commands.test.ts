@@ -34,7 +34,12 @@ vi.mock('../../src/core/storage.js', () => ({
   searchSessions: (...args: unknown[]) => mockSearchSessions(...args),
   listWorkspaces: (...args: unknown[]) => mockListWorkspaces(...args),
   findWorkspaces: (...args: unknown[]) => mockFindWorkspaces(...args),
-  createSessionReadContext: vi.fn(() => ({ storeSessions: null, summaries: null })),
+  createSessionReadContext: vi.fn(() => ({
+    workspaceScope: undefined,
+    storeSessions: null,
+    summaries: null,
+    resolvedSessions: new Map(),
+  })),
 }));
 
 const mockListBackups = vi.fn();

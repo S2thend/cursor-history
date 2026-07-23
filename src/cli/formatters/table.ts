@@ -114,6 +114,23 @@ function padRight(str: string, width: number): string {
   return str.padEnd(width);
 }
 
+/** Compact fidelity label for the session list. */
+function formatSessionFidelity(session: ChatSessionSummary): string {
+  switch (session.source) {
+    case 'workspace-fallback':
+    case 'transcript':
+    case 'store-partial':
+      return '⚠ partial';
+    case 'store':
+    case 'store-complete':
+      return '⚠ metadata';
+    case 'merged':
+      return 'merged';
+    default:
+      return 'full';
+  }
+}
+
 /**
  * Format sessions list as table
  */
@@ -128,35 +145,42 @@ export function formatSessionsTable(sessions: ChatSessionSummary[], showIds = fa
   if (showIds) {
     lines.push(
       pc.bold(
-        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Msgs', 5)} ${padRight('Workspace', 25)} ${padRight('Composer ID', 38)} Preview`
+        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Msgs', 5)} ${padRight('Fidelity', 12)} ${padRight('Workspace', 25)} ${padRight('Composer ID', 38)} Preview`
       )
     );
-    lines.push(pc.dim('─'.repeat(130)));
+    lines.push(pc.dim('─'.repeat(143)));
   } else {
     lines.push(
       pc.bold(
-        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Messages', 8)} ${padRight('Workspace', 30)} Preview`
+        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Messages', 8)} ${padRight('Fidelity', 12)} ${padRight('Workspace', 30)} Preview`
       )
     );
-    lines.push(pc.dim('─'.repeat(100)));
+    lines.push(pc.dim('─'.repeat(113)));
   }
 
   // Rows
   for (const session of sessions) {
     const idx = pc.cyan(padRight(String(session.index), 4));
     const date = padRight(formatDate(session.createdAt), 12);
+    const fidelityLabel = formatSessionFidelity(session);
+    const paddedFidelity = padRight(fidelityLabel, 12);
+    const fidelity = fidelityLabel.startsWith('⚠')
+      ? pc.yellow(paddedFidelity)
+      : session.source === 'merged'
+        ? pc.cyan(paddedFidelity)
+        : paddedFidelity;
 
     if (showIds) {
       const msgs = padRight(String(session.messageCount), 5);
       const workspace = pc.dim(padRight(truncatePath(session.workspacePath, 25), 25));
       const composerId = pc.gray(padRight(session.id, 38));
       const preview = truncate(session.preview, 30);
-      lines.push(`${idx} ${date} ${msgs} ${workspace} ${composerId} ${preview}`);
+      lines.push(`${idx} ${date} ${msgs} ${fidelity} ${workspace} ${composerId} ${preview}`);
     } else {
       const msgs = padRight(String(session.messageCount), 8);
       const workspace = pc.dim(padRight(truncatePath(session.workspacePath, 30), 30));
       const preview = truncate(session.preview, 40);
-      lines.push(`${idx} ${date} ${msgs} ${workspace} ${preview}`);
+      lines.push(`${idx} ${date} ${msgs} ${fidelity} ${workspace} ${preview}`);
     }
   }
 

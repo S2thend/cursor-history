@@ -109,8 +109,12 @@ describe('Composer + Store stack integration', () => {
     expect(session!.messages.every((message) => message.source === 'both')).toBe(true);
     expect(session!.messages[1]?.toolCalls).toEqual([expect.objectContaining({ name: 'Read' })]);
 
+    const originalMessages = structuredClone(session!.messages);
+    session!.messages[0]!.content = 'caller mutation';
     const byIndex = await getSession(duplicates[0]!.index, workspaceStorage, undefined, context);
     expect(byIndex?.id).toBe(SESSION_ID);
-    expect(byIndex?.messages).toEqual(session!.messages);
+    expect(byIndex?.messages).toEqual(originalMessages);
+    expect(byIndex).not.toBe(session);
+    expect(context.resolvedSessions.size).toBe(1);
   });
 });

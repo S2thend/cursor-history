@@ -84,6 +84,17 @@ describe('formatSessionsTable', () => {
     const result = formatSessionsTable([makeSummary(), makeSummary({ index: 2, id: 'sess-2' })]);
     expect(result).toContain('2 session(s)');
   });
+
+  it('marks lower-fidelity Store sessions in the text list', () => {
+    const result = stripAnsi(
+      formatSessionsTable([
+        makeSummary({ source: 'transcript' }),
+        makeSummary({ index: 2, id: 'sess-2', source: 'store-complete' }),
+      ])
+    );
+    expect(result).toContain('⚠ partial');
+    expect(result).toContain('⚠ metadata');
+  });
 });
 
 describe('formatWorkspacesTable', () => {

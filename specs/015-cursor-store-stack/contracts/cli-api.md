@@ -8,7 +8,7 @@
 - **New behavior**: In addition to the Composer stack, discovers and lists Store stack sessions (`~/.cursor/chats/` + transcripts).
 - **Cross-stack deduplication**: The same session ID appears only once. Composer and Store representations are merged; the runtime-preferred stack supplies canonical order and true-conflict values while non-conflicting fields and unmatched messages from both stacks are preserved.
 - **Source label**: Per-session `source` field.
-- **Degraded label**: Sessions with `source='transcript'` show a degraded indicator (reuses the 012 mechanism).
+- **Fidelity label**: Text listings include a compact fidelity column. Transcript, workspace-fallback, and partial Store sessions are marked `partial`; complete Store DB sessions are marked `metadata` because tokens and per-message timestamps remain unavailable; merged sessions are identified separately.
 - **`--workspaces`**: Store stack workspaces are grouped by their `meta.json.cwd`.
 
 ### `cursor-history show <id|index>`

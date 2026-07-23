@@ -44,6 +44,7 @@ interface Session {
 
 ## Configuration (`LibraryConfig`)
 - `dataPath?`: Refers to `~/.cursor` → Store stack takes precedence; by default both stack roots are scanned.
+- When `dataPath` is omitted, the Library keeps that absence explicit while the core resolves the platform default. This preserves runtime conflict priority: WSL and an explicit non-default `CURSOR_STORE_ROOT` can prefer Store instead of being masked by a synthesized Composer path.
 - No new required configuration; Store stack discovery is **enabled by default**.
 
 ## Error Handling
@@ -54,4 +55,6 @@ interface Session {
 ## Backward Compatibility
 - The new `source` values are an **additive extension**; existing consumers can simply ignore unknown sources.
 - No existing function signatures or return structures are broken.
-- Calls remain stateless across public API invocations. Within one invocation, a private read context keeps scoped summaries and Store discovery consistent while full sessions are loaded.
+- Calls remain stateless across public API invocations. Each invocation creates one private read context bound to one data source and one normalized workspace scope; there is no process-global cache, TTL, or cross-call reuse.
+- Within that invocation, the context reuses the complete scoped summary list and Store discovery result. Full Composer-only, Store-only, and merged sessions are resolved lazily by stable ID and cached only after the final `ChatSession` has been produced.
+- Concurrent reads of the same session share one in-flight resolution. Repeated reads receive deep copies of the cached result, and a rejected resolution is removed so the same operation can retry.
