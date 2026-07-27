@@ -122,7 +122,13 @@ export function registerExportCommand(program: Command): void {
 
             for (const summary of sessions) {
               // Resolve by stable ID through the cached context.
-              const session = await getSession(summary.id, expanded, backupPath, context);
+              const session = await getSession(
+                summary.id,
+                expanded,
+                backupPath,
+                context,
+                summary.index
+              );
               if (!session) continue;
 
               // Prefer the resolved session's workspacePath when Composer

@@ -50,9 +50,9 @@ Message order and message time are separate concerns. The canonical order comes 
 - Composer uses its active branch / ordered bubble representation.
 - Store uses the ordered `latestRoot` message references and ordered turn structure from `store.db`; transcript-only fallback preserves JSONL line order.
 
-Modern Composer bubble records provide a native per-bubble `createdAt` value. Older Composer records may expose lifecycle timing fields or may require interpolation. Store protobuf can expose recorded conversation- or turn-level timing fields, but those fields are not guaranteed to be populated and must only be attached to a message when their semantic mapping is proven.
+Modern Composer bubble records provide a native per-bubble `createdAt` value. Older Composer records may expose lifecycle timing fields or may require the existing neighbor/session fallback implemented by `fillTimestampGaps()`. Store protobuf can expose recorded conversation- or turn-level timing fields, but those fields are not guaranteed to be populated and must only be attached to a core Store message when their semantic mapping is proven.
 
-The merged message model therefore treats a per-message timestamp as optional. A timestamp is assigned only when it is directly stored and can be mapped to that message or turn. Session-level `createdAt`, `updatedAt`, or `conversation_started_timestamp_ms` values must not be copied onto every message. Missing message timestamps remain absent and are omitted from display and export rather than replaced with a fabricated fallback.
+The core merged message model therefore permits an optional timestamp for Store-origin messages while preserving Composer's established timestamp recovery. Store session-level `createdAt`, `updatedAt`, or `conversation_started_timestamp_ms` values are not presented by CLI rendering as precise per-message times. The public Library keeps its existing required `Message.timestamp` contract by using the session creation time when a Store message has no mapped turn time; `timestampSource` remains absent for that compatibility fallback.
 
 When a timestamp is retained, its origin is recorded so a directly stored timestamp cannot be confused with an inferred value:
 
@@ -130,8 +130,9 @@ This provenance is additive. Existing single-source values such as `global`, `wo
 - Distinct messages and tool calls from either source remain present after the merge.
 - Messages remain in source-native order when timestamps are missing, equal, or non-monotonic.
 - A directly stored Composer message time or mapped Store turn time is retained with its source.
-- A message without a directly mapped time has no rendered/exported timestamp.
-- Store session creation, update, and conversation-start timestamps are not duplicated onto every message.
+- Composer messages retain the existing neighbor/session timestamp fallback.
+- A Store message without a directly mapped time has no CLI-rendered timestamp.
+- Public Library Store messages retain the required timestamp field through a session-created compatibility fallback without direct provenance.
 - Empty-text assistant messages with different structured tool calls are treated as distinct.
 - Consecutive messages with identical role and content are each rendered separately and no default `×N` folding marker is produced.
 - `--only tool` preserves and renders every matching structured tool-call message in source-native order.

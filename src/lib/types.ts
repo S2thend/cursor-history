@@ -118,11 +118,11 @@ export interface Message {
   content: string;
 
   /**
-   * ISO 8601 timestamp when the message was created. Optional: present only
-   * when a per-message time is directly stored. Absent when no direct time
-   * exists (it is NOT fabricated from session-level times).
+   * ISO 8601 timestamp for the message. When Cursor does not store a
+   * per-message time, the library preserves its historical contract by using
+   * the session creation time.
    */
-  timestamp?: string;
+  timestamp: string;
 
   /** Provenance of `timestamp` when it is directly stored (not inferred). */
   timestampSource?: 'composer-created-at' | 'composer-timing' | 'store-turn-timing';

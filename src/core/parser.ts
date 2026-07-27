@@ -53,12 +53,67 @@ function getToolDisplayName(name: string): string {
   return TOOL_DISPLAY_NAMES[name.trim().toLowerCase()] ?? name;
 }
 
+const TOOL_IDENTITY_PARAMS = new Set([
+  'cmd',
+  'command',
+  'cwd',
+  'dir',
+  'directory',
+  'effectiveuri',
+  'file',
+  'filepath',
+  'path',
+  'pattern',
+  'query',
+  'regex',
+  'relativeworkspacepath',
+  'searchquery',
+  'target',
+  'targetdirectory',
+  'targetfile',
+  'uri',
+  'url',
+]);
+
+function normalizeToolIdentityKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Values that can distinguish one same-name call from another. Generic
+ * parameters (for example, `encoding`) are deliberately excluded: matching a
+ * shared option must not cause a different call to be hidden.
+ */
 function getToolIdentityValues(tc: ToolCall): string[] {
-  const values = [...(tc.files ?? [])];
-  for (const value of Object.values(tc.params ?? {})) {
-    if (typeof value === 'string' && value.length > 0) values.push(value);
+  const values = new Set(
+    (tc.files ?? []).map((value) => value.trim()).filter((value) => value.length > 0)
+  );
+  for (const [key, value] of Object.entries(tc.params ?? {})) {
+    if (
+      TOOL_IDENTITY_PARAMS.has(normalizeToolIdentityKey(key)) &&
+      typeof value === 'string' &&
+      value.trim().length > 0
+    ) {
+      values.add(value.trim());
+    }
   }
-  return values;
+  return [...values];
+}
+
+/** Strong identity values explicitly rendered on labelled Composer lines. */
+function getEmbeddedToolIdentityValues(content: string): string[] {
+  const values = new Set<string>();
+  for (const line of content.split(/\r?\n/).slice(1)) {
+    const labelledValue = line.match(/^([^:\n]+):[ \t]*(.+)$/);
+    if (
+      labelledValue?.[1] &&
+      labelledValue[2] &&
+      TOOL_IDENTITY_PARAMS.has(normalizeToolIdentityKey(labelledValue[1]))
+    ) {
+      values.add(labelledValue[2].trim());
+    }
+  }
+  return [...values];
 }
 
 /**
@@ -80,10 +135,20 @@ export function findEmbeddedToolCallIndex(content: string, toolCalls: ToolCall[]
     );
   if (candidates.length === 0) return -1;
 
-  const identified = candidates.find(({ tc }) =>
-    getToolIdentityValues(tc).some((value) => content.includes(value))
-  );
-  return identified?.index ?? candidates[0]!.index;
+  const embeddedIdentity = getEmbeddedToolIdentityValues(content);
+  if (embeddedIdentity.length > 0) {
+    const identified = candidates.filter(({ tc }) => {
+      const structuredIdentity = new Set(getToolIdentityValues(tc));
+      return embeddedIdentity.every((value) => structuredIdentity.has(value));
+    });
+    return identified.length === 1 ? identified[0]!.index : -1;
+  }
+
+  // A unique name is sufficient when there is only one possible structured
+  // counterpart and the embedded text carries no conflicting identity
+  // evidence. With repeated names, an absent identity match must suppress
+  // nothing rather than silently dropping the wrong call.
+  return candidates.length === 1 ? candidates[0]!.index : -1;
 }
 
 /**
@@ -628,7 +693,8 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
         }
         if (embeddedCall.error !== undefined) {
           lines.push(`- error: ${embeddedCall.error}`);
-        } else if (embeddedCall.result !== undefined) {
+        }
+        if (embeddedCall.result !== undefined) {
           lines.push(`- result: ${truncateForMd(embeddedCall.result)}`);
         }
         if (embeddedCall.files !== undefined) {
@@ -645,7 +711,7 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
         let line = `- 🔧 **${tc.name}**${params ? ` — ${params}` : ''}`;
         if (tc.status && tc.status !== 'completed') line += ` _(${tc.status})_`;
         if (tc.error !== undefined) line += ` — error: ${tc.error}`;
-        else if (tc.result !== undefined) line += ` — result: ${truncateForMd(tc.result)}`;
+        if (tc.result !== undefined) line += ` — result: ${truncateForMd(tc.result)}`;
         lines.push(line);
       }
       if (tc0HasFiles(callsToRender)) {

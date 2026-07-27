@@ -37,9 +37,11 @@ interface Session {
     | 'unsupported'
     | 'unreadable';
 }
-// Message unchanged: toolCalls.result / tokenUsage / model are already optional.
-// The Store stack (P1) simply does not populate these optional fields;
-// the semantics remain consistent with the existing behavior.
+// Message remains backward-compatible: timestamp stays required, while
+// toolCalls.result / tokenUsage / model remain optional. When a Store message
+// has no directly mapped turn time, the Library uses the session creation time
+// and leaves timestampSource absent. Core CLI rendering still omits an unknown
+// Store turn time rather than presenting that fallback as precise provenance.
 ```
 
 ## Configuration (`LibraryConfig`)
@@ -55,6 +57,7 @@ interface Session {
 ## Backward Compatibility
 - The new `source` values are an **additive extension**; existing consumers can simply ignore unknown sources.
 - No existing function signatures or return structures are broken.
+- The required `Message.timestamp` field remains present for every Library message; Store-only fallback timestamps do not claim direct timestamp provenance.
 - Calls remain stateless across public API invocations. Each invocation creates one private read context bound to one data source and one normalized workspace scope; there is no process-global cache, TTL, or cross-call reuse.
 - Within that invocation, the context reuses the complete scoped summary list and Store discovery result. Full Composer-only, Store-only, and merged sessions are resolved lazily by stable ID and cached only after the final `ChatSession` has been produced.
 - Concurrent reads of the same session share one in-flight resolution. Repeated reads receive deep copies of the cached result, and a rejected resolution is removed so the same operation can retry.

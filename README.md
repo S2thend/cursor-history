@@ -405,7 +405,7 @@ When browsing your chat history, you'll see:
 
 - **Complete conversations** - All messages exchanged with Cursor AI
 - **Every message rendered** - Each resolved message is shown once in order; consecutive duplicates are not folded, so distinct tool calls, provenance, and token data are never hidden
-- **Timestamps** - The directly-stored time of a message when available (HH:MM:SS format); messages without a directly-stored time show no timestamp rather than a fabricated fallback
+- **Timestamps** - Composer sessions retain their historical timestamp recovery and interpolation; Store messages show a time only when Cursor provides a directly mapped turn timestamp
 - **Merged cross-stack sessions** - When the same session exists in both the Composer (vscdb) and Store (~/.cursor) stacks, the two representations are merged field by field (neither is discarded), with the backbone source chosen per platform (WSL prefers Store; Windows/macOS/native Linux prefer Composer)
 - **AI tool actions** - Detailed view of what Cursor AI did:
   - **File edits/writes** - Full diff display with syntax highlighting showing exactly what changed

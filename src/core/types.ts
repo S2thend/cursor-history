@@ -27,7 +27,9 @@ export type MessageSource = 'composer' | 'store' | 'both';
 /**
  * Provenance of a directly-stored per-message timestamp. Only attached when a
  * timestamp is directly stored and can be mapped to that message/turn. Inferred
- * or session-level times are NEVER tagged (and never copied onto messages).
+ * or session-level times are never tagged; Composer may still interpolate an
+ * untagged timestamp for compatibility, while Store core messages remain
+ * untimed unless Cursor stored a turn timestamp.
  */
 export type MessageTimestampSource =
   'composer-created-at' | 'composer-timing' | 'store-turn-timing';
@@ -126,10 +128,9 @@ export interface Message {
   role: MessageRole;
   content: string;
   /**
-   * Per-message timestamp. Optional: only present when a time is directly
-   * stored and mappable to this message/turn. Missing timestamps are omitted
-   * from display/export rather than replaced with a fabricated fallback
-   * (session createdAt/updatedAt/conversation_started are NEVER copied here).
+   * Per-message timestamp. Composer bubble reads preserve the historical gap
+   * filling behavior, while Store-only messages may omit this when Cursor does
+   * not provide a turn timestamp.
    */
   timestamp?: Date;
   /** Provenance of `timestamp` when it is directly stored (not inferred). */

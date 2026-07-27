@@ -27,6 +27,90 @@ describe('listWorkspaces — aggregates from the resolved session set', () => {
     const total = workspaces.reduce((sum, w) => sum + w.sessionCount, 0);
     expect(total).toBe(2); // UUID1 + UUID2
   });
+
+  it('counts a duplicate-ID hybrid once at the Store-preferred workspace', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-workspace-conflict-'));
+    const previousHome = process.env['HOME'];
+    const previousDataPath = process.env['CURSOR_DATA_PATH'];
+    const previousStoreRoot = process.env['CURSOR_STORE_ROOT'];
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000099';
+    const composerPath = '/workspace/composer';
+    const storePath = '/workspace/store';
+
+    try {
+      process.env['HOME'] = root;
+      delete process.env['CURSOR_DATA_PATH'];
+      const storeRoot = join(root, 'cursor-store');
+      process.env['CURSOR_STORE_ROOT'] = storeRoot;
+
+      const writeComposerWorkspace = (workspaceId: string, workspacePath: string): void => {
+        const workspaceDir = join(
+          root,
+          '.config',
+          'Cursor',
+          'User',
+          'workspaceStorage',
+          workspaceId
+        );
+        mkdirSync(workspaceDir, { recursive: true });
+        writeFileSync(
+          join(workspaceDir, 'workspace.json'),
+          JSON.stringify({ folder: pathToFileURL(workspacePath).href })
+        );
+        const db = new BetterSqlite3(join(workspaceDir, 'state.vscdb'));
+        db.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+        db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run(
+          'composer.composerData',
+          JSON.stringify({
+            allComposers: [
+              {
+                composerId: sessionId,
+                name: 'Composer title',
+                createdAt: 1783000000000,
+              },
+            ],
+          })
+        );
+        db.close();
+      };
+      writeComposerWorkspace('workspace-a', composerPath);
+      writeComposerWorkspace('workspace-b', storePath);
+
+      const chatDir = join(storeRoot, 'chats', 'hash-store', sessionId);
+      const transcriptDir = join(storeRoot, 'projects', 'hash-store', 'agent-transcripts');
+      mkdirSync(chatDir, { recursive: true });
+      mkdirSync(transcriptDir, { recursive: true });
+      writeFileSync(
+        join(chatDir, 'meta.json'),
+        JSON.stringify({
+          cwd: storePath,
+          createdAtMs: 1784000000000,
+          title: 'Store title',
+        })
+      );
+      writeFileSync(
+        join(transcriptDir, `${sessionId}.jsonl`),
+        JSON.stringify({
+          role: 'user',
+          message: { content: [{ type: 'text', text: 'Store message' }] },
+        }) + '\n'
+      );
+
+      const workspaces = await storage.listWorkspaces();
+
+      expect(workspaces.map(({ path, sessionCount }) => ({ path, sessionCount }))).toEqual([
+        { path: storePath, sessionCount: 1 },
+      ]);
+    } finally {
+      if (previousHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previousHome;
+      if (previousDataPath === undefined) delete process.env['CURSOR_DATA_PATH'];
+      else process.env['CURSOR_DATA_PATH'] = previousDataPath;
+      if (previousStoreRoot === undefined) delete process.env['CURSOR_STORE_ROOT'];
+      else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('SessionReadContext — one Store discovery per operation', () => {
@@ -97,9 +181,15 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     expect(ctx.summaries).not.toBeNull();
     const firstStore = ctx.storeSessions;
     const firstSummaries = ctx.summaries;
+    expect(first).not.toBe(firstSummaries);
+    expect(first).toEqual(firstSummaries);
+
+    const originalTitle = first[0]!.title;
+    first[0]!.title = 'caller mutation';
 
     // Re-list with the same scope: both discovery and the complete directory
-    // summary are reused; only the requested limit is applied to the result.
+    // summary are reused; callers receive isolated copies and only the
+    // requested limit is applied to the result.
     const limited = await storage.listSessions(
       { limit: 1, all: false },
       STORE_ROOT(),
@@ -108,7 +198,8 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     );
     expect(ctx.storeSessions).toBe(firstStore);
     expect(ctx.summaries).toBe(firstSummaries);
-    expect(limited).toEqual(first.slice(0, 1));
+    expect(limited).not.toBe(firstSummaries);
+    expect(limited[0]!.title).toBe(originalTitle);
   });
 
   it('caches the final Store session and returns isolated copies', async () => {
@@ -203,6 +294,125 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     }
   });
 
+  it('keeps duplicate filtered summaries distinct in the final-session cache and bulk search', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-composer-duplicate-cache-'));
+    const workspaceStorage = join(root, 'User', 'workspaceStorage');
+    const projectPath = join(root, 'shared-project');
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000077';
+
+    const writeWorkspace = (workspaceId: string, title: string, createdAt: number): void => {
+      const workspaceDir = join(workspaceStorage, workspaceId);
+      mkdirSync(workspaceDir, { recursive: true });
+      writeFileSync(
+        join(workspaceDir, 'workspace.json'),
+        JSON.stringify({ folder: pathToFileURL(projectPath).href })
+      );
+      const db = new BetterSqlite3(join(workspaceDir, 'state.vscdb'));
+      db.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+      db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run(
+        'composer.composerData',
+        JSON.stringify({
+          allComposers: [
+            {
+              composerId: sessionId,
+              name: title,
+              createdAt,
+              lastUpdatedAt: createdAt,
+            },
+          ],
+        })
+      );
+      db.close();
+    };
+
+    try {
+      writeWorkspace('workspace-a', 'alpha-only duplicate', 1783000000000);
+      writeWorkspace('workspace-b', 'beta-only duplicate', 1784000000000);
+
+      const context = storage.createSessionReadContext(workspaceStorage);
+      const summaries = await storage.listSessions(
+        { limit: 0, all: true, workspacePath: projectPath },
+        workspaceStorage,
+        undefined,
+        context
+      );
+
+      // Workspace-filtered duplicate listing is intentional legacy behavior.
+      expect(summaries).toHaveLength(2);
+      expect(summaries.every((summary) => summary.id === sessionId)).toBe(true);
+
+      const resolved = await Promise.all(
+        summaries.map((summary) =>
+          storage.getSession(summary.id, workspaceStorage, undefined, context, summary.index)
+        )
+      );
+      expect(resolved.map((session) => session?.messages[0]?.content).sort()).toEqual([
+        'alpha-only duplicate',
+        'beta-only duplicate',
+      ]);
+      expect(context.resolvedSessions.size).toBe(2);
+
+      const betaSummary = summaries.find((summary) => summary.title === 'beta-only duplicate')!;
+      const results = await storage.searchSessions(
+        'beta-only',
+        { limit: 0, contextChars: 50, workspacePath: projectPath },
+        workspaceStorage
+      );
+      expect(results.map((result) => result.index)).toEqual([betaSummary.index]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves pure-Composer workspace rows when the same ID exists in distinct workspaces', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-composer-workspace-inventory-'));
+    const workspaceStorage = join(root, 'User', 'workspaceStorage');
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000078';
+
+    const writeWorkspace = (workspaceId: string, projectPath: string): void => {
+      const workspaceDir = join(workspaceStorage, workspaceId);
+      mkdirSync(workspaceDir, { recursive: true });
+      writeFileSync(
+        join(workspaceDir, 'workspace.json'),
+        JSON.stringify({ folder: pathToFileURL(projectPath).href })
+      );
+      const db = new BetterSqlite3(join(workspaceDir, 'state.vscdb'));
+      db.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+      db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run(
+        'composer.composerData',
+        JSON.stringify({
+          allComposers: [
+            {
+              composerId: sessionId,
+              name: workspaceId,
+              createdAt: 1783000000000,
+            },
+          ],
+        })
+      );
+      db.close();
+    };
+
+    const projectA = join(root, 'project-a');
+    const projectB = join(root, 'project-b');
+    try {
+      writeWorkspace('workspace-a', projectA);
+      writeWorkspace('workspace-b', projectB);
+
+      const workspaces = await storage.listWorkspaces(workspaceStorage);
+      expect(
+        workspaces
+          .map(({ id, path, sessionCount }) => ({ id, path, sessionCount }))
+          .sort((a, b) => a.id.localeCompare(b.id))
+      ).toEqual([
+        { id: 'workspace-a', path: projectA, sessionCount: 1 },
+        { id: 'workspace-b', path: projectB, sessionCount: 1 },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('resolves a workspace-filtered numeric index against the cached filtered summaries', async () => {
     const ctx = storage.createSessionReadContext(STORE_ROOT());
     const summaries = await storage.listSessions(
@@ -213,7 +423,8 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     );
 
     expect(summaries).toHaveLength(1);
-    expect(ctx.summaries).toBe(summaries);
+    expect(ctx.summaries).not.toBe(summaries);
+    expect(ctx.summaries).toEqual(summaries);
     const session = await storage.getSession(1, STORE_ROOT(), undefined, ctx);
     expect(session?.id).toBe(summaries[0]!.id);
     expect(session?.workspacePath).toBe(summaries[0]!.workspacePath);
@@ -239,7 +450,8 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     );
 
     expect(equivalent.map((session) => session.id)).toEqual([UUID1]);
-    expect(sameScope).toBe(context.summaries);
+    expect(sameScope).not.toBe(context.summaries);
+    expect(sameScope).toEqual(context.summaries);
     expect(suffixOnly).toEqual([]);
   });
 

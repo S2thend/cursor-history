@@ -480,8 +480,6 @@ export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
       id: data.bubbleId ?? getBubbleRowId(row.key),
       role: bubbleType === 2 ? 'assistant' : 'user',
       content: extractedContent.length > 0 ? extractedContent : '[empty message]',
-      // Per-message timestamp is only attached when directly stored; otherwise it
-      // is left null here and dropped (→ undefined) in resolveBubbleMessages.
       timestamp: extractTimestamp(data),
       timestampSource: extractTimestampSource(data),
       codeBlocks: [],
@@ -506,15 +504,10 @@ export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
   }
 }
 
-function resolveBubbleMessages(bubbleRows: BubbleRow[], _sessionCreatedAt: Date): Message[] {
-  // Per-message timestamps are only attached when directly stored. We do NOT
-  // call fillTimestampGaps() here — its neighbor/session-time interpolation is
-  // not a directly-stored time and must not be presented as a precise message
-  // time. Messages without a stored time keep timestamp === undefined.
-  return bubbleRows.map((row) => {
-    const m = mapBubbleToMessage(row);
-    return { ...m, timestamp: m.timestamp ?? undefined } as unknown as Message;
-  });
+function resolveBubbleMessages(bubbleRows: BubbleRow[], sessionCreatedAt: Date): Message[] {
+  const messages = bubbleRows.map((row) => mapBubbleToMessage(row));
+  fillTimestampGaps(messages, sessionCreatedAt);
+  return messages as Message[];
 }
 
 function parseComposerSessionUsage(
@@ -700,6 +693,29 @@ export function readWorkspaceJson(workspaceDir: string): string | null {
   }
 }
 
+const COUNTED_COMPOSER_SESSION_IDS = Symbol('countedComposerSessionIds');
+type WorkspaceWithCountedSessions = Workspace & {
+  [COUNTED_COMPOSER_SESSION_IDS]?: ReadonlySet<string>;
+};
+
+/**
+ * Retain the exact IDs represented by a Composer workspace count without
+ * exposing implementation metadata through the public Workspace shape.
+ */
+function attachCountedComposerSessionIds(
+  workspace: Workspace,
+  sessionIds: Iterable<string>
+): Workspace {
+  Object.defineProperty(workspace, COUNTED_COMPOSER_SESSION_IDS, {
+    value: new Set(sessionIds),
+  });
+  return workspace;
+}
+
+function getCountedComposerSessionIds(workspace: Workspace): ReadonlySet<string> | undefined {
+  return (workspace as WorkspaceWithCountedSessions)[COUNTED_COMPOSER_SESSION_IDS];
+}
+
 /**
  * Find all workspaces with chat history
  * @param customDataPath - Custom Cursor data path (for live data)
@@ -846,12 +862,17 @@ export async function findWorkspaces(
       }
 
       if (sessionCount > 0) {
-        workspaces.push({
-          id: entry.name,
-          path: workspacePath,
-          dbPath,
-          sessionCount,
-        });
+        workspaces.push(
+          attachCountedComposerSessionIds(
+            {
+              id: entry.name,
+              path: workspacePath,
+              dbPath,
+              sessionCount,
+            },
+            seenComposerIds
+          )
+        );
       }
     }
   } catch {
@@ -1182,7 +1203,8 @@ export interface SessionReadContext {
   summaries: ChatSessionSummary[] | null;
   /**
    * Lazily resolved final sessions, after Composer/Store loading and any
-   * cross-stack merge. Promises coalesce concurrent reads of the same ID.
+   * cross-stack merge. Promises coalesce concurrent reads of the same selected
+   * summary; duplicate filtered summaries with one stable ID remain distinct.
    */
   resolvedSessions: Map<string, Promise<ChatSession | null>>;
 }
@@ -1266,10 +1288,9 @@ function applySessionListLimit(
   summaries: ChatSessionSummary[],
   options: ListOptions
 ): ChatSessionSummary[] {
-  if (!options.all && options.limit > 0) {
-    return summaries.slice(0, options.limit);
-  }
-  return summaries;
+  const selected =
+    !options.all && options.limit > 0 ? summaries.slice(0, options.limit) : summaries;
+  return structuredClone(selected);
 }
 
 async function getWorkspacesCached(
@@ -1565,15 +1586,15 @@ export async function listSessions(
     // Conflict priority for sessions present in BOTH stacks (same ID).
     const preferredSource = detectPreferredStackSource(customDataPath);
     for (const ss of storeSessions) {
-      if (options.workspacePath) {
-        if (!workspaceFilterMatches(ss.workspacePath, options.workspacePath)) continue;
-      }
       // Same ID in both stacks → merge scalar metadata and mark merged instead
       // of discarding the lower-priority representation. The full
-      // field/message merge happens in getSession().
+      // field/message merge happens in getSession(). Do this before applying
+      // the Store path filter: the Composer half has already matched the
+      // requested workspace, while transcript-only Store metadata may not
+      // contain a cwd at all.
       if (storeSeenIds.has(ss.id)) {
-        const existing = allSessions.find((s) => s.id === ss.id);
-        if (existing) {
+        const existingSummaries = allSessions.filter((s) => s.id === ss.id);
+        for (const existing of existingSummaries) {
           applyStoreMergeToSummary(
             existing,
             {
@@ -1588,6 +1609,12 @@ export async function listSessions(
             preferredSource
           );
         }
+        continue;
+      }
+      if (
+        options.workspacePath &&
+        !workspaceFilterMatches(ss.workspacePath, options.workspacePath)
+      ) {
         continue;
       }
       storeSeenIds.add(ss.id);
@@ -1624,13 +1651,27 @@ export async function listSessions(
   return applySessionListLimit(allSessions, options);
 }
 
+function canonicalWorkspaceAggregationKey(workspacePath: string): string {
+  let normalized = normalizePath(workspacePath).replace(/\\/g, '/');
+  if (/^\/[a-z]:\//i.test(normalized)) normalized = normalized.slice(1);
+  const wsl = normalized.match(/^\/mnt\/([a-z])(?:\/(.*))?$/i);
+  if (wsl) normalized = `${wsl[1]}:/${wsl[2] ?? ''}`;
+  if (/^[a-z]:$/i.test(normalized)) normalized += '/';
+  if (
+    /^[a-z]:\//i.test(normalized) ||
+    normalized.startsWith('//') ||
+    process.platform === 'win32'
+  ) {
+    normalized = normalized.toLowerCase();
+  }
+  return normalized;
+}
+
 /**
- * List all workspaces with chat history, aggregated from the resolved session
- * set. Groups the deduplicated `listSessions({ all: true })` summaries by
- * normalized final `workspacePath`, counting each merged session once. Composer
- * workspace metadata (dbPath) is preserved when available; Store-only paths get
- * a stable Store workspace identity. Transcript-only sessions without a path
- * land in one explicit unknown-workspace bucket.
+ * List all workspaces with chat history. Composer discovery remains the
+ * inventory of record so its workspace rows and counts retain their historical
+ * behavior. Store-only sessions are then added to an equivalent Composer row,
+ * or to a stable Store row when no Composer workspace matches.
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  */
@@ -1639,30 +1680,19 @@ export async function listWorkspaces(
   backupPath?: string
 ): Promise<Workspace[]> {
   const context = createSessionReadContext(customDataPath, backupPath);
+  const composerWorkspaces = await getWorkspacesCached(context, customDataPath, backupPath);
   const summaries = await listSessions(
     { limit: 0, all: true },
     customDataPath,
     backupPath,
     context
   );
-  // Composer workspaces supply dbPath + canonical id when the path matches.
-  const composerWorkspaces = await getWorkspacesCached(context, customDataPath, backupPath);
-
-  const UNKNOWN_BUCKET = '(unknown workspace)';
-  const byKey = new Map<string, Workspace>();
+  const workspaces = composerWorkspaces.map((workspace) => ({
+    ...workspace,
+    path: contractPath(workspace.path),
+  }));
 
   for (const summary of summaries) {
-    const rawPath = summary.workspacePath?.trim() ? summary.workspacePath : UNKNOWN_BUCKET;
-    const normalized = normalizePath(rawPath).replace(/\\/g, '/');
-    const isWindowsPath = /^[a-zA-Z]:\//.test(normalized) || normalized.startsWith('//');
-    const key =
-      process.platform === 'win32' || isWindowsPath ? normalized.toLowerCase() : normalized;
-    const existing = byKey.get(key);
-    if (existing) {
-      existing.sessionCount++;
-      continue;
-    }
-    const composer = composerWorkspaces.find((w) => pathsEqual(w.path, rawPath));
     const storeBacked =
       summary.workspaceId === 'store' ||
       summary.source === 'transcript' ||
@@ -1670,22 +1700,54 @@ export async function listWorkspaces(
       summary.source === 'store-complete' ||
       summary.source === 'store-partial' ||
       summary.source === 'merged';
-    const fallbackId = storeBacked
-      ? rawPath === UNKNOWN_BUCKET
-        ? 'store:unknown'
-        : `store:${key}`
-      : summary.workspaceId || `workspace:${key}`;
-    byKey.set(key, {
-      id: composer?.id ?? fallbackId,
+    if (!storeBacked) continue;
+
+    const rawPath = summary.workspacePath?.trim() ? summary.workspacePath : UNKNOWN_WORKSPACE_PATH;
+    const key = canonicalWorkspaceAggregationKey(rawPath);
+
+    // A merged session is already included in the Composer inventory. Keep
+    // that count when both stacks resolve to the same workspace. If the
+    // preferred Store metadata resolves the session elsewhere, move (rather
+    // than duplicate) the count to the canonical resolved workspace.
+    if (summary.source === 'merged') {
+      const countedComposerWorkspaces = composerWorkspaces.filter(
+        (workspace) =>
+          getCountedComposerSessionIds(workspace)?.has(summary.id) ??
+          workspace.id === summary.workspaceId
+      );
+      if (
+        countedComposerWorkspaces.length === 1 &&
+        canonicalWorkspaceAggregationKey(countedComposerWorkspaces[0]!.path) === key
+      ) {
+        continue;
+      }
+      for (const composerWorkspace of countedComposerWorkspaces) {
+        const countedRow = workspaces.find((workspace) => workspace.id === composerWorkspace.id);
+        if (countedRow && countedRow.sessionCount > 0) {
+          countedRow.sessionCount--;
+        }
+      }
+    }
+
+    const existing = workspaces.find(
+      (workspace) => canonicalWorkspaceAggregationKey(workspace.path) === key
+    );
+    if (existing) {
+      existing.sessionCount++;
+      continue;
+    }
+
+    workspaces.push({
+      id: rawPath === UNKNOWN_WORKSPACE_PATH ? 'store:unknown' : `store:${key}`,
       path: contractPath(rawPath),
-      dbPath: composer?.dbPath ?? '',
+      dbPath: '',
       sessionCount: 1,
     });
   }
 
-  const workspaces = [...byKey.values()];
-  workspaces.sort((a, b) => b.sessionCount - a.sessionCount);
-  return workspaces;
+  const nonEmptyWorkspaces = workspaces.filter((workspace) => workspace.sessionCount > 0);
+  nonEmptyWorkspaces.sort((a, b) => b.sessionCount - a.sessionCount);
+  return nonEmptyWorkspaces;
 }
 
 /**
@@ -1695,13 +1757,15 @@ export async function listWorkspaces(
  * @param customDataPath - Custom Cursor data path (for live data)
  * @param backupPath - Path to backup zip file (if reading from backup)
  * @param context - Optional operation-scoped read context for caching
+ * @param summaryIndexHint - Internal exact-summary selector for stable-ID bulk reads
  * @returns The session or null (identifier not found).
  */
 export async function getSession(
   identifier: number | string,
   customDataPath?: string,
   backupPath?: string,
-  context?: SessionReadContext
+  context?: SessionReadContext,
+  summaryIndexHint?: number
 ): Promise<ChatSession | null> {
   const operationContext = context ?? createSessionReadContext(customDataPath, backupPath);
   assertContextSource(operationContext, customDataPath, backupPath);
@@ -1711,7 +1775,11 @@ export async function getSession(
   if (operationContext.summaries) {
     summary =
       typeof identifier === 'string'
-        ? operationContext.summaries.find((s) => s.id === identifier)
+        ? operationContext.summaries.find(
+            (s) =>
+              s.id === identifier &&
+              (summaryIndexHint === undefined || s.index === summaryIndexHint)
+          )
         : operationContext.summaries.find((s) => s.index === identifier);
   } else {
     const summaries = await listSessions(
@@ -1722,26 +1790,31 @@ export async function getSession(
     );
     summary =
       typeof identifier === 'string'
-        ? summaries.find((s) => s.id === identifier)
+        ? summaries.find(
+            (s) =>
+              s.id === identifier &&
+              (summaryIndexHint === undefined || s.index === summaryIndexHint)
+          )
         : summaries.find((s) => s.index === identifier);
   }
   if (!summary) {
     return null;
   }
 
-  const index: number = typeof identifier === 'string' ? summary.index : identifier;
-  let resolution = operationContext.resolvedSessions.get(summary.id);
+  const index = summary.index;
+  const resolutionKey = `${summary.id}\0${summary.index}`;
+  let resolution = operationContext.resolvedSessions.get(resolutionKey);
   if (!resolution) {
     resolution = resolveFinalSession(summary, index, customDataPath, backupPath, operationContext);
-    operationContext.resolvedSessions.set(summary.id, resolution);
+    operationContext.resolvedSessions.set(resolutionKey, resolution);
   }
 
   try {
     const session = await resolution;
     return session ? structuredClone(session) : null;
   } catch (error) {
-    if (operationContext.resolvedSessions.get(summary.id) === resolution) {
-      operationContext.resolvedSessions.delete(summary.id);
+    if (operationContext.resolvedSessions.get(resolutionKey) === resolution) {
+      operationContext.resolvedSessions.delete(resolutionKey);
     }
     throw error;
   }
@@ -1979,7 +2052,13 @@ export async function searchSessions(
 
   for (const summary of summaries) {
     // Resolve by stable ID via the cached context rather than mutable index.
-    const session = await getSession(summary.id, customDataPath, backupPath, context);
+    const session = await getSession(
+      summary.id,
+      customDataPath,
+      backupPath,
+      context,
+      summary.index
+    );
     if (!session) continue;
 
     const snippets = getSearchSnippets(session.messages, lowerQuery, options.contextChars);

@@ -124,6 +124,7 @@ describe('listSessions', () => {
     expect(result.data).toHaveLength(1);
     expect(result.data[0]!.id).toBe('c1');
     expect(result.pagination.total).toBe(1);
+    expect(mockGetSession).toHaveBeenCalledWith('c1', undefined, undefined, mockReadContext, 1);
   });
 
   it('preserves assistant roles in listSessions output', async () => {
@@ -235,6 +236,18 @@ describe('getSession', () => {
     expect(session.timestamp).toBe('2024-01-15T10:00:00.000Z');
   });
 
+  it('preserves the required library message timestamp for an untimed Store message', async () => {
+    mockGetSession.mockResolvedValue({
+      ...makeCoreSession(),
+      source: 'transcript',
+      messages: [{ id: null, role: 'user', content: 'Store message', codeBlocks: [] }],
+    });
+
+    const session = await getSession(0);
+    expect(session.messages[0]!.timestamp).toBe(now.toISOString());
+    expect(session.messages[0]!.timestampSource).toBeUndefined();
+  });
+
   it('omits library Message.id when the core message ID is null', async () => {
     mockGetSession.mockResolvedValue({
       ...makeCoreSession(),
@@ -325,7 +338,7 @@ describe('searchSessions', () => {
     expect(results).toHaveLength(1);
     expect(results[0]!.session.id).toBe('c1');
     expect(mockSearchSessions.mock.calls[0]?.[4]).toBe(mockReadContext);
-    expect(mockGetSession).toHaveBeenCalledWith('c1', undefined, undefined, mockReadContext);
+    expect(mockGetSession).toHaveBeenCalledWith('c1', undefined, undefined, mockReadContext, 1);
   });
 
   it('returns empty for no matches', async () => {

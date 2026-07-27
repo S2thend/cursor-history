@@ -84,4 +84,73 @@ describe('parseTranscriptFile (role-nested Cursor 3.x transcripts)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('keeps known content but marks an unknown user-visible content part partial', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ch-transcript-unknown-part-'));
+    const path = join(dir, 'unknown-part.jsonl');
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          role: 'assistant',
+          message: {
+            content: [
+              { type: 'text', text: 'kept' },
+              { type: 'image', source: { type: 'base64', data: 'omitted' } },
+            ],
+          },
+        })
+      );
+
+      const { messages, state } = parseTranscriptFile(path);
+      expect(state).toBe('partial');
+      expect(messages.map((message) => message.content)).toEqual(['kept']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports unsupported when only an unknown user-visible role is present', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ch-transcript-unknown-role-'));
+    const path = join(dir, 'unknown-role.jsonl');
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          role: 'developer',
+          message: { content: [{ type: 'text', text: 'new schema data' }] },
+        })
+      );
+
+      expect(parseTranscriptFile(path)).toEqual({ messages: [], state: 'unsupported' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('intentionally ignores system lines without degrading valid messages', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ch-transcript-system-'));
+    const path = join(dir, 'system.jsonl');
+    try {
+      writeFileSync(
+        path,
+        [
+          JSON.stringify({
+            role: 'system',
+            message: { content: [{ type: 'text', text: 'instructions' }] },
+          }),
+          JSON.stringify({
+            role: 'user',
+            message: { content: [{ type: 'text', text: 'visible' }] },
+          }),
+        ].join('\n')
+      );
+
+      const { messages, state } = parseTranscriptFile(path);
+      expect(state).toBe('parsed');
+      expect(messages.map((message) => message.content)).toEqual(['visible']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -166,9 +166,13 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
         id: msg.id ?? undefined,
         role: msg.role === 'user' ? 'user' : 'assistant',
         content: msg.content,
+        // Preserve the library's required timestamp contract. Composer
+        // messages are filled by the core storage layer; Store-only messages
+        // without a turn timestamp use the session creation time.
+        timestamp: (msg.timestamp ?? coreSession.createdAt).toISOString(),
       };
-      // Per-message timestamp + provenance only when directly stored.
-      if (msg.timestamp) m['timestamp'] = msg.timestamp.toISOString();
+      // Provenance remains absent when the public timestamp uses the
+      // compatibility fallback above.
       if (msg.timestampSource) m['timestampSource'] = msg.timestampSource;
       if (msg.source) m['source'] = msg.source;
       if (msg.toolCalls) m['toolCalls'] = msg.toolCalls;
@@ -253,7 +257,8 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
         summary.id,
         resolved.dataPath,
         resolved.backupPath,
-        context
+        context,
+        summary.index
       );
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${summary.index} not found`);
@@ -425,7 +430,8 @@ export async function searchSessions(
         coreResult.sessionId,
         resolved.dataPath,
         resolved.backupPath,
-        context
+        context,
+        coreResult.index
       );
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${coreResult.index} not found`);
@@ -634,7 +640,8 @@ export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<s
         summary.id,
         resolved.dataPath,
         resolved.backupPath,
-        context
+        context,
+        summary.index
       );
       if (!session) continue;
       exportedSessions.push(
@@ -692,7 +699,8 @@ export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promi
         summary.id,
         resolved.dataPath,
         resolved.backupPath,
-        context
+        context,
+        summary.index
       );
       if (!session) continue;
 

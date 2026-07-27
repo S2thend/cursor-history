@@ -66,8 +66,27 @@ function truncate(str: string, maxLength: number): string {
  * concise (params truncated to 60 chars); `full` (--tool) shows full params
  * plus status, result, error, and files.
  */
-function formatStructuredToolCall(tc: ToolCall, full: boolean): string[] {
+function formatStructuredToolCallDetails(tc: ToolCall): string[] {
   const out: string[] = [];
+  if (tc.params !== undefined) {
+    out.push(pc.dim(`  params: ${JSON.stringify(tc.params)}`));
+  }
+  if (tc.status !== undefined) {
+    out.push(pc.dim(`  status: ${tc.status}`));
+  }
+  if (tc.result !== undefined) {
+    out.push(pc.dim(`  result: ${tc.result}`));
+  }
+  if (tc.error !== undefined) {
+    out.push(pc.red(`  error: ${tc.error}`));
+  }
+  if (tc.files !== undefined) {
+    out.push(pc.dim(`  files: ${tc.files.length > 0 ? tc.files.join(', ') : '[]'}`));
+  }
+  return out;
+}
+
+function formatStructuredToolCall(tc: ToolCall, full: boolean): string[] {
   const params = tc.params
     ? Object.entries(tc.params)
         .map(([k, v]) => {
@@ -76,25 +95,9 @@ function formatStructuredToolCall(tc: ToolCall, full: boolean): string[] {
         })
         .join(', ')
     : '';
-  out.push(pc.magenta(pc.bold(`🔧 ${tc.name}`)) + (!full && params ? pc.dim(`  ${params}`) : ''));
-  if (full) {
-    if (tc.params !== undefined) {
-      out.push(pc.dim(`  params: ${JSON.stringify(tc.params)}`));
-    }
-    if (tc.status !== undefined) {
-      out.push(pc.dim(`  status: ${tc.status}`));
-    }
-    if (tc.result !== undefined) {
-      out.push(pc.dim(`  result: ${tc.result}`));
-    }
-    if (tc.error !== undefined) {
-      out.push(pc.red(`  error: ${tc.error}`));
-    }
-    if (tc.files !== undefined) {
-      out.push(pc.dim(`  files: ${tc.files.length > 0 ? tc.files.join(', ') : '[]'}`));
-    }
-  }
-  return out;
+  const header =
+    pc.magenta(pc.bold(`🔧 ${tc.name}`)) + (!full && params ? pc.dim(`  ${params}`) : '');
+  return full ? [header, ...formatStructuredToolCallDetails(tc)] : [header];
 }
 
 /**
@@ -256,12 +259,13 @@ export function getMessageType(message: {
   if (message.role === 'user') {
     return 'user';
   }
-  // For assistant messages, check content markers AND structured toolCalls
-  // (Store-stack transcripts carry tool calls as a structured field, not in content).
+  // Preserve the established content-marker precedence. Store-stack
+  // transcripts carry tool calls structurally, but those calls must not
+  // reclassify explicit thinking or error messages.
   if (isToolCall(message.content)) return 'tool';
-  if (Array.isArray(message.toolCalls) && message.toolCalls.length > 0) return 'tool';
   if (isThinking(message.content)) return 'thinking';
   if (isError(message.content)) return 'error';
+  if (Array.isArray(message.toolCalls) && message.toolCalls.length > 0) return 'tool';
   return 'assistant';
 }
 
@@ -271,6 +275,10 @@ function matchesMessageType(
 ): boolean {
   const primaryType = getMessageType(message);
   if (primaryType === type) return true;
+
+  if (type === 'tool' && Array.isArray(message.toolCalls) && message.toolCalls.length > 0) {
+    return true;
+  }
 
   return (
     type === 'assistant' &&
@@ -648,9 +656,10 @@ export function formatSessionDetail(
       lines.push(formatToolCallDisplay(message.content, fullTool));
       if (message.toolCalls && message.toolCalls.length > 0) {
         const embeddedIndex = findEmbeddedToolCallIndex(message.content, message.toolCalls);
-        const callsToRender = fullTool
-          ? message.toolCalls
-          : message.toolCalls.filter((_, index) => index !== embeddedIndex);
+        if (fullTool && embeddedIndex >= 0) {
+          lines.push(...formatStructuredToolCallDetails(message.toolCalls[embeddedIndex]!));
+        }
+        const callsToRender = message.toolCalls.filter((_, index) => index !== embeddedIndex);
         for (const tc of callsToRender) {
           lines.push(...formatStructuredToolCall(tc, fullTool));
         }
@@ -666,6 +675,11 @@ export function formatSessionDetail(
     if (isError(message.content)) {
       lines.push(`${pc.red(pc.bold('Error:'))}${timeStr}`);
       lines.push(formatErrorDisplay(message.content, fullError));
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        for (const tc of message.toolCalls) {
+          lines.push(...formatStructuredToolCall(tc, fullTool));
+        }
+      }
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));
@@ -677,6 +691,11 @@ export function formatSessionDetail(
     if (isThinking(message.content)) {
       lines.push(`${pc.magenta(pc.bold('Thinking:'))}${timeStr}`);
       lines.push(formatThinkingDisplay(message.content, fullThinking));
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        for (const tc of message.toolCalls) {
+          lines.push(...formatStructuredToolCall(tc, fullTool));
+        }
+      }
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));

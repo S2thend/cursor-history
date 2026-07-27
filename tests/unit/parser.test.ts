@@ -617,7 +617,8 @@ describe('exportToMarkdown — source line and no duplicate tool', () => {
     expect(md).not.toContain('🔧 **Read**');
   });
 
-  it('preserves structured result, error, and files for an embedded Composer tool', () => {
+  it('preserves bounded structured result, error, and files for an embedded Composer tool', () => {
+    const fullResult = `${'x'.repeat(240)}RESULT-SENTINEL`;
     const md = exportToMarkdown(
       session({
         messages: [
@@ -627,6 +628,7 @@ describe('exportToMarkdown — source line and no duplicate tool', () => {
                 name: 'Read',
                 status: 'error',
                 params: { file: '/a', encoding: 'utf8' },
+                result: fullResult,
                 error: 'permission denied',
                 files: ['/a'],
               },
@@ -639,7 +641,98 @@ describe('exportToMarkdown — source line and no duplicate tool', () => {
     expect(md).toContain('- parameters: {"file":"/a","encoding":"utf8"}');
     expect(md).toContain('- status: error');
     expect(md).toContain('- error: permission denied');
+    expect(md).toContain(`- result: ${'x'.repeat(197)}...`);
+    expect(md).not.toContain('RESULT-SENTINEL');
     expect(md).toContain('- files: /a');
+  });
+
+  it('matches repeated same-name embedded calls by strong identity instead of shared options', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nFile: /b\nEncoding: utf8', {
+            toolCalls: [
+              {
+                name: 'read_file',
+                status: 'completed',
+                params: { file: '/a', encoding: 'utf8' },
+              },
+              {
+                name: 'read_file',
+                status: 'completed',
+                params: { file: '/b', encoding: 'utf8' },
+              },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect(md).toContain('- parameters: {"file":"/b","encoding":"utf8"}');
+    expect(md).toContain('- 🔧 **read_file** — `file`="/a", `encoding`="utf8"');
+    expect(md).not.toContain('- 🔧 **read_file** — `file`="/b"');
+  });
+
+  it('suppresses no repeated same-name call when the embedded identity is ambiguous', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nCompleted', {
+            toolCalls: [
+              { name: 'read_file', status: 'completed', params: { encoding: 'utf8' } },
+              { name: 'read_file', status: 'completed', params: { encoding: 'ascii' } },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect((md.match(/🔧 \*\*read_file\*\*/g) ?? []).length).toBe(2);
+  });
+
+  it('does not suppress a unique same-name call when its identity conflicts', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nFile: /a', {
+            toolCalls: [
+              {
+                name: 'read_file',
+                status: 'completed',
+                params: { targetFile: '/b' },
+              },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect(md).toContain('[Tool: Read File]\nFile: /a');
+    expect(md).toContain('- 🔧 **read_file** — `targetFile`="/b"');
+  });
+
+  it('keeps bounded standalone structured results alongside errors', () => {
+    const fullResult = `${'y'.repeat(240)}RESULT-SENTINEL`;
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '', {
+            toolCalls: [
+              {
+                name: 'Shell',
+                status: 'error',
+                result: fullResult,
+                error: 'ERROR-SENTINEL',
+              },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect(md).toContain('— error: ERROR-SENTINEL');
+    expect(md).toContain(`— result: ${'y'.repeat(197)}...`);
+    expect(md).not.toContain('RESULT-SENTINEL');
   });
 
   it('still renders additional structured calls merged into an embedded Composer tool message', () => {

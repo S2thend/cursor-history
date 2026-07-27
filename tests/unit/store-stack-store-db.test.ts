@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import BetterSqlite3 from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { existsSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { existsSync, rmSync, statSync } from 'node:fs';
 import { parseStoreDb } from '../../src/core/store-stack/store-db.js';
 import * as database from '../../src/core/database/index.js';
 
@@ -258,14 +258,22 @@ describe('parseStoreDb (store.db primary source)', () => {
     }
   });
 
-  it('reads the source directly when the native snapshot API rejects the path', async () => {
+  it('degrades safely and removes its private snapshot directory when backup fails', async () => {
+    let snapshotDir = '';
+    let snapshotMode = 0;
     const backupSpy = vi
       .spyOn(database, 'backupDatabase')
-      .mockRejectedValueOnce(new Error('UNC snapshot failed'));
+      .mockImplementationOnce(async (_path, to) => {
+        snapshotDir = dirname(to);
+        snapshotMode = statSync(snapshotDir).mode & 0o777;
+        throw new Error('UNC snapshot failed');
+      });
     try {
       const data = await parseStoreDb(DB_MODERN_TOOLS);
-      expect(data?.title).toBe('Modern Tool Session');
-      expect(data?.completeness).toBe('complete');
+      expect(data).toBeNull();
+      expect(snapshotDir).not.toBe('');
+      if (process.platform !== 'win32') expect(snapshotMode).toBe(0o700);
+      expect(existsSync(snapshotDir)).toBe(false);
     } finally {
       backupSpy.mockRestore();
     }
@@ -440,6 +448,38 @@ describe('parseStoreDb (store.db primary source)', () => {
       const data = await parseStoreDb(path);
       expect(data?.completeness).toBe('partial');
       expect(data?.messages).toEqual([]);
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  it('keeps known content but marks an unknown user-visible content block partial', async () => {
+    const path = join(tmpdir(), `ch-store-unknown-block-${process.pid}.db`);
+    makeDb(path, (db) => {
+      const ins = insert(db);
+      const assistant = Buffer.from(
+        JSON.stringify({
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'kept' },
+            { type: 'image', source: { type: 'base64', data: 'omitted' } },
+          ],
+        })
+      );
+      const assistantHash = sha(assistant);
+      ins(assistantHash, assistant);
+      const root = frame(assistantHash, 0x0a);
+      const rootHash = sha(root);
+      ins(rootHash, root);
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(
+        '0',
+        Buffer.from(JSON.stringify({ latestRootBlobId: rootHash })).toString('hex')
+      );
+    });
+    try {
+      const data = await parseStoreDb(path);
+      expect(data?.completeness).toBe('partial');
+      expect(data?.messages.map((message) => message.content)).toEqual(['kept']);
     } finally {
       rmSync(path, { force: true });
     }

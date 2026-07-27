@@ -19,7 +19,7 @@
  *
  * Defensive: any failure → null (caller degrades to transcript).
  */
-import { copyFileSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { backupDatabase, openDatabase, type Database } from '../database/index.js';
@@ -61,37 +61,23 @@ interface ToolResultIndex {
 }
 
 export async function parseStoreDb(path: string): Promise<StoreDbData | null> {
-  const tmpPath = join(
-    tmpdir(),
-    `ch-store-${process.pid}-${Math.random().toString(36).slice(2)}.db`
-  );
+  let tempDir: string | null = null;
   let db: Database | null = null;
   try {
-    // WAL-consistent snapshot via the shared registry.
+    // Keep the WAL-consistent snapshot in a process-private directory. If the
+    // native backup cannot produce an atomic snapshot, degrade to transcript
+    // instead of pairing a copied database with a separately copied WAL.
+    tempDir = mkdtempSync(join(tmpdir(), 'ch-store-'));
+    const tmpPath = join(tempDir, 'store.db');
     try {
       await backupDatabase(path, tmpPath);
-      db = await openDatabase(tmpPath);
     } catch (backupError) {
-      // node:sqlite backup can fail for Windows UNC paths that point into WSL
-      // because the native backup API cannot coordinate the remote WAL locks.
-      // Stage the database and WAL locally; SQLite rebuilds the local SHM file
-      // and ignores an incomplete WAL tail, giving us a coherent best-effort
-      // snapshot without mutating the source database.
       debugLogStorage(
-        `store.db snapshot failed for ${path}; staging source locally: ${String(backupError)}`
+        `store.db snapshot failed for ${path}; degrading to transcript: ${String(backupError)}`
       );
-      try {
-        copyFileSync(path, tmpPath);
-        const sourceWal = `${path}-wal`;
-        if (existsSync(sourceWal)) copyFileSync(sourceWal, `${tmpPath}-wal`);
-        db = await openDatabase(tmpPath);
-      } catch (stageError) {
-        debugLogStorage(
-          `store.db local staging failed for ${path}; reading source directly: ${String(stageError)}`
-        );
-        db = await openDatabase(path);
-      }
+      return null;
     }
+    db = await openDatabase(tmpPath);
     const metaRow = db.prepare("SELECT value FROM meta WHERE key = '0'").get() as
       { value: string } | undefined;
     if (!metaRow) return null;
@@ -115,9 +101,9 @@ export async function parseStoreDb(path: string): Promise<StoreDbData | null> {
     } catch {
       // ignore
     }
-    for (const tempFile of [tmpPath, `${tmpPath}-wal`, `${tmpPath}-shm`]) {
+    if (tempDir) {
       try {
-        unlinkSync(tempFile);
+        rmSync(tempDir, { recursive: true, force: true });
       } catch {
         // ignore
       }
@@ -185,9 +171,14 @@ function readMessages(db: Database, rootId: string): { messages: Message[]; comp
     const leaf = classifyLeaf(object, toolResults);
     if (leaf.kind === 'message') {
       messages.push(leaf.message);
+      if (!leaf.complete) {
+        complete = false;
+        debugLogStorage('store.db: unsupported message content block → partial');
+      }
     } else if (leaf.kind === 'tool-result') {
       encounteredToolResultIds.push(...leaf.callIds);
       if (leaf.callIds.length === 0) encounteredUnkeyedToolResult = true;
+      if (!leaf.complete) complete = false;
     } else if (leaf.kind === 'malformed') {
       complete = false;
     }
@@ -202,8 +193,8 @@ function readMessages(db: Database, rootId: string): { messages: Message[]; comp
 }
 
 type LeafResult =
-  | { kind: 'message'; message: Message }
-  | { kind: 'tool-result'; callIds: string[] }
+  | { kind: 'message'; message: Message; complete: boolean }
+  | { kind: 'tool-result'; callIds: string[]; complete: boolean }
   | { kind: 'ignore' }
   | { kind: 'malformed' };
 
@@ -225,11 +216,17 @@ function classifyLeaf(obj: LeafObj, toolResults: ToolResultIndex): LeafResult {
   if (obj.role === 'tool') {
     // Tool results are indexed separately and joined only by a stable
     // toolCallId. The leaf itself is not emitted as a chat message.
-    return { kind: 'tool-result', callIds: getToolResultIds(obj) };
+    return {
+      kind: 'tool-result',
+      callIds: getToolResultIds(obj),
+      complete: hasOnlySupportedToolResultContent(obj),
+    };
   }
   if (obj.role === 'user' || obj.role === 'assistant') {
-    const msg = buildMessage(obj, obj.role as MessageRole, toolResults);
-    return msg ? { kind: 'message', message: msg } : { kind: 'malformed' };
+    const built = buildMessage(obj, obj.role as MessageRole, toolResults);
+    return built.message
+      ? { kind: 'message', message: built.message, complete: built.complete }
+      : { kind: 'malformed' };
   }
   if (obj.role === 'system') return { kind: 'ignore' };
   // Unknown roles can contain data from a newer schema; silently dropping them
@@ -241,20 +238,33 @@ function buildMessage(
   obj: LeafObj,
   role: MessageRole,
   toolResults: ToolResultIndex
-): Message | null {
+): { message: Message | null; complete: boolean } {
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
+  let complete = true;
   if (typeof obj.content === 'string') {
     texts.push(obj.content);
   } else if (Array.isArray(obj.content)) {
     const r = extractBlocks(obj.content, toolResults);
     texts.push(r.text);
     toolCalls.push(...r.toolCalls);
+    complete = r.complete;
+  } else if (obj.content !== undefined && obj.content !== null) {
+    // Missing/null content is valid for a tool-only assistant turn. Any other
+    // unrecognized value can hide user-visible data.
+    complete = false;
   }
   if (Array.isArray(obj.tool_calls)) {
     for (const tc of obj.tool_calls) {
+      if (!tc || typeof tc !== 'object') {
+        complete = false;
+        continue;
+      }
       const name = tc.function?.name;
-      if (typeof name !== 'string') continue;
+      if (typeof name !== 'string') {
+        complete = false;
+        continue;
+      }
       let params: Record<string, unknown> | undefined;
       if (tc.function?.arguments) {
         try {
@@ -266,23 +276,31 @@ function buildMessage(
       const call = applyStoredResult({ name, status: 'completed', params }, tc.id, toolResults);
       toolCalls.push(call);
     }
+  } else if (obj.tool_calls !== undefined) {
+    complete = false;
   }
   // No directly-stored per-message timestamp at this layer; leave undefined.
   const content = texts.join('');
-  if (content.length === 0 && toolCalls.length === 0) return null;
+  if (content.length === 0 && toolCalls.length === 0) {
+    return { message: null, complete: false };
+  }
   const msg: Message = { id: null, role, content, codeBlocks: [] };
   if (toolCalls.length > 0) msg.toolCalls = toolCalls;
-  return msg;
+  return { message: msg, complete };
 }
 
 function extractBlocks(
   blocks: unknown[],
   toolResults: ToolResultIndex
-): { text: string; toolCalls: ToolCall[] } {
+): { text: string; toolCalls: ToolCall[]; complete: boolean } {
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
+  let complete = true;
   for (const b of blocks) {
-    if (!b || typeof b !== 'object') continue;
+    if (!b || typeof b !== 'object') {
+      complete = false;
+      continue;
+    }
     const block = b as {
       type?: string;
       text?: unknown;
@@ -315,10 +333,27 @@ function extractBlocks(
         toolResults
       );
       toolCalls.push(tc);
+    } else {
+      // Unknown content blocks can carry user-visible data (for example image
+      // or reasoning content). Keep known fields, but report degraded fidelity.
+      complete = false;
     }
-    // unknown block types ignored (forward compat)
   }
-  return { text: texts.join(''), toolCalls };
+  return { text: texts.join(''), toolCalls, complete };
+}
+
+/** Whether a role:tool leaf contains only tool-result shapes we understand. */
+function hasOnlySupportedToolResultContent(obj: LeafObj): boolean {
+  if (!Array.isArray(obj.content)) {
+    return typeof obj.tool_call_id === 'string' && obj.tool_call_id.length > 0;
+  }
+  return obj.content.every((raw) => {
+    if (!raw || typeof raw !== 'object') return false;
+    const block = raw as Record<string, unknown>;
+    if (block['type'] !== 'tool-result' && block['type'] !== 'tool_result') return false;
+    const callId = block['toolCallId'] ?? block['tool_call_id'];
+    return typeof callId === 'string' && callId.length > 0;
+  });
 }
 
 function parseToolParams(value: unknown): Record<string, unknown> | undefined {

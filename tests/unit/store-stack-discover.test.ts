@@ -541,4 +541,55 @@ describe('discoverStoreSessions — metadata candidate integrity', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('isolates invalid metadata fields without dropping valid sibling sessions', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-invalid-metadata-fields-'));
+    const invalidUuid = 'ffffffff-0000-0000-0000-000000000013';
+    const validUuid = 'ffffffff-0000-0000-0000-000000000014';
+    try {
+      const invalidDir = join(root, 'chats', 'hash', invalidUuid);
+      const validDir = join(root, 'chats', 'hash', validUuid);
+      mkdirSync(invalidDir, { recursive: true });
+      mkdirSync(validDir, { recursive: true });
+      writeFileSync(
+        join(invalidDir, 'meta.json'),
+        JSON.stringify({
+          schemaVersion: 'new',
+          hasConversation: 'yes',
+          cwd: { path: '/workspace/unsafe' },
+          title: ['unsafe'],
+          createdAtMs: '1783000000000',
+          updatedAtMs: 1e20,
+        })
+      );
+      writeFileSync(
+        join(validDir, 'meta.json'),
+        JSON.stringify({
+          cwd: '/workspace/valid',
+          title: 'Valid sibling',
+          createdAtMs: 1783000000000,
+          updatedAtMs: 1783000001000,
+        })
+      );
+
+      const sessions = await discoverStoreSessions(root);
+      const invalid = sessions.find((item) => item.id === invalidUuid);
+      const valid = sessions.find((item) => item.id === validUuid);
+
+      expect(invalid).toMatchObject({
+        workspacePath: undefined,
+        title: null,
+      });
+      expect(Number.isFinite(invalid?.createdAt.getTime())).toBe(true);
+      expect(Number.isFinite(invalid?.lastUpdatedAt.getTime())).toBe(true);
+      expect(valid).toMatchObject({
+        workspacePath: '/workspace/valid',
+        title: 'Valid sibling',
+      });
+      expect(valid?.createdAt).toEqual(new Date(1783000000000));
+      expect(valid?.lastUpdatedAt).toEqual(new Date(1783000001000));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

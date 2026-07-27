@@ -282,7 +282,7 @@ describe('formatSessionDetail', () => {
     expect(filterMessages([mixed], ['tool'])).toEqual([mixed]);
   });
 
-  it('does not treat marked tool messages as natural-language assistant responses', () => {
+  it('preserves explicit marker categories when marked messages carry tool calls', () => {
     const marked = [
       {
         role: 'assistant',
@@ -298,6 +298,49 @@ describe('formatSessionDetail', () => {
 
     expect(filterMessages(marked, ['assistant'])).toEqual([]);
     expect(filterMessages(marked, ['tool'])).toEqual(marked);
+    expect(filterMessages(marked, ['thinking'])).toEqual([marked[0]]);
+    expect(filterMessages(marked, ['error'])).toEqual([marked[1]]);
+  });
+
+  it('renders structured calls carried by thinking and error messages', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Thinking]\nInspecting the repository',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: '/a' } }],
+        },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: '[Error]\nWrite failed',
+          codeBlocks: [],
+          toolCalls: [
+            {
+              name: 'Write',
+              status: 'error',
+              params: { file: '/b' },
+              error: 'disk full',
+            },
+          ],
+        },
+      ],
+    });
+
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).toContain('Thinking:');
+    expect(normal).toContain('Error:');
+    expect(normal).toContain('🔧 Read');
+    expect(normal).toContain('🔧 Write');
+
+    const toolOnly = filterMessages(s.messages, ['tool']);
+    const full = stripAnsi(
+      formatSessionDetail({ ...s, messages: toolOnly }, undefined, { fullTool: true })
+    );
+    expect(full).toContain('params: {"file":"/a"}');
+    expect(full).toContain('error: disk full');
   });
 
   it('shows filter info when messageFilter is active', () => {
@@ -365,6 +408,7 @@ describe('formatSessionDetail', () => {
     expect(full).toContain('status: completed');
     expect(full).toContain('result: ');
     expect(full).toContain('files: []');
+    expect((full.match(/🔧/g) ?? []).length).toBe(1);
   });
 
   it('normal view suppresses only the embedded call and keeps additional merged calls', () => {
@@ -385,6 +429,25 @@ describe('formatSessionDetail', () => {
     const normal = stripAnsi(formatSessionDetail(s));
     expect(normal).not.toContain('🔧 read_file');
     expect(normal).toContain('🔧 write_file');
+  });
+
+  it('keeps a distinct same-name structured call when the embedded identity disagrees', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Tool: Read File]\nFile: /a',
+          codeBlocks: [],
+          toolCalls: [{ name: 'read_file', status: 'completed', params: { targetFile: '/b' } }],
+        },
+      ],
+    });
+
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).toContain('File: /a');
+    expect(normal).toContain('🔧 read_file');
+    expect(normal).toContain('targetFile="/b"');
   });
 
   it('--tool preserves an explicitly defined empty error', () => {

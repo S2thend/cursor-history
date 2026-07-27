@@ -319,7 +319,61 @@ function listEntries(dir: string): Dirent[] {
 function readMeta(path: string): StoreMetaJson | undefined {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-    return parsed && typeof parsed === 'object' ? (parsed as StoreMetaJson) : undefined;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+
+    const record = parsed as Record<string, unknown>;
+    const meta: StoreMetaJson = {};
+    const invalidFields: string[] = [];
+
+    if (record['schemaVersion'] !== undefined) {
+      if (typeof record['schemaVersion'] === 'number' && Number.isFinite(record['schemaVersion'])) {
+        meta.schemaVersion = record['schemaVersion'];
+      } else {
+        invalidFields.push('schemaVersion');
+      }
+    }
+    if (record['hasConversation'] !== undefined) {
+      if (typeof record['hasConversation'] === 'boolean') {
+        meta.hasConversation = record['hasConversation'];
+      } else {
+        invalidFields.push('hasConversation');
+      }
+    }
+    if (record['cwd'] !== undefined) {
+      if (typeof record['cwd'] === 'string') {
+        meta.cwd = record['cwd'];
+      } else {
+        invalidFields.push('cwd');
+      }
+    }
+    if (record['title'] !== undefined) {
+      if (typeof record['title'] === 'string') {
+        meta.title = record['title'];
+      } else {
+        invalidFields.push('title');
+      }
+    }
+    if (record['createdAtMs'] !== undefined) {
+      if (isValidMs(record['createdAtMs'])) {
+        meta.createdAtMs = record['createdAtMs'];
+      } else {
+        invalidFields.push('createdAtMs');
+      }
+    }
+    if (record['updatedAtMs'] !== undefined) {
+      if (isValidMs(record['updatedAtMs'])) {
+        meta.updatedAtMs = record['updatedAtMs'];
+      } else {
+        invalidFields.push('updatedAtMs');
+      }
+    }
+
+    if (invalidFields.length > 0) {
+      debugLogStorage(
+        `store: ignoring invalid metadata fields in ${path}: ${invalidFields.join(', ')}`
+      );
+    }
+    return meta;
   } catch {
     return undefined;
   }

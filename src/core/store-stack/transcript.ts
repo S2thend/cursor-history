@@ -4,7 +4,8 @@
  *
  * Each line: {"role":"user"|"assistant","message":{"content":[{"type":"text"|"tool_use",...}]}}
  * Error lines {"type":"error",...} are recognized but do not yield messages.
- * Unknown part types are ignored (forward compatibility).
+ * Unknown user-visible roles or part types are omitted defensively and mark the
+ * transcript partial/unsupported rather than overstating fidelity.
  *
  * Per-message timestamps are NOT present in transcripts; messages carry NO
  * timestamp rather than a session-level fallback.
@@ -41,6 +42,7 @@ export function parseTranscriptFile(filePath: string): TranscriptParseResult {
   let unsupportedLines = 0;
   let malformedLines = 0;
   let nonEmptyLines = 0;
+  let ignoredLines = 0;
 
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -58,10 +60,13 @@ export function parseTranscriptFile(filePath: string): TranscriptParseResult {
     const result = mapLine(parsed);
     if (result.kind === 'message') {
       messages.push(result.message);
+      if (!result.complete) unsupportedLines++;
     } else if (result.kind === 'error') {
       errorLines++;
-    } else {
+    } else if (result.kind === 'skip') {
       unsupportedLines++;
+    } else {
+      ignoredLines++;
     }
   }
 
@@ -70,7 +75,7 @@ export function parseTranscriptFile(filePath: string): TranscriptParseResult {
     state = malformedLines > 0 || unsupportedLines > 0 || errorLines > 0 ? 'partial' : 'parsed';
   } else if (errorLines > 0 && malformedLines === 0 && unsupportedLines === 0) {
     state = 'error-only';
-  } else if (nonEmptyLines > 0) {
+  } else if (nonEmptyLines > ignoredLines) {
     state = 'unsupported';
   } else {
     state = 'empty';
@@ -78,19 +83,24 @@ export function parseTranscriptFile(filePath: string): TranscriptParseResult {
   return { messages, state };
 }
 
-type LineResult = { kind: 'message'; message: Message } | { kind: 'error' } | { kind: 'skip' };
+type LineResult =
+  | { kind: 'message'; message: Message; complete: boolean }
+  | { kind: 'error' }
+  | { kind: 'ignore' }
+  | { kind: 'skip' };
 
 function mapLine(parsed: unknown): LineResult {
   if (!parsed || typeof parsed !== 'object') return { kind: 'skip' };
   const obj = parsed as Record<string, unknown>;
 
   if (obj.type === 'error') return { kind: 'error' }; // provider-error line
+  if (obj.role === 'system') return { kind: 'ignore' }; // intentionally non-user-visible
   if (obj.role !== 'user' && obj.role !== 'assistant') return { kind: 'skip' };
 
   const content = (obj as { message?: { content?: unknown } }).message?.content;
   if (!Array.isArray(content)) return { kind: 'skip' };
 
-  const { text, toolCalls } = extractContent(content);
+  const { text, toolCalls, complete } = extractContent(content);
   if (text.length === 0 && toolCalls.length === 0) return { kind: 'skip' };
 
   // No per-message timestamp is stored in transcripts; leave timestamp undefined.
@@ -101,15 +111,23 @@ function mapLine(parsed: unknown): LineResult {
     codeBlocks: [],
   };
   if (toolCalls.length > 0) message.toolCalls = toolCalls;
-  return { kind: 'message', message };
+  return { kind: 'message', message, complete };
 }
 
-function extractContent(parts: unknown[]): { text: string; toolCalls: ToolCall[] } {
+function extractContent(parts: unknown[]): {
+  text: string;
+  toolCalls: ToolCall[];
+  complete: boolean;
+} {
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
+  let complete = true;
 
   for (const part of parts) {
-    if (!part || typeof part !== 'object') continue;
+    if (!part || typeof part !== 'object') {
+      complete = false;
+      continue;
+    }
     const p = part as { type?: string; text?: unknown; name?: unknown; input?: unknown };
 
     if (p.type === 'text' && typeof p.text === 'string') {
@@ -120,9 +138,10 @@ function extractContent(parts: unknown[]): { text: string; toolCalls: ToolCall[]
         toolCall.params = p.input as Record<string, unknown>;
       }
       toolCalls.push(toolCall);
+    } else {
+      complete = false;
     }
-    // unknown part types ignored (forward compatibility)
   }
 
-  return { text: texts.join(''), toolCalls };
+  return { text: texts.join(''), toolCalls, complete };
 }
