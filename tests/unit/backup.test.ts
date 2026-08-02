@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { Readable, Writable } from 'node:stream';
 
 // Mock node:fs
 vi.mock('node:fs', async () => {
@@ -15,6 +16,9 @@ vi.mock('node:fs', async () => {
     statSync: vi.fn(),
     unlinkSync: vi.fn(),
     rmdirSync: vi.fn(),
+    copyFileSync: vi.fn(),
+    createReadStream: vi.fn(),
+    createWriteStream: vi.fn(),
   };
 });
 
@@ -44,24 +48,52 @@ vi.mock('../../src/core/database/index.js', () => ({
 }));
 
 // Mock jszip - vi.hoisted ensures variables are available in hoisted vi.mock
-const { mockZipFile, mockZipGenerateAsync, mockZipLoadAsync } = vi.hoisted(() => ({
-  mockZipFile: vi.fn(),
-  mockZipGenerateAsync: vi.fn(),
-  mockZipLoadAsync: vi.fn(),
-}));
+const { mockZipFile, mockZipGenerateAsync, mockZipGenerateNodeStream, mockZipLoadAsync } =
+  vi.hoisted(() => ({
+    mockZipFile: vi.fn(),
+    mockZipGenerateAsync: vi.fn(),
+    mockZipGenerateNodeStream: vi.fn(),
+    mockZipLoadAsync: vi.fn(),
+  }));
 
 vi.mock('jszip', () => {
   function MockJSZip() {
     return {
       file: mockZipFile,
       generateAsync: mockZipGenerateAsync,
+      generateNodeStream: mockZipGenerateNodeStream,
     };
   }
   MockJSZip.loadAsync = mockZipLoadAsync;
   return { default: MockJSZip };
 });
 
-import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'node:fs';
+/** Zip entry mock exposing both the buffer and the streaming API. */
+function zipEntry(content: Buffer) {
+  return {
+    async: vi.fn().mockResolvedValue(content),
+    nodeStream: vi.fn(() => Readable.from([content])),
+  };
+}
+
+/** Writable that swallows everything (stand-in for fs.createWriteStream). */
+function sinkStream() {
+  return new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+}
+
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  readFileSync,
+  createReadStream,
+  createWriteStream,
+} from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import {
   getDefaultBackupDir,
@@ -291,10 +323,10 @@ describe('validateBackup', () => {
     mockZipLoadAsync.mockResolvedValue({
       file: vi.fn((name: string) => {
         if (name === 'manifest.json') {
-          return { async: vi.fn().mockResolvedValue(Buffer.from(JSON.stringify(manifest))) };
+          return zipEntry(Buffer.from(JSON.stringify(manifest)));
         }
         if (name === 'test.db') {
-          return { async: vi.fn().mockResolvedValue(fileContent) };
+          return zipEntry(fileContent);
         }
         return null;
       }),
@@ -393,14 +425,52 @@ describe('createBackup', () => {
     });
     vi.mocked(statSync).mockReturnValue({ size: 1024 } as ReturnType<typeof statSync>);
     vi.mocked(readFileSync).mockReturnValue(Buffer.from('database-content'));
-
-    const { writeFile: mockWriteFile } = await import('node:fs/promises');
-    vi.mocked(mockWriteFile).mockResolvedValue(undefined);
-    mockZipGenerateAsync.mockResolvedValue(Buffer.from('zipdata'));
+    // Files are hashed and zipped through streams
+    vi.mocked(createReadStream).mockImplementation(
+      () => Readable.from([Buffer.from('database-content')]) as unknown as ReturnType<
+        typeof createReadStream
+      >
+    );
+    vi.mocked(createWriteStream).mockImplementation(
+      () => sinkStream() as unknown as ReturnType<typeof createWriteStream>
+    );
+    mockZipGenerateNodeStream.mockImplementation(() => Readable.from([Buffer.from('zipdata')]));
 
     const result = await createBackup({ outputPath: '/backups/test.zip' });
     expect(result.success).toBe(true);
     expect(result.manifest.files.length).toBeGreaterThan(0);
+    // Never buffer the whole archive in memory
+    expect(mockZipGenerateAsync).not.toHaveBeenCalled();
+    expect(mockZipGenerateNodeStream).toHaveBeenCalledWith(
+      expect.objectContaining({ streamFiles: true }),
+      expect.any(Function)
+    );
+  });
+
+  it('reports compression progress while writing the archive', async () => {
+    vi.mocked(mkdirSync).mockImplementation(() => undefined as unknown as string);
+    vi.mocked(existsSync).mockImplementation((p) => !String(p).endsWith('.zip'));
+    vi.mocked(readdirSync).mockImplementation(() => []);
+    vi.mocked(statSync).mockReturnValue({ size: 1024 } as ReturnType<typeof statSync>);
+    vi.mocked(createReadStream).mockImplementation(
+      () => Readable.from([Buffer.from('database-content')]) as unknown as ReturnType<
+        typeof createReadStream
+      >
+    );
+    vi.mocked(createWriteStream).mockImplementation(
+      () => sinkStream() as unknown as ReturnType<typeof createWriteStream>
+    );
+    mockZipGenerateNodeStream.mockImplementation(
+      (_options: unknown, onUpdate?: (m: { percent: number; currentFile: string | null }) => void) => {
+        onUpdate?.({ percent: 50, currentFile: 'globalStorage/state.vscdb' });
+        return Readable.from([Buffer.from('zipdata')]);
+      }
+    );
+
+    const progress = vi.fn();
+    await createBackup({ outputPath: '/backups/test.zip', onProgress: progress });
+
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'compressing' }));
   });
 });
 
@@ -436,10 +506,10 @@ describe('restoreBackup', () => {
     mockZipLoadAsync.mockResolvedValue({
       file: vi.fn((name: string) => {
         if (name === 'manifest.json') {
-          return { async: vi.fn().mockResolvedValue(Buffer.from(JSON.stringify(manifest))) };
+          return zipEntry(Buffer.from(JSON.stringify(manifest)));
         }
         if (name === 'globalStorage/state.vscdb') {
-          return { async: vi.fn().mockResolvedValue(fileContent) };
+          return zipEntry(fileContent);
         }
         return null;
       }),

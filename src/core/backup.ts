@@ -15,17 +15,25 @@ import {
   readdirSync,
   statSync,
   unlinkSync,
-  readFileSync,
-  writeFileSync,
+  copyFileSync,
   rmdirSync,
 } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import JSZip from 'jszip';
 import type { Database as DatabaseInterface, Statement } from './database/types.js';
 import { registry } from './database/registry.js';
 import { backupDatabase } from './database/index.js';
+import {
+  MAX_ZIP_ENTRY_BYTES,
+  computeFileChecksum,
+  computeZipEntryChecksum,
+  createByteCounter,
+  createGzipFileStream,
+  extractZipEntryToFile,
+  readFileBuffer,
+  writeZipToFile,
+} from './stream-io.js';
 import type {
   BackupManifest,
   BackupFileEntry,
@@ -59,6 +67,25 @@ export function getDefaultBackupDir(): string {
  */
 export function computeChecksum(buffer: Buffer): string {
   return `sha256:${createHash('sha256').update(buffer).digest('hex')}`;
+}
+
+/**
+ * Name of the zip member holding a manifest entry.
+ * Gzipped files get a `.gz` suffix; older backups stored the raw file.
+ */
+function zipEntryName(entry: Pick<BackupFileEntry, 'path' | 'compression'>): string {
+  return entry.compression === 'gzip' ? `${entry.path}.gz` : entry.path;
+}
+
+/** Delete a file, ignoring any error (used to drop half written archives). */
+function removeFileQuietly(filePath: string): void {
+  try {
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+  } catch {
+    // Ignore cleanup errors
+  }
 }
 
 /**
@@ -341,20 +368,22 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
         // T011: Backup database using SQLite backup API
         await backupDatabase(dbFile.absolutePath, tempFilePath);
       } else {
-        // For non-DB files (like workspace.json), just copy
-        const content = readFileSync(dbFile.absolutePath);
-        writeFileSync(tempFilePath, content);
+        // For non-DB files (like workspace.json), copy at the filesystem level
+        // (readFileSync would fail on files above 2 GiB)
+        copyFileSync(dbFile.absolutePath, tempFilePath);
       }
 
-      // Read backed up file and compute checksum
-      const buffer = readFileSync(tempFilePath);
-      const checksum = computeChecksum(buffer);
+      // Checksum the backed up file with a streaming hash: reading it into a
+      // Buffer throws ERR_FS_FILE_TOO_LARGE once a database passes 2 GiB
+      const checksum = await computeFileChecksum(tempFilePath);
+      const backedUpSize = statSync(tempFilePath).size;
 
       fileEntries.push({
-        path: dbFile.relativePath,
-        size: buffer.length,
+        path: dbFile.relativePath.split(sep).join('/'),
+        size: backedUpSize,
         checksum,
         type: dbFile.type,
+        compression: 'gzip',
       });
 
       // Count sessions (only for DB files)
@@ -368,26 +397,21 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       bytesCompleted += dbFile.size;
     }
 
-    // Phase: Compressing
-    onProgress?.({
-      phase: 'compressing',
-      filesCompleted: dbFiles.length,
-      totalFiles: dbFiles.length,
-      bytesCompleted: totalBytes,
-      totalBytes,
-    });
-
     // T014: Create zip file
     const zip = new JSZip();
 
-    // Add all backed up database files
-    for (const entry of fileEntries) {
+    // Add every file as a gzip stream: databases are never loaded into memory
+    // (readFileSync throws ERR_FS_FILE_TOO_LARGE above 2 GiB) and gzipping them
+    // up front keeps each zip member small enough to be read back later.
+    const storedSizes = fileEntries.map((entry) => {
       const filePath = join(tempDir, entry.path);
-      // Convert path to use forward slashes for cross-platform compatibility
-      const zipPath = entry.path.split(sep).join('/');
-      const fileContent = readFileSync(filePath);
-      zip.file(zipPath, fileContent);
-    }
+      const counter = createByteCounter();
+      // Already gzipped, so let jszip store the bytes as they are
+      zip.file(zipEntryName(entry), createGzipFileStream(filePath).pipe(counter), {
+        compression: 'STORE',
+      });
+      return { entry, counter };
+    });
 
     // T015: Create and add manifest
     const stats: BackupStats = {
@@ -398,6 +422,61 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
     const manifest = createManifest(fileEntries, stats);
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
+    // Phase: Compressing
+    onProgress?.({
+      phase: 'compressing',
+      filesCompleted: dbFiles.length,
+      totalFiles: dbFiles.length,
+      bytesCompleted: 0,
+      totalBytes,
+    });
+
+    // Write zip file
+    if (existsSync(outputPath)) {
+      unlinkSync(outputPath);
+    }
+
+    let lastPercent = -1;
+    try {
+      await writeZipToFile(zip, outputPath, {
+        onUpdate: (metadata) => {
+          // jszip fires this for every chunk, throttle to whole percents
+          const percent = Math.floor(metadata.percent);
+          if (percent === lastPercent) {
+            return;
+          }
+          lastPercent = percent;
+          onProgress?.({
+            phase: 'compressing',
+            currentFile: metadata.currentFile ?? undefined,
+            filesCompleted: dbFiles.length,
+            totalFiles: dbFiles.length,
+            bytesCompleted: Math.round((percent / 100) * totalBytes),
+            totalBytes,
+          });
+        },
+      });
+    } catch (e) {
+      removeFileQuietly(outputPath);
+      throw e;
+    }
+
+    // A member of 2 GiB or more cannot be read back (32 bit signed zip headers),
+    // so refuse to hand out a backup that could never be restored
+    const oversized = storedSizes.find(({ counter }) => counter.bytes > MAX_ZIP_ENTRY_BYTES);
+    if (oversized) {
+      removeFileQuietly(outputPath);
+      return {
+        success: false,
+        backupPath: outputPath,
+        manifest: createManifest([], { totalSize: 0, sessionCount: 0, workspaceCount: 0 }),
+        durationMs: Date.now() - startTime,
+        error:
+          `${oversized.entry.path} is too large to archive: ${oversized.counter.bytes} compressed ` +
+          `bytes exceed the 2 GiB zip member limit. Copy the database manually instead.`,
+      };
+    }
+
     // Phase: Finalizing
     onProgress?.({
       phase: 'finalizing',
@@ -406,13 +485,6 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       bytesCompleted: totalBytes,
       totalBytes,
     });
-
-    // Write zip file
-    if (existsSync(outputPath)) {
-      unlinkSync(outputPath);
-    }
-    const zipContent = await zip.generateAsync({ type: 'nodebuffer' });
-    await writeFile(outputPath, zipContent);
 
     return {
       success: true,
@@ -491,22 +563,23 @@ export async function openBackupDatabase(
   backupPath: string,
   dbPath: string
 ): Promise<DatabaseInterface> {
-  const data = await readFile(backupPath);
+  const data = await readFileBuffer(backupPath);
   const zip = await JSZip.loadAsync(data);
-  const dbFile = zip.file(dbPath);
+  // Current backups store databases gzipped, older ones stored them as is
+  const gzipped = zip.file(`${dbPath}.gz`);
+  const dbFile = gzipped ?? zip.file(dbPath);
 
   if (!dbFile) {
     throw new Error(`Database not found in backup: ${dbPath}`);
   }
 
-  const buffer = await dbFile.async('nodebuffer');
-
-  // Extract to temp file since SQLite needs file access
+  // Extract to temp file since SQLite needs file access.
+  // Streamed so that multi-GB databases don't have to fit in a Buffer.
   const tempFile = join(
     tmpdir(),
     `cursor_history_backup_${Date.now()}_${Math.random().toString(36).slice(2)}.vscdb`
   );
-  writeFileSync(tempFile, buffer);
+  await extractZipEntryToFile(dbFile, tempFile, { gunzip: gzipped !== null });
 
   // Use pluggable driver system - registry.openSync requires driver to already be selected
   let db: DatabaseInterface | null = null;
@@ -532,7 +605,7 @@ export async function openBackupDatabase(
  */
 export async function readBackupManifest(backupPath: string): Promise<BackupManifest | null> {
   try {
-    const data = await readFile(backupPath);
+    const data = await readFileBuffer(backupPath);
     const zip = await JSZip.loadAsync(data);
     const manifestFile = zip.file('manifest.json');
     if (!manifestFile) {
@@ -568,7 +641,7 @@ export async function validateBackup(backupPath: string): Promise<BackupValidati
   // Try to open as zip
   let zip: JSZip;
   try {
-    const data = await readFile(backupPath);
+    const data = await readFileBuffer(backupPath);
     zip = await JSZip.loadAsync(data);
   } catch (e) {
     return {
@@ -608,14 +681,16 @@ export async function validateBackup(backupPath: string): Promise<BackupValidati
 
   // Verify each file
   for (const fileEntry of manifest.files) {
-    const file = zip.file(fileEntry.path);
+    const file = zip.file(zipEntryName(fileEntry));
     if (!file) {
       missingFiles.push(fileEntry.path);
       continue;
     }
 
-    const buffer = await file.async('nodebuffer');
-    const actualChecksum = computeChecksum(buffer);
+    // Hash while inflating: entries can be several GB
+    const actualChecksum = await computeZipEntryChecksum(file, {
+      gunzip: fileEntry.compression === 'gzip',
+    });
     if (actualChecksum === fileEntry.checksum) {
       validFiles.push(fileEntry.path);
     } else {
@@ -712,7 +787,7 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
   });
 
   // Phase: Extracting
-  const data = await readFile(backupPath);
+  const data = await readFileBuffer(backupPath);
   const zip = await JSZip.loadAsync(data);
   const restoredFiles: string[] = [];
   const warnings: string[] = validation.corruptedFiles.map((f) => `Checksum mismatch: ${f}`);
@@ -730,12 +805,10 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
         corruptedFiles: validation.corruptedFiles,
       });
 
-      const file = zip.file(fileEntry.path);
+      const file = zip.file(zipEntryName(fileEntry));
       if (!file) {
         continue; // Skip missing files
       }
-
-      const buffer = await file.async('nodebuffer');
 
       // Convert forward slashes to platform-specific separators
       const platformPath = fileEntry.path.split('/').join(sep);
@@ -744,8 +817,10 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
       // Create directory structure
       mkdirSync(dirname(destPath), { recursive: true });
 
-      // Write file
-      writeFileSync(destPath, buffer);
+      // Stream the entry to disk (databases can be several GB)
+      await extractZipEntryToFile(file, destPath, {
+        gunzip: fileEntry.compression === 'gzip',
+      });
       restoredFiles.push(fileEntry.path);
     }
 

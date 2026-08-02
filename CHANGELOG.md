@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Backups of databases larger than 2 GiB**: `backup` crashed with `File size (...) is greater than 2 GiB` (`ERR_FS_FILE_TOO_LARGE`) as soon as `globalStorage/state.vscdb` passed 2 GiB, because every file was read into a Buffer for checksumming and zipping. Backup, validate, restore and backup browsing are now fully stream based, and database files are stored gzipped inside the archive (zip members must stay below 2 GiB to be readable, and archives get considerably smaller). Backups written by older versions still restore unchanged.
 - **Tool content normalization**: `Message.content` now preserves full payloads for `read_file_v2`, `edit_file_v2`, legacy `read_file`, terminal-command output, and generic tool params/results. Default CLI previews are unchanged; `show --tool` still expands full tool content in the terminal.
 - **Session data integrity**: `getSession()` and `getGlobalSession()` now preserve empty bubbles as `[empty message]`, retain malformed global rows as `[corrupted message]` placeholders with `metadata.corrupted = true`, and populate `message.metadata.bubbleType` when the source bubble type is known.
 - **Structured tool call recovery**: `message.toolCalls` is now populated from `toolFormerData`, including default `completed` status handling and `{ _raw: ... }` sentinels when tool params contain invalid JSON.

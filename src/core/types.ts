@@ -303,14 +303,21 @@ export interface BackupManifest {
  * A single file entry in the backup manifest
  */
 export interface BackupFileEntry {
-  /** Path within zip (forward slashes, relative to zip root) */
+  /** Logical path (forward slashes, relative to zip root) */
   path: string;
   /** Original file size in bytes */
   size: number;
-  /** SHA-256 checksum for integrity verification */
+  /** SHA-256 checksum of the original file, for integrity verification */
   checksum: string;
   /** File type for categorization */
   type: 'global-db' | 'workspace-db' | 'workspace-json' | 'manifest';
+  /**
+   * How the file is encoded inside the zip. When 'gzip' the zip entry is
+   * `${path}.gz` and holds gzipped data (keeps entries small enough for the
+   * zip reader, which cannot handle members of 2 GiB or more).
+   * Absent in backups created before this was introduced.
+   */
+  compression?: 'gzip';
 }
 
 /**
