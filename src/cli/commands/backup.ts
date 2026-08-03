@@ -26,7 +26,10 @@ function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 /**
@@ -53,10 +56,15 @@ function displayProgress(progress: BackupProgress): void {
   const phaseText = phases[progress.phase];
   const fileProgress =
     progress.totalFiles > 0 ? ` [${progress.filesCompleted}/${progress.totalFiles}]` : '';
+  // Compressing a multi-GB database takes a while, show how far along it is
+  const percent =
+    progress.phase === 'compressing' && progress.totalBytes > 0
+      ? ` ${Math.min(100, Math.round((progress.bytesCompleted / progress.totalBytes) * 100))}%`
+      : '';
   const currentFile = progress.currentFile ? ` ${pc.dim(progress.currentFile)}` : '';
 
   // Clear line and print progress
-  process.stdout.write(`\r${phaseText}${fileProgress}${currentFile}`.padEnd(80));
+  process.stdout.write(`\r${phaseText}${fileProgress}${percent}${currentFile}`.padEnd(80));
 }
 
 /**

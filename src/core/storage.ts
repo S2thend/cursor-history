@@ -3,8 +3,8 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import JSZip from 'jszip';
 import {
   openDatabase as openDatabaseAsync,
@@ -43,6 +43,7 @@ import {
   type CursorChatBundle,
 } from './parser.js';
 import { openBackupDatabase, readBackupManifest } from './backup.js';
+import { readFileBuffer } from './stream-io.js';
 import { debugLogStorage } from './database/debug.js';
 import { discoverStoreSessions } from './store-stack/discover.js';
 import type { StoreSession } from './store-stack/types.js';
@@ -601,16 +602,20 @@ async function readWorkspaceJsonFromBackup(
   workspaceId: string
 ): Promise<string | null> {
   try {
-    const data = await readFile(backupPath);
+    const data = await readFileBuffer(backupPath);
     const zip = await JSZip.loadAsync(data);
     const jsonPath = `workspaceStorage/${workspaceId}/workspace.json`;
-    const file = zip.file(jsonPath);
+    // Current backups gzip their members, older ones stored them as is
+    const gzipped = zip.file(`${jsonPath}.gz`);
+    const file = gzipped ?? zip.file(jsonPath);
 
     if (!file) {
       return null;
     }
 
-    const buffer = await file.async('nodebuffer');
+    const buffer = gzipped
+      ? gunzipSync(await gzipped.async('nodebuffer'))
+      : await file.async('nodebuffer');
     const content = buffer.toString('utf-8');
     const jsonData = JSON.parse(content) as WorkspaceJsonShape;
     return getWorkspacePathFromJson(jsonData);
