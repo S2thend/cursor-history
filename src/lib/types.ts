@@ -25,8 +25,37 @@ export interface Session {
   /** Total number of messages in session */
   messageCount: number;
 
-  /** Source data completeness: full global bubbles or degraded workspace fallback */
-  source?: 'global' | 'workspace-fallback';
+  /**
+   * Source data completeness:
+   * - 'global': full global bubbles (Composer stack)
+   * - 'workspace-fallback': degraded, workspace storage only (Composer stack)
+   * - 'transcript': Store stack; the transcript supplies the messages (sole source when no store.db
+   *   exists, or fallback when store.db is unreadable/yields no messages)
+   * - 'store-complete' / 'store-partial': Store stack, store.db supplies the messages (primary
+   *   source); full or partial parse
+   * - 'store': legacy alias (pre-rework)
+   * - 'merged': resolved from BOTH Composer and Store stacks by session ID
+   */
+  source?:
+    | 'global'
+    | 'workspace-fallback'
+    | 'transcript'
+    | 'store'
+    | 'store-complete'
+    | 'store-partial'
+    | 'merged';
+
+  /**
+   * Cross-stack provenance. Present only when `source === 'merged'`:
+   * the contributing stacks and the stack that supplies canonical order /
+   * wins true scalar conflicts.
+   */
+  sources?: Array<'composer' | 'store'>;
+  preferredSource?: 'composer' | 'store';
+
+  /** Parse state of the Store transcript when the Store stack contributed. */
+  transcriptState?:
+    'missing' | 'parsed' | 'partial' | 'empty' | 'error-only' | 'unsupported' | 'unreadable';
 
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
@@ -88,8 +117,21 @@ export interface Message {
   /** Message content (text, code blocks, or structured data) */
   content: string;
 
-  /** ISO 8601 timestamp when message was created */
+  /**
+   * ISO 8601 timestamp for the message. When Cursor does not store a
+   * per-message time, the library preserves its historical contract by using
+   * the session creation time.
+   */
   timestamp: string;
+
+  /** Provenance of `timestamp` when it is directly stored (not inferred). */
+  timestampSource?: 'composer-created-at' | 'composer-timing' | 'store-turn-timing';
+
+  /**
+   * Which stack supplied this resolved message ('composer' | 'store'), or
+   * 'both' when an equivalent message was merged across stacks.
+   */
+  source?: 'composer' | 'store' | 'both';
 
   /** Tool calls executed by assistant (optional, assistant-only) */
   toolCalls?: ToolCall[];

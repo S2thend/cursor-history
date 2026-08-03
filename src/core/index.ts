@@ -18,6 +18,7 @@ export type {
   SearchOptions,
   ExportOptions,
 } from './types.js';
+export type { SessionReadContext } from './storage.js';
 
 // Storage operations
 export {
@@ -25,6 +26,7 @@ export {
   listWorkspaces,
   listSessions,
   getSession,
+  createSessionReadContext,
   searchSessions,
   openDatabase,
   readWorkspaceJson,

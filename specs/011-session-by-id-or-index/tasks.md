@@ -3,7 +3,7 @@
 **Input**: Design documents from `/specs/011-session-by-id-or-index/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/, quickstart.md
 
-**Tests**: Not explicitly requested in spec; optional verification in Polish phase.
+**Tests**: Required regression coverage for global vs workspace-filtered ordering, stable-ID lookup, custom data paths, and backups.
 
 **Organization**: Tasks grouped by user story so each story can be implemented and tested independently.
 
@@ -33,7 +33,7 @@
 
 **CRITICAL**: No user story work can begin until this phase is complete
 
-- [x] T002 Extend getSession to accept identifier (number | string) in src/core/storage.ts: when string call resolveSessionIdentifiers([identifier], customDataPath) and load session by resolved ID; when number keep current 1-based index logic; when not found return null
+- [x] T002 Extend getSession to accept identifier (number | string) in src/core/storage.ts: resolve a number from the operation context's current summaries when available; resolve a string as a global stable ID for the active data source; when not found return null
 - [x] T003 Extend SessionNotFoundError to support (identifier: string | number, maxIndex?: number) in src/cli/errors.ts: when identifier is string or maxIndex undefined use generic message including identifier; else use "Session #n not found. Valid range: 1–maxIndex"
 
 **Checkpoint**: Foundation ready — CLI and library can now use getSession(identifier) and correct CLI error shape
@@ -48,8 +48,8 @@
 
 ### Implementation for User Story 1 & 2
 
-- [x] T004 [US1] [US2] In show command parse argument as index (positive integer/numeric string) or ID (non-numeric string); call getSession(identifier, ...); on null throw SessionNotFoundError(index, count); on thrown SessionNotFoundError from core rethrow or map to CLI SessionNotFoundError(identifier) so message includes invalid ID in src/cli/commands/show.ts
-- [x] T005 [US1] [US2] In export command for single-session path parse index-or-id same as show; call getSession(identifier, ...); apply same not-found handling (range for index, generic+ID for composer ID) in src/cli/commands/export.ts
+- [x] T004 [US1] [US2] Add one shared CLI resolver in `src/cli/commands/session-lookup.ts`: workspace-scoped numeric index → cached summary → stable ID; non-numeric ID → global lookup; preserve index-range and invalid-ID error shapes
+- [x] T005 [US1] [US2] Use the shared resolver from both `src/cli/commands/show.ts` and `src/cli/commands/export.ts` so the two commands cannot drift
 
 **Checkpoint**: CLI show and export accept index or ID with correct errors; User Story 1 and 2 are satisfied
 
@@ -76,6 +76,8 @@
 
 - [x] T008 [P] Update README or CLAUDE.md with identifier semantics for show/export and getSession (index or composer ID) in project root
 - [x] T009 Run quickstart.md verification steps: show by ID, show by index, show invalid-id, show out-of-range; export by ID/index; library getSession(0) and getSession(id)
+- [x] T010 Reproduce Issue #33 with two deliberately conflicting workspace/global orders and verify filtered list/get/search/export/library flows resolve summaries by stable ID
+- [x] T011 Add real Composer SQLite integration coverage for a custom live data path and a generated backup archive; both must round-trip filtered index 1 to the same workspace session and exclude the other workspace from search
 
 ---
 
@@ -97,7 +99,7 @@
 ### Parallel Opportunities
 
 - T008 can run in parallel with T009 after implementation is done
-- Phase 3 (T004, T005) and Phase 4 (T006, T007) could be done by different people after Phase 2
+- T010 and T011 validate the shared resolver after Phases 3 and 4
 
 ---
 
@@ -142,8 +144,8 @@ Developer B: T006, T007 (Library)
 | Foundational | —   | T002, T003  | 2     |
 | US1+US2 | P1 CLI  | T004, T005  | 2     |
 | US3     | P2 Lib  | T006, T007  | 2     |
-| Polish  | —       | T008, T009  | 2     |
-| **Total** |        |            | **9** |
+| Polish  | —       | T008–T011   | 4     |
+| **Total** |        |            | **11** |
 
 ---
 
@@ -151,5 +153,5 @@ Developer B: T006, T007 (Library)
 
 - Each task includes exact file path(s)
 - [US1] [US2] on T004/T005: same commands deliver both “by ID” and “by index” behavior
-- No separate test phase; add unit/integration tests in a follow-up if desired
-- Commit after each task or after each phase checkpoint
+- Regression and integration tests are part of completion, not a follow-up
+- Keep Issue #33 delivery independently reviewable from Store-stack PR #32

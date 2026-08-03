@@ -117,6 +117,16 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
       roDb.close();
     });
 
+    it('readonly open never creates a missing database', async () => {
+      driver = await getDriver();
+      await driver.isAvailable();
+      const dbPath = tempDbPath();
+
+      expect(existsSync(dbPath)).toBe(false);
+      expect(() => driver.open(dbPath, { readonly: true })).toThrow();
+      expect(existsSync(dbPath)).toBe(false);
+    });
+
     it('readonly database blocks write operations', async () => {
       driver = await getDriver();
       await driver.isAvailable();

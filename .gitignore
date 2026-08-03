@@ -29,3 +29,7 @@ coverage/
 *.swp
 *.txt
 *.tmp.*
+
+# P2 store.db investigation temp files
+tmp_store_real.db*
+tmp_*.db

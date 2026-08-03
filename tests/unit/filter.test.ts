@@ -65,6 +65,23 @@ describe('getMessageType', () => {
     );
   });
 
+  it('keeps explicit thinking and error markers ahead of structured tool calls', () => {
+    expect(
+      getMessageType({
+        role: 'assistant',
+        content: '[Thinking]\nInspecting the repository',
+        toolCalls: [{ name: 'Read' }],
+      })
+    ).toBe('thinking');
+    expect(
+      getMessageType({
+        role: 'assistant',
+        content: '[Error]\nRead failed',
+        toolCalls: [{ name: 'Read' }],
+      })
+    ).toBe('error');
+  });
+
   it('returns assistant for plain assistant messages', () => {
     expect(getMessageType({ role: 'assistant', content: 'Here is the answer...' })).toBe(
       'assistant'

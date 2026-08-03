@@ -10,7 +10,7 @@
 **Parameters**:
 
 - `identifier`: Either a **number** (0-based index; 0 = first session) or a **string** (composer ID). Same resolution rules as CLI: numeric → index, non-numeric → composer ID.
-- `config`: Optional. Unchanged (`dataPath`, `workspace`, `messageFilter`, etc.). When `workspace` is set, composer ID lookup uses the same scope as index lookup.
+- `config`: Optional. Unchanged (`dataPath`, `workspace`, `messageFilter`, etc.). When `workspace` is set, numeric index lookup uses that filtered list; stable composer/session ID lookup remains global.
 
 **Returns**: `Promise<Session>` — The session for the resolved identifier.
 

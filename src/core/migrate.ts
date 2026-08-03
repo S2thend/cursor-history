@@ -292,7 +292,11 @@ function toFileUri(path: string): string {
   const windowsDrivePath = normalized.match(/^([A-Za-z]):[\\/](.*)$/);
   if (windowsDrivePath) {
     const drive = windowsDrivePath[1]!.toLowerCase();
-    const rest = windowsDrivePath[2]!.replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
+    const rest = windowsDrivePath[2]!
+      .replace(/\\/g, '/')
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/');
     return `file:///${drive}:/${rest}`;
   }
 
@@ -713,7 +717,11 @@ export async function migrateSession(
         sessionIndex >= 0
           ? (sourceResult.composers[sessionIndex]! as Record<string, unknown>)
           : { composerId: sessionId };
-      const hydratedSession = hydrateComposerFromGlobalStorage(sessionToMigrate, sessionId, dataPath);
+      const hydratedSession = hydrateComposerFromGlobalStorage(
+        sessionToMigrate,
+        sessionId,
+        dataPath
+      );
 
       if (mode === 'move') {
         // Remove from source (skip when the session is only in global storage)
@@ -741,7 +749,13 @@ export async function migrateSession(
         );
 
         // T010-T012: Update file paths in global storage bubble data for move mode
-        updateBubblePathsInGlobalStorage(sessionId, sourceWorkspace, normalizedDest, debug, dataPath);
+        updateBubblePathsInGlobalStorage(
+          sessionId,
+          sourceWorkspace,
+          normalizedDest,
+          debug,
+          dataPath
+        );
         updateComposerWorkspaceInGlobalStorage(
           sessionId,
           normalizedDest,

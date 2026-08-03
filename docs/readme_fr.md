@@ -290,8 +290,9 @@ cursor-history --workspace /chemin/vers/projet list
 En parcourant votre historique de chat, vous verrez :
 
 - **Conversations complètes** - Tous les messages échangés avec Cursor AI
-- **Pliage des messages dupliqués** - Les messages identiques consécutifs sont pliés en un seul affichage avec plusieurs horodatages et un compteur de répétition (ex. "02:48:01 PM, 02:48:04 PM, 02:48:54 PM (×3)")
-- **Horodatages** - Heure exacte d'envoi de chaque message (format HH:MM:SS), avec repli intelligent pour les sessions avant septembre 2025 qui extrait le timing des champs de données alternatifs et interpole pour les messages sans horodatage direct
+- **Chaque message rendu** - Chaque message résolu est affiché une fois dans l'ordre ; les doublons consécutifs ne sont pas pliés, afin que les appels d'outils, la provenance et les données de tokens distincts ne soient jamais masqués
+- **Horodatages** - L'heure directement stockée d'un message quand elle est disponible (format HH:MM:SS) ; les messages sans heure directement stockée n'affichent pas d'horodatage plutôt qu'un repli fabriqué
+- **Sessions fusionnées entre piles** - Quand la même session existe à la fois dans la pile Composer (vscdb) et Store (~/.cursor), les deux représentations sont fusionnées champ par champ (aucune n'est écartée), la source principale étant choisie par plateforme (WSL préfère Store ; Windows/macOS/Linux natif préfèrent Composer)
 - **Actions des outils IA** - Vue détaillée de ce que Cursor AI a fait :
   - **Modifications/écritures de fichiers** - Affichage complet des diff avec coloration syntaxique montrant exactement ce qui a changé
   - **Lectures de fichiers** - Chemins de fichiers et aperçus du contenu (utilisez `--fullread` pour le contenu complet)

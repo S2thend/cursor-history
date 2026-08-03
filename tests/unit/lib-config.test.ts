@@ -3,6 +3,7 @@ import { validateConfig, mergeWithDefaults, resolveDatabasePath } from '../../sr
 import { InvalidConfigError, DatabaseNotFoundError } from '../../src/lib/errors.js';
 import { tmpdir } from 'node:os';
 import { basename } from 'node:path';
+import { detectPreferredStackSource } from '../../src/lib/platform.js';
 
 describe('validateConfig', () => {
   it('accepts undefined config', () => {
@@ -79,7 +80,7 @@ describe('mergeWithDefaults', () => {
     expect(result.limit).toBe(Number.MAX_SAFE_INTEGER);
     expect(result.offset).toBe(0);
     expect(result.context).toBe(0);
-    expect(typeof result.dataPath).toBe('string');
+    expect(result.dataPath).toBeUndefined();
   });
 
   it('merges partial config with defaults', () => {
@@ -91,12 +92,29 @@ describe('mergeWithDefaults', () => {
   it('preserves optional fields', () => {
     const result = mergeWithDefaults({
       workspace: '/abs/path',
+      dataPath: '/cursor-data',
       backupPath: '/backup',
       sqliteDriver: 'node:sqlite',
     });
     expect(result.workspace).toBe('/abs/path');
+    expect(result.dataPath).toBe('/cursor-data');
     expect(result.backupPath).toBe('/backup');
     expect(result.sqliteDriver).toBe('node:sqlite');
+  });
+
+  it('keeps an implicit data path from masking Store preference', () => {
+    const previousDataPath = process.env['CURSOR_DATA_PATH'];
+    const previousStoreRoot = process.env['CURSOR_STORE_ROOT'];
+    delete process.env['CURSOR_DATA_PATH'];
+    process.env['CURSOR_STORE_ROOT'] = '/non-default-cursor-store';
+    try {
+      expect(detectPreferredStackSource(mergeWithDefaults().dataPath)).toBe('store');
+    } finally {
+      if (previousDataPath === undefined) delete process.env['CURSOR_DATA_PATH'];
+      else process.env['CURSOR_DATA_PATH'] = previousDataPath;
+      if (previousStoreRoot === undefined) delete process.env['CURSOR_STORE_ROOT'];
+      else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
+    }
   });
 
   it('throws on invalid config', () => {

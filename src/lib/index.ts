@@ -104,8 +104,13 @@ import type {
   WorkspaceMigrationResult,
   SqliteDriverName,
 } from './types.js';
-import { mergeWithDefaults } from './config.js';
-import { DatabaseLockedError, DatabaseNotFoundError, InvalidFilterError } from './errors.js';
+import { mergeWithDefaults, type ResolvedConfig } from './config.js';
+import {
+  DatabaseLockedError,
+  DatabaseNotFoundError,
+  InvalidFilterError,
+  SessionNotFoundError,
+} from './errors.js';
 import {
   filterMessages as filterMessagesImpl,
   validateMessageTypes as validateMessageTypesImpl,
@@ -121,6 +126,33 @@ import {
   getActiveDriver as coreGetActiveDriver,
 } from '../core/database/index.js';
 
+/** Convert the library's zero-based numeric identifier to the core's one-based index. */
+function toCoreSessionIdentifier(identifier: number | string): number | string {
+  if (typeof identifier === 'number') return identifier + 1;
+  if (/^\d+$/.test(identifier)) return Number.parseInt(identifier, 10) + 1;
+  return identifier;
+}
+
+async function getCoreSessionInScope(
+  identifier: number | string,
+  resolved: ResolvedConfig
+): Promise<CoreSession | null> {
+  // Workspace scope disambiguates mutable numeric indices only. Stable IDs
+  // retain their existing global lookup semantics.
+  if (!resolved.workspace || typeof identifier === 'string') {
+    return storage.getSession(identifier, resolved.dataPath, resolved.backupPath);
+  }
+
+  const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
+  await storage.listSessions(
+    { limit: 0, all: true, workspacePath: resolved.workspace },
+    resolved.dataPath,
+    resolved.backupPath,
+    context
+  );
+  return storage.getSession(identifier, resolved.dataPath, resolved.backupPath, context);
+}
+
 /**
  * Convert core ChatSession to library Session
  */
@@ -129,20 +161,33 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     id: coreSession.id,
     workspace: coreSession.workspacePath ?? 'unknown',
     timestamp: coreSession.createdAt.toISOString(),
-    messages: coreSession.messages.map((msg) => ({
-      id: msg.id ?? undefined,
-      role: msg.role === 'user' ? 'user' : 'assistant',
-      content: msg.content,
-      timestamp: msg.timestamp.toISOString(),
-      toolCalls: msg.toolCalls,
-      thinking: msg.thinking,
-      tokenUsage: msg.tokenUsage,
-      model: msg.model,
-      durationMs: msg.durationMs,
-      metadata: msg.metadata,
-    })),
+    messages: coreSession.messages.map((msg) => {
+      const m: Record<string, unknown> = {
+        id: msg.id ?? undefined,
+        role: msg.role === 'user' ? 'user' : 'assistant',
+        content: msg.content,
+        // Preserve the library's required timestamp contract. Composer
+        // messages are filled by the core storage layer; Store-only messages
+        // without a turn timestamp use the session creation time.
+        timestamp: (msg.timestamp ?? coreSession.createdAt).toISOString(),
+      };
+      // Provenance remains absent when the public timestamp uses the
+      // compatibility fallback above.
+      if (msg.timestampSource) m['timestampSource'] = msg.timestampSource;
+      if (msg.source) m['source'] = msg.source;
+      if (msg.toolCalls) m['toolCalls'] = msg.toolCalls;
+      if (msg.thinking) m['thinking'] = msg.thinking;
+      if (msg.tokenUsage) m['tokenUsage'] = msg.tokenUsage;
+      if (msg.model) m['model'] = msg.model;
+      if (msg.durationMs !== undefined) m['durationMs'] = msg.durationMs;
+      if (msg.metadata) m['metadata'] = msg.metadata;
+      return m as unknown as import('./types.js').Message;
+    }),
     messageCount: coreSession.messageCount,
     source: coreSession.source,
+    ...(coreSession.sources ? { sources: coreSession.sources } : {}),
+    ...(coreSession.preferredSource ? { preferredSource: coreSession.preferredSource } : {}),
+    ...(coreSession.transcriptState ? { transcriptState: coreSession.transcriptState } : {}),
     usage: coreSession.usage,
     ...(coreSession.activeBranchBubbleIds
       ? { activeBranchBubbleIds: coreSession.activeBranchBubbleIds }
@@ -180,6 +225,10 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
   try {
     const resolved = mergeWithDefaults(config);
 
+    // Use one read context for the whole listing. It caches Store
+    // sessions and summaries so each per-session load below does not re-discover.
+    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
+
     // Get all sessions using core storage layer
     const coreSessions = await storage.listSessions(
       {
@@ -188,7 +237,8 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
         workspacePath: resolved.workspace,
       },
       resolved.dataPath,
-      resolved.backupPath
+      resolved.backupPath,
+      context
     );
 
     // Total count before pagination
@@ -204,9 +254,11 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
     const sessions: Session[] = [];
     for (const summary of paginatedSessions) {
       const fullSession = await storage.getSession(
-        summary.index,
+        summary.id,
         resolved.dataPath,
-        resolved.backupPath
+        resolved.backupPath,
+        context,
+        summary.index
       );
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${summary.index} not found`);
@@ -252,7 +304,7 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
  * @returns Complete session with all messages (filtered if messageFilter specified)
  * @throws {DatabaseLockedError} If database is locked by Cursor
  * @throws {DatabaseNotFoundError} If database path does not exist
- * @throws {InvalidConfigError} If index is out of bounds
+ * @throws {SessionNotFoundError} If the session ID or index cannot be resolved
  * @throws {InvalidFilterError} If messageFilter contains invalid types
  *
  * @example
@@ -283,17 +335,12 @@ export async function getSession(index: number | string, config?: LibraryConfig)
       }
     }
 
-    // Core storage uses 1-based indexing, so we add 1 when passed an index.
-    const coreIdentifier: number | string = typeof index === 'number' ? index + 1 : index;
+    const coreIdentifier = toCoreSessionIdentifier(index);
 
-    const coreSession = await storage.getSession(
-      coreIdentifier,
-      resolved.dataPath,
-      resolved.backupPath
-    );
+    const coreSession = await getCoreSessionInScope(coreIdentifier, resolved);
 
     if (!coreSession) {
-      throw new DatabaseNotFoundError(`Session not found: ${index}`);
+      throw new SessionNotFoundError(index);
     }
 
     // Apply message filter if provided
@@ -318,7 +365,8 @@ export async function getSession(index: number | string, config?: LibraryConfig)
     if (
       err instanceof DatabaseLockedError ||
       err instanceof DatabaseNotFoundError ||
-      err instanceof InvalidFilterError
+      err instanceof InvalidFilterError ||
+      err instanceof SessionNotFoundError
     ) {
       throw err;
     }
@@ -359,6 +407,7 @@ export async function searchSessions(
 ): Promise<SearchResult[]> {
   try {
     const resolved = mergeWithDefaults(config);
+    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
 
     // Search using core storage layer
     const coreResults = await storage.searchSessions(
@@ -369,7 +418,8 @@ export async function searchSessions(
         workspacePath: resolved.workspace,
       },
       resolved.dataPath,
-      resolved.backupPath
+      resolved.backupPath,
+      context
     );
 
     // Convert core results to library format
@@ -377,9 +427,11 @@ export async function searchSessions(
     for (const coreResult of coreResults) {
       // Get full session for reference
       const fullSession = await storage.getSession(
-        coreResult.index,
+        coreResult.sessionId,
         resolved.dataPath,
-        resolved.backupPath
+        resolved.backupPath,
+        context,
+        coreResult.index
       );
       if (!fullSession) {
         throw new DatabaseNotFoundError(`Session ${coreResult.index} not found`);
@@ -462,7 +514,7 @@ export async function searchSessions(
  * @returns JSON string representation of session
  * @throws {DatabaseLockedError} If database is locked by Cursor
  * @throws {DatabaseNotFoundError} If database path does not exist
- * @throws {InvalidConfigError} If index is out of bounds
+ * @throws {SessionNotFoundError} If the session ID or index cannot be resolved
  *
  * @example
  * const json = await exportSessionToJson(0);
@@ -478,21 +530,20 @@ export async function exportSessionToJson(
   try {
     const resolved = mergeWithDefaults(config);
 
-    // Core storage uses 1-based indexing, so we add 1 when passed an index.
-    const coreIdentifier: number | string = typeof index === 'number' ? index + 1 : index;
+    const coreIdentifier = toCoreSessionIdentifier(index);
 
-    const coreSession = await storage.getSession(
-      coreIdentifier,
-      resolved.dataPath,
-      resolved.backupPath
-    );
+    const coreSession = await getCoreSessionInScope(coreIdentifier, resolved);
     if (!coreSession) {
-      throw new DatabaseNotFoundError(`Session not found: ${index}`);
+      throw new SessionNotFoundError(index);
     }
 
     return exportToJson(coreSession, coreSession.workspacePath);
   } catch (err) {
-    if (err instanceof DatabaseLockedError || err instanceof DatabaseNotFoundError) {
+    if (
+      err instanceof DatabaseLockedError ||
+      err instanceof DatabaseNotFoundError ||
+      err instanceof SessionNotFoundError
+    ) {
       throw err;
     }
     throw new Error(
@@ -508,7 +559,8 @@ export async function exportSessionToJson(
  * @param config - Optional configuration (dataPath)
  * @returns Markdown formatted string
  * @throws {DatabaseLockedError} If database is locked by Cursor
- * @throws {DatabaseNotFoundError} If database path does not exist or session cannot be found
+ * @throws {DatabaseNotFoundError} If database path does not exist
+ * @throws {SessionNotFoundError} If the session ID or index cannot be resolved
  *
  * @example
  * const markdown = await exportSessionToMarkdown(0);
@@ -524,21 +576,20 @@ export async function exportSessionToMarkdown(
   try {
     const resolved = mergeWithDefaults(config);
 
-    // Core storage uses 1-based indexing, so we add 1 when passed an index.
-    const coreIdentifier: number | string = typeof index === 'number' ? index + 1 : index;
+    const coreIdentifier = toCoreSessionIdentifier(index);
 
-    const coreSession = await storage.getSession(
-      coreIdentifier,
-      resolved.dataPath,
-      resolved.backupPath
-    );
+    const coreSession = await getCoreSessionInScope(coreIdentifier, resolved);
     if (!coreSession) {
-      throw new DatabaseNotFoundError(`Session not found: ${index}`);
+      throw new SessionNotFoundError(index);
     }
 
     return exportToMarkdown(coreSession, coreSession.workspacePath);
   } catch (err) {
-    if (err instanceof DatabaseLockedError || err instanceof DatabaseNotFoundError) {
+    if (
+      err instanceof DatabaseLockedError ||
+      err instanceof DatabaseNotFoundError ||
+      err instanceof SessionNotFoundError
+    ) {
       throw err;
     }
     throw new Error(
@@ -567,6 +618,9 @@ export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<s
   try {
     const resolved = mergeWithDefaults(config);
 
+    // Share one Store discovery across the export-all loop.
+    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
+
     // Get all sessions
     const coreSessions = await storage.listSessions(
       {
@@ -575,16 +629,19 @@ export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<s
         workspacePath: resolved.workspace,
       },
       resolved.dataPath,
-      resolved.backupPath
+      resolved.backupPath,
+      context
     );
 
     // Export each session
     const exportedSessions: Record<string, unknown>[] = [];
     for (const summary of coreSessions) {
       const session = await storage.getSession(
-        summary.index,
+        summary.id,
         resolved.dataPath,
-        resolved.backupPath
+        resolved.backupPath,
+        context,
+        summary.index
       );
       if (!session) continue;
       exportedSessions.push(
@@ -619,6 +676,9 @@ export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promi
   try {
     const resolved = mergeWithDefaults(config);
 
+    // Share one Store discovery across the export-all loop.
+    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
+
     // Get all sessions
     const coreSessions = await storage.listSessions(
       {
@@ -627,7 +687,8 @@ export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promi
         workspacePath: resolved.workspace,
       },
       resolved.dataPath,
-      resolved.backupPath
+      resolved.backupPath,
+      context
     );
 
     // Export each session
@@ -635,9 +696,11 @@ export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promi
 
     for (const summary of coreSessions) {
       const session = await storage.getSession(
-        summary.index,
+        summary.id,
         resolved.dataPath,
-        resolved.backupPath
+        resolved.backupPath,
+        context,
+        summary.index
       );
       if (!session) continue;
 

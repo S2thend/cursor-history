@@ -6,18 +6,18 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { getSession, listSessions, findWorkspaces } from '../../core/storage.js';
+import {
+  getSession,
+  listSessions,
+  findWorkspaces,
+  createSessionReadContext,
+} from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
 import { exportToMarkdown, exportToJson } from '../../core/parser.js';
 import { formatExportSuccess, formatExportResultJson } from '../formatters/index.js';
-import {
-  SessionNotFoundError,
-  FileExistsError,
-  handleError,
-  CliError,
-  ExitCode,
-} from '../errors.js';
+import { FileExistsError, handleError, CliError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
+import { resolveCommandSession } from './session-lookup.js';
 
 interface ExportCommandOptions {
   output?: string;
@@ -43,9 +43,14 @@ export function registerExportCommand(program: Command): void {
     .option('-b, --backup <path>', 'Export from backup file instead of live data')
     .action(
       async (indexArg: string | undefined, options: ExportCommandOptions, command: Command) => {
-        const globalOptions = command.parent?.opts() as { json?: boolean; dataPath?: string };
+        const globalOptions = command.parent?.opts() as {
+          json?: boolean;
+          dataPath?: string;
+          workspace?: string;
+        };
         const useJson = options.json ?? globalOptions?.json ?? false;
         const customPath = options.dataPath ?? globalOptions?.dataPath;
+        const workspaceFilter = globalOptions?.workspace;
         const format = options.format === 'json' ? 'json' : 'md';
         const backupPath = options.backup ? expandPath(options.backup) : undefined;
 
@@ -85,11 +90,15 @@ export function registerExportCommand(program: Command): void {
           const exported: { index: number; path: string }[] = [];
 
           if (options.all) {
-            // Export all sessions
+            // Export all sessions with one Store discovery shared across the
+            // export-all loop via the read context.
+            const expanded = customPath ? expandPath(customPath) : undefined;
+            const context = createSessionReadContext(expanded, backupPath);
             const sessions = await listSessions(
-              { limit: 0, all: true },
-              customPath ? expandPath(customPath) : undefined,
-              backupPath
+              { limit: 0, all: true, workspacePath: workspaceFilter },
+              expanded,
+              backupPath,
+              context
             );
 
             if (sessions.length === 0) {
@@ -104,10 +113,7 @@ export function registerExportCommand(program: Command): void {
               mkdirSync(outputDir, { recursive: true });
             }
 
-            const workspaces = await findWorkspaces(
-              customPath ? expandPath(customPath) : undefined,
-              backupPath
-            );
+            const workspaces = await findWorkspaces(expanded, backupPath);
 
             // Show backup source indicator if exporting from backup
             if (backupPath && !useJson) {
@@ -115,15 +121,20 @@ export function registerExportCommand(program: Command): void {
             }
 
             for (const summary of sessions) {
+              // Resolve by stable ID through the cached context.
               const session = await getSession(
-                summary.index,
-                customPath ? expandPath(customPath) : undefined,
-                backupPath
+                summary.id,
+                expanded,
+                backupPath,
+                context,
+                summary.index
               );
               if (!session) continue;
 
+              // Prefer the resolved session's workspacePath when Composer
+              // workspace metadata is unavailable (Store-only sessions).
               const workspace = workspaces.find((w) => w.id === session.workspaceId);
-              const workspacePath = workspace?.path;
+              const workspacePath = workspace?.path ?? session.workspacePath;
 
               // Generate filename
               const dateStr = session.createdAt.toISOString().split('T')[0];
@@ -163,31 +174,21 @@ export function registerExportCommand(program: Command): void {
               );
             }
 
-            const session = await getSession(
+            const expanded = customPath ? expandPath(customPath) : undefined;
+            const session = await resolveCommandSession(
               identifier,
-              customPath ? expandPath(customPath) : undefined,
+              workspaceFilter,
+              expanded,
               backupPath
             );
-
-            if (!session) {
-              if (typeof identifier === 'number') {
-                const sessions = await listSessions(
-                  { limit: 0, all: true },
-                  customPath ? expandPath(customPath) : undefined,
-                  backupPath
-                );
-                throw new SessionNotFoundError({ index: identifier, maxIndex: sessions.length });
-              } else {
-                throw new SessionNotFoundError({ composerId: identifier });
-              }
-            }
 
             const workspaces = await findWorkspaces(
               customPath ? expandPath(customPath) : undefined,
               backupPath
             );
             const workspace = workspaces.find((w) => w.id === session.workspaceId);
-            const workspacePath = workspace?.path;
+            // Fall back to the resolved session's workspacePath for Store sessions.
+            const workspacePath = workspace?.path ?? session.workspacePath;
 
             // Determine output path
             let outputPath: string;

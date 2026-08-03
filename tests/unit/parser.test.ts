@@ -491,3 +491,264 @@ describe('exportToJson', () => {
     expect(parsed.activeBranchBubbleIds).toBeUndefined();
   });
 });
+
+describe('exportToJson — resolved-session fallback and provenance', () => {
+  it('falls back to session.workspacePath when no explicit path is supplied', () => {
+    const parsed = JSON.parse(exportToJson(session({ workspacePath: '/store/ws' })));
+    expect(parsed.workspacePath).toBe('/store/ws');
+  });
+
+  it('explicit workspacePath still wins over session.workspacePath', () => {
+    const parsed = JSON.parse(exportToJson(session({ workspacePath: '/store/ws' }), '/explicit'));
+    expect(parsed.workspacePath).toBe('/explicit');
+  });
+
+  it('preserves merged provenance (source/sources/preferredSource)', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          source: 'merged',
+          sources: ['composer', 'store'],
+          preferredSource: 'store',
+        })
+      )
+    );
+    expect(parsed.source).toBe('merged');
+    expect(parsed.sources).toEqual(['composer', 'store']);
+    expect(parsed.preferredSource).toBe('store');
+  });
+
+  it('preserves Store transcript state in JSON', () => {
+    const parsed = JSON.parse(exportToJson(session({ transcriptState: 'partial' })));
+    expect(parsed.transcriptState).toBe('partial');
+  });
+
+  it('serializes every ToolCall field including error and files', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          messages: [
+            msg('assistant', '', {
+              toolCalls: [
+                {
+                  name: 'Write',
+                  status: 'error',
+                  params: { file: '/a' },
+                  error: 'disk full',
+                  files: ['/a'],
+                },
+              ],
+            }),
+          ],
+        })
+      )
+    );
+    const tc = parsed.messages[0].toolCalls[0];
+    expect(tc).toMatchObject({ name: 'Write', status: 'error', params: { file: '/a' } });
+    expect(tc.error).toBe('disk full');
+    expect(tc.files).toEqual(['/a']);
+  });
+
+  it('preserves defined empty tool fields', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          messages: [
+            msg('assistant', '', {
+              toolCalls: [
+                {
+                  name: 'Read',
+                  status: 'completed',
+                  result: '',
+                  error: '',
+                  files: [],
+                },
+              ],
+            }),
+          ],
+        })
+      )
+    );
+    expect(parsed.messages[0].toolCalls[0]).toMatchObject({ result: '', error: '', files: [] });
+  });
+});
+
+describe('exportToMarkdown — source line and no duplicate tool', () => {
+  it('includes the session update timestamp without changing the original date line', () => {
+    const md = exportToMarkdown(session());
+    expect(md).toContain('**Date**: 2024-01-15');
+    expect(md).toContain('**Last Updated**: 2024-01-15T11:00:00.000Z');
+  });
+
+  it('includes a readable source line for a single-source Store session', () => {
+    const md = exportToMarkdown(session({ source: 'store-complete' }));
+    expect(md).toContain('**Source**: Store stack (store.db — complete)');
+  });
+
+  it('includes a merged source line', () => {
+    const md = exportToMarkdown(
+      session({ source: 'merged', sources: ['composer', 'store'], preferredSource: 'composer' })
+    );
+    expect(md).toContain('**Source**: merged from composer + store (backbone: composer)');
+  });
+
+  it('includes Store transcript state', () => {
+    const md = exportToMarkdown(session({ source: 'transcript', transcriptState: 'partial' }));
+    expect(md).toContain('**Transcript State**: partial');
+  });
+
+  it('falls back to session.workspacePath when no explicit path is supplied', () => {
+    const md = exportToMarkdown(session({ workspacePath: '/store/ws' }));
+    expect(md).toContain('**Workspace**: /store/ws');
+  });
+
+  it('does not duplicate a structured tool already represented by embedded Composer [Tool:] text', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nFile: /a', {
+            toolCalls: [{ name: 'Read', status: 'completed', params: { file: '/a' } }],
+          }),
+        ],
+      })
+    );
+    // Embedded Composer text is kept; the structured call is NOT appended again.
+    expect(md).toContain('[Tool: Read File]');
+    expect(md).not.toContain('🔧 **Read**');
+  });
+
+  it('preserves bounded structured result, error, and files for an embedded Composer tool', () => {
+    const fullResult = `${'x'.repeat(240)}RESULT-SENTINEL`;
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nFile: /a', {
+            toolCalls: [
+              {
+                name: 'Read',
+                status: 'error',
+                params: { file: '/a', encoding: 'utf8' },
+                result: fullResult,
+                error: 'permission denied',
+                files: ['/a'],
+              },
+            ],
+          }),
+        ],
+      })
+    );
+    expect(md).not.toContain('🔧 **Read**');
+    expect(md).toContain('- parameters: {"file":"/a","encoding":"utf8"}');
+    expect(md).toContain('- status: error');
+    expect(md).toContain('- error: permission denied');
+    expect(md).toContain(`- result: ${'x'.repeat(197)}...`);
+    expect(md).not.toContain('RESULT-SENTINEL');
+    expect(md).toContain('- files: /a');
+  });
+
+  it('matches repeated same-name embedded calls by strong identity instead of shared options', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nFile: /b\nEncoding: utf8', {
+            toolCalls: [
+              {
+                name: 'read_file',
+                status: 'completed',
+                params: { file: '/a', encoding: 'utf8' },
+              },
+              {
+                name: 'read_file',
+                status: 'completed',
+                params: { file: '/b', encoding: 'utf8' },
+              },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect(md).toContain('- parameters: {"file":"/b","encoding":"utf8"}');
+    expect(md).toContain('- 🔧 **read_file** — `file`="/a", `encoding`="utf8"');
+    expect(md).not.toContain('- 🔧 **read_file** — `file`="/b"');
+  });
+
+  it('suppresses no repeated same-name call when the embedded identity is ambiguous', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nCompleted', {
+            toolCalls: [
+              { name: 'read_file', status: 'completed', params: { encoding: 'utf8' } },
+              { name: 'read_file', status: 'completed', params: { encoding: 'ascii' } },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect((md.match(/🔧 \*\*read_file\*\*/g) ?? []).length).toBe(2);
+  });
+
+  it('does not suppress a unique same-name call when its identity conflicts', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nFile: /a', {
+            toolCalls: [
+              {
+                name: 'read_file',
+                status: 'completed',
+                params: { targetFile: '/b' },
+              },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect(md).toContain('[Tool: Read File]\nFile: /a');
+    expect(md).toContain('- 🔧 **read_file** — `targetFile`="/b"');
+  });
+
+  it('keeps bounded standalone structured results alongside errors', () => {
+    const fullResult = `${'y'.repeat(240)}RESULT-SENTINEL`;
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '', {
+            toolCalls: [
+              {
+                name: 'Shell',
+                status: 'error',
+                result: fullResult,
+                error: 'ERROR-SENTINEL',
+              },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect(md).toContain('— error: ERROR-SENTINEL');
+    expect(md).toContain(`— result: ${'y'.repeat(197)}...`);
+    expect(md).not.toContain('RESULT-SENTINEL');
+  });
+
+  it('still renders additional structured calls merged into an embedded Composer tool message', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('assistant', '[Tool: Read File]\nFile: /a', {
+            toolCalls: [
+              { name: 'read_file', status: 'completed', params: { file: '/a' } },
+              { name: 'write_file', status: 'completed', params: { file: '/b' } },
+            ],
+          }),
+        ],
+      })
+    );
+    expect(md).not.toContain('🔧 **read_file**');
+    expect(md).toContain('🔧 **write_file**');
+  });
+});

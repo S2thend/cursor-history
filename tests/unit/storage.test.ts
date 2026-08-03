@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { dirname, join, parse } from 'node:path';
 import type { Database } from '../../src/core/database/types.js';
 
 // Mock the database module
@@ -16,6 +17,12 @@ vi.mock('../../src/core/database/index.js', () => ({
 vi.mock('../../src/core/backup.js', () => ({
   openBackupDatabase: vi.fn(),
   readBackupManifest: vi.fn().mockResolvedValue(null),
+}));
+
+// Mock Store-stack discovery: these unit tests focus on the Composer stack.
+// Store-stack has its own dedicated tests (tests/unit/store-stack-*.test.ts).
+vi.mock('../../src/core/store-stack/discover.js', () => ({
+  discoverStoreSessions: vi.fn(async () => []),
 }));
 
 // For backup-from-zip tests: mock zip so readWorkspaceJsonFromBackup can read workspace.json (hoisted)
@@ -44,11 +51,13 @@ vi.mock('node:fs', async () => {
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { readBackupManifest, openBackupDatabase } from '../../src/core/backup.js';
+import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
 import * as debugModule from '../../src/core/database/debug.js';
 import {
   readWorkspaceJson,
   findWorkspaces,
   listSessions,
+  createSessionReadContext,
   getSession,
   searchSessions,
   getComposerData,
@@ -181,7 +190,7 @@ function createGlobalDbForComposerMap(
           get: vi.fn((pattern?: string) => {
             const match = String(pattern).match(/^bubbleId:(.+):%$/);
             const composerId = match?.[1];
-            const bubbles = composerId ? composerMap[composerId]?.bubbles ?? [] : [];
+            const bubbles = composerId ? (composerMap[composerId]?.bubbles ?? []) : [];
             return { count: bubbles.length };
           }),
           all: vi.fn(() => []),
@@ -287,6 +296,7 @@ function createMockDb(queryMap: Record<string, { get?: unknown; all?: unknown[] 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(discoverStoreSessions).mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -451,7 +461,9 @@ describe('findWorkspaces', () => {
       return path.includes('state.vscdb') || path.includes('workspace.json') || path === '/data';
     });
     vi.mocked(readdirSync).mockReturnValue([
-      { name: 'ws-fallback', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws-fallback', isDirectory: () => true } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
     ]);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ someNewShape: 'value' }));
 
@@ -472,7 +484,9 @@ describe('findWorkspaces', () => {
       return path.includes('state.vscdb') || path.includes('workspace.json') || path === '/data';
     });
     vi.mocked(readdirSync).mockReturnValue([
-      { name: 'ws-selected', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws-selected', isDirectory: () => true } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
     ]);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/new' }));
 
@@ -494,13 +508,18 @@ describe('findWorkspaces', () => {
       return path.includes('state.vscdb') || path.includes('workspace.json') || path === '/data';
     });
     vi.mocked(readdirSync).mockReturnValue([
-      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
     ]);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/modern' }));
 
     // Only signal is a pointer key; its GUID cannot be confirmed without global storage.
     const wsDb = createWorkspaceDbWithPointers(JSON.stringify({ selectedComposerIds: [] }), [
-      { key: 'workbench.panel.composerChatViewPane.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', value: '{}' },
+      {
+        key: 'workbench.panel.composerChatViewPane.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        value: '{}',
+      },
     ]);
     mockOpenDatabase.mockResolvedValue(wsDb);
 
@@ -539,7 +558,10 @@ describe('getWorkspaceLinkedComposerIds', () => {
         bubbles: [{ type: 1, text: 'orphan' }],
       },
       [foreignId]: {
-        composerData: { name: 'Foreign', workspaceIdentifier: { uri: { fsPath: '/other/project' } } },
+        composerData: {
+          name: 'Foreign',
+          workspaceIdentifier: { uri: { fsPath: '/other/project' } },
+        },
         bubbles: [{ type: 1, text: 'foreign' }],
       },
     });
@@ -615,6 +637,26 @@ describe('findWorkspaces (from backup)', () => {
 // listSessions
 // =============================================================================
 describe('listSessions', () => {
+  it('shares one in-flight Store discovery across concurrent context readers', async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    let finishDiscovery!: (sessions: []) => void;
+    vi.mocked(discoverStoreSessions).mockReturnValue(
+      new Promise((resolve) => {
+        finishDiscovery = resolve;
+      })
+    );
+    const context = createSessionReadContext('/data');
+
+    const first = listSessions({ limit: 0, all: true }, '/data', undefined, context);
+    const second = listSessions({ limit: 0, all: true }, '/data', undefined, context);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(discoverStoreSessions).toHaveBeenCalledTimes(1);
+    finishDiscovery([]);
+    await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
+  });
+
   it('returns sorted sessions across workspaces', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
@@ -785,7 +827,9 @@ describe('listSessions', () => {
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/new' }));
 
     const workspaceComposerData = JSON.stringify({
-      allComposers: [{ composerId: 'old-1', name: 'Old Visible Session', createdAt: 1705300000000 }],
+      allComposers: [
+        { composerId: 'old-1', name: 'Old Visible Session', createdAt: 1705300000000 },
+      ],
       selectedComposerIds: ['recent-1'],
       hasMigratedComposerData: true,
     });
@@ -976,7 +1020,9 @@ describe('listSessions', () => {
       );
     });
     vi.mocked(readdirSync).mockReturnValue([
-      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
     ]);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/modern' }));
 
@@ -987,7 +1033,11 @@ describe('listSessions', () => {
     // Global record has NO workspaceUri / workspaceIdentifier.
     const globalDb = createGlobalDbForComposerMap({
       [guid]: {
-        composerData: { name: 'Pointer Session', createdAt: 1778672423842, lastUpdatedAt: 1778682083842 },
+        composerData: {
+          name: 'Pointer Session',
+          createdAt: 1778672423842,
+          lastUpdatedAt: 1778682083842,
+        },
         bubbles: [{ type: 1, text: 'pointer-linked prompt' }],
       },
     });
@@ -1016,7 +1066,9 @@ describe('listSessions', () => {
       );
     });
     vi.mocked(readdirSync).mockReturnValue([
-      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws-modern', isDirectory: () => true } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
     ]);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project/modern' }));
 
@@ -1025,7 +1077,11 @@ describe('listSessions', () => {
     ]);
     const globalDb = createGlobalDbForComposerMap({
       [guid]: {
-        composerData: { name: 'Pointer Filtered', createdAt: 1778672423842, lastUpdatedAt: 1778682083842 },
+        composerData: {
+          name: 'Pointer Filtered',
+          createdAt: 1778672423842,
+          lastUpdatedAt: 1778682083842,
+        },
         bubbles: [{ type: 1, text: 'filtered pointer prompt' }],
       },
     });
@@ -1041,11 +1097,13 @@ describe('listSessions', () => {
   });
 
   it('scopes global recovery to the custom --data-path (no leak from default global storage)', async () => {
+    const customDataPath = join(parse(process.cwd()).root, 'custom', 'workspaceStorage');
+    const expectedGlobalStorage = join(dirname(customDataPath), 'globalStorage');
     // Only the custom data dir exists; it has no workspaces and no sibling globalStorage.
-    vi.mocked(existsSync).mockImplementation((p) => String(p) === '/custom/workspaceStorage');
+    vi.mocked(existsSync).mockImplementation((p) => String(p) === customDataPath);
     vi.mocked(readdirSync).mockReturnValue([]);
 
-    const result = await listSessions({ all: true }, '/custom/workspaceStorage');
+    const result = await listSessions({ all: true }, customDataPath);
 
     expect(result).toHaveLength(0);
     // Every global-storage probe must be the sibling of the custom path, never the
@@ -1055,7 +1113,7 @@ describe('listSessions', () => {
       .mock.calls.map((call) => String(call[0]))
       .filter((path) => path.includes('globalStorage'));
     expect(globalChecks.length).toBeGreaterThan(0);
-    expect(globalChecks.every((path) => path.includes('/custom/globalStorage'))).toBe(true);
+    expect(globalChecks.every((path) => path.includes(expectedGlobalStorage))).toBe(true);
   });
 
   it('surfaces unattributed global composers via the catch-all under a global bucket', async () => {
@@ -1181,19 +1239,14 @@ describe('listSessions', () => {
   it('deduplicates by session id when same session appears in multiple workspaces and attributes to first in sort order', async () => {
     vi.mocked(existsSync).mockImplementation((p) => {
       const path = String(p);
-      return (
-        path === '/data' ||
-        path.includes('state.vscdb') ||
-        path.includes('workspace.json')
-      );
+      return path === '/data' || path.includes('state.vscdb') || path.includes('workspace.json');
     });
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
       { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
     ]);
     vi.mocked(readFileSync).mockImplementation((path: any) => {
-      if (path.includes('ws1'))
-        return JSON.stringify({ folder: 'file:///folder' });
+      if (path.includes('ws1')) return JSON.stringify({ folder: 'file:///folder' });
       if (path.includes('ws2'))
         return JSON.stringify({
           workspace: 'file:///path/to/project.code-workspace',
@@ -1217,19 +1270,14 @@ describe('listSessions', () => {
   it('assigns consecutive 1-based indexes after dedupe so list --ids has no gaps', async () => {
     vi.mocked(existsSync).mockImplementation((p) => {
       const path = String(p);
-      return (
-        path === '/data' ||
-        path.includes('state.vscdb') ||
-        path.includes('workspace.json')
-      );
+      return path === '/data' || path.includes('state.vscdb') || path.includes('workspace.json');
     });
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
       { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
     ]);
     vi.mocked(readFileSync).mockImplementation((path: any) => {
-      if (path.includes('ws1'))
-        return JSON.stringify({ folder: 'file:///folder' });
+      if (path.includes('ws1')) return JSON.stringify({ folder: 'file:///folder' });
       if (path.includes('ws2'))
         return JSON.stringify({
           workspace: 'file:///path/to/project.code-workspace',
@@ -1273,19 +1321,14 @@ describe('listSessions', () => {
   it('does not remove sessions when two workspaces have no overlapping session ids', async () => {
     vi.mocked(existsSync).mockImplementation((p) => {
       const path = String(p);
-      return (
-        path === '/data' ||
-        path.includes('state.vscdb') ||
-        path.includes('workspace.json')
-      );
+      return path === '/data' || path.includes('state.vscdb') || path.includes('workspace.json');
     });
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
       { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
     ]);
     vi.mocked(readFileSync).mockImplementation((path: any) => {
-      if (path.includes('ws1'))
-        return JSON.stringify({ folder: 'file:///folder' });
+      if (path.includes('ws1')) return JSON.stringify({ folder: 'file:///folder' });
       if (path.includes('ws2'))
         return JSON.stringify({
           workspace: 'file:///path/to/project.code-workspace',
@@ -1316,6 +1359,128 @@ describe('listSessions', () => {
     const ids = result.map((s) => s.id).sort();
     expect(ids).toEqual(['c1', 'c2']);
   });
+
+  it('merges a pathless Store half into every same-ID Composer summary that matched a workspace filter', async () => {
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000079';
+    vi.mocked(existsSync).mockImplementation((p) => {
+      const path = String(p);
+      return path === '/data' || path.includes('state.vscdb') || path.includes('workspace.json');
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const composerData = JSON.stringify({
+      allComposers: [
+        {
+          composerId: sessionId,
+          name: 'Composer workspace fallback',
+          createdAt: 1783000000000,
+        },
+      ],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+    vi.mocked(discoverStoreSessions).mockResolvedValue([
+      {
+        id: sessionId,
+        title: 'Store transcript',
+        createdAt: new Date(1783000000000),
+        lastUpdatedAt: new Date(1784000000000),
+        messages: [
+          {
+            id: 'store-assistant',
+            role: 'assistant',
+            content: 'Store assistant detail',
+            codeBlocks: [],
+            toolCalls: [{ name: 'Read', status: 'completed', params: { path: '/tmp/a' } }],
+          },
+        ],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+    ]);
+
+    const context = createSessionReadContext('/data');
+    const summaries = await listSessions(
+      { limit: 0, all: true, workspacePath: '/project' },
+      '/data',
+      undefined,
+      context
+    );
+
+    expect(summaries).toHaveLength(2);
+    expect(summaries.every((summary) => summary.source === 'merged')).toBe(true);
+
+    const sessions = await Promise.all(
+      summaries.map((summary) => getSession(summary.id, '/data', undefined, context, summary.index))
+    );
+    expect(
+      sessions.every((session) =>
+        session?.messages.some(
+          (message) =>
+            message.content === 'Store assistant detail' &&
+            message.toolCalls?.some((toolCall) => toolCall.name === 'Read')
+        )
+      )
+    ).toBe(true);
+    expect(context.resolvedSessions.size).toBe(2);
+  });
+});
+
+describe('SessionReadContext final session cache', () => {
+  it('removes a rejected resolution so the same operation can retry', async () => {
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000088';
+    const context = createSessionReadContext('/data');
+    context.workspaceScope = null;
+    context.summaries = [
+      {
+        id: sessionId,
+        index: 1,
+        title: 'Retry fixture',
+        createdAt: new Date(1783000000000),
+        lastUpdatedAt: new Date(1783000000000),
+        messageCount: 1,
+        workspaceId: 'store',
+        workspacePath: '/project',
+        preview: 'recovered',
+        source: 'store-complete',
+      },
+    ];
+
+    vi.mocked(discoverStoreSessions)
+      .mockRejectedValueOnce(new Error('transient discovery failure'))
+      .mockResolvedValueOnce([
+        {
+          id: sessionId,
+          title: 'Retry fixture',
+          createdAt: new Date(1783000000000),
+          lastUpdatedAt: new Date(1783000000000),
+          workspacePath: '/project',
+          messages: [
+            {
+              id: null,
+              role: 'user',
+              content: 'recovered',
+              codeBlocks: [],
+            },
+          ],
+          source: 'store-complete',
+          transcriptState: 'parsed',
+        },
+      ]);
+
+    await expect(getSession(sessionId, '/data', undefined, context)).rejects.toThrow(
+      'transient discovery failure'
+    );
+    expect(context.resolvedSessions.size).toBe(0);
+
+    const recovered = await getSession(sessionId, '/data', undefined, context);
+    expect(recovered?.messages[0]?.content).toBe('recovered');
+    expect(discoverStoreSessions).toHaveBeenCalledTimes(2);
+    expect(context.resolvedSessions.size).toBe(1);
+  });
 });
 
 // =============================================================================
@@ -1336,6 +1501,157 @@ describe('listWorkspaces', () => {
 
     const result = await listWorkspaces('/data');
     expect(result).toHaveLength(1);
+  });
+
+  it('groups equivalent Windows and WSL Store paths under one canonical Store ID', async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const createdAt = new Date('2024-01-15T10:00:00Z');
+    vi.mocked(discoverStoreSessions).mockResolvedValue([
+      {
+        id: 'store-1',
+        workspacePath: 'D:\\Repo\\Project',
+        title: 'One',
+        createdAt,
+        lastUpdatedAt: createdAt,
+        messages: [],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+      {
+        id: 'store-2',
+        workspacePath: '/mnt/d/Repo/Project',
+        title: 'Two',
+        createdAt,
+        lastUpdatedAt: createdAt,
+        messages: [],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+    ]);
+
+    const result = await listWorkspaces('/data');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.sessionCount).toBe(2);
+    expect(result[0]!.id).toBe('store:d:/repo/project');
+  });
+
+  it('groups case-variant UNC Store paths under one canonical Store ID', async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const createdAt = new Date('2024-01-15T10:00:00Z');
+    vi.mocked(discoverStoreSessions).mockResolvedValue([
+      {
+        id: 'store-unc-1',
+        workspacePath: '\\\\Server\\Share\\Project',
+        title: 'One',
+        createdAt,
+        lastUpdatedAt: createdAt,
+        messages: [],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+      {
+        id: 'store-unc-2',
+        workspacePath: '//server/share/project',
+        title: 'Two',
+        createdAt,
+        lastUpdatedAt: createdAt,
+        messages: [],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+    ]);
+
+    const result = await listWorkspaces('/data');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.sessionCount).toBe(2);
+    expect(result[0]!.id).toBe('store://server/share/project');
+  });
+
+  it('reconciles a globally recovered hybrid against the workspace that was counted', async () => {
+    const sharedId = 'aaaaaaaa-0000-0000-0000-000000000088';
+    const localA = 'aaaaaaaa-0000-0000-0000-000000000089';
+    const localB = 'aaaaaaaa-0000-0000-0000-000000000090';
+    const pathA = '/a-first-after-sort';
+    const pathB = '/z-first-during-discovery';
+    const storePath = '/store-preferred';
+
+    vi.mocked(existsSync).mockImplementation((value) => {
+      const path = String(value);
+      return (
+        path === '/data' ||
+        path === '/data/chats' ||
+        path === '/data/projects' ||
+        path.endsWith('workspace.json') ||
+        path.endsWith('state.vscdb')
+      );
+    });
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'workspace-b', isDirectory: () => true } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
+      { name: 'workspace-a', isDirectory: () => true } as unknown as ReturnType<
+        typeof readdirSync
+      >[0],
+    ]);
+    vi.mocked(readFileSync).mockImplementation((value) =>
+      JSON.stringify({
+        folder: String(value).includes('workspace-b') ? pathB : pathA,
+      })
+    );
+
+    const workspaceData = (localId: string, title: string): string =>
+      JSON.stringify({
+        allComposers: [
+          {
+            composerId: localId,
+            name: title,
+            createdAt: 1783000000000,
+          },
+        ],
+        selectedComposerIds: [sharedId],
+      });
+    const workspaceA = createWorkspaceDb(workspaceData(localA, 'Local A'));
+    const workspaceB = createWorkspaceDb(workspaceData(localB, 'Local B'));
+    const globalDb = createGlobalDbForComposerMap({
+      [sharedId]: {
+        composerData: {
+          name: 'Shared global',
+          createdAt: 1783000000000,
+        },
+        bubbles: [{ type: 1, text: 'global message' }],
+      },
+    });
+    mockOpenDatabase.mockImplementation(async (value: string) => {
+      const path = String(value);
+      if (path.includes('globalStorage')) return globalDb;
+      return path.includes('workspace-b') ? workspaceB : workspaceA;
+    });
+    vi.mocked(discoverStoreSessions).mockResolvedValue([
+      {
+        id: sharedId,
+        workspacePath: storePath,
+        title: 'Store copy',
+        createdAt: new Date(1784000000000),
+        lastUpdatedAt: new Date(1784000000000),
+        messages: [],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+    ]);
+
+    const result = await listWorkspaces('/data');
+
+    expect(
+      result
+        .map(({ path, sessionCount }) => ({ path, sessionCount }))
+        .sort((a, b) => a.path.localeCompare(b.path))
+    ).toEqual([
+      { path: pathA, sessionCount: 1 },
+      { path: storePath, sessionCount: 1 },
+      { path: pathB, sessionCount: 1 },
+    ]);
   });
 });
 
@@ -1445,14 +1761,17 @@ describe('getSession', () => {
   });
 
   it('loads global bubbles from the sibling globalStorage for a custom dataPath', async () => {
-    const customDataPath = '/custom/workspaceStorage';
+    const customDataPath = join(parse(process.cwd()).root, 'custom', 'workspaceStorage');
+    const expectedGlobalDbPath = join(dirname(customDataPath), 'globalStorage', 'state.vscdb');
+    const workspaceDbPath = join(customDataPath, 'ws1', 'state.vscdb');
+    const workspaceJsonPath = join(customDataPath, 'ws1', 'workspace.json');
     vi.mocked(existsSync).mockImplementation((p) => {
       const path = String(p);
       return (
         path === customDataPath ||
-        path === '/custom/globalStorage/state.vscdb' ||
-        path.includes('/custom/workspaceStorage/ws1/state.vscdb') ||
-        path.includes('/custom/workspaceStorage/ws1/workspace.json')
+        path === expectedGlobalDbPath ||
+        path === workspaceDbPath ||
+        path === workspaceJsonPath
       );
     });
     vi.mocked(readdirSync).mockReturnValue([
@@ -1481,7 +1800,7 @@ describe('getSession', () => {
     );
 
     mockOpenDatabase.mockImplementation(async (path: string) => {
-      if (path === '/custom/globalStorage/state.vscdb') return globalDb;
+      if (path === expectedGlobalDbPath) return globalDb;
       if (path.includes('globalStorage')) {
         throw new Error(`wrong global path: ${path}`);
       }
@@ -1495,7 +1814,7 @@ describe('getSession', () => {
     expect(result!.messages).toHaveLength(1);
     expect(result!.messages[0]!.content).toBe('custom profile message');
     const openedPaths = mockOpenDatabase.mock.calls.map((call) => String(call[0]));
-    expect(openedPaths).toContain('/custom/globalStorage/state.vscdb');
+    expect(openedPaths).toContain(expectedGlobalDbPath);
     expect(openedPaths.some((path) => path.includes('Application Support/Cursor'))).toBe(false);
   });
 
@@ -3246,7 +3565,7 @@ describe('getSession (workspace fallback)', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     vi.mocked(existsSync).mockImplementation((path) => {
-      const value = String(path);
+      const value = String(path).replace(/\\/g, '/');
       if (value.includes('globalStorage/state.vscdb')) return false;
       return value === '/data' || value.includes('state.vscdb') || value.includes('workspace.json');
     });
@@ -3271,7 +3590,7 @@ describe('getSession (workspace fallback)', () => {
 
   it('keeps activeBranchBubbleIds undefined for workspace-fallback sessions', async () => {
     vi.mocked(existsSync).mockImplementation((path) => {
-      const value = String(path);
+      const value = String(path).replace(/\\/g, '/');
       if (value.includes('globalStorage/state.vscdb')) return false;
       return value === '/data' || value.includes('state.vscdb') || value.includes('workspace.json');
     });
@@ -3344,7 +3663,11 @@ describe('getSession debug logging', () => {
     setupFallbackHarness({
       prepare: vi.fn((sql: string) => {
         if (sql.includes('sqlite_master')) {
-          return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
+          return {
+            get: vi.fn(() => ({ name: 'cursorDiskKV' })),
+            all: vi.fn(() => []),
+            run: vi.fn(),
+          };
         }
         return { get: vi.fn(), all: vi.fn(() => []), run: vi.fn() };
       }),
@@ -3368,7 +3691,11 @@ describe('getSession debug logging', () => {
     setupFallbackHarness({
       prepare: vi.fn((sql: string) => {
         if (sql.includes('sqlite_master')) {
-          return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
+          return {
+            get: vi.fn(() => ({ name: 'cursorDiskKV' })),
+            all: vi.fn(() => []),
+            run: vi.fn(),
+          };
         }
         if (sql.includes('WHERE key LIKE ? ORDER BY rowid ASC')) {
           return {
@@ -3611,7 +3938,7 @@ describe('timestamp fallback - US1', () => {
     expect(result!.messages[0]!.timestamp).toEqual(new Date(validEndTime));
   });
 
-  it('bubble with no timestamp source uses session creation time, not current time', async () => {
+  it('bubble with no timestamp source uses the Composer session-time fallback', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3633,11 +3960,11 @@ describe('timestamp fallback - US1', () => {
 
     const result = await getSession(1, '/data');
     expect(result).not.toBeNull();
-    // Should use session creation time, not current time
     expect(result!.messages[0]!.timestamp).toEqual(new Date(sessionCreatedAt));
+    expect(result!.messages[0]!.timestampSource).toBeUndefined();
   });
 
-  it('mixed-format session: each bubble uses its own best available source', async () => {
+  it('mixed-format session keeps stored times and fills a trailing Composer gap', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3685,8 +4012,9 @@ describe('timestamp fallback - US1', () => {
     expect(result!.messages[0]!.timestamp).toEqual(new Date('2025-10-15T10:00:00Z'));
     // Old format: uses clientRpcSendTime
     expect(result!.messages[1]!.timestamp).toEqual(new Date(rpcTime));
-    // No timestamp: interpolated from previous neighbor (b2's clientRpcSendTime)
+    // Trailing gap uses the preceding stored time.
     expect(result!.messages[2]!.timestamp).toEqual(new Date(rpcTime));
+    expect(result!.messages[2]!.timestampSource).toBeUndefined();
   });
 });
 
@@ -3790,7 +4118,7 @@ describe('fillTimestampGaps', () => {
 // timestamp fallback - US3 session-level
 // =============================================================================
 describe('timestamp fallback - US3 session-level', () => {
-  it('all bubbles lack any timestamp source, sessionCreatedAt provided: all get sessionCreatedAt', async () => {
+  it('fills Composer bubbles from the session creation timestamp when no bubble time exists', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3815,13 +4143,13 @@ describe('timestamp fallback - US3 session-level', () => {
     const result = await getSession(1, '/data');
     expect(result).not.toBeNull();
     expect(result!.messages).toHaveLength(3);
-    // All should get sessionCreatedAt since no bubble has any timestamp
-    for (const msg of result!.messages) {
-      expect(msg.timestamp).toEqual(new Date(sessionCreatedAt));
+    for (const m of result!.messages) {
+      expect(m.timestamp).toEqual(new Date(sessionCreatedAt));
+      expect(m.timestampSource).toBeUndefined();
     }
   });
 
-  it('all bubbles lack any timestamp source, sessionCreatedAt not available: uses current time', async () => {
+  it('uses a valid runtime fallback when Composer sessionCreatedAt is unavailable', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3841,13 +4169,12 @@ describe('timestamp fallback - US3 session-level', () => {
     const result = await getSession(1, '/data');
     const after = Date.now();
     expect(result).not.toBeNull();
-    // Timestamp should be approximately now (either from session fallback or last resort)
-    const ts = result!.messages[0]!.timestamp.getTime();
-    expect(ts).toBeGreaterThanOrEqual(before - 1000);
-    expect(ts).toBeLessThanOrEqual(after + 1000);
+    expect(result!.messages[0]!.timestamp).toBeInstanceOf(Date);
+    expect(result!.messages[0]!.timestamp!.getTime()).toBeGreaterThanOrEqual(before);
+    expect(result!.messages[0]!.timestamp!.getTime()).toBeLessThanOrEqual(after);
   });
 
-  it('full chain integration: createdAt + timingInfo + no-timestamp + interpolation', async () => {
+  it('keeps directly-stored Composer times and fills surrounding gaps from neighbors', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3860,9 +4187,9 @@ describe('timestamp fallback - US3 session-level', () => {
       allComposers: [{ composerId: 'c1', name: 'Test', createdAt: sessionCreatedAt }],
     });
 
-    // b1: user msg, no timestamp → should interpolate from next (b2)
+    // b1: user msg, no timestamp → next stored time
     const b1 = JSON.stringify({ type: 1, text: 'user question', bubbleId: 'b1' });
-    // b2: assistant, has timingInfo.clientRpcSendTime → should use rpcTime
+    // b2: assistant, has timingInfo.clientRpcSendTime → uses rpcTime
     const b2 = JSON.stringify({
       type: 2,
       text: 'assistant answer',
@@ -3873,9 +4200,9 @@ describe('timestamp fallback - US3 session-level', () => {
         clientEndTime: rpcTime + 500,
       },
     });
-    // b3: user msg, no timestamp → should interpolate from prev (b2) since no next
+    // b3: user msg, no timestamp → next stored time
     const b3 = JSON.stringify({ type: 1, text: 'follow up', bubbleId: 'b3' });
-    // b4: assistant, has createdAt → should use createdAt
+    // b4: assistant, has createdAt → uses createdAt
     const b4 = JSON.stringify({
       type: 2,
       text: 'new format response',
@@ -3894,11 +4221,11 @@ describe('timestamp fallback - US3 session-level', () => {
     expect(result).not.toBeNull();
     expect(result!.messages).toHaveLength(4);
 
-    // b1: no timestamp → interpolated from next (b2's rpcTime)
+    // b1: next directly-stored time
     expect(result!.messages[0]!.timestamp).toEqual(new Date(rpcTime));
     // b2: timingInfo.clientRpcSendTime
     expect(result!.messages[1]!.timestamp).toEqual(new Date(rpcTime));
-    // b3: no timestamp → interpolated from next (b4's createdAt)
+    // b3: next directly-stored time
     expect(result!.messages[2]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));
     // b4: createdAt
     expect(result!.messages[3]!.timestamp).toEqual(new Date('2025-10-15T12:00:00Z'));

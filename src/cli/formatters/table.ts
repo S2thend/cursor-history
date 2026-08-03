@@ -11,8 +11,10 @@ import type {
   MessageType,
   TokenUsage,
   SessionUsage,
+  ToolCall,
 } from '../../core/types.js';
 import { MESSAGE_TYPES } from '../../core/types.js';
+import { findEmbeddedToolCallIndex } from '../../core/parser.js';
 
 /**
  * Check if output supports colors
@@ -60,6 +62,45 @@ function truncate(str: string, maxLength: number): string {
 }
 
 /**
+ * Render a structured tool call (Store-stack transcripts). Normal view is
+ * concise (params truncated to 60 chars); `full` (--tool) shows full params
+ * plus status, result, error, and files.
+ */
+function formatStructuredToolCallDetails(tc: ToolCall): string[] {
+  const out: string[] = [];
+  if (tc.params !== undefined) {
+    out.push(pc.dim(`  params: ${JSON.stringify(tc.params)}`));
+  }
+  if (tc.status !== undefined) {
+    out.push(pc.dim(`  status: ${tc.status}`));
+  }
+  if (tc.result !== undefined) {
+    out.push(pc.dim(`  result: ${tc.result}`));
+  }
+  if (tc.error !== undefined) {
+    out.push(pc.red(`  error: ${tc.error}`));
+  }
+  if (tc.files !== undefined) {
+    out.push(pc.dim(`  files: ${tc.files.length > 0 ? tc.files.join(', ') : '[]'}`));
+  }
+  return out;
+}
+
+function formatStructuredToolCall(tc: ToolCall, full: boolean): string[] {
+  const params = tc.params
+    ? Object.entries(tc.params)
+        .map(([k, v]) => {
+          const serialized = JSON.stringify(v) ?? String(v);
+          return `${k}=${truncate(serialized, 60)}`;
+        })
+        .join(', ')
+    : '';
+  const header =
+    pc.magenta(pc.bold(`🔧 ${tc.name}`)) + (!full && params ? pc.dim(`  ${params}`) : '');
+  return full ? [header, ...formatStructuredToolCallDetails(tc)] : [header];
+}
+
+/**
  * Truncate path from the beginning (keep the end which is more specific)
  */
 function truncatePath(path: string, maxLength: number): string {
@@ -76,6 +117,23 @@ function padRight(str: string, width: number): string {
   return str.padEnd(width);
 }
 
+/** Compact fidelity label for the session list. */
+function formatSessionFidelity(session: ChatSessionSummary): string {
+  switch (session.source) {
+    case 'workspace-fallback':
+    case 'transcript':
+    case 'store-partial':
+      return '⚠ partial';
+    case 'store':
+    case 'store-complete':
+      return '⚠ metadata';
+    case 'merged':
+      return 'merged';
+    default:
+      return 'full';
+  }
+}
+
 /**
  * Format sessions list as table
  */
@@ -90,35 +148,42 @@ export function formatSessionsTable(sessions: ChatSessionSummary[], showIds = fa
   if (showIds) {
     lines.push(
       pc.bold(
-        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Msgs', 5)} ${padRight('Workspace', 25)} ${padRight('Composer ID', 38)} Preview`
+        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Msgs', 5)} ${padRight('Fidelity', 12)} ${padRight('Workspace', 25)} ${padRight('Composer ID', 38)} Preview`
       )
     );
-    lines.push(pc.dim('─'.repeat(130)));
+    lines.push(pc.dim('─'.repeat(143)));
   } else {
     lines.push(
       pc.bold(
-        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Messages', 8)} ${padRight('Workspace', 30)} Preview`
+        `${padRight('#', 4)} ${padRight('Date', 12)} ${padRight('Messages', 8)} ${padRight('Fidelity', 12)} ${padRight('Workspace', 30)} Preview`
       )
     );
-    lines.push(pc.dim('─'.repeat(100)));
+    lines.push(pc.dim('─'.repeat(113)));
   }
 
   // Rows
   for (const session of sessions) {
     const idx = pc.cyan(padRight(String(session.index), 4));
     const date = padRight(formatDate(session.createdAt), 12);
+    const fidelityLabel = formatSessionFidelity(session);
+    const paddedFidelity = padRight(fidelityLabel, 12);
+    const fidelity = fidelityLabel.startsWith('⚠')
+      ? pc.yellow(paddedFidelity)
+      : session.source === 'merged'
+        ? pc.cyan(paddedFidelity)
+        : paddedFidelity;
 
     if (showIds) {
       const msgs = padRight(String(session.messageCount), 5);
       const workspace = pc.dim(padRight(truncatePath(session.workspacePath, 25), 25));
       const composerId = pc.gray(padRight(session.id, 38));
       const preview = truncate(session.preview, 30);
-      lines.push(`${idx} ${date} ${msgs} ${workspace} ${composerId} ${preview}`);
+      lines.push(`${idx} ${date} ${msgs} ${fidelity} ${workspace} ${composerId} ${preview}`);
     } else {
       const msgs = padRight(String(session.messageCount), 8);
       const workspace = pc.dim(padRight(truncatePath(session.workspacePath, 30), 30));
       const preview = truncate(session.preview, 40);
-      lines.push(`${idx} ${date} ${msgs} ${workspace} ${preview}`);
+      lines.push(`${idx} ${date} ${msgs} ${fidelity} ${workspace} ${preview}`);
     }
   }
 
@@ -186,29 +251,58 @@ export function isError(content: string): boolean {
 /**
  * Get the type of a message based on its role and content
  */
-export function getMessageType(message: { role: string; content: string }): MessageType {
+export function getMessageType(message: {
+  role: string;
+  content: string;
+  toolCalls?: unknown[];
+}): MessageType {
   if (message.role === 'user') {
     return 'user';
   }
-  // For assistant messages, check content markers
+  // Preserve the established content-marker precedence. Store-stack
+  // transcripts carry tool calls structurally, but those calls must not
+  // reclassify explicit thinking or error messages.
   if (isToolCall(message.content)) return 'tool';
   if (isThinking(message.content)) return 'thinking';
   if (isError(message.content)) return 'error';
+  if (Array.isArray(message.toolCalls) && message.toolCalls.length > 0) return 'tool';
   return 'assistant';
+}
+
+function matchesMessageType(
+  message: { role: string; content: string; toolCalls?: unknown[] },
+  type: MessageType
+): boolean {
+  const primaryType = getMessageType(message);
+  if (primaryType === type) return true;
+
+  if (type === 'tool' && Array.isArray(message.toolCalls) && message.toolCalls.length > 0) {
+    return true;
+  }
+
+  return (
+    type === 'assistant' &&
+    primaryType === 'tool' &&
+    message.role === 'assistant' &&
+    message.content.trim().length > 0 &&
+    !isToolCall(message.content) &&
+    !isThinking(message.content) &&
+    !isError(message.content)
+  );
 }
 
 /**
  * Filter messages by type
  * Returns all messages if types is empty or contains all types
  */
-export function filterMessages<T extends { role: string; content: string }>(
+export function filterMessages<T extends { role: string; content: string; toolCalls?: unknown[] }>(
   messages: T[],
   types: MessageType[]
 ): T[] {
   if (types.length === 0 || types.length === MESSAGE_TYPES.length) {
     return messages; // No filtering needed
   }
-  return messages.filter((m) => types.includes(getMessageType(m)));
+  return messages.filter((message) => types.some((type) => matchesMessageType(message, type)));
 }
 
 /**
@@ -498,6 +592,8 @@ export function formatSessionDetail(
   lines.push(`${pc.bold('Date:')} ${formatDate(session.createdAt)}`);
   if (workspacePath) {
     lines.push(`${pc.bold('Workspace:')} ${workspacePath}`);
+  } else if (session.source === 'transcript' || session.source === 'store') {
+    lines.push(`${pc.bold('Workspace:')} ${pc.dim('(unknown — Store transcript only)')}`);
   }
   // Show original message count and filter info if filtering is active
   if (messageFilter && messageFilter.length > 0 && originalMessageCount !== undefined) {
@@ -509,6 +605,26 @@ export function formatSessionDetail(
   }
   if (session.source === 'workspace-fallback') {
     lines.push(pc.yellow('⚠ Partial data - loaded from workspace fallback'));
+  } else if (session.source === 'transcript') {
+    lines.push(
+      pc.yellow(
+        '⚠ Partial data - Store-stack transcript only (no tokens / timestamps / tool results)'
+      )
+    );
+  } else if (session.source === 'store-partial') {
+    lines.push(
+      pc.yellow('⚠ Partial data - Store.db parse incomplete (some messages/results may be missing)')
+    );
+  } else if (session.source === 'store-complete' || session.source === 'store') {
+    lines.push(
+      pc.yellow('⚠ Partial metadata - Store.db does not provide tokens or per-message timestamps')
+    );
+  } else if (session.source === 'merged') {
+    const stacks = session.sources?.join(' + ') ?? 'composer + store';
+    const backbone = session.preferredSource ?? 'composer';
+    lines.push(
+      pc.cyan(`⊕ Merged from ${stacks} (backbone: ${backbone}) — fields and messages combined`)
+    );
   }
   lines.push('');
   lines.push(pc.dim('─'.repeat(60)));
@@ -522,74 +638,75 @@ export function formatSessionDetail(
     return lines.join('\n');
   }
 
-  // Messages - with consecutive duplicate folding
-  let i = 0;
-  while (i < session.messages.length) {
-    const message = session.messages[i]!;
-    const timestamps: Date[] = [message.timestamp];
-
-    // Check for consecutive duplicates (same role and content)
-    let j = i + 1;
-    while (j < session.messages.length) {
-      const nextMsg = session.messages[j]!;
-      if (nextMsg.role === message.role && nextMsg.content === message.content) {
-        timestamps.push(nextMsg.timestamp);
-        j++;
-      } else {
-        break;
-      }
-    }
-
-    // Format timestamps
-    const timestampDisplay =
-      timestamps.length > 1
-        ? pc.dim(`${timestamps.map((t) => formatTime(t)).join(', ')} `) +
-          pc.yellow(`(×${timestamps.length})`)
-        : pc.dim(formatTime(message.timestamp));
+  // Messages — render every resolved message once in canonical array order.
+  // Consecutive-duplicate folding (×N) is removed from the default path so
+  // that distinct structured tool calls / provenance / token data are never
+  // hidden. Filtering (--only) selects by type and still renders each match.
+  for (const message of session.messages) {
+    // Per-message timestamp is only shown when directly stored. Missing
+    // times are omitted rather than replaced with a fabricated fallback.
+    const timeStr = message.timestamp ? ` ${pc.dim(formatTime(message.timestamp))}` : '';
 
     // Get usage badge for this message (if available)
     const usageBadge = formatUsageBadge(message.model, message.tokenUsage, message.durationMs);
 
     // Check if this is a tool call
     if (isToolCall(message.content)) {
-      lines.push(`${pc.cyan(pc.bold('Tool:'))} ${timestampDisplay}`);
+      lines.push(`${pc.cyan(pc.bold('Tool:'))}${timeStr}`);
       lines.push(formatToolCallDisplay(message.content, fullTool));
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        const embeddedIndex = findEmbeddedToolCallIndex(message.content, message.toolCalls);
+        if (fullTool && embeddedIndex >= 0) {
+          lines.push(...formatStructuredToolCallDetails(message.toolCalls[embeddedIndex]!));
+        }
+        const callsToRender = message.toolCalls.filter((_, index) => index !== embeddedIndex);
+        for (const tc of callsToRender) {
+          lines.push(...formatStructuredToolCall(tc, fullTool));
+        }
+      }
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));
       lines.push('');
-      i = j;
       continue;
     }
 
     // Check if this is an error message
     if (isError(message.content)) {
-      lines.push(`${pc.red(pc.bold('Error:'))} ${timestampDisplay}`);
+      lines.push(`${pc.red(pc.bold('Error:'))}${timeStr}`);
       lines.push(formatErrorDisplay(message.content, fullError));
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        for (const tc of message.toolCalls) {
+          lines.push(...formatStructuredToolCall(tc, fullTool));
+        }
+      }
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));
       lines.push('');
-      i = j;
       continue;
     }
 
     // Check if this is thinking/reasoning
     if (isThinking(message.content)) {
-      lines.push(`${pc.magenta(pc.bold('Thinking:'))} ${timestampDisplay}`);
+      lines.push(`${pc.magenta(pc.bold('Thinking:'))}${timeStr}`);
       lines.push(formatThinkingDisplay(message.content, fullThinking));
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        for (const tc of message.toolCalls) {
+          lines.push(...formatStructuredToolCall(tc, fullTool));
+        }
+      }
       if (usageBadge) lines.push(usageBadge);
       lines.push('');
       lines.push(pc.dim('─'.repeat(40)));
       lines.push('');
-      i = j;
       continue;
     }
 
     const roleLabel =
       message.role === 'user'
-        ? `${pc.blue(pc.bold('You:'))} ${timestampDisplay}`
-        : `${pc.green(pc.bold('Assistant:'))} ${timestampDisplay}`;
+        ? `${pc.blue(pc.bold('You:'))}${timeStr}`
+        : `${pc.green(pc.bold('Assistant:'))}${timeStr}`;
 
     lines.push(roleLabel);
     lines.push('');
@@ -602,6 +719,13 @@ export function formatSessionDetail(
       lines.push(message.content);
     }
 
+    // Normal output stays concise; --tool exposes the complete structured call.
+    if (message.toolCalls && message.toolCalls.length > 0) {
+      for (const tc of message.toolCalls) {
+        lines.push(...formatStructuredToolCall(tc, fullTool));
+      }
+    }
+
     // Append usage badge after content
     if (usageBadge) {
       lines.push(usageBadge);
@@ -610,8 +734,6 @@ export function formatSessionDetail(
     lines.push('');
     lines.push(pc.dim('─'.repeat(40)));
     lines.push('');
-
-    i = j;
   }
 
   // Add session-level usage summary at the bottom (if available)

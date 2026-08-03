@@ -62,6 +62,16 @@ describe('formatSessionsJson', () => {
     expect(result.count).toBe(0);
     expect(result.sessions).toEqual([]);
   });
+
+  it('includes transcript provenance in list output', () => {
+    const result = JSON.parse(
+      formatSessionsJson([makeSummary({ source: 'transcript', transcriptState: 'partial' })])
+    );
+    expect(result.sessions[0]).toMatchObject({
+      source: 'transcript',
+      transcriptState: 'partial',
+    });
+  });
 });
 
 describe('formatWorkspacesJson', () => {
@@ -119,6 +129,11 @@ describe('formatSessionJson', () => {
     expect(result.source).toBe('workspace-fallback');
   });
 
+  it('includes Store transcript state when present', () => {
+    const result = JSON.parse(formatSessionJson(makeSession({ transcriptState: 'partial' })));
+    expect(result.transcriptState).toBe('partial');
+  });
+
   it('includes activeBranchBubbleIds when present', () => {
     const result = JSON.parse(
       formatSessionJson(makeSession({ activeBranchBubbleIds: ['m1', 'm2'] }))
@@ -129,6 +144,33 @@ describe('formatSessionJson', () => {
   it('omits activeBranchBubbleIds when undefined', () => {
     const result = JSON.parse(formatSessionJson(makeSession()));
     expect(result.activeBranchBubbleIds).toBeUndefined();
+  });
+
+  it('preserves defined empty structured-tool fields', () => {
+    const result = JSON.parse(
+      formatSessionJson(
+        makeSession({
+          messages: [
+            {
+              id: 'm1',
+              role: 'assistant',
+              content: '',
+              codeBlocks: [],
+              toolCalls: [
+                {
+                  name: 'Read',
+                  status: 'completed',
+                  result: '',
+                  error: '',
+                  files: [],
+                },
+              ],
+            },
+          ],
+        })
+      )
+    );
+    expect(result.messages[0].toolCalls[0]).toMatchObject({ result: '', error: '', files: [] });
   });
 });
 

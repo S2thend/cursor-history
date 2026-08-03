@@ -25,7 +25,10 @@ interface NodeSqliteDatabase {
 }
 
 interface NodeSqliteModule {
-  DatabaseSync: new (path: string, options?: { open?: boolean }) => NodeSqliteDatabase;
+  DatabaseSync: new (
+    path: string,
+    options?: { open?: boolean; readOnly?: boolean }
+  ) => NodeSqliteDatabase;
   backup: (
     sourceDb: NodeSqliteDatabase,
     destPath: string,
@@ -147,7 +150,7 @@ export const nodeSqliteDriver: DatabaseDriver = {
     if (!nodeSqliteModule) {
       throw new Error('node:sqlite is not loaded. Call isAvailable() first.');
     }
-    const db = new nodeSqliteModule.DatabaseSync(path);
+    const db = new nodeSqliteModule.DatabaseSync(path, { readOnly: options.readonly });
     debugLog(`Opened database with node:sqlite: ${path} (readonly: ${options.readonly})`);
     return new NodeSqliteDatabaseWrapper(db, options.readonly);
   },
@@ -156,7 +159,7 @@ export const nodeSqliteDriver: DatabaseDriver = {
     if (!nodeSqliteModule) {
       throw new Error('node:sqlite is not loaded. Call isAvailable() first.');
     }
-    const sourceDb = new nodeSqliteModule.DatabaseSync(sourcePath);
+    const sourceDb = new nodeSqliteModule.DatabaseSync(sourcePath, { readOnly: true });
     try {
       debugLog(`Backing up database with node:sqlite: ${sourcePath} -> ${destPath}`);
       await nodeSqliteModule.backup(sourceDb, destPath);

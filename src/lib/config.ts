@@ -15,10 +15,15 @@ import { getCursorDataPath } from '../lib/platform.js';
 const VALID_SQLITE_DRIVERS: SqliteDriverName[] = ['better-sqlite3', 'node:sqlite'];
 
 /**
- * Merged configuration with all defaults applied
+ * Merged configuration with behavioral defaults applied.
+ *
+ * `dataPath` intentionally remains undefined when the caller did not provide
+ * one. Core storage resolves the platform default itself, while preserving the
+ * distinction between an implicit default and an explicit Composer/Store path
+ * for cross-stack conflict priority.
  */
 export interface ResolvedConfig {
-  dataPath: string;
+  dataPath?: string;
   workspace?: string;
   limit: number;
   offset: number;
@@ -100,10 +105,8 @@ export function validateConfig(config?: LibraryConfig): void {
 export function mergeWithDefaults(config?: LibraryConfig): ResolvedConfig {
   validateConfig(config);
 
-  const dataPath = config?.dataPath ?? getCursorDataPath();
-
   return {
-    dataPath,
+    dataPath: config?.dataPath,
     workspace: config?.workspace,
     limit: config?.limit ?? Number.MAX_SAFE_INTEGER,
     offset: config?.offset ?? 0,

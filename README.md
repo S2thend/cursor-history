@@ -404,8 +404,9 @@ cursor-history --workspace /path/to/project list
 When browsing your chat history, you'll see:
 
 - **Complete conversations** - All messages exchanged with Cursor AI
-- **Duplicate message folding** - Consecutive identical messages are folded into one display with multiple timestamps and repeat count (e.g., "02:48:01 PM, 02:48:04 PM, 02:48:54 PM (×3)")
-- **Timestamps** - Exact time each message was sent (HH:MM:SS format), with smart fallback for pre-September 2025 sessions that extracts timing from alternative data fields and interpolates for messages without direct timestamps
+- **Every message rendered** - Each resolved message is shown once in order; consecutive duplicates are not folded, so distinct tool calls, provenance, and token data are never hidden
+- **Timestamps** - Composer sessions retain their historical timestamp recovery and interpolation; Store messages show a time only when Cursor provides a directly mapped turn timestamp
+- **Merged cross-stack sessions** - When the same session exists in both the Composer (vscdb) and Store (~/.cursor) stacks, the two representations are merged field by field (neither is discarded), with the backbone source chosen per platform (WSL prefers Store; Windows/macOS/native Linux prefer Composer)
 - **AI tool actions** - Detailed view of what Cursor AI did:
   - **File edits/writes** - Full diff display with syntax highlighting showing exactly what changed
   - **File reads** - File paths and content previews (use `--fullread` for complete content)
@@ -428,15 +429,23 @@ When browsing your chat history, you'll see:
 - **`--error` flag** - Shows full error messages instead of 300-char preview
 - **`--only <types>` flag** - Filter messages by type: `user`, `assistant`, `tool`, `thinking`, `error` (comma-separated)
 
+A natural-language assistant response that also contains structured tool calls matches both the `assistant` and `tool` filters. Tool-only records match only `tool`.
+
 ## Where Cursor Stores Data
 
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/Cursor/User/` |
-| Windows | `%APPDATA%/Cursor/User/` |
-| Linux | `~/.config/Cursor/User/` |
+| Platform | Composer stack | Store stack |
+|----------|----------------|-------------|
+| macOS | `~/Library/Application Support/Cursor/User/` | `~/.cursor/` |
+| Windows | `%APPDATA%/Cursor/User/` | `%USERPROFILE%\.cursor\` |
+| Linux / WSL | `~/.config/Cursor/User/` | `~/.cursor/` |
 
-The tool automatically finds and reads your Cursor chat history from these locations.
+The tool automatically finds and reads both stacks. Per-session `store.db` is the primary Store message source; the transcript is used only as a fallback when `store.db` is absent, unreadable, or yields no messages. It does not heuristically merge the two sources.
+
+Use `--data-path <path>` or `CURSOR_DATA_PATH` to point at a custom Cursor data tree. Use `CURSOR_STORE_ROOT` to configure the Store root independently. A Store root itself, or its `chats`, `projects`, or `acp-sessions` child, is accepted and normalized to the same root.
+
+Inside WSL, Windows-side Store data is normally mounted at `/mnt/c/Users/<windows-user>/.cursor`. For example: `CURSOR_STORE_ROOT=/mnt/c/Users/<windows-user>/.cursor cursor-history list --all`. Use the WSL-side `~/.cursor` path instead when the sessions were created by a Cursor agent running inside that WSL distribution.
+
+When running the CLI inside WSL against a Windows-mounted project, do not reuse Windows-installed native `node_modules`. Native packages are platform-specific; install dependencies with Linux Node.js in a separate WSL dependency tree before running Linux-side tests or builds. `cursor-history` never installs or removes dependencies automatically.
 
 ## Library API
 

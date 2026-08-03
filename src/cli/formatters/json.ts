@@ -10,6 +10,7 @@ import type {
   MessageType,
 } from '../../core/types.js';
 import { getMessageType } from './table.js';
+import { serializeToolCall } from '../../core/parser.js';
 
 /**
  * Format sessions list as JSON
@@ -17,17 +18,32 @@ import { getMessageType } from './table.js';
 export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
   const output = {
     count: sessions.length,
-    sessions: sessions.map((s) => ({
-      index: s.index,
-      id: s.id,
-      title: s.title,
-      createdAt: s.createdAt.toISOString(),
-      lastUpdatedAt: s.lastUpdatedAt.toISOString(),
-      messageCount: s.messageCount,
-      workspaceId: s.workspaceId,
-      workspacePath: s.workspacePath,
-      preview: s.preview,
-    })),
+    sessions: sessions.map((s) => {
+      const obj: Record<string, unknown> = {
+        index: s.index,
+        id: s.id,
+        title: s.title,
+        createdAt: s.createdAt.toISOString(),
+        lastUpdatedAt: s.lastUpdatedAt.toISOString(),
+        messageCount: s.messageCount,
+        workspaceId: s.workspaceId,
+        workspacePath: s.workspacePath,
+        preview: s.preview,
+      };
+      if (s.source !== undefined) {
+        obj['source'] = s.source;
+      }
+      if (s.sources) {
+        obj['sources'] = s.sources;
+      }
+      if (s.preferredSource) {
+        obj['preferredSource'] = s.preferredSource;
+      }
+      if (s.transcriptState) {
+        obj['transcriptState'] = s.transcriptState;
+      }
+      return obj;
+    }),
   };
 
   return JSON.stringify(output, null, 2);
@@ -73,6 +89,15 @@ export function formatSessionJson(
   if (session.source !== undefined) {
     output['source'] = session.source;
   }
+  if (session.sources) {
+    output['sources'] = session.sources;
+  }
+  if (session.preferredSource) {
+    output['preferredSource'] = session.preferredSource;
+  }
+  if (session.transcriptState) {
+    output['transcriptState'] = session.transcriptState;
+  }
   if (session.activeBranchBubbleIds !== undefined) {
     output['activeBranchBubbleIds'] = session.activeBranchBubbleIds;
   }
@@ -112,13 +137,28 @@ export function formatSessionJson(
       id: m.id,
       role: m.role,
       content: m.content,
-      timestamp: m.timestamp.toISOString(),
       codeBlocks: m.codeBlocks.map((cb) => ({
         language: cb.language,
         content: cb.content,
         startLine: cb.startLine,
       })),
     };
+
+    // Per-message timestamp + provenance only when directly stored.
+    if (m.timestamp) {
+      msg['timestamp'] = m.timestamp.toISOString();
+    }
+    if (m.timestampSource) {
+      msg['timestampSource'] = m.timestampSource;
+    }
+    if (m.source) {
+      msg['source'] = m.source;
+    }
+
+    if (m.toolCalls && m.toolCalls.length > 0) {
+      // The shared serializer preserves every defined ToolCall field.
+      msg['toolCalls'] = m.toolCalls.map((tc) => serializeToolCall(tc));
+    }
 
     // Add type field when filtering is active
     if (messageFilter && messageFilter.length > 0) {

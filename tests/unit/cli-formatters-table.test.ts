@@ -7,6 +7,7 @@ import {
   formatExportSuccess,
   formatNoHistory,
   formatCursorNotFound,
+  filterMessages,
   supportsColor,
 } from '../../src/cli/formatters/table.js';
 import type {
@@ -82,6 +83,17 @@ describe('formatSessionsTable', () => {
   it('shows session count footer', () => {
     const result = formatSessionsTable([makeSummary(), makeSummary({ index: 2, id: 'sess-2' })]);
     expect(result).toContain('2 session(s)');
+  });
+
+  it('marks lower-fidelity Store sessions in the text list', () => {
+    const result = stripAnsi(
+      formatSessionsTable([
+        makeSummary({ source: 'transcript' }),
+        makeSummary({ index: 2, id: 'sess-2', source: 'store-complete' }),
+      ])
+    );
+    expect(result).toContain('⚠ partial');
+    expect(result).toContain('⚠ metadata');
   });
 });
 
@@ -210,7 +222,7 @@ describe('formatSessionDetail', () => {
     expect(result).toContain('Let me analyze');
   });
 
-  it('folds consecutive duplicate messages', () => {
+  it('renders consecutive duplicate messages separately without folding', () => {
     const ts1 = new Date('2024-01-15T10:00:00Z');
     const ts2 = new Date('2024-01-15T10:01:00Z');
     const ts3 = new Date('2024-01-15T10:02:00Z');
@@ -222,7 +234,113 @@ describe('formatSessionDetail', () => {
       ],
     });
     const result = formatSessionDetail(s);
-    expect(result).toContain('×3');
+    // Every resolved message is rendered once; no ×N folding marker.
+    expect(result).not.toContain('×3');
+    expect((result.match(/\bsame\b/g) ?? []).length).toBe(3);
+  });
+
+  it('--only tool renders every distinct structured tool-call message', () => {
+    // Two assistant turns with empty text but DIFFERENT tool calls; both must
+    // survive filtering and render (no folding onto one block).
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: '/a' } }],
+        },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Write', status: 'completed', params: { file: '/b' } }],
+        },
+      ],
+    });
+    const filter: MessageType[] = ['tool'];
+    const result = stripAnsi(
+      formatSessionDetail(s, undefined, { messageFilter: filter, originalMessageCount: 2 })
+    );
+    expect((result.match(/🔧 Read/g) ?? []).length).toBe(1);
+    expect((result.match(/🔧 Write/g) ?? []).length).toBe(1);
+    expect(result).not.toContain('×2');
+  });
+
+  it('matches a mixed assistant/tool message in both filter categories', () => {
+    const mixed = {
+      id: 'm1',
+      role: 'assistant' as const,
+      content: 'I inspected the file and found the issue.',
+      codeBlocks: [],
+      toolCalls: [{ name: 'Read', status: 'completed' as const, params: { file: '/a' } }],
+    };
+
+    expect(filterMessages([mixed], ['assistant'])).toEqual([mixed]);
+    expect(filterMessages([mixed], ['tool'])).toEqual([mixed]);
+  });
+
+  it('preserves explicit marker categories when marked messages carry tool calls', () => {
+    const marked = [
+      {
+        role: 'assistant',
+        content: '[Thinking]\nInspecting the repository',
+        toolCalls: [{ name: 'Read' }],
+      },
+      {
+        role: 'assistant',
+        content: '[Error]\nRead failed',
+        toolCalls: [{ name: 'Read' }],
+      },
+    ];
+
+    expect(filterMessages(marked, ['assistant'])).toEqual([]);
+    expect(filterMessages(marked, ['tool'])).toEqual(marked);
+    expect(filterMessages(marked, ['thinking'])).toEqual([marked[0]]);
+    expect(filterMessages(marked, ['error'])).toEqual([marked[1]]);
+  });
+
+  it('renders structured calls carried by thinking and error messages', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Thinking]\nInspecting the repository',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: '/a' } }],
+        },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: '[Error]\nWrite failed',
+          codeBlocks: [],
+          toolCalls: [
+            {
+              name: 'Write',
+              status: 'error',
+              params: { file: '/b' },
+              error: 'disk full',
+            },
+          ],
+        },
+      ],
+    });
+
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).toContain('Thinking:');
+    expect(normal).toContain('Error:');
+    expect(normal).toContain('🔧 Read');
+    expect(normal).toContain('🔧 Write');
+
+    const toolOnly = filterMessages(s.messages, ['tool']);
+    const full = stripAnsi(
+      formatSessionDetail({ ...s, messages: toolOnly }, undefined, { fullTool: true })
+    );
+    expect(full).toContain('params: {"file":"/a"}');
+    expect(full).toContain('error: disk full');
   });
 
   it('shows filter info when messageFilter is active', () => {
@@ -234,6 +352,136 @@ describe('formatSessionDetail', () => {
     });
     expect(result).toContain('2 of 10');
     expect(result).toContain('user');
+  });
+
+  it('--tool renders full params, status, result, error, and files', () => {
+    const longParam = 'x'.repeat(120);
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [
+            {
+              name: 'Write',
+              status: 'error',
+              params: { file: longParam },
+              error: 'disk full',
+              files: ['/a.txt', '/b.txt'],
+            },
+          ],
+        },
+      ],
+    });
+    const full = stripAnsi(formatSessionDetail(s, undefined, { fullTool: true }));
+    // Full params (not truncated), status, error, and files all rendered.
+    expect(full).toContain(longParam);
+    expect(full).toContain('status: error');
+    expect(full).toContain('error: disk full');
+    expect(full).toContain('files: /a.txt, /b.txt');
+  });
+
+  it('--tool exposes structured details for an embedded Composer tool call', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Tool: Read File]\nFile: /a',
+          codeBlocks: [],
+          toolCalls: [
+            {
+              name: 'read_file',
+              status: 'completed',
+              params: { file: '/a' },
+              result: '',
+              files: [],
+            },
+          ],
+        },
+      ],
+    });
+    const full = stripAnsi(formatSessionDetail(s, undefined, { fullTool: true }));
+    expect(full).toContain('params: {"file":"/a"}');
+    expect(full).toContain('status: completed');
+    expect(full).toContain('result: ');
+    expect(full).toContain('files: []');
+    expect((full.match(/🔧/g) ?? []).length).toBe(1);
+  });
+
+  it('normal view suppresses only the embedded call and keeps additional merged calls', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Tool: Read File]\nFile: /a',
+          codeBlocks: [],
+          toolCalls: [
+            { name: 'read_file', status: 'completed', params: { file: '/a' } },
+            { name: 'write_file', status: 'completed', params: { file: '/b' } },
+          ],
+        },
+      ],
+    });
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).not.toContain('🔧 read_file');
+    expect(normal).toContain('🔧 write_file');
+  });
+
+  it('keeps a distinct same-name structured call when the embedded identity disagrees', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '[Tool: Read File]\nFile: /a',
+          codeBlocks: [],
+          toolCalls: [{ name: 'read_file', status: 'completed', params: { targetFile: '/b' } }],
+        },
+      ],
+    });
+
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).toContain('File: /a');
+    expect(normal).toContain('🔧 read_file');
+    expect(normal).toContain('targetFile="/b"');
+  });
+
+  it('--tool preserves an explicitly defined empty error', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Write', status: 'error', error: '' }],
+        },
+      ],
+    });
+    const full = stripAnsi(formatSessionDetail(s, undefined, { fullTool: true }));
+    expect(full).toContain('error: ');
+  });
+
+  it('normal view truncates long structured-tool params', () => {
+    const longParam = 'y'.repeat(120);
+    const s = makeSession({
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          codeBlocks: [],
+          toolCalls: [{ name: 'Read', status: 'completed', params: { file: longParam } }],
+        },
+      ],
+    });
+    const normal = stripAnsi(formatSessionDetail(s));
+    expect(normal).not.toContain(longParam);
+    expect(normal).toContain('...');
   });
 
   it('shows info message when filter results in empty', () => {
@@ -253,6 +501,16 @@ describe('formatSessionDetail', () => {
     expect(result).toContain('Partial data');
     expect(result).toContain('workspace fallback');
   });
+
+  it.each(['store', 'store-complete'] as const)(
+    'shows missing metadata warning for %s sessions',
+    (source) => {
+      const result = stripAnsi(formatSessionDetail(makeSession({ source })));
+      expect(result).toContain('Partial metadata');
+      expect(result).toContain('tokens');
+      expect(result).toContain('per-message timestamps');
+    }
+  );
 });
 
 describe('formatSearchResultsTable', () => {

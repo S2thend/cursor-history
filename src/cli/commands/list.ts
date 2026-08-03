@@ -14,7 +14,12 @@ import {
   formatNoHistory,
   formatCursorNotFound,
 } from '../formatters/index.js';
-import { getCursorDataPath, expandPath, contractPath } from '../../lib/platform.js';
+import {
+  getCursorDataPath,
+  getStoreStackRoot,
+  expandPath,
+  contractPath,
+} from '../../lib/platform.js';
 import { existsSync } from 'node:fs';
 
 interface ListCommandOptions {
@@ -79,13 +84,16 @@ export function registerListCommand(program: Command): void {
       if (options.workspaces) {
         // For backup mode, skip Cursor data check - we read from backup
         if (!backupPath) {
-          // Verify Cursor data exists for workspaces listing
-          const dataPath = getCursorDataPath(customPath ? expandPath(customPath) : undefined);
-          if (!existsSync(dataPath)) {
+          // Workspace listing succeeds when either the Composer root or the
+          // resolved Store root exists (so Store-only machines are not rejected).
+          const expanded = customPath ? expandPath(customPath) : undefined;
+          const composerRoot = getCursorDataPath(expanded);
+          const storeRoot = getStoreStackRoot(expanded);
+          if (!existsSync(composerRoot) && !existsSync(storeRoot)) {
             if (useJson) {
-              console.log(JSON.stringify({ error: 'Cursor data not found', path: dataPath }));
+              console.log(JSON.stringify({ error: 'Cursor data not found', path: composerRoot }));
             } else {
-              console.log(formatCursorNotFound(dataPath));
+              console.log(formatCursorNotFound(composerRoot));
             }
             process.exit(3);
           }
