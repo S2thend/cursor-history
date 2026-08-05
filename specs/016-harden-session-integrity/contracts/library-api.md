@@ -12,9 +12,22 @@ New metadata is additive. Deprecated v0.17 source literals remain in declaration
 existing TypeScript consumers compile, but corrective runtime output uses the legacy fidelity values
 `global` and `workspace-fallback`.
 
+Every symbol reachable from the exact packed package-root declaration graph—including aliases and
+re-exports—has shipped JSDoc describing its purpose and public contract. Callable and constructable
+exports document parameters, applicable return values, thrown typed errors, index base,
+scope/lifetime, and compatibility behavior. The declaration-graph audit walks the packed
+`dist/lib/index.d.ts` graph rather than relying on a hand-maintained source-file list. Library
+examples in shipped documentation are typechecked and executed against the exact packed artifact.
+
 The confirmed no-consumer-change guarantee covers v0.16 Composer-only archives becoming complete
 Composer-backed merged sessions. Complete v0.17 Store/merged input receives a documented one-time
 replacement/convergence path; unstable v0.17 Store positional and cross-format IDs are not preserved.
+An unchanged consumer receives Source Read Limits v1 defaults automatically. The release gate must
+raise any default exceeded by an authorized Cursor source carrier actually readable by v0.16
+(live/custom Composer roots or cursor-history backup ZIP/SQLite input) before publication; callers
+do not need to opt into `sourceReadLimits` for the confirmed upgrade path. The downstream
+vibe-history archive is exercised by the compatibility harness, not parsed by this source-limit
+preflight.
 
 ## Additive public types
 
@@ -36,6 +49,108 @@ export type ResolvedSource =
   | 'merged';
 export type ResolutionState = 'complete' | 'partial';
 export type IndexScope = 'global' | 'workspace';
+
+export interface SourceReadLimitsV1 {
+  readonly policyVersion: 'source-read-limits/v1';
+  readonly jsonlRecordBytes: number;
+  readonly jsonlSourceBytes: number;
+  readonly jsonlRecordCount: number;
+  readonly sqlitePageRows: number;
+  readonly sqlitePageBytes: number;
+  readonly sqliteValueBytes: number;
+  readonly sqliteRowCount: number;
+  readonly sqliteDecodedBytes: number;
+  readonly zipCompressedBytes: number;
+  readonly zipEntryCount: number;
+  readonly zipEntryBytes: number;
+  readonly zipAggregateBytes: number;
+  readonly zipCompressionRatio: number;
+}
+
+export type SourceReadLimitsOverride = Partial<Omit<SourceReadLimitsV1, 'policyVersion'>>;
+
+`source-read-limits/v1` uses these exact inclusive defaults; equality passes:
+
+| Field | Inclusive default |
+|---|---:|
+| `jsonlRecordBytes` | `67_108_864` |
+| `jsonlSourceBytes` | `4_294_967_296` |
+| `jsonlRecordCount` | `2_000_000` |
+| `sqlitePageRows` | `256` |
+| `sqlitePageBytes` | `268_435_456` |
+| `sqliteValueBytes` | `134_217_728` |
+| `sqliteRowCount` | `5_000_000` |
+| `sqliteDecodedBytes` | `8_589_934_592` |
+| `zipCompressedBytes` | `17_179_869_184` |
+| `zipEntryCount` | `65_536` |
+| `zipEntryBytes` | `8_589_934_592` |
+| `zipAggregateBytes` | `17_179_869_184` |
+| `zipCompressionRatio` | `200` |
+
+export type JsonlSourceBoundKind =
+  | 'jsonl-record-bytes'
+  | 'jsonl-source-bytes'
+  | 'jsonl-record-count';
+
+export type SqliteSourceBoundKind =
+  | 'sqlite-page-rows'
+  | 'sqlite-page-bytes'
+  | 'sqlite-value-bytes'
+  | 'sqlite-row-count'
+  | 'sqlite-decoded-bytes';
+
+export type ZipSourceBoundKind =
+  | 'zip-compressed-bytes'
+  | 'zip-entry-count'
+  | 'zip-entry-bytes'
+  | 'zip-aggregate-bytes'
+  | 'zip-compression-ratio';
+
+export type SourceBoundKind =
+  | JsonlSourceBoundKind
+  | SqliteSourceBoundKind
+  | ZipSourceBoundKind;
+
+export type JsonlSourceLimitDimension =
+  | {
+      sourceKind: 'jsonl';
+      bound: 'jsonl-record-bytes' | 'jsonl-source-bytes';
+      unit: 'bytes';
+    }
+  | {
+      sourceKind: 'jsonl';
+      bound: 'jsonl-record-count';
+      unit: 'records';
+    };
+
+export type SqliteSourceLimitDimension =
+  | {
+      sourceKind: 'sqlite';
+      bound: 'sqlite-page-rows' | 'sqlite-row-count';
+      unit: 'rows';
+    }
+  | {
+      sourceKind: 'sqlite';
+      bound: 'sqlite-page-bytes' | 'sqlite-value-bytes' | 'sqlite-decoded-bytes';
+      unit: 'bytes';
+    };
+
+export type ZipSourceLimitDimension =
+  | {
+      sourceKind: 'zip';
+      bound: 'zip-compressed-bytes' | 'zip-entry-bytes' | 'zip-aggregate-bytes';
+      unit: 'bytes';
+    }
+  | {
+      sourceKind: 'zip';
+      bound: 'zip-entry-count';
+      unit: 'records';
+    }
+  | {
+      sourceKind: 'zip';
+      bound: 'zip-compression-ratio';
+      unit: 'ratio';
+    };
 
 export type SessionTimestampSource =
   | 'composer-metadata'
@@ -80,8 +195,16 @@ export interface SessionSourceInstance {
     | 'superseded';
 }
 
-export interface SessionDiagnostic {
-  code: string;
+export type GeneralSessionDiagnosticCode =
+  | 'WORKSPACE_AMBIGUOUS'
+  | 'SESSION_AMBIGUOUS'
+  | 'SESSION_SCOPE_MISMATCH'
+  | 'UNSUPPORTED_SESSION_MIGRATION'
+  | 'DATABASE_CAPABILITY_MISSING'
+  | 'TEMPORARY_ARTIFACT_CLEANUP_FAILED';
+
+export interface GeneralSessionDiagnostic {
+  code: GeneralSessionDiagnosticCode;
   message: string;
   sessionId?: string;
   sourceRole?: SourceRole;
@@ -89,7 +212,40 @@ export interface SessionDiagnostic {
   occurrenceRefs?: string[];
   remedy?: string;
 }
+
+export interface SourceEncodingDiagnostic {
+  code: 'SOURCE_ENCODING_INVALID';
+  message: string;
+  sessionId?: string;
+  sourceRole?: SourceRole;
+  sourceKind: 'jsonl' | 'sqlite';
+  outcome: 'partial';
+  remedy: string;
+}
+
+export type SourceLimitExceededDiagnostic = {
+  code: 'SOURCE_LIMIT_EXCEEDED';
+  message: string;
+  sessionId?: string;
+  sourceRole?: SourceRole;
+  policyVersion: 'source-read-limits/v1';
+  limit: number;
+  observedAtLeast: number;
+  outcome: 'partial';
+  retryableWithOverride: true;
+  remedy: string;
+} & (JsonlSourceLimitDimension | SqliteSourceLimitDimension);
+
+export type SessionDiagnostic =
+  | GeneralSessionDiagnostic
+  | SourceEncodingDiagnostic
+  | SourceLimitExceededDiagnostic;
 ```
+
+For source encoding/limit diagnostics, `sessionId` and `sourceRole` are required at runtime whenever
+the failing contributor has already been associated with a logical session. They may be absent only
+for an operation/catalog failure detected before UUID or role identification; omission never permits
+attaching the diagnostic to a different session.
 
 `SessionSourceInstance` never exposes a DB path, transcript path, record key, Store directory, or
 other physical locator. Opaque `occurrenceRefs` are present only in ambiguity diagnostics and are
@@ -266,8 +422,52 @@ export interface LibraryConfig {
 
   /** Receive safe continuation diagnostics for skipped ambiguity groups. */
   onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
+
+  /** Explicit per-operation overrides of documented Source Read Limits v1 defaults. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+
+  /** Reuse an explicitly bound public read context. Other binding fields must agree. */
+  readContext?: SessionReadContext;
+
+  /** Cooperatively cancel this read and all nested parsing/snapshot work. */
+  signal?: AbortSignal;
 }
 ```
+
+The additive public lifecycle API is intentionally opaque: it exposes release/disposal controls but
+not physical source locators or the internal catalog.
+
+```ts
+export interface SessionReadContextOptions {
+  dataPath?: string;
+  backupPath?: string;
+  workspace?: string;
+  includeCrossWorkspaceSources?: boolean;
+  resolvedSessionCapacity?: number; // default 1; finite nonnegative integer
+  onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
+  sqliteDriver?: SqliteDriverName;
+  sourceReadLimits?: SourceReadLimitsOverride;
+  signal?: AbortSignal;
+}
+
+export interface SessionReadContext {
+  readonly resolvedSessionCapacity: number;
+  readonly disposed: boolean;
+  releaseSession(sessionId: string): void;
+  dispose(): Promise<void>;
+}
+
+export function createSessionReadContext(
+  options?: SessionReadContextOptions
+): SessionReadContext;
+```
+
+Supplying both `readContext` and per-call binding fields is allowed only when they match the
+context's immutable binding. A mismatch or use after disposal fails with the documented typed error
+before catalog or content I/O. `sourceReadLimits` is stricter: it must be omitted whenever
+`readContext` is supplied; providing both fails as `READ_CONTEXT_OPTIONS_MISMATCH` rather than being
+ignored or compared against an opaque effective map. Built-in operations dispose their own contexts
+in `finally`; a caller that supplies a context owns its lifecycle.
 
 `workspace` accepts a full historical path or a component-aligned suffix. It is normalized
 lexically and need not exist on the current machine. Exact match wins; one unique suffix is accepted;
@@ -275,6 +475,20 @@ multiple suffixes throw `WorkspaceAmbiguityError` before conversation payload I/
 
 `sqliteDriver` is now honored by the bound operation. It is a forced preference: if it lacks a
 required capability, the operation throws instead of silently falling back.
+
+Changed Store/transcript/archive parsers accept deterministic UTF-8 with one optional leading BOM,
+ignore unknown supported-record fields, and never guess, transcode, or replacement-decode invalid or
+mixed encoding. JSONL, SQLite, and ZIP processing use the exact inclusive Source Read Limits v1
+defaults defined by the normative specification. A caller may raise or lower fields explicitly for
+one operation; the validated values are copied and frozen. Global, environment-derived,
+input/manifest-driven, automatic-retry, and unlimited overrides are forbidden. Encoding and limit
+failures surface through the typed errors below as partial diagnostics only when a safe contributor
+remains, otherwise as one fatal error. Limit policy and override values never participate in public
+identity, hashing, equivalence, deduplication, or incremental synchronization.
+
+Within `SourceReadLimitsOverride`, an omitted recognized field or recognized field whose value is
+`undefined` inherits its default; `null` is invalid. Unknown own keys and `policyVersion` are rejected
+before source content I/O even if their value is `undefined`.
 
 ## Read functions
 
@@ -358,8 +572,13 @@ Pagination is over scoped logical catalog rows before hydration. Therefore both
 logical row, including one row for each ambiguous UUID; `hasMore` is computed from that same total.
 `listSessionSummaries().data` has one item per row in the requested window. `listSessions().data`
 contains only the resolvable full sessions in that window, so it may be shorter than `limit` and its
-presentation indices may have gaps when an ambiguous row is diagnosed. Consumers requiring a
-one-to-one catalog page use `listSessionSummaries()`.
+presentation indices may have gaps when an ambiguous row is diagnosed. It never pulls a later
+logical row into the page to replace an omitted ambiguity. Consumers requiring a one-to-one catalog
+page use `listSessionSummaries()`.
+
+Summary indices use the same zero-based public-read base as `listSessions()` and `getSession()`.
+They are ephemeral within the same data source, workspace scope, catalog snapshot, and invocation;
+persist the native session ID instead.
 
 ## Migration additions
 
@@ -368,6 +587,18 @@ export interface MigrateSessionConfig {
   // Existing sessions, destination, mode, dryRun, force, dataPath remain.
   /** Scope numeric or ID selection to this historical workspace path. */
   workspace?: string;
+  /** Explicit per-operation overrides for bounded source reads during preparation. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel before mutation or between bounded preparation/application steps. */
+  signal?: AbortSignal;
+}
+
+export interface MigrateWorkspaceConfig {
+  // Existing source, destination, mode, dryRun, force, and dataPath remain.
+  /** Explicit per-operation overrides for bounded source reads during preparation. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel before mutation or between bounded preparation/application steps. */
+  signal?: AbortSignal;
 }
 ```
 
@@ -379,7 +610,8 @@ also throw `UnsupportedSessionMigrationError` or `SessionAmbiguityError` before 
 retains UUID; copy returns a new UUID.
 
 Workspace-wide migration applies the same eligibility rules and cannot move only one half of a
-merged session.
+merged session. Migration limit overrides are validated and frozen before source reads and never
+weaken the prepare/revalidate/first-write boundary.
 
 ## Backup additions
 
@@ -390,14 +622,46 @@ export interface BackupConfig {
   // Existing fields remain.
   /** Request platform-default/shared final archive permissions. Default false. */
   sharedPermissions?: boolean;
+  /** Explicit per-operation overrides of documented Source Read Limits v1 defaults. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel creation/read and run the normal private-artifact cleanup path. */
+  signal?: AbortSignal;
 }
+
+export interface RestoreConfig {
+  // Existing fields remain.
+  /** Explicit per-operation overrides of documented Source Read Limits v1 defaults. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+}
+
+export interface SourceReadOptions {
+  sourceReadLimits?: SourceReadLimitsOverride;
+  signal?: AbortSignal;
+}
+
+export function validateBackup(
+  backupPath: string,
+  options?: SourceReadOptions
+): Promise<BackupValidation>;
+
+export function listBackups(
+  directory?: string,
+  options?: SourceReadOptions
+): Promise<BackupInfo[]>;
 ```
 
 New final archives are owner-only on permission-aware platforms by default. A default overwrite
 preserves the existing archive's mode exactly and never changes the parent directory. On POSIX,
 explicit `sharedPermissions` requests the ordinary non-executable mode `0666 & ~currentUmask`.
 Temporary plaintext remains private regardless of final sharing, and the process umask is never
-modified.
+modified. On Windows, creation uses the system per-user temporary location, inherited access
+controls, exclusive paths, and the same cleanup/typed-residue contract; this release does not claim
+independently verified cross-user ACL isolation.
+
+Every newly created backup manifest records the exact running package version as `producer`. Older
+or absent producer values remain readable. This field is diagnostic provenance only and never
+participates in logical/session/message identity, replica equivalence, deduplication, or
+incremental-sync comparison.
 
 ## Driver selection compatibility
 
@@ -423,12 +687,16 @@ and have exported type guards:
 | `SessionScopeMismatchError` | `SESSION_SCOPE_MISMATCH` | UUID and requested/matched scope |
 | `ReadContextSourceMismatchError` | `READ_CONTEXT_SOURCE_MISMATCH` | requested source kind/path |
 | `ReadContextScopeMismatchError` | `READ_CONTEXT_SCOPE_MISMATCH` | requested and bound scopes |
+| `ReadContextOptionsMismatchError` | `READ_CONTEXT_OPTIONS_MISMATCH` | conflicting public option names and remedy; no bound locator/value dump |
 | `ReadContextDisposedError` | `READ_CONTEXT_DISPOSED` | remedy to create a new context |
 | `DatabaseCapabilityError` | `DATABASE_CAPABILITY_MISSING` | driver, operation, missing capabilities, alternatives, remedy |
 | `NoCapableDriverError` | `NO_CAPABLE_DATABASE_DRIVER` | operation, required capabilities, remedies |
 | `UnsupportedSessionMigrationError` | `UNSUPPORTED_SESSION_MIGRATION` | UUID and source category |
 | `MigrationTargetChangedError` | `MIGRATION_TARGET_CHANGED` | UUID and retry remedy; no locator |
 | `TemporaryArtifactCleanupError` | `TEMPORARY_ARTIFACT_CLEANUP_FAILED` | possible residue paths only |
+| `SourceEncodingError` | `SOURCE_ENCODING_INVALID` | source kind, partial/fatal outcome, remedy; no content |
+| `SourceLimitError` | `SOURCE_LIMIT_EXCEEDED` | policy version, source kind, named bound, limit, observed-at-least, unit, partial/fatal outcome, override remedy; no content |
+| `SourceLimitConfigurationError` | `SOURCE_LIMIT_CONFIGURATION_INVALID` | invalid field, optional primitive value, received type, violated constraint, and remedy; no source content |
 
 Existing library wrappers must pass these types through; they must not turn them into a bare
 `Error("Failed to ...")`.
@@ -458,3 +726,8 @@ Release regressions snapshot a v0.16 Composer fixture's session, message, and or
 keys byte-for-byte before and after Store enrichment, preferred-backbone changes, Store-only gaps,
 and a second sync. They also lock stable source/fidelity values, exact pathless aliases, session and
 message timestamp/provenance pairs, parent/branch rewrites, and existing Composer tool order.
+
+The finite carrier/source coverage and exclusions for these APIs are normative in
+[`../spec.md`](../spec.md), repeated in the design-time
+[`compatibility-matrix-v1.md`](compatibility-matrix-v1.md), and shipped in
+`docs/compatibility.md`. The supported backup carrier is Composer-only in matrix v1.

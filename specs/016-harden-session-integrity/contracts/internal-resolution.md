@@ -6,6 +6,10 @@
 This contract defines load-bearing internal boundaries. They are not an invitation to export
 physical locators from the npm library.
 
+Source/carrier applicability is normative in the specification and projected without modification
+in [`compatibility-matrix-v1.md`](compatibility-matrix-v1.md). Matrix v1 backup hydration is
+Composer-only.
+
 ## Module ownership
 
 | Module | Owns | Must not own |
@@ -15,10 +19,19 @@ physical locators from the npm library.
 | `workspace-scope.ts` | lexical normalization, exact/unique-suffix resolution, match diagnostics | Payload reads, logical ID changes |
 | `storage.ts` | context lifecycle, listing/resolution/search orchestration, lazy hydration | Identity algorithms duplicated inline, destructive migration writes |
 | `private-temp.ts` | exclusive private staging, tracked cleanup, residue error | ZIP/SQLite parsing semantics |
+| `io-observer.ts` | immutable operation context and low-level filesystem/key-value/SQLite event emission | Resolver-only claims of physical I/O isolation |
+| `source-read-limits.ts` | v1 defaults, override validation/freezing, scoped counters, safe typed limit details | Content identity, automatic limit escalation |
+| `parser.ts` | UTF-8/BOM validation, unknown-field tolerance, bounded JSONL/SQLite decoding, timestamp/public projection | Heuristic transcoding, unbounded whole-source buffering |
+| `zip-stream.ts` | bounded ZIP32/ZIP64 central reads, path/method validation, STORE/DEFLATE entry streams, CRC/limit checks | Session resolution, manifest trust decisions |
+| `backup.ts` | private archive staging/publication, streamed file hashing, manifest producer metadata, archive orchestration | Session/message identity derived from producer metadata |
 | `database/registry.ts` | capability profiles and per-operation provider selection | Store completeness policy |
 | `migrate.ts` | bind/prepare/revalidate/apply exact eligible target | Numeric rediscovery after preparation |
 
-## Read context construction
+## Core read context construction
+
+These exports are internal core-module contracts, not package-root declarations. The package-root
+library exposes the opaque lifecycle wrapper defined in `library-api.md`; it does not expose
+`DataSourceBinding`, `BoundReadScope`, `OperationIoContext`, catalogs, or physical locators.
 
 ```ts
 export interface SessionReadContextOptions {
@@ -29,6 +42,8 @@ export interface SessionReadContextOptions {
   resolvedSessionCapacity?: number;
   onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
   sqliteDriver?: SqliteDriverName;
+  sourceReadLimits?: Partial<Omit<SourceReadLimitsV1, 'policyVersion'>>;
+  signal?: AbortSignal;
 }
 
 export function createSessionReadContext(
@@ -51,6 +66,7 @@ interface SessionReadContext {
   readonly binding: DataSourceBinding;
   readonly scope: BoundReadScope;
   readonly resolvedSessionCapacity: number; // default 1
+  readonly operationIo: OperationIoContext;
   releaseSession(key: string): void;
   dispose(): Promise<void>;
 }
@@ -58,7 +74,12 @@ interface SessionReadContext {
 
 - Every core operation verifies that its positional compatibility arguments agree with the context.
 - A mismatch fails before catalog or content I/O.
+- Package-root calls using a caller-supplied opaque context must omit per-call `sourceReadLimits`;
+  supplying both fails before I/O as `READ_CONTEXT_OPTIONS_MISMATCH`. The bound effective limit map
+  is not exposed or re-compared through public API fields.
 - `dispose()` is idempotent. Built-in callers invoke it in `finally`.
+- The optional `AbortSignal`, context identity, and low-level audit observer propagate through every
+  nested adapter/parser/snapshot call; cancellation reaches the same cleanup `finally` path.
 - Active promises and completed decoded values use separate maps. On success, LRU insertion evicts
   down to `C`; on rejection, the entry is removed immediately.
 - Metadata-only catalog values may live for the context lifetime because they contain no decoded
@@ -96,12 +117,21 @@ Hydration asserts that:
 4. the context is not disposed.
 
 The actual filesystem, SQLite, and key/value adapters emit at a private test/audit seam immediately
-before performing each open/read/query/get:
+before performing each open/read/prepare/query/get/backup:
 
 ```ts
-type AdapterIoReadEvent = {
+type OperationIoContext = {
+  contextId: string;
+  dataSourceIdentity: string;
+  sourceReadLimits: Readonly<SourceReadLimitsV1>;
+  signal?: AbortSignal;
+  emit?: (event: AdapterIoEvent) => void;
+};
+
+type AdapterIoEvent = {
   adapter: 'filesystem' | 'sqlite' | 'key-value';
-  operation: 'open' | 'read' | 'query' | 'get';
+  operation: 'open' | 'read' | 'prepare' | 'query' | 'get' | 'backup';
+  contextId: string;
   dataSourceIdentity: string;
   logicalSessionId?: string;
   sourceRole?: SourceRole;
@@ -116,6 +146,10 @@ unclassified reads fail closed as `conversation-payload`. A high-level resolver 
 events for diagnostics but is not isolation evidence. Release tests require zero off-scope payload
 events and use poison-canary off-scope DB rows, transcript files, and key/value blobs that throw if
 an adapter touches them; result-only assertions are insufficient.
+
+Every adapter call receives the same immutable `OperationIoContext`; nested Store snapshot and
+backup paths do not create an unobserved context. SQLite emits `prepare` before statement
+preparation, `query` before execution/iteration, and `backup` before online snapshot I/O.
 
 ## Workspace resolution
 
@@ -354,6 +388,11 @@ export function toLegacyFidelity(
 No parser/formatter independently infers `source`. Complete transcript-only with no expected DB may
 be `global`; transcript used after an expected DB failure is `workspace-fallback`.
 
+cursor-history guarantees the completeness and replacement-safety of this projection and signal;
+it does not persist an arbitrary consumer's database. The unchanged test-only vibe-history adapter
+owns the downstream transaction/rollback, and only that combined compatibility harness asserts
+atomic archive replacement.
+
 Session `createdAt`/`lastUpdatedAt` are independent of preferred rendering. A Composer-backed
 view uses valid stored metadata from its selected Composer contribution. A Store-only view uses
 selected Store DB metadata, then Store meta. Otherwise creation uses the earliest directly stored
@@ -370,6 +409,74 @@ instances by role, representation declaration order, lexicographic `workspacePat
 declaration order; diagnostic refs by stable payload fingerprint and then opaque ref. Semantic
 message/branch/tool/file arrays retain their specified source order. Formatters never re-sort these
 arrays independently.
+
+## Defensive parsing boundary
+
+```ts
+export interface SourceReadLimitsV1 {
+  readonly policyVersion: 'source-read-limits/v1';
+  readonly jsonlRecordBytes: number;
+  readonly jsonlSourceBytes: number;
+  readonly jsonlRecordCount: number;
+  readonly sqlitePageRows: number;
+  readonly sqlitePageBytes: number;
+  readonly sqliteValueBytes: number;
+  readonly sqliteRowCount: number;
+  readonly sqliteDecodedBytes: number;
+  readonly zipCompressedBytes: number;
+  readonly zipEntryCount: number;
+  readonly zipEntryBytes: number;
+  readonly zipAggregateBytes: number;
+  readonly zipCompressionRatio: number;
+}
+
+export const SOURCE_READ_LIMITS_V1_DEFAULTS: Readonly<SourceReadLimitsV1>;
+```
+
+| Field | Inclusive v1 default |
+|---|---:|
+| `jsonlRecordBytes` | `67_108_864` |
+| `jsonlSourceBytes` | `4_294_967_296` |
+| `jsonlRecordCount` | `2_000_000` |
+| `sqlitePageRows` | `256` |
+| `sqlitePageBytes` | `268_435_456` |
+| `sqliteValueBytes` | `134_217_728` |
+| `sqliteRowCount` | `5_000_000` |
+| `sqliteDecodedBytes` | `8_589_934_592` |
+| `zipCompressedBytes` | `17_179_869_184` |
+| `zipEntryCount` | `65_536` |
+| `zipEntryBytes` | `8_589_934_592` |
+| `zipAggregateBytes` | `17_179_869_184` |
+| `zipCompressionRatio` | `200` |
+
+- Text is UTF-8 with at most one leading UTF-8 BOM. Unknown fields and SQLite columns are ignored.
+- Invalid/mixed encoding is never replacement-decoded, guessed, or transcoded. It emits
+  `SOURCE_ENCODING_INVALID` as partial only when a documented safe contributor remains; otherwise
+  it is fatal.
+- All limits are raw-byte/integer inclusive defaults: equality passes and the first unit above emits
+  `SOURCE_LIMIT_EXCEEDED`, never a silently truncated complete view. JSONL counts one transcript;
+  SQLite page limits apply to keyset/row-ID metadata pages and sequential payload fetches, while
+  row/decoded totals reset per logical-session hydration and separately per catalog scan; ZIP
+  compressed, central-directory, and streamed-output counters reset per archive.
+- ZIP applies ratio `uncompressed / max(compressed, 1)` to each nonempty entry and the aggregate; a
+  zero-byte compressed entry claiming nonempty output fails. Metadata claims never raise a limit.
+- A validated `Partial<Omit<SourceReadLimitsV1, 'policyVersion'>>` override is copied and frozen into
+  `OperationIoContext`. It may raise or lower defaults per operation but cannot come from globals,
+  environment, input, or a manifest; cannot request `unlimited`; and never triggers automatic retry.
+  Values must be positive safe integers, obey the documented cross-field inequalities and runtime
+  string-materialization bound, or fail before content I/O with
+  `SOURCE_LIMIT_CONFIGURATION_INVALID`.
+- An omitted recognized field or recognized own property with value `undefined` inherits the
+  default; `null` is invalid. Reject every unknown own key and any `policyVersion` override before
+  content I/O, including unknown keys whose value is `undefined`.
+- `SOURCE_LIMIT_EXCEEDED` safe details contain `policyVersion`, `sourceKind`, named `bound`, `limit`,
+  `observedAtLeast`, `unit`, partial/fatal `outcome`, `retryableWithOverride: true`, and an actionable
+  remedy, never content or a locator. The diagnostic is an exact source-kind/bound/unit
+  discriminator: byte bounds use `bytes`, JSONL/ZIP counts use `records`, SQLite row bounds use
+  `rows`, and only ZIP compression ratio uses `ratio`. Byte/count/row observations are positive
+  integers; the exact first failing ZIP ratio may be fractional.
+- Each bounded unit checks the context `AbortSignal`; parse/limit/cancellation paths dispose every
+  private artifact through the same nested `finally` chain.
 
 ## Search and bulk export
 
@@ -437,6 +544,7 @@ projection of the same prepared object.
 export interface PrivateTempWorkspaceOptions {
   prefix: string;
   parent?: string; // defaults to os.tmpdir(); parent permissions are never changed
+  signal?: AbortSignal; // owning operation; cleanup remains best-effort and idempotent
 }
 
 export function createPrivateTempWorkspace(
@@ -459,8 +567,10 @@ interface PrivateTempWorkspace {
 ```
 
 The directory is unique/exclusive and `0700` on POSIX. `createFile` uses exclusive creation and
-`0600`. For online backup, create the target privately, close the creation handle, then allow the
-driver to overwrite it inside the private directory. `dispose()` attempts every registered artifact
+`0600`. On Windows, use the system per-user temporary location, inherit its access controls, and
+retain the same uniqueness/no-reuse/cleanup rules without claiming separately verified cross-user
+ACL isolation. For online backup, create the target privately, close the creation handle, then allow
+the driver to overwrite it inside the private directory. `dispose()` attempts every registered artifact
 and directory even when one action fails, is safe to repeat, and throws a paths-only typed residue
 error after all attempts.
 
@@ -492,6 +602,16 @@ candidates remain untouched. `SIGKILL`, power loss, and kernel termination canno
 immediate deletion is not guaranteed; `0700`/`0600` privacy plus conservative next-run recovery
 is the explicit limit.
 
+### Backup manifest producer contract
+
+- A newly created manifest records the exact `package.json` version embedded in the running packed
+  artifact as `producer`; it never uses a historical hard-coded literal.
+- A missing or older producer value remains readable.
+- `producer` is diagnostic provenance only and is excluded from logical/session/message identity,
+  replica equivalence, deduplication, and incremental-sync comparisons.
+- The packed-artifact smoke creates and rereads an archive and asserts the producer equals the exact
+  artifact under test.
+
 ## Database capability registry
 
 ```ts
@@ -520,7 +640,9 @@ export function selectDatabaseDriver(
 
 ## Error propagation
 
-Core throws typed errors with stable codes. CLI maps them to exit category and safe JSON; library
+Core throws typed errors with stable codes, including `SOURCE_ENCODING_INVALID` and
+`SOURCE_LIMIT_EXCEEDED`. CLI maps them to the applicable existing exit category and safe JSON on
+stderr for every fatal outcome; library
 re-exports/maps them without wrapping in a bare error. Continuation is allowed only where the
 operation contract explicitly supports diagnostics (list/search/bulk export). A rejected individual
 resolution is removed from the active/cache maps and does not block unrelated rows.

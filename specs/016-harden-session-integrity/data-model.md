@@ -26,6 +26,11 @@ Public logical identity never contains a workspace, source role, representation,
 locator. Locators are private implementation values; the only physical reference that may leave
 core is an opaque, operation-scoped diagnostic reference for an ambiguity.
 
+Source/carrier applicability comes only from the normative specification and its design projection
+[`contracts/compatibility-matrix-v1.md`](contracts/compatibility-matrix-v1.md). In matrix v1,
+supported backup archives contain Composer `state.vscdb` representations only. The packed package
+repeats the same verified table in `docs/compatibility.md`.
+
 ## Shared value types
 
 ```ts
@@ -94,6 +99,67 @@ type SessionTimestampSource =
 type IndexScope = 'global' | 'workspace';
 type WorkspaceMatchKind = 'exact' | 'unique-suffix';
 type ReplicaState = 'single' | 'equivalent' | 'divergent';
+
+type TextEncodingState = 'utf8' | 'utf8-bom' | 'invalid-or-mixed';
+type JsonlSourceBoundKind =
+  | 'jsonl-record-bytes'
+  | 'jsonl-source-bytes'
+  | 'jsonl-record-count';
+type SqliteSourceBoundKind =
+  | 'sqlite-page-rows'
+  | 'sqlite-page-bytes'
+  | 'sqlite-value-bytes'
+  | 'sqlite-row-count'
+  | 'sqlite-decoded-bytes';
+type ZipSourceBoundKind =
+  | 'zip-compressed-bytes'
+  | 'zip-entry-count'
+  | 'zip-entry-bytes'
+  | 'zip-aggregate-bytes'
+  | 'zip-compression-ratio';
+type SourceBoundKind =
+  | JsonlSourceBoundKind
+  | SqliteSourceBoundKind
+  | ZipSourceBoundKind;
+
+type JsonlSourceLimitDimension =
+  | {
+      sourceKind: 'jsonl';
+      bound: 'jsonl-record-bytes' | 'jsonl-source-bytes';
+      unit: 'bytes';
+    }
+  | {
+      sourceKind: 'jsonl';
+      bound: 'jsonl-record-count';
+      unit: 'records';
+    };
+type SqliteSourceLimitDimension =
+  | {
+      sourceKind: 'sqlite';
+      bound: 'sqlite-page-rows' | 'sqlite-row-count';
+      unit: 'rows';
+    }
+  | {
+      sourceKind: 'sqlite';
+      bound: 'sqlite-page-bytes' | 'sqlite-value-bytes' | 'sqlite-decoded-bytes';
+      unit: 'bytes';
+    };
+type ZipSourceLimitDimension =
+  | {
+      sourceKind: 'zip';
+      bound: 'zip-compressed-bytes' | 'zip-entry-bytes' | 'zip-aggregate-bytes';
+      unit: 'bytes';
+    }
+  | {
+      sourceKind: 'zip';
+      bound: 'zip-entry-count';
+      unit: 'records';
+    }
+  | {
+      sourceKind: 'zip';
+      bound: 'zip-compression-ratio';
+      unit: 'ratio';
+    };
 ```
 
 All set-like public arrays are deduplicated before deterministic ordering: source-role arrays use
@@ -334,12 +400,21 @@ unbound request
 This transition completes before any conversation payload is opened. With no workspace request,
 the context binds an explicit global scope rather than an undefined/mutable state.
 
-### 6.1 AdapterIoReadEvent (internal test/audit seam)
+### 6.1 AdapterIoEvent and OperationIoContext (internal test/audit seam)
 
 ```ts
-interface AdapterIoReadEvent {
+interface OperationIoContext {
+  contextId: string;
+  dataSourceIdentity: string;
+  sourceReadLimits: Readonly<SourceReadLimitsV1>;
+  signal?: AbortSignal;
+  emit?: (event: AdapterIoEvent) => void; // core/test seam; not a public locator API
+}
+
+interface AdapterIoEvent {
   adapter: 'filesystem' | 'sqlite' | 'key-value';
-  operation: 'open' | 'read' | 'query' | 'get';
+  operation: 'open' | 'read' | 'prepare' | 'query' | 'get' | 'backup';
+  contextId: string;
   dataSourceIdentity: string;
   logicalSessionId?: string;
   sourceRole?: SourceRole;
@@ -352,8 +427,12 @@ interface AdapterIoReadEvent {
 Rules:
 
 - The filesystem, SQLite, and key/value adapters emit an event immediately before each actual
-  open/read, database open/query, or key/value read. A resolver-level observer may mirror these
-  events but cannot substitute for them.
+  open/read, statement prepare/query, online backup, or key/value read. A resolver-level observer
+  may mirror these events but cannot substitute for them.
+- One immutable `OperationIoContext` propagates through catalog discovery, hydration, parsing,
+  snapshot/backup, and cleanup. Nested adapters copy `contextId`, `dataSourceIdentity`, the validated
+  frozen `sourceReadLimits`, `signal`, and the audit emitter rather than constructing an unbound
+  context.
 - Adapter operations must select a reviewed resource class. An absent or unknown classification is
   treated as `conversation-payload`, never as metadata.
 - Metadata classes are restricted to membership/inventory fields. Titles, previews, transcript
@@ -591,6 +670,9 @@ Compatibility aliases:
   `lastUpdatedAt`; their additive source fields carry the provenance above.
 - Complete/replacement-safe maps to `source: 'global'`; any degraded/unsafe view maps to
   `source: 'workspace-fallback'`.
+- cursor-history's ownership ends at this complete replacement-safe projection and signal. The
+  unchanged compatibility consumer owns its persistence transaction and rollback; only the
+  combined regression harness claims atomic downstream replacement.
 - Deprecated v0.17 literals remain accepted by declarations during transition but are not emitted by
 new resolution.
 
@@ -599,7 +681,7 @@ new resolution.
 ```ts
 interface ResolvedSessionSummary {
   id: string;
-  index: number;
+  index: number; // core/CLI one-based; public-library summary projection zero-based
   indexScope: IndexScope;
   indexWorkspacePath?: string;
   title: string | null;
@@ -632,7 +714,7 @@ A resolved summary contains the complete resolved metadata projection plus the e
 ```ts
 interface AmbiguousSessionSummary {
   id: string;
-  index: number;
+  index: number; // core/CLI one-based; public-library summary projection zero-based
   indexScope: IndexScope;
   indexWorkspacePath?: string;
   resolutionState: 'ambiguous';
@@ -669,14 +751,16 @@ interface IndexAddress {
 ## 14. SessionDiagnostic and typed errors
 
 ```ts
-interface SessionDiagnostic {
-  code:
+type GeneralSessionDiagnosticCode =
     | 'WORKSPACE_AMBIGUOUS'
     | 'SESSION_AMBIGUOUS'
     | 'SESSION_SCOPE_MISMATCH'
     | 'UNSUPPORTED_SESSION_MIGRATION'
     | 'DATABASE_CAPABILITY_MISSING'
     | 'TEMPORARY_ARTIFACT_CLEANUP_FAILED';
+
+interface GeneralSessionDiagnostic {
+  code: GeneralSessionDiagnosticCode;
   message: string;
   sessionId?: string;
   sourceRole?: SourceRole;
@@ -684,11 +768,40 @@ interface SessionDiagnostic {
   occurrenceRefs?: string[];
   remedy?: string;
 }
+
+interface SourceEncodingDiagnostic {
+  code: 'SOURCE_ENCODING_INVALID';
+  message: string;
+  sessionId?: string;
+  sourceRole?: SourceRole;
+  sourceKind: 'jsonl' | 'sqlite';
+  outcome: 'partial';
+  remedy: string;
+}
+
+type SourceLimitExceededDiagnostic = {
+  code: 'SOURCE_LIMIT_EXCEEDED';
+  message: string;
+  sessionId?: string;
+  sourceRole?: SourceRole;
+  policyVersion: 'source-read-limits/v1';
+  limit: number;
+  observedAtLeast: number;
+  outcome: 'partial';
+  retryableWithOverride: true;
+  remedy: string;
+} & (JsonlSourceLimitDimension | SqliteSourceLimitDimension);
+
+type SessionDiagnostic =
+  | GeneralSessionDiagnostic
+  | SourceEncodingDiagnostic
+  | SourceLimitExceededDiagnostic;
 ```
 
 Errors add stable `code` and typed safe details. Raw locators and conversation content never appear.
 Context errors additionally use `READ_CONTEXT_SOURCE_MISMATCH`,
-`READ_CONTEXT_SCOPE_MISMATCH`, and `READ_CONTEXT_DISPOSED`; migration revalidation uses
+`READ_CONTEXT_SCOPE_MISMATCH`, `READ_CONTEXT_OPTIONS_MISMATCH`, and `READ_CONTEXT_DISPOSED`;
+migration revalidation uses
 `MIGRATION_TARGET_CHANGED`; driver exhaustion uses `NO_CAPABLE_DATABASE_DRIVER`.
 
 ## 15. SessionReadContext (internal with public factory)
@@ -701,6 +814,8 @@ interface SessionReadContextOptions {
   includeCrossWorkspaceSources?: boolean; // default false
   resolvedSessionCapacity?: number;       // default 1
   onDiagnostic?: (value: SessionDiagnostic) => void;
+  sourceReadLimits?: Partial<Omit<SourceReadLimitsV1, 'policyVersion'>>;
+  signal?: AbortSignal;
 }
 
 interface SessionReadContextState {
@@ -710,6 +825,7 @@ interface SessionReadContextState {
   activeResolutions: Map<string, Promise<ResolvedSessionView>>;
   completedLru: Map<string, ResolvedSessionView>;
   capacity: number;
+  io: OperationIoContext;
   disposed: boolean;
 }
 ```
@@ -720,6 +836,8 @@ Validation and lifecycle:
 - Active resolutions `A` are separate from the completed LRU. The context owns at most `C+A`
   decoded sessions; caller-returned objects are outside context ownership.
 - A rejection is removed immediately and remains retryable.
+- Cancellation is observed at bounded parser/adapter boundaries and reaches the same nested
+  `try/finally` cleanup path as an operation failure.
 - `releaseSession()` evicts one completed value; `dispose()` is idempotent and clears all completed
   values after active work settles/cancels according to the caller.
 - Any operation after disposal fails with the typed disposed error.
@@ -790,8 +908,11 @@ interface BackupSnapshot {
 
 Rules:
 
-- Directory creation is exclusive and unique; POSIX mode is `0700`.
-- The marker and plaintext files are exclusive and POSIX `0600`.
+- Directory creation is exclusive and unique; POSIX mode is `0700` on permission-aware platforms.
+- The marker and plaintext files are exclusive and POSIX `0600` on permission-aware platforms.
+- On Windows, the directory is created beneath the system per-user temporary location with
+  inherited access controls and the same uniqueness, no-reuse, cleanup, and typed-residue rules.
+  This feature does not claim independently verified cross-user ACL isolation.
 - Close and cleanup are nested `try/finally`; cleanup attempts all tracked paths.
 - Every open workspace is registered in one process-level registry. Coordinated handlers for
   `SIGINT`, `SIGTERM`, and `SIGHUP` perform synchronous best-effort disposal once, then preserve the
@@ -807,7 +928,116 @@ Rules:
   overwrite preserves the existing mode, explicit POSIX sharing uses `0666 & ~currentUmask`, and no
   path changes a parent directory or the process umask.
 
-## 18. DatabaseCapabilityProfile
+## 18. BackupManifest and source parsing policy
+
+```ts
+interface BackupManifest {
+  producer?: string; // exact package version for new archives; absent/legacy values remain readable
+  // existing manifest members remain
+}
+
+interface SourceReadLimitsV1 {
+  readonly policyVersion: 'source-read-limits/v1';
+  readonly jsonlRecordBytes: number;
+  readonly jsonlSourceBytes: number;
+  readonly jsonlRecordCount: number;
+  readonly sqlitePageRows: number;
+  readonly sqlitePageBytes: number;
+  readonly sqliteValueBytes: number;
+  readonly sqliteRowCount: number;
+  readonly sqliteDecodedBytes: number;
+  readonly zipCompressedBytes: number;
+  readonly zipEntryCount: number;
+  readonly zipEntryBytes: number;
+  readonly zipAggregateBytes: number;
+  readonly zipCompressionRatio: number;
+}
+
+const SOURCE_READ_LIMITS_V1_DEFAULTS: SourceReadLimitsV1 = {
+  policyVersion: 'source-read-limits/v1',
+  jsonlRecordBytes: 67_108_864,
+  jsonlSourceBytes: 4_294_967_296,
+  jsonlRecordCount: 2_000_000,
+  sqlitePageRows: 256,
+  sqlitePageBytes: 268_435_456,
+  sqliteValueBytes: 134_217_728,
+  sqliteRowCount: 5_000_000,
+  sqliteDecodedBytes: 8_589_934_592,
+  zipCompressedBytes: 17_179_869_184,
+  zipEntryCount: 65_536,
+  zipEntryBytes: 8_589_934_592,
+  zipAggregateBytes: 17_179_869_184,
+  zipCompressionRatio: 200,
+};
+
+interface SourceParsingPolicy {
+  acceptedTextEncoding: 'utf8-with-optional-leading-bom';
+  ignoreUnknownFields: true;
+  limits: Readonly<SourceReadLimitsV1>;
+}
+
+interface SourceLimitFailureBase {
+  code: 'SOURCE_LIMIT_EXCEEDED';
+  policyVersion: 'source-read-limits/v1';
+  limit: number;
+  observedAtLeast: number;
+  retryableWithOverride: true;
+  remedy: string;
+}
+
+type SourceLimitFailure =
+  | (SourceLimitFailureBase &
+      (JsonlSourceLimitDimension | SqliteSourceLimitDimension) & {
+        outcome: 'partial' | 'fatal';
+      })
+  | (SourceLimitFailureBase &
+      ZipSourceLimitDimension & {
+        outcome: 'fatal';
+      });
+
+type SourceParsingDiagnostic =
+  | {
+      code: 'SOURCE_ENCODING_INVALID';
+      sourceKind: 'jsonl' | 'sqlite';
+      outcome: 'partial' | 'fatal';
+      remedy: string;
+    }
+  | SourceLimitFailure
+  | {
+      code: 'SOURCE_LIMIT_CONFIGURATION_INVALID';
+      outcome: 'fatal';
+      invalidField: string;
+      invalidValue?: string | number;
+      receivedType: string;
+      violatedConstraint: string;
+      remedy: string;
+    };
+```
+
+Rules:
+
+- Every newly created manifest uses the version of the running package artifact as `producer`.
+  Missing or historical values remain readable. `producer` is diagnostic provenance only and is
+  excluded from logical/message identity, replica equivalence, deduplication, and incremental-sync
+  comparisons.
+- Text accepts deterministic UTF-8 with one optional leading BOM. Unknown fields/columns are
+  ignored. Invalid or mixed encoding is never guessed, transcoded, or replacement-decoded; it yields
+  a typed partial outcome only when a safe fallback remains, otherwise one typed fatal outcome.
+- JSONL is incremental and bounded per record/source/count; SQLite uses keyset/row-ID metadata pages,
+  preflights value lengths, fetches payloads sequentially, and is bounded per page/value/row/decoded
+  aggregate; ZIP bounds the compressed container, preflights central-directory
+  entry/count/aggregate/ratio metadata, and rechecks streamed output during private materialization.
+  A limit is never reported as successful truncation.
+- `SourceReadLimitsV1` defaults are inclusive. Raw-byte counters accept equality and fail the first
+  unit above. JSONL resets per transcript, SQLite aggregate counters reset per logical-session
+  hydration and separately per metadata catalog scan, and ZIP counters reset per archive.
+- A caller may provide a validated partial per-operation override copied into the immutable operation
+  context. There is no global/environment/input/manifest override, no `unlimited` value, and no
+  automatic retry at a higher limit. Limits and overrides are excluded from every identity,
+  equivalence, deduplication, and incremental-sync comparison.
+- Policy constants are centralized and documented; repeated input bytes produce the same outcome.
+
+## 19. DatabaseCapabilityProfile
 
 ```ts
 type DatabaseCapability = 'read' | 'readWrite' | 'onlineBackup';
@@ -848,3 +1078,7 @@ Selection rules:
     v0.17 input converges once and becomes idempotent.
 11. Replica equivalence includes directly stored timestamp values but excludes timestamp provenance
     annotations and every inferred display timestamp value.
+12. Unknown supported fields do not change a result; invalid/mixed encoding and every exceeded
+    source bound produce deterministic typed outcomes without silent truncation or guessed text.
+13. Backup producer metadata reports the creating artifact but never participates in identity or
+    incremental equality.

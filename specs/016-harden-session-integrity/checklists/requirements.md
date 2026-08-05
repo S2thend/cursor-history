@@ -39,10 +39,22 @@
   byte-for-byte preservation fixture.
 - Validation iteration 3 fixed the zero-based v0.16 fallback index contract, made divergent replica
   references diagnostic-only, and defined deterministic Store synthetic-ID collision handling.
-- Planning validation resolved catchable versus uncatchable temporary-file cleanup, retained the
-  released fatal JSON stream behavior for compatibility, completed the Store state matrix and
-  timestamp provenance contracts, required plural deterministic source paths and runtime tool IDs,
-  and limited attachment compatibility to fields the unchanged vibe-history adapter consumes.
+- Planning validation resolved catchable versus uncatchable temporary-file cleanup, versioned the
+  intentional fatal-JSON migration from stdout to stderr while preserving object/exit contracts,
+  completed the Store state matrix and timestamp provenance contracts, required plural
+  deterministic source paths and runtime tool IDs, and limited attachment compatibility to fields
+  the unchanged vibe-history adapter consumes.
+- Post-analysis validation made logical pagination/no-backfill normative, expanded JSDoc and fatal
+  CLI coverage to closed package/command registries, made the specification the sole compatibility
+  matrix authority, added executable synthetic-fixture safety checks, and fixed exact configurable
+  Source Read Limits v1 defaults plus a real v0.16-readable Cursor-source preflight compatibility
+  gate distinct from the downstream vibe-history archive harness.
+- Final remediation pinned the unchanged vibe-history consumer oracle to revision
+  `698701775144f7d8875330e1f8caec9ddfc27744` with copied-path/blob provenance, replaced JSON-only
+  persistence emulation with a deterministic real SQLite rollback/reopen test, made all 13
+  source-limit diagnostic dimensions exact (including fractional ZIP-ratio observations), and
+  ordered preflight, repository freeze, final validation, pack-once smoke, manual approval, and
+  exact-byte publication so every failure is fail-closed.
 - Exact public field names, identity formats, existing provenance tokens, JSON shape, and supported
   runtime range are externally observable compatibility constraints, not implementation design.
 - Constitution v1.2.0 adds Stable Public Contracts and Source Fidelity as an ongoing project

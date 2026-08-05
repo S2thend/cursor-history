@@ -10,6 +10,7 @@
 --data-path <path>
 -w, --workspace <path>
 --include-cross-workspace-sources
+--source-limit <field>=<IEC-size-or-integer>  # repeatable
 ```
 
 - `--workspace` accepts a normalized full historical path or one unambiguous component suffix.
@@ -20,7 +21,44 @@
 - `--include-cross-workspace-sources` may broaden reads only to contributors of UUIDs already
   selected in scope. It never scans unrelated conversation payload and discloses every broadened
   contributor.
-- Global options apply uniformly to `list`, `show`, `search`, `export`, and `migrate-session`.
+- `--source-limit` raises or lowers one documented Source Read Limits v1 field for this invocation.
+  Byte fields accept decimal bytes or an exact `KiB`, `MiB`, or `GiB` suffix using powers of 1024;
+  count/row/ratio fields accept decimal positive safe integers only. Values use
+  `^[1-9][0-9]*(KiB|MiB|GiB)?$`: no sign, decimal fraction, exponent, whitespace, or alternate
+  suffix is accepted. Repeating the flag for different fields is allowed; repeating one field is
+  rejected rather than silently taking a discovery-order winner. Unknown fields and
+  `policyVersion` are rejected. The final map is validated and frozen before source content I/O.
+  There is no `unlimited` value and no global,
+  environment-derived, input/manifest-driven, or automatic-retry override. Raising a bound can
+  increase resource exposure; it never changes identity or deduplication semantics.
+
+`source-read-limits/v1` uses these exact inclusive defaults; equality passes:
+
+| Field | Inclusive default |
+|---|---:|
+| `jsonlRecordBytes` | `67_108_864` |
+| `jsonlSourceBytes` | `4_294_967_296` |
+| `jsonlRecordCount` | `2_000_000` |
+| `sqlitePageRows` | `256` |
+| `sqlitePageBytes` | `268_435_456` |
+| `sqliteValueBytes` | `134_217_728` |
+| `sqliteRowCount` | `5_000_000` |
+| `sqliteDecodedBytes` | `8_589_934_592` |
+| `zipCompressedBytes` | `17_179_869_184` |
+| `zipEntryCount` | `65_536` |
+| `zipEntryBytes` | `8_589_934_592` |
+| `zipAggregateBytes` | `17_179_869_184` |
+| `zipCompressionRatio` | `200` |
+
+Limit diagnostics pair fields exactly: JSONL/SQLite/ZIP byte bounds use `bytes`; JSONL record and
+ZIP entry counts use `records`; SQLite page/total row bounds use `rows`; only
+`zip-compression-ratio` uses `ratio`. Byte/count/row observations are positive integers. A first
+failing ZIP ratio observation is a positive number and may be fractional.
+
+- Addressing/scope options apply uniformly to `list`, `show`, `search`, `export`, `migrate`, and
+  `migrate-session`. `--source-limit` also applies to source-reading `backup`, `restore`, and
+  `list-backups` paths where the named carrier bound is relevant; irrelevant fields remain harmless
+  validated configuration rather than changing another carrier's behavior.
 
 Numeric CLI and migration indices are one-based. An index is ephemeral and valid only with the same
 data path/backup, workspace scope, and catalog snapshot that produced it. Once selected, the command
@@ -345,13 +383,22 @@ Add:
 Without `--shared`, a newly created final archive is owner-only (`0600` on POSIX). Force-overwrite
 preserves an existing mode exactly. On POSIX, `--shared` explicitly selects the ordinary
 non-executable mode `0666 & ~currentUmask`. Temporary plaintext snapshots/staging remain owner-only
-even when the final archive is shared, and no command changes the process umask.
+even when the final archive is shared, and no command changes the process umask. On Windows the
+operation uses the system per-user temporary location, inherited access controls, exclusive paths,
+and the same cleanup guarantees without claiming independently verified cross-user ACL isolation.
+
+Every newly created manifest reports the exact running package version as `producer`; older or
+missing producer values remain readable. The field is diagnostic provenance and does not affect
+session/message identity, replica equivalence, deduplication, or incremental synchronization.
 
 ## Diagnostics and fatal errors
 
 Successful/best-effort commands put nonfatal diagnostics in their existing stdout JSON envelope.
-For a fatal branch that already emits a JSON error object, only `code` and safe `details` are
-additive to its released object shape:
+Existing human-readable fatal errors continue to use stderr. Every fatal JSON object is written to
+stderr. For a fatal branch that already emits
+a JSON error object, the same locked failure fixture retains every pre-existing field name, type,
+and value and the same exit-category meaning; `code` and safe `details` are additive, so the entire
+object is not required to remain byte-for-byte identical:
 
 ```json
 {
@@ -366,15 +413,18 @@ additive to its released object shape:
 }
 ```
 
-No error details contain content or a raw physical locator.
+No error details contain content or a raw physical locator. Built-CLI fixtures first lock the v0.17
+object/exit baseline, then assert the intentional versioned transition of every fatal JSON object
+from stdout to stderr. The release warning and migration guide tell scripts that previously parsed
+fatal JSON from stdout to read stderr instead. Successful result bytes remain on stdout.
 
-This corrective release preserves the released output stream and exit code for every command/error
-branch. Existing command-owned JSON failures that write to stdout continue to write to stdout;
-existing failures routed through stderr continue to use stderr. Built-CLI regression fixtures lock
-the v0.17 stream, object baseline, and exit code per branch. No existing stdout error moves to
-stderr, no new stdout error path is introduced, and plain-text fatal branches are not silently
-redefined as a universal JSON protocol. Normalizing all fatal JSON to stderr is out of scope and
-requires a separately reviewed compatibility transition.
+The fatal-path coverage inventory is closed over the command registry, not a hand-picked sample. It
+includes `list`, `show`, `search`, `export`, `migrate`, `migrate-session`, `backup`, `restore`, and
+`list-backups`, plus root option/usage parsing, command-loading failures, not-found failures, I/O
+failures, and unexpected typed failures. Every registered command maps each reachable fatal JSON
+category to a built-process fixture or a registry-backed proof. Adding a command or fatal category
+without such coverage fails the release gate. This inventory is separate from Compatibility Matrix
+v1, which covers source representations and carriers.
 
 | Category | Exit code |
 |----------|-----------|
@@ -383,10 +433,30 @@ requires a separately reviewed compatibility transition.
 | Existing usage-error category | 2 |
 | Existing not-found category | 3 |
 | Existing I/O-error category | 4 |
+| `SOURCE_LIMIT_CONFIGURATION_INVALID` | 2 (usage error) |
+| Fatal `SOURCE_ENCODING_INVALID` | 4 (I/O error) |
+| Fatal `SOURCE_LIMIT_EXCEEDED` | 4 (I/O error) |
+| Explicit safe-fallback partial result for encoding/limit diagnostics | 0 (successful result envelope) |
 
-The table names the existing exit categories for new typed failures; it does not authorize
-remapping a released command branch. Human-readable errors and warnings continue on their released
-streams; successful content goes to stdout.
+The table names the existing exit categories for new typed failures; it does not authorize an
+unversioned category remap. The explicit source-policy rows fix categories for newly introduced
+codes. Human-readable fatal errors and warnings use stderr; successful content uses stdout.
+
+`SOURCE_ENCODING_INVALID` and `SOURCE_LIMIT_EXCEEDED` follow the same rule. Invalid/mixed encoding
+is never guessed or replacement-decoded, and oversized JSONL/SQLite/ZIP input is never silently
+truncated into a complete result. A safe fallback may produce an explicit partial success envelope;
+otherwise one fatal JSON object is emitted on stderr.
+
+`SOURCE_LIMIT_EXCEEDED` safe `details` contain `policyVersion`, `sourceKind`, `bound`, `limit`,
+`observedAtLeast`, `unit`, partial/fatal `outcome`, `retryableWithOverride: true`, and a remedy. When
+a streaming reader cannot cheaply know the final size, `observedAtLeast` is the first observed
+failing value, normally integer `limit + 1` for byte/count/row bounds; for
+`zip-compression-ratio` it is the exact first positive failing ratio and may be fractional. Invalid,
+fractional, non-finite, unsafe-integer, zero,
+negative, cross-field-inconsistent, or runtime-unmaterializable overrides fail before content I/O as
+`SOURCE_LIMIT_CONFIGURATION_INVALID`; its safe `details` contain `invalidField`, optional primitive
+`invalidValue`, `receivedType`, `violatedConstraint`, and `remedy`. Neither error exposes source
+content or a physical locator.
 
 ## Message-type rendering
 
@@ -416,3 +486,10 @@ cursor-history --workspace /work/a migrate-session 1 /work/destination --dry-run
 # Request a shared final archive; private is the default
 cursor-history backup --shared
 ```
+
+Every public command and option has complete shipped help. Each CLI example in shipped README/help
+is executed against the built CLI, and the same frozen structured-output schema is validated against
+the built CLI and exact packed artifact. The finite source/carrier cases are normative in
+[`../spec.md`](../spec.md), repeated in the design-time
+[`compatibility-matrix-v1.md`](compatibility-matrix-v1.md), and shipped in
+`docs/compatibility.md`; matrix v1 supports Composer-only backup archives.

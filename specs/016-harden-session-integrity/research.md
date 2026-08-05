@@ -21,16 +21,49 @@ tag did. The workspace fallback freezes the tagged `parseChatData`, `parseCompos
 not define it.
 
 Run that projector through a test-only copy of the unchanged vibe-history Cursor adapter and
-replacement policy. For session UUID `S`, that consumer creates message key
+replacement policy pinned to repository `S2thend/vibe-history` revision
+`698701775144f7d8875330e1f8caec9ddfc27744`. This revision is copied into the test oracle by
+content, not loaded from an adjacent checkout. Its required source-blob inventory is:
+
+| Source path | Git blob |
+|---|---|
+| `packages/core/src/providers/cursor/index.ts` | `cb986058e481bebe6a902d80519f17813b53bc8f` |
+| `packages/core/src/providers/utils.ts` | `e0326b4c104d00d3672d25b77298afcdd702105a` |
+| `packages/core/src/types/message.ts` | `cab7fa684c7685b4b0c7a6813391c53eee8c1d31` |
+| `packages/core/src/types/session.ts` | `c8c337fc34da8c28cb9adc9f063135339a92ac9b` |
+| `packages/core/src/sync/state.ts` | `ce51f1429f7169f5586dcc5e66eed9df22c46d22` |
+| `packages/core/src/sync/policy.ts` | `d5a16bca2b3169c00ba08076422a7f44b6627b4f` |
+| `packages/core/src/sync/engine.ts` | `48b82557d32225f6489f329e2a349aa93d0d149f` |
+| `packages/core/src/sync/targets/sql/base.ts` | `893f60fcd0abf85d4eebfc728c0d70836006f316` |
+| `packages/core/src/sync/targets/sql/sqlite.ts` | `cb9e7e6ba4126fba14192af88bbd3b33f3f42348` |
+| `packages/core/src/sync/targets/sql/schema.sqlite.ts` | `6e20c92853765086c9bb8b3d0395882817f6b556` |
+| `drizzle/sqlite/0000_light_hellfire_club.sql` | `15a9ba96e3629310277ed5da41a17047c921ab9b` |
+
+The checked-in consumer manifest records this revision/table and the SQLite schema/migration
+assumptions exercised by the deterministic synthetic archive: persisted session/message/tool
+relationships, the sync metadata digest, the complete-`global` versus
+degraded-`workspace-fallback` replacement rule, and one transaction that deletes prior children and
+inserts the complete replacement. A conformance test hashes the vendored oracle inputs and executes
+the pinned SQL transaction against a real synthetic SQLite database. It injects a failure after
+delete and before replacement insertion, closes and reopens the database, and accepts only the full
+old state; after success it accepts only the full new state. It never treats a
+hand-maintained golden output as proof of equivalence and never consults a mutable live
+vibe-history checkout during the required test run.
+
+For session UUID `S`, that consumer creates message key
 `cursor:S:<source-message-id>` when the source ID is nonempty, otherwise
 `cursor:S:msg:<zero-based-final-array-index>`, and tool key
 `<normalized-message-key>:tc:<zero-based-tool-index>`. The harness exercises the actual atomic
-session-replacement transaction and complete-message digest.
+session-replacement transaction and complete-message digest. The unchanged test-only vibe-history
+adapter owns that transaction and rollback; cursor-history owns only the complete,
+replacement-safe projection and compatibility signal supplied to it. This is a combined-system
+acceptance oracle, not a new cursor-history persistence API.
 
 **Rationale**: The compatibility promise concerns durable keys and replacement behavior actually
-used by the existing archive, not an approximation reconstructed from current code. A golden
-consumer harness verifies session, message, tool, parent, digest, and idempotency behavior together
-without adding a runtime dependency on vibe-history.
+used by the existing archive, not an approximation reconstructed from current code. Pinning both
+upstream projector and downstream consumer source makes the oracle reproducible. A golden consumer
+harness then verifies session, message, tool, parent, digest, transaction/rollback, and idempotency
+behavior together without adding a runtime dependency on vibe-history.
 
 **Alternatives considered**: Snapshot only cursor-history JSON (insufficient to prove downstream
 keys or replacement); depend on the live vibe-history repository (not reproducible); preserve every
@@ -208,11 +241,13 @@ metadata may locate memberships, but off-scope contributors remain omitted and m
 partial. Explicit `includeCrossWorkspaceSources` may load contributors only for UUIDs already
 selected in the bound scope and records each broadened path.
 
-Prove the boundary below the resolver: all filesystem opens/reads, SQLite opens and queries, and
-key/value reads flow through shared adapters that automatically record operation, physical source,
-table/key class, and whether it is catalog metadata or conversation payload. Tests also install
-off-scope poison-canary DB rows, transcript files, and blobs that throw on any touch. A voluntary
-high-level observer is diagnostic convenience only and cannot be the sole evidence of isolation.
+Prove the boundary below the resolver: all filesystem opens/reads, SQLite opens, statement prepares,
+queries, online backups, and key/value reads flow through shared adapters that automatically record
+operation, operation-context identity, physical source, safe resource class, and whether it is
+catalog metadata or conversation payload. The same immutable context carries its optional
+`AbortSignal` and low-level observer through every nested adapter. Tests also install off-scope
+poison-canary DB rows, transcript files, and blobs that throw on any touch. A voluntary high-level
+resolver observer is diagnostic convenience only and cannot be the sole evidence of isolation.
 
 **Rationale**: Current eager Store discovery both reads unrelated conversations and pins every
 decoded Store session, so neither result-only filtering nor an LRU around final sessions can satisfy
@@ -294,6 +329,13 @@ without a diagnostic handler, an ambiguity that would otherwise be skipped throw
 Opaque occurrence references are diagnostic, context-bound, contain no path, and never authorize
 mutation.
 
+Add `listSessionSummaries()` as a separate additive public API. It uses the existing public-read
+zero-based indices and pagination inputs, returns exactly one payload-free summary per logical row
+in the requested catalog window, and can therefore represent divergent rows without fabricating an
+empty session. Existing `listSessions()` retains its full-session result type and released
+pagination shape; it diagnoses/skips an ambiguous row according to the existing continuation
+policy rather than returning a union.
+
 Canonicalize every new set-like public array before serialization: source roles use
 `composer, store`; reason/state enums use declaration order; workspace memberships and every
 source-instance `workspacePaths` array use normalized Unicode code-point path order; source
@@ -334,8 +376,10 @@ merged session (creates split state).
 ## 12. Read context lifecycle and retention
 
 **Decision**: Construct `SessionReadContext` with immutable data path/backup identity, normalized
-workspace scope, cross-workspace opt-in, diagnostic sink, and completed-session capacity. Preserve a
-deprecated positional global overload for source compatibility. Use a separate in-flight promise
+workspace scope, cross-workspace opt-in, diagnostic sink, optional `AbortSignal`, optional low-level
+audit observer, and completed-session capacity. Preserve a deprecated positional global overload
+for source compatibility. Propagate the same signal/context identity into filesystem, key/value,
+SQLite prepare/query/backup, parser, and private-temp operations. Use a separate in-flight promise
 map for concurrent coalescing and an LRU for completed values. Default `C=1`; built-in search,
 export-all, and streaming core loops use `C=0`. Rejects are removed immediately. Expose
 `releaseSession()` and idempotent `dispose()`, and dispose all built-in contexts in `finally`.
@@ -402,7 +446,15 @@ non-executable file mode `0666 & ~currentUmask`; reading the current umask is al
 umask is never changed. A default force-overwrite preserves the existing archive mode exactly after
 the complete private staging file is ready; explicit sharing may set the ordinary shared mode. The
 backup manifest producer version comes from the package build rather than the current hard-coded
-`0.9.2`.
+`0.9.2`. It equals the version of the running packed artifact that created the archive. Older
+manifests remain readable, and this diagnostic provenance field is excluded from session/message
+identity, replica equivalence, archive deduplication, and incremental synchronization decisions.
+
+On Windows, create each operation under the system-provided user temporary directory and inherit
+its ACLs; still require unique exclusive paths, collision resistance, complete cleanup, and typed
+residue failures. Do not claim an independently verified cross-user unreadability guarantee until
+dedicated ACL creation and multi-user tests exist. The strict `0700`/`0600` owner-only guarantee is
+therefore scoped to permission-aware POSIX platforms.
 
 **Rationale**: A private parent closes the exposure window during SQLite backup, while explicit
 modes protect each plaintext file. Process umask is global and unsafe under concurrent operations.
@@ -443,15 +495,23 @@ Primary references:
 ## 16. Runtime/dependency and release pipeline
 
 **Decision**: Keep `engines.node >=20.0.0`. The release matrix covers Node 20.0.0, exact capability
-boundaries 22.15.1/22.16.0 and 23.7.0/23.8.0 in focused driver tests, current 24.x LTS, and current
-26.x stable. Update `better-sqlite3` within major v12 to a release that supports Node 26 while
-retaining a Node 20 source-build path; v12.10.0 is the minimum researched candidate. Do not adopt
-v13 because it would violate the settled Node 20 contract.
+boundaries 22.15.1/22.16.0 and 23.7.0/23.8.0 in focused driver tests, current 24.x LTS, and the latest
+26.x Current release. Node 20 is upstream EOL at this release date but remains an explicit project
+compatibility contract and therefore stays in the required matrix. Update `better-sqlite3` within
+major v12 to a release that supports Node 26 while retaining and testing its Node 20 source-build
+path; v12.10.0 is the minimum researched candidate. Do not adopt v13 because it would violate the
+settled Node 20 contract.
 
-Split publication into required validation jobs and a dependent publish job. Remove all failure
-swallowing. Run install, typecheck, lint, nonempty tests, and build; pack once; record tag/version and
-SHA-256; install the exact tarball into a clean project; smoke ESM import, CommonJS `require`, CLI
-version plus a real fixture command, and declarations; publish that same tarball. Generate the
+Split publication into required validation jobs, a pack-once candidate stage, a protected
+verification approval, and a dependent publish job. Remove all failure swallowing. Before repository
+freeze, run the metadata-only authorized source-limit preflight and relock all affected artifacts if
+a legitimate source exceeds a default. Freeze tracked evidence, then run install, typecheck, lint,
+nonempty tests, and build. Pack once; record tag/version and SHA-256; install the exact tarball into a
+clean project; smoke ESM import, CommonJS `require`, CLI version plus a real fixture command,
+declarations, schema, JSDoc, and documentation examples; then pause for maintainer-owned
+live/export/backup/custom-path verification against the same bytes. Any failure discards the
+candidate and restarts the preflight-through-pack sequence. Only a passing protected approval may
+publish the preserved tarball without rebuild, repack, or tracked-file changes. Generate the
 currently advertised but missing `dist/lib/index.cjs` rather than removing the `require` export.
 Use a second TypeScript CommonJS output under `dist/cjs/`, place a generated
 `dist/cjs/package.json` with `{"type":"commonjs"}`, and make `dist/lib/index.cjs` require that
@@ -479,32 +539,47 @@ Primary reference:
 
 **Decision**: Ship `CHANGELOG.md` and a canonical compatibility contract in the npm package alongside
 README/LICENSE/dist. Update CLI help, canonical README, library API docs, and localized READMEs (or
-make each localized file link clearly to the canonical contract). Document v0.12-current history,
-the v0.17 warning/pinning path, corrective source/provenance semantics, index scope, exact/unique
-suffix matching, partial states, cross-workspace opt-in, timestamp provenance, and v0.16/v0.17
-upgrade boundaries. Empty/ambiguous results receive stable error/diagnostic codes and remedies.
+make each localized file link clearly to the canonical contract). Every symbol reachable from the
+exact packed package-root TypeScript declaration graph—including aliases and re-exports—receives
+contract JSDoc; callable and constructable exports cover parameters, applicable returns, and thrown
+typed errors. Every command/option receives complete help, built-CLI documentation examples execute
+in tests, and library examples typecheck and run.
+Document v0.12-current history, the v0.17 warning/pinning path, corrective source/provenance
+semantics, all three frozen numeric bases, exact/unique suffix matching, partial states,
+cross-workspace opt-in, timestamp provenance, and v0.16/v0.17 upgrade boundaries.
+Empty/ambiguous results receive stable error/diagnostic codes and remedies.
 
-Preserve each command's released fatal JSON stream and exit-category behavior in this corrective
-release, and lock it with built-CLI regressions. New error codes/details are additive wherever an
-error object already exists. Normalizing every fatal JSON error to stderr would itself break scripts
-and is deferred to a separately reviewed compatibility transition; this plan introduces no new
-stdout error path. Freeze the pathless compatibility aliases exactly: public-library `workspace` is
-the string `"unknown"`, while core/CLI structured `workspacePath` is `null` and canonical workspace
+Keep the existing human-readable fatal-output convention on stderr and move every fatal JSON object
+to stderr in this release, including command-owned v0.17 branches that previously wrote JSON to
+stdout. The versioned migration applies to fatal JSON stream placement; it does not claim a new
+human-readable stream migration. For the same locked failure fixture, preserve
+every pre-existing JSON field name, type, and value and its exit-code category; additive safe
+codes/details remain permitted, so do not require whole-object byte equality. Lock
+both the v0.17 baseline and the intentional stdout-to-stderr transition with built-CLI fixtures, and
+ship an explicit warning plus migration example for scripts that parsed fatal JSON from stdout.
+Successful results remain on stdout; nonfatal best-effort diagnostics stay in their successful JSON
+envelope. Freeze the pathless compatibility aliases exactly: public-library `workspace` is the
+string `"unknown"`, while core/CLI structured `workspacePath` is `null` and canonical workspace
 metadata remains absent.
 
 **Rationale**: Development specs are excluded from the current package and cannot serve library
 consumers. Compatibility decisions must be visible before upgrade and available from installed
 artifacts.
 
-**Alternatives considered**: Specs-only documentation (not shipped); changelog only (insufficient
-API contract); silently alter workspace matching/source semantics (violates constitution VI).
+**Alternatives considered**: Preserve command-specific stdout fatal errors (conflicts with the
+CLI-native constitutional contract); specs-only documentation (not shipped); changelog only
+(insufficient API contract); silently alter workspace matching/source semantics (violates
+constitution VI).
 
 ## 18. Test architecture and release-blocking fault evidence
 
 **Decision**: Combine small deterministic unit tests with real SQLite/ZIP/filesystem integration and
-built-CLI/package e2e tests. Instrument the actual filesystem, SQLite query, and key/value adapter
-boundaries, then combine their event log with poison-canary off-scope payloads that fail if touched;
-a resolver-level observer alone is not accepted as proof. Run POSIX permission tests in a child
+built-CLI/package e2e tests. The locked raw-layout SQLite fixture is generated deterministically
+from wholly synthetic values, includes generation provenance/logical inventory/SHA-256, and is
+scanned for real paths, emails, tokens, machine identifiers, or copied user data. Instrument the
+actual filesystem, SQLite open/prepare/query/backup, and key/value adapter boundaries, then combine
+their event log with poison-canary off-scope payloads that fail if touched; a resolver-level observer
+alone is not accepted as proof. Run POSIX permission tests in a child
 process under `umask 000` and
 inject failures at ZIP parse, secure creation, snapshot, DB open/parse/close, cleanup, target
 revalidation, context cache, and workflow gates. Compatibility fixtures deliberately inject wrong
@@ -521,6 +596,93 @@ message content, raw paths, database contents, or the archive itself.
 isolation, CLI option plumbing, driver capabilities, and packed-entry failures. Mutation-proven
 regressions establish that tests protect the load-bearing lines.
 
+The frozen CLI JSON schema is validated by one executable oracle used first against built-CLI
+fixtures and again against the exact packed artifact; implementation output may not rewrite the
+schema to pass. Feature-016 compatibility governance is complete only when every changed or new
+public value is mapped to its prior-release fixture, disposition, test, and migration note. This is
+a 100% evidence goal for this feature and a required per-PR review practice, not a claim that one
+release can quantify every future change.
+
 **Alternatives considered**: Unit mocks only (already left gaps); manual release verification
 (nonrepeatable); introduce a mutation-testing runtime dependency (unnecessary—a focused fault harness
 is simpler).
+
+## 19. Defensive parsing and bounded source reads
+
+**Decision**: Treat supported text as UTF-8 with at most one leading UTF-8 BOM. Ignore unknown
+object fields/SQLite columns for forward compatibility. Do not heuristically detect or transcode
+invalid/mixed encodings and do not replace invalid bytes with `U+FFFD`, because either choice can
+silently change content hashes and synthetic identity. Return a typed source-partial diagnostic
+when another safe contributor remains; otherwise return the operation's typed fatal parse error.
+
+Adopt inclusive policy `source-read-limits/v1`: JSONL record `67_108_864` bytes (`64 MiB`), source
+`4_294_967_296` bytes (`4 GiB`), and `2_000_000` nonempty records; SQLite metadata page `256` rows
+and `268_435_456` bytes (`256 MiB`), individual value `134_217_728` bytes (`128 MiB`),
+`5_000_000` rows, and `8_589_934_592` decoded bytes (`8 GiB`); ZIP compressed container
+`17_179_869_184` bytes (`16 GiB`), `65_536` central records, entry `8_589_934_592` bytes (`8 GiB`),
+aggregate uncompressed `17_179_869_184` bytes (`16 GiB`), and per-entry/aggregate ratio `200:1`.
+Equality passes and the first raw-byte/count unit above fails.
+
+Process JSONL incrementally by raw-byte line with fatal UTF-8 decoding per bounded record; count the
+optional BOM/newlines in source bytes and nonempty records only. Iterate SQLite with keyset/row-ID
+metadata pages, preflight each SQLite-reported value length, and fetch admitted payloads
+sequentially rather than calling payload `.all()`. Reset SQLite aggregate counters per logical
+session and separately per metadata-only catalog scan so bulk operations do not accumulate an
+entire corpus. Inspect ZIP central-directory metadata before extraction, bound the compressed file,
+and recheck actual streamed output and `uncompressed / max(compressed, 1)` ratios while
+materializing privately. Replace whole-container/entry archive reads and aggregate-buffer archive
+creation with bounded streams. Cancellation is checked between bounded units and flows through the
+same nested cleanup path.
+
+Expose a partial per-operation override in library/context/backup/restore configuration and a
+repeatable CLI `--source-limit <field>=<IEC-size-or-integer>`. Validate positive safe integers,
+runtime string bounds, and cross-field relationships before content I/O; copy/freeze the result.
+Permit explicit raising or lowering, but no unlimited, global, environment, input/manifest,
+automatic-retry, or mutable override. Limits never feed identity/equivalence/deduplication. A safe
+alternate contributor yields a typed partial; no fallback makes a session/source fatal, while any
+ZIP bound failure makes the archive read/validation/restore fatal.
+
+Use a focused Node-20-compatible archive adapter rather than adding a runtime package: bounded
+filesystem range reads locate and validate ZIP32/ZIP64 central records; normalized paths reject
+traversal and duplicate contested names; STORE and DEFLATE entries stream through checksum/CRC and
+limit counters; encryption and unknown compression methods fail explicitly. Existing JSZip may
+remain only on the creation side with streamed file inputs and streamed output. This avoids trusting
+whole-buffer `loadAsync()`/entry materialization while retaining compatibility with archives the
+project already creates.
+
+**Rationale**: Conservative deterministic decoding protects identity stability and avoids hiding
+corruption. Per-input limits satisfy defensive parsing even when the overall read context retains
+only one completed session; an LRU alone cannot bound one enormous transcript, row, or archive. The
+defaults leave high headroom for Cursor source carriers consumed by v0.16, whose normal
+cursor-history backup entry count and compression ratio are small, while explicit per-operation
+overrides avoid converting the defaults into hard compatibility ceilings. Before release, a
+metadata-only preflight over maintainer-authorized live/custom Composer roots and cursor-history
+backup ZIP/SQLite inputs records counts/sizes/ratios; any legitimate exceedance raises the v1
+default before release so an unchanged incremental consumer needs no configuration. The downstream
+vibe-history database/archive is validated by its compatibility harness, not this parser preflight.
+
+**Alternatives considered**: Replacement decoding (changes content/identity); heuristic charset
+detection (nondeterministic and adds dependency); whole-file JSONL/SQLite materialization (unbounded);
+keeping whole-buffer JSZip extraction (a 16 GiB finite bound is not a practical memory bound); adding
+a second ZIP dependency (unnecessary for the narrow existing STORE/DEFLATE backup contract); ZIP
+extraction before limit checks (resource-exhaustion exposure).
+
+## 20. Versioned compatibility matrix
+
+**Decision**: Make the Matrix v1 table in [`spec.md`](spec.md) the sole normative finite source,
+carrier, and preferred-orientation coverage contract. Keep
+[`contracts/compatibility-matrix-v1.md`](contracts/compatibility-matrix-v1.md) as the design-time
+projection, repeat the matrix in packaged `docs/compatibility.md`, and fail validation when any row
+or cell in either projection drifts. Every `Required` cell is
+release-blocking, every `Unsupported` cell has a tested typed outcome, and every `N/A` cell carries
+a rationale. The current backup archive carrier is Composer-only; Store/merged coverage applies to
+live and custom data roots, not to backup archives. Capability discovery cannot remove a required
+cell. A materially new representation/carrier or changed supported outcome advances the matrix
+version.
+
+**Rationale**: A dynamic phrase such as “all applicable combinations” lets the implementation
+silently shrink its own test surface. A versioned finite table makes omissions and future scope
+changes reviewable.
+
+**Alternatives considered**: Full Cartesian product (includes impossible combinations and obscures
+real gaps); implementation-discovered matrix (self-fulfilling); prose-only examples (not finite).
