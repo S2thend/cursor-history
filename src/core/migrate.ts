@@ -5,19 +5,31 @@
  * Workspace-level migration is built on top of session migration.
  */
 
-import { existsSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, readdirSync, statSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import BetterSqlite3 from 'better-sqlite3';
 import {
-  findWorkspaceForSession,
   findWorkspaceByPath,
+  findWorkspaces,
+  createSessionReadContext,
+  listSessions,
+  openDatabase,
   openDatabaseReadWrite,
   getComposerData,
   updateComposerData,
   getWorkspaceLinkedComposerIds,
+  readWorkspaceJson,
+  type ComposerDataResult,
+  type SessionReadContext,
 } from './storage.js';
-import { getGlobalStoragePath, normalizePath, pathsEqual } from '../lib/platform.js';
+import {
+  getCursorDataPath,
+  getGlobalStoragePath,
+  getStoreStackRoot,
+  normalizePath,
+  pathsEqual,
+} from '../lib/platform.js';
 import {
   SessionNotFoundError,
   WorkspaceNotFoundError,
@@ -26,10 +38,25 @@ import {
   DestinationHasSessionsError,
   NestedPathError,
 } from '../lib/errors.js';
+import {
+  MigrationTargetChangedError,
+  SessionAmbiguityError,
+  SessionScopeMismatchError,
+  UnsupportedSessionMigrationError,
+  WorkspaceAmbiguityError,
+  isSessionIntegrityError,
+} from './errors.js';
+import { ensureDriver, selectDatabaseDriver, type DriverName } from './database/index.js';
+import type { Database } from './database/types.js';
+import { resolveSourceReadLimits, SqliteSourceReadBudget } from './source-read-limits.js';
 import type {
+  ChatSessionSummary,
   MigrateSessionOptions,
   MigrateWorkspaceOptions,
+  MigrationMode,
   SessionMigrationResult,
+  SourceReadLimitsOverride,
+  SourceReadLimitsV1,
   WorkspaceMigrationResult,
 } from './types.js';
 
@@ -37,12 +64,7 @@ import type {
  * Generate a new unique session ID (UUID v4 format)
  */
 function generateSessionId(): string {
-  // Simple UUID v4 generator
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+  return randomUUID();
 }
 
 // ============================================================================
@@ -346,284 +368,2427 @@ function updateComposerWorkspaceMetadata(
   };
 }
 
-function composerExistsInGlobalStorage(composerId: string, dataPath?: string): boolean {
-  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
-  if (!existsSync(globalDbPath)) {
-    return false;
-  }
+// ============================================================================
+// Bound migration target preparation
+// ============================================================================
 
-  const db = new BetterSqlite3(globalDbPath, { readonly: true });
+/** Migration eligibility is decided before any writable database is opened. */
+export type MigrationEligibility =
+  | 'eligible-composer'
+  | 'multiple-composer-occurrences'
+  | 'shared-membership'
+  | 'ambiguous'
+  | 'store-only'
+  | 'merged';
+
+/** Private physical address used only by the core migration state machine. */
+export interface InternalComposerLocator {
+  readonly workspaceId: string;
+  readonly databasePath: string;
+  /** Compatibility alias retained for internal callers written against the original draft. */
+  readonly dbPath: string;
+  readonly sessionId: string;
+  /** Position in the decoded workspace Composer array, or -1 for a global-only record. */
+  readonly composerIndex: number;
+  /** Fingerprint of the exact Composer record at composerIndex. */
+  readonly recordFingerprint: string;
+}
+
+/** Exact immutable target produced from one scoped logical selection. */
+export interface BoundMigrationTarget {
+  readonly logicalSessionId: string;
+  readonly composerLocator: InternalComposerLocator;
+  readonly sourceWorkspacePath: string;
+  /** Capable SQLite provider selected once for the complete migration operation. */
+  readonly sqliteDriver: DriverName;
+  /** Store root captured with the operation; environment changes cannot retarget collision checks. */
+  readonly storeRootPath: string;
+  readonly dataSourceIdentity: string;
+  readonly occurrenceFingerprint: string;
+  readonly eligibility: MigrationEligibility;
+  readonly dataPath?: string;
+  readonly sourceReadLimits: Readonly<SourceReadLimitsV1>;
+  readonly signal?: AbortSignal;
+}
+
+/** Options for binding CLI/core one-based or library-specific migration selectors. */
+export interface MigrationBindingOptions {
+  readonly numericBase?: 0 | 1;
+  /** Internal compatibility mode for legacy APIs that already resolved IDs. */
+  readonly treatStringSelectorsAsIds?: boolean;
+  /** Internal operation binding; public migration configuration does not expose this field. */
+  readonly sqliteDriver?: DriverName;
+  /** Internal Store-root snapshot captured by a containing workspace operation. */
+  readonly storeRootPath?: string;
+  readonly workspacePath?: string;
+  readonly dataPath?: string;
+  readonly sourceReadLimits?: SourceReadLimitsOverride | Readonly<SourceReadLimitsV1>;
+  readonly signal?: AbortSignal;
+}
+
+/** Options frozen into a prepared migration before the first write. */
+export interface MigrationOptions {
+  readonly mode: MigrationMode;
+  readonly force?: boolean;
+  readonly dataPath?: string;
+  readonly debug?: boolean;
+  readonly sourceReadLimits?: SourceReadLimitsOverride | Readonly<SourceReadLimitsV1>;
+  readonly signal?: AbortSignal;
+  /** Internal deterministic injection used by collision regression fixtures. */
+  readonly uuidFactory?: () => string;
+}
+
+/** Private prepared state. It deliberately contains locators and is never public JSON. */
+export interface PreparedSessionMigration {
+  readonly target: BoundMigrationTarget;
+  readonly destinationWorkspacePath: string;
+  readonly destinationWorkspaceId?: string;
+  readonly destinationDatabasePath: string;
+  /** Physical identity captured at prepare time; content equality cannot mask file replacement. */
+  readonly destinationDataSourceIdentity: string;
+  readonly mode: MigrationMode;
+  readonly sourceFingerprint: string;
+  readonly destinationFingerprint: string;
+  readonly proposedCopySessionId?: string;
+  readonly dataPath?: string;
+  readonly debug: boolean;
+  readonly sourceReadLimits: Readonly<SourceReadLimitsV1>;
+  readonly signal?: AbortSignal;
+}
+
+interface ComposerOccurrence {
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly databasePath: string;
+  readonly composerIndex: number;
+  readonly composer: Record<string, unknown>;
+  readonly fingerprint: string;
+}
+
+interface GlobalSessionRow {
+  readonly key: string;
+  readonly value: string;
+}
+
+interface MigrationReadGuard {
+  readonly limits: Readonly<SourceReadLimitsV1>;
+  readonly signal?: AbortSignal;
+  readonly sqliteDriver?: DriverName;
+}
+
+function throwIfMigrationAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (typeof signal.throwIfAborted === 'function') signal.throwIfAborted();
+  throw new DOMException('The migration operation was aborted.', 'AbortError');
+}
+
+function createMigrationReadGuard(
+  limits: Readonly<SourceReadLimitsV1>,
+  signal?: AbortSignal,
+  sqliteDriver?: DriverName
+): MigrationReadGuard {
+  return {
+    limits,
+    signal,
+    sqliteDriver,
+  };
+}
+
+function physicalPathIdentity(label: string, path: string): string {
+  const normalized = normalizedPathKey(path);
+  if (!existsSync(path)) return `${label}:${normalized}|missing`;
   try {
-    const composerRow = db
-      .prepare('SELECT 1 FROM cursorDiskKV WHERE key = ? LIMIT 1')
-      .get(`composerData:${composerId}`);
-    if (composerRow) {
-      return true;
-    }
-
-    const bubbleRow = db
-      .prepare('SELECT 1 FROM cursorDiskKV WHERE key LIKE ? LIMIT 1')
-      .get(`bubbleId:${composerId}:%`);
-    return Boolean(bubbleRow);
+    const stat = statSync(path);
+    return `${label}:${normalized}|dev:${String(stat.dev)}|ino:${String(stat.ino)}`;
   } catch {
-    return false;
-  } finally {
-    db.close();
+    return `${label}:${normalized}|unavailable`;
   }
 }
 
-function updateComposerWorkspaceInGlobalStorage(
-  composerId: string,
-  workspacePath: string,
-  workspaceId?: string,
-  dataPath?: string
-): void {
-  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
-  if (!existsSync(globalDbPath)) {
-    return;
-  }
-
-  const db = new BetterSqlite3(globalDbPath, { readonly: false });
-  try {
-    const composerDataRow = db
-      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
-      .get(`composerData:${composerId}`) as { value: string } | undefined;
-    if (!composerDataRow?.value) {
-      return;
-    }
-
-    const composerData = JSON.parse(composerDataRow.value) as Record<string, unknown>;
-    updateComposerWorkspaceMetadata(composerData, workspacePath, workspaceId);
-
-    db.prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ?').run(
-      JSON.stringify(composerData),
-      `composerData:${composerId}`
-    );
-  } finally {
-    db.close();
-  }
+function currentDataSourceIdentity(
+  dataPath: string | undefined,
+  databasePath: string,
+  storeRootPath: string
+): string {
+  const workspaceRoot = getCursorDataPath(dataPath);
+  const globalDatabasePath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+  return [
+    physicalPathIdentity('workspace-root', workspaceRoot),
+    physicalPathIdentity('workspace-db', databasePath),
+    physicalPathIdentity('global-db', globalDatabasePath),
+    physicalPathIdentity('store-root', storeRootPath),
+  ].join('|');
 }
 
-function hydrateComposerFromGlobalStorage(
-  composer: Record<string, unknown>,
-  composerId: string,
-  dataPath?: string
-): Record<string, unknown> {
-  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
-  if (!existsSync(globalDbPath)) {
-    return composer;
-  }
-
-  const db = new BetterSqlite3(globalDbPath, { readonly: true });
+function decodeComposerDataValue(value: string | undefined): ComposerDataResult | null {
+  if (!value) return null;
   try {
-    const row = db
-      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
-      .get(`composerData:${composerId}`) as { value: string } | undefined;
-    if (!row?.value) {
-      return composer;
+    const rawData = JSON.parse(value) as unknown;
+    if (rawData && typeof rawData === 'object' && 'allComposers' in rawData) {
+      const data = rawData as {
+        allComposers?: Array<{ composerId?: string; [key: string]: unknown }>;
+        selectedComposerIds?: unknown[];
+      };
+      const allComposers = Array.isArray(data.allComposers) ? data.allComposers : [];
+      const seenIds = new Set(
+        allComposers
+          .map((composer) => composer.composerId)
+          .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      );
+      const missingSelectedComposers = (
+        Array.isArray(data.selectedComposerIds) ? data.selectedComposerIds : []
+      )
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        .filter((id) => {
+          if (seenIds.has(id)) return false;
+          seenIds.add(id);
+          return true;
+        })
+        .map((composerId) => ({ composerId }));
+      return {
+        composers: [...allComposers, ...missingSelectedComposers],
+        rawData,
+        isNewFormat: true,
+      };
     }
+    if (
+      rawData &&
+      typeof rawData === 'object' &&
+      'selectedComposerIds' in rawData &&
+      Array.isArray((rawData as { selectedComposerIds?: unknown }).selectedComposerIds)
+    ) {
+      return {
+        composers: (rawData as { selectedComposerIds: unknown[] }).selectedComposerIds
+          .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+          .map((composerId) => ({ composerId })),
+        rawData,
+        isNewFormat: true,
+      };
+    }
+    if (Array.isArray(rawData)) {
+      return {
+        composers: rawData as Array<{ composerId?: string; [key: string]: unknown }>,
+        rawData,
+        isNewFormat: false,
+      };
+    }
+  } catch {
+    // Preserve getComposerData()'s historical malformed-row behavior while
+    // ensuring no uncharged retry occurs.
+  }
+  return null;
+}
 
-    const globalComposer = JSON.parse(row.value) as {
-      name?: string;
-      createdAt?: number | string;
-      updatedAt?: number | string;
-      lastUpdatedAt?: number | string;
-      unifiedMode?: string;
-    };
-    const lastUpdatedAt = globalComposer.lastUpdatedAt ?? globalComposer.updatedAt;
+function getComposerDataBounded(
+  db: Awaited<ReturnType<typeof openDatabase>>,
+  guard: MigrationReadGuard,
+  budget = new SqliteSourceReadBudget(guard.limits, 'fatal')
+): ComposerDataResult | null {
+  throwIfMigrationAborted(guard.signal);
+  const metadata = db
+    .prepare(
+      "SELECT length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key = 'composer.composerData'"
+    )
+    .all() as Array<{ valueBytes: number }>;
+  budget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
+  throwIfMigrationAborted(guard.signal);
+  const raw = db
+    .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+    .get() as { value: string } | undefined;
+  // Compatibility for database adapters/mocks that expose the historical
+  // storage helper but no raw row. A real admitted row always follows the
+  // single-read path below, so its payload is never decoded twice.
+  if (!raw?.value) return getComposerData(db);
+  budget.admitDecodedValue(Buffer.byteLength(raw.value));
+  throwIfMigrationAborted(guard.signal);
 
+  // Decode the exact value that was admitted above. Calling getComposerData()
+  // here would issue a second, uncharged SELECT and could observe a different
+  // value between admission and use.
+  return decodeComposerDataValue(raw.value);
+}
+
+function canonicalizeForHash(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeForHash);
+  if (!value || typeof value !== 'object') return value;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    const member = (value as Record<string, unknown>)[key];
+    if (member !== undefined) result[key] = canonicalizeForHash(member);
+  }
+  return result;
+}
+
+function migrationFingerprint(value: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalizeForHash(value)))
+    .digest('hex');
+}
+
+function contextMigrationOptions(context: SessionReadContext | undefined): {
+  dataPath?: string;
+  workspacePath?: string;
+  sourceReadLimits?: SourceReadLimitsOverride | Readonly<SourceReadLimitsV1>;
+  signal?: AbortSignal;
+  sqliteDriver?: DriverName;
+} {
+  if (!context) return {};
+  const raw = context as unknown as Record<string, unknown>;
+  // During the context API transition, accept both the released positional
+  // shape and the additive immutable options/binding shapes.
+  const positional = raw['customDataPath'];
+  if (positional && typeof positional === 'object') {
+    const options = positional as Record<string, unknown>;
     return {
-      ...composer,
-      composerId,
-      ...(typeof globalComposer.name === 'string' ? { name: globalComposer.name } : {}),
-      ...(globalComposer.createdAt !== undefined && globalComposer.createdAt !== null
-        ? { createdAt: globalComposer.createdAt }
-        : {}),
-      ...(lastUpdatedAt !== undefined && lastUpdatedAt !== null ? { lastUpdatedAt } : {}),
-      ...(typeof globalComposer.unifiedMode === 'string'
-        ? { unifiedMode: globalComposer.unifiedMode }
-        : {}),
+      dataPath: typeof options['dataPath'] === 'string' ? options['dataPath'] : undefined,
+      workspacePath:
+        typeof options['workspacePath'] === 'string'
+          ? options['workspacePath']
+          : typeof options['workspace'] === 'string'
+            ? options['workspace']
+            : undefined,
+      sourceReadLimits: options['sourceReadLimits'] as SourceReadLimitsOverride | undefined,
+      signal: options['signal'] instanceof AbortSignal ? options['signal'] : undefined,
+      sqliteDriver:
+        options['sqliteDriver'] === 'node:sqlite' || options['sqliteDriver'] === 'better-sqlite3'
+          ? options['sqliteDriver']
+          : undefined,
     };
-  } catch {
-    return composer;
+  }
+  const scope = raw['scope'] as Record<string, unknown> | undefined;
+  const binding = raw['binding'] as Record<string, unknown> | undefined;
+  return {
+    dataPath:
+      typeof positional === 'string'
+        ? positional
+        : typeof binding?.['dataPath'] === 'string'
+          ? binding['dataPath']
+          : undefined,
+    workspacePath:
+      typeof raw['workspaceScope'] === 'string'
+        ? raw['workspaceScope']
+        : typeof scope?.['workspacePath'] === 'string'
+          ? scope['workspacePath']
+          : undefined,
+    sourceReadLimits: raw['sourceReadLimits'] as
+      SourceReadLimitsOverride | Readonly<SourceReadLimitsV1> | undefined,
+    signal: raw['signal'] instanceof AbortSignal ? raw['signal'] : undefined,
+    sqliteDriver:
+      raw['sqliteDriver'] === 'node:sqlite' || raw['sqliteDriver'] === 'better-sqlite3'
+        ? raw['sqliteDriver']
+        : undefined,
+  };
+}
+
+function normalizedPathKey(value: string): string {
+  return normalizePath(value).replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+async function resolveMigrationWorkspacePath(
+  requested: string | undefined,
+  dataPath: string | undefined,
+  guard: MigrationReadGuard
+): Promise<string | undefined> {
+  if (!requested) return undefined;
+  const normalizedRequest = normalizedPathKey(requested);
+  const workspaces = await findWorkspaces(dataPath, undefined, {
+    sqliteDriver: guard.sqliteDriver,
+    sourceReadLimits: guard.limits,
+    signal: guard.signal,
+  });
+  const exact = workspaces.find((workspace) => pathsEqual(workspace.path, normalizedRequest));
+  if (exact) return normalizePath(exact.path);
+
+  const suffix = normalizedRequest.replace(/^\/+/, '');
+  const matches = workspaces.filter((workspace) => {
+    const candidate = normalizedPathKey(workspace.path);
+    return candidate === suffix || candidate.endsWith(`/${suffix}`);
+  });
+  const uniquePaths = [...new Set(matches.map((workspace) => normalizePath(workspace.path)))];
+  if (uniquePaths.length > 1) throw new WorkspaceAmbiguityError(requested, uniquePaths);
+  return uniquePaths[0] ?? normalizePath(requested);
+}
+
+async function findMigrationWorkspaceByPath(
+  requested: string,
+  dataPath: string | undefined,
+  guard: MigrationReadGuard
+): Promise<Awaited<ReturnType<typeof findWorkspaceByPath>>> {
+  throwIfMigrationAborted(guard.signal);
+  const normalizedRequest = normalizePath(requested);
+  const workspaces = await findWorkspaces(dataPath, undefined, {
+    sqliteDriver: guard.sqliteDriver,
+    sourceReadLimits: guard.limits,
+    signal: guard.signal,
+  });
+  const workspace = workspaces.find((candidate) => pathsEqual(candidate.path, normalizedRequest));
+  if (workspace) return { workspace, dbPath: workspace.dbPath };
+
+  // Empty destinations are intentionally absent from findWorkspaces(), so
+  // locate their database using only workspace metadata and the captured root.
+  const basePath = getCursorDataPath(dataPath);
+  if (!existsSync(basePath)) return null;
+  for (const entry of readdirSync(basePath, { withFileTypes: true })) {
+    throwIfMigrationAborted(guard.signal);
+    if (!entry.isDirectory()) continue;
+    const workspaceDirectory = join(basePath, entry.name);
+    const databasePath = join(workspaceDirectory, 'state.vscdb');
+    if (!existsSync(databasePath)) continue;
+    const path = readWorkspaceJson(workspaceDirectory);
+    if (!path || !pathsEqual(path, normalizedRequest)) continue;
+    return {
+      workspace: {
+        id: entry.name,
+        path: normalizePath(path),
+        dbPath: databasePath,
+        sessionCount: 0,
+      },
+      dbPath: databasePath,
+    };
+  }
+  return null;
+}
+
+/**
+ * Validate and enforce migration's Composer catalog value bounds before the
+ * ordinary listing path decodes those values.
+ */
+async function preflightComposerSourceLimits(
+  dataPath: string | undefined,
+  limits: Readonly<SourceReadLimitsV1>,
+  signal?: AbortSignal,
+  sqliteDriver?: DriverName
+): Promise<void> {
+  throwIfMigrationAborted(signal);
+  const basePath = getCursorDataPath(dataPath);
+  if (!existsSync(basePath)) return;
+  const databasePaths: string[] = [];
+  for (const entry of readdirSync(basePath, { withFileTypes: true })) {
+    throwIfMigrationAborted(signal);
+    if (!entry.isDirectory()) continue;
+    const databasePath = join(basePath, entry.name, 'state.vscdb');
+    if (existsSync(databasePath)) databasePaths.push(databasePath);
+  }
+
+  for (const databasePath of databasePaths.sort()) {
+    throwIfMigrationAborted(signal);
+    // SQLite aggregate counters reset for each independent workspace catalog;
+    // a batch never consumes one corpus-wide budget.
+    const budget = new SqliteSourceReadBudget(limits, 'fatal');
+    const db = await openDatabase(databasePath, { sqliteDriver, signal });
+    try {
+      const metadata = db
+        .prepare(
+          "SELECT length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key = 'composer.composerData'"
+        )
+        .all() as Array<{ valueBytes: number }>;
+      budget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
+      if (metadata.length === 0) continue;
+      const row = db
+        .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+        .get() as { value: string } | undefined;
+      if (row) budget.admitDecodedValue(Buffer.byteLength(row.value));
+    } finally {
+      db.close();
+    }
+  }
+}
+
+async function collectComposerOccurrences(
+  sessionId: string,
+  dataPath?: string,
+  guard: MigrationReadGuard = createMigrationReadGuard(resolveSourceReadLimits())
+): Promise<{
+  occurrences: ComposerOccurrence[];
+  pointerMembershipPaths: string[];
+  complete: boolean;
+}> {
+  const occurrences: ComposerOccurrence[] = [];
+  const pointerMembershipPaths = new Set<string>();
+  const basePath = getCursorDataPath(dataPath);
+  if (!existsSync(basePath)) {
+    return { occurrences, pointerMembershipPaths: [], complete: true };
+  }
+
+  let entries: Dirent<string>[];
+  try {
+    entries = readdirSync(basePath, { withFileTypes: true });
+  } catch (error) {
+    if (isSessionIntegrityError(error) || (error instanceof Error && error.name === 'AbortError')) {
+      throw error;
+    }
+    return { occurrences, pointerMembershipPaths: [], complete: false };
+  }
+
+  let complete = true;
+  for (const entry of entries) {
+    throwIfMigrationAborted(guard.signal);
+    if (!entry.isDirectory()) continue;
+    const workspaceDir = join(basePath, entry.name);
+    const databasePath = join(workspaceDir, 'state.vscdb');
+    if (!existsSync(databasePath)) continue;
+    const resolvedWorkspacePath = readWorkspaceJson(workspaceDir);
+    if (!resolvedWorkspacePath) complete = false;
+    const workspacePath = normalizePath(
+      resolvedWorkspacePath ?? `(unresolved workspace: ${entry.name})`
+    );
+    let db: Awaited<ReturnType<typeof openDatabase>> | null = null;
+    try {
+      db = await openDatabase(databasePath, {
+        sqliteDriver: guard.sqliteDriver,
+        sourceReadLimits: guard.limits,
+        signal: guard.signal,
+      });
+      const result = getComposerDataBounded(db, guard);
+      const pointerBudget = new SqliteSourceReadBudget(guard.limits, 'fatal');
+      result?.composers.forEach((composer, composerIndex) => {
+        if (composer.composerId !== sessionId) return;
+        const record = composer as Record<string, unknown>;
+        occurrences.push({
+          workspaceId: entry.name,
+          workspacePath,
+          databasePath,
+          composerIndex,
+          composer: structuredClone(record),
+          fingerprint: migrationFingerprint(record),
+        });
+      });
+
+      let afterKey = '';
+      while (true) {
+        throwIfMigrationAborted(guard.signal);
+        const metadata = db
+          .prepare(
+            "SELECT key, length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key LIKE '%composerChatViewPane%' AND key > ? ORDER BY key LIMIT ?"
+          )
+          .all(afterKey, guard.limits.sqlitePageRows) as Array<{
+          key: string;
+          valueBytes: number;
+        }>;
+        pointerBudget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
+        if (metadata.length === 0) break;
+        for (const row of metadata) {
+          throwIfMigrationAborted(guard.signal);
+          const payload = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(row.key) as
+            { value: string } | undefined;
+          if (!payload) {
+            complete = false;
+            continue;
+          }
+          pointerBudget.admitDecodedValue(Buffer.byteLength(payload.value));
+          const pointerText = `${row.key}\n${payload.value}`.toLowerCase();
+          if (pointerText.includes(sessionId.toLowerCase())) {
+            pointerMembershipPaths.add(workspacePath);
+          }
+        }
+        afterKey = metadata[metadata.length - 1]!.key;
+        if (metadata.length < guard.limits.sqlitePageRows) break;
+      }
+    } catch (error) {
+      if (
+        isSessionIntegrityError(error) ||
+        (error instanceof Error && error.name === 'AbortError')
+      ) {
+        throw error;
+      }
+      complete = false;
+    } finally {
+      try {
+        db?.close();
+      } catch {
+        complete = false;
+      }
+    }
+  }
+  return {
+    occurrences,
+    pointerMembershipPaths: [...pointerMembershipPaths].sort(),
+    complete,
+  };
+}
+
+async function readGlobalSessionRows(
+  sessionId: string,
+  dataPath?: string,
+  guard: MigrationReadGuard = createMigrationReadGuard(resolveSourceReadLimits())
+): Promise<GlobalSessionRow[]> {
+  throwIfMigrationAborted(guard.signal);
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+  if (!existsSync(globalDbPath)) return [];
+  const db = await openDatabase(globalDbPath, {
+    sqliteDriver: guard.sqliteDriver,
+    sourceReadLimits: guard.limits,
+    signal: guard.signal,
+  });
+  try {
+    return readGlobalSessionRowsFromDatabase(sessionId, db, guard);
   } finally {
     db.close();
+  }
+}
+
+function readGlobalSessionRowsFromDatabase(
+  sessionId: string,
+  db: Database,
+  guard: MigrationReadGuard
+): GlobalSessionRow[] {
+  const rows: GlobalSessionRow[] = [];
+  const budget = new SqliteSourceReadBudget(guard.limits, 'fatal');
+  let afterKey = '';
+  while (true) {
+    throwIfMigrationAborted(guard.signal);
+    const metadata = db
+      .prepare(
+        'SELECT key, length(CAST(value AS BLOB)) AS valueBytes FROM cursorDiskKV WHERE (key = ? OR key LIKE ?) AND key > ? ORDER BY key LIMIT 1'
+      )
+      .get(`composerData:${sessionId}`, `bubbleId:${sessionId}:%`, afterKey) as
+      { key: string; valueBytes: number } | undefined;
+    if (!metadata) break;
+    budget.admitMetadataPage([Number(metadata.valueBytes)]);
+    throwIfMigrationAborted(guard.signal);
+    const row = db
+      .prepare('SELECT key, value FROM cursorDiskKV WHERE key = ?')
+      .get(metadata.key) as GlobalSessionRow | undefined;
+    if (!row) throw new MigrationTargetChangedError(sessionId);
+    budget.admitDecodedValue(Buffer.byteLength(row.value));
+    rows.push(row);
+    afterKey = metadata.key;
+  }
+  return rows;
+}
+
+function globalWorkspaceMembershipPaths(
+  sessionId: string,
+  rows: readonly GlobalSessionRow[]
+): string[] {
+  const composerRow = rows.find((row) => row.key === `composerData:${sessionId}`);
+  if (!composerRow) return [];
+  let composer: Record<string, unknown>;
+  try {
+    composer = JSON.parse(composerRow.value) as Record<string, unknown>;
+  } catch {
+    throw new SyntaxError(`Malformed global Composer metadata for ${sessionId}.`);
+  }
+
+  const candidates: string[] = [];
+  const add = (value: unknown): void => {
+    if (typeof value !== 'string' || value.trim().length === 0) return;
+    let candidate = value;
+    if (candidate.startsWith('file:')) {
+      try {
+        candidate = decodeURIComponent(new URL(candidate).pathname);
+      } catch {
+        return;
+      }
+    }
+    candidates.push(normalizePath(candidate));
+  };
+  add(composer['workspaceUri']);
+  add(composer['cwd']);
+  const identifier = composer['workspaceIdentifier'];
+  if (identifier && typeof identifier === 'object' && !Array.isArray(identifier)) {
+    const uri = (identifier as Record<string, unknown>)['uri'];
+    if (uri && typeof uri === 'object' && !Array.isArray(uri)) {
+      const uriRecord = uri as Record<string, unknown>;
+      add(uriRecord['fsPath']);
+      add(uriRecord['external']);
+      add(uriRecord['path']);
+    }
+  }
+  return [...new Set(candidates.map(normalizedPathKey))].sort();
+}
+
+function sourceFingerprint(
+  target: BoundMigrationTarget,
+  sourceResult: ComposerDataResult | null,
+  globalRows: readonly GlobalSessionRow[]
+): string {
+  const record =
+    target.composerLocator.composerIndex >= 0
+      ? (sourceResult?.composers[target.composerLocator.composerIndex] ?? null)
+      : null;
+  return migrationFingerprint({
+    logicalSessionId: target.logicalSessionId,
+    workspaceId: target.composerLocator.workspaceId,
+    workspacePath: normalizedPathKey(target.sourceWorkspacePath),
+    databasePath: normalizedPathKey(target.composerLocator.databasePath),
+    composerIndex: target.composerLocator.composerIndex,
+    record,
+    globalRows,
+  });
+}
+
+function destinationFingerprint(result: ComposerDataResult | null): string {
+  return migrationFingerprint({
+    composers: result?.composers ?? [],
+    rawData: result?.rawData ?? null,
+    isNewFormat: result?.isNewFormat ?? null,
+  });
+}
+
+function destinationDataSourceIdentity(databasePath: string): string {
+  return physicalPathIdentity('destination-db', databasePath);
+}
+
+function assertPreparedDestinationIdentity(prepared: PreparedSessionMigration): void {
+  if (
+    destinationDataSourceIdentity(prepared.destinationDatabasePath) !==
+    prepared.destinationDataSourceIdentity
+  ) {
+    throw new MigrationTargetChangedError(prepared.target.logicalSessionId);
+  }
+}
+
+function freezeBoundMigrationTarget(target: BoundMigrationTarget): BoundMigrationTarget {
+  Object.freeze(target.composerLocator);
+  return Object.freeze(target);
+}
+
+function assertExactBoundOccurrence(
+  target: BoundMigrationTarget,
+  dataPath: string | undefined,
+  sourceResult: ComposerDataResult | null,
+  globalRows: readonly GlobalSessionRow[]
+): Record<string, unknown> {
+  const locator = target.composerLocator;
+  if (
+    target.dataSourceIdentity !==
+      currentDataSourceIdentity(dataPath, locator.databasePath, target.storeRootPath) ||
+    locator.databasePath !== locator.dbPath ||
+    locator.sessionId !== target.logicalSessionId ||
+    !Number.isSafeInteger(locator.composerIndex) ||
+    locator.composerIndex < -1
+  ) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
+  }
+
+  const matchingIndices: number[] = [];
+  sourceResult?.composers.forEach((composer, index) => {
+    if (composer.composerId === target.logicalSessionId) matchingIndices.push(index);
+  });
+
+  let record: Record<string, unknown>;
+  let recordFingerprint: string;
+  if (locator.composerIndex === -1) {
+    if (matchingIndices.length !== 0 || globalRows.length === 0) {
+      throw new MigrationTargetChangedError(target.logicalSessionId);
+    }
+    record = { composerId: target.logicalSessionId };
+    recordFingerprint = migrationFingerprint({
+      composerId: target.logicalSessionId,
+      globalOnly: true,
+    });
+  } else {
+    if (matchingIndices.length !== 1 || matchingIndices[0] !== locator.composerIndex) {
+      throw new MigrationTargetChangedError(target.logicalSessionId);
+    }
+    const candidate = sourceResult?.composers[locator.composerIndex];
+    if (!candidate || candidate.composerId !== target.logicalSessionId) {
+      throw new MigrationTargetChangedError(target.logicalSessionId);
+    }
+    record = candidate as Record<string, unknown>;
+    recordFingerprint = migrationFingerprint(record);
+  }
+
+  if (
+    locator.recordFingerprint !== recordFingerprint ||
+    target.occurrenceFingerprint !==
+      migrationFingerprint({ occurrence: recordFingerprint, globalRows })
+  ) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
+  }
+  return record;
+}
+
+async function assertBoundInventoryStillExclusive(
+  target: BoundMigrationTarget,
+  dataPath: string | undefined,
+  globalRows: readonly GlobalSessionRow[],
+  guard: MigrationReadGuard
+): Promise<void> {
+  const storeInventory = inspectStoreSessionIdMetadataOnly(
+    target.logicalSessionId,
+    target.storeRootPath,
+    guard.signal
+  );
+  if (!storeInventory.complete || storeInventory.exists) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
+  }
+
+  const composerInventory = await collectComposerOccurrences(
+    target.logicalSessionId,
+    dataPath,
+    guard
+  );
+  if (!composerInventory.complete) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
+  }
+  const expectedComposerOccurrences = target.composerLocator.composerIndex === -1 ? 0 : 1;
+  if (composerInventory.occurrences.length !== expectedComposerOccurrences) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
+  }
+  if (expectedComposerOccurrences === 1) {
+    const [occurrence] = composerInventory.occurrences;
+    if (
+      !occurrence ||
+      occurrence.databasePath !== target.composerLocator.databasePath ||
+      occurrence.workspaceId !== target.composerLocator.workspaceId ||
+      occurrence.composerIndex !== target.composerLocator.composerIndex ||
+      occurrence.fingerprint !== target.composerLocator.recordFingerprint
+    ) {
+      throw new MigrationTargetChangedError(target.logicalSessionId);
+    }
+  }
+
+  const membershipPaths = new Set([
+    ...composerInventory.occurrences.map((occurrence) =>
+      normalizedPathKey(occurrence.workspacePath)
+    ),
+    ...composerInventory.pointerMembershipPaths.map(normalizedPathKey),
+    ...globalWorkspaceMembershipPaths(target.logicalSessionId, globalRows),
+  ]);
+  if (
+    membershipPaths.size !== 1 ||
+    !membershipPaths.has(normalizedPathKey(target.sourceWorkspacePath))
+  ) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
   }
 }
 
 /**
- * Copy all bubble data for a session in global storage with new IDs.
- * This is required for copy mode to create independent session data.
- * Also transforms file paths from source workspace to destination workspace.
- *
- * @param oldComposerId - Original composer ID
- * @param newComposerId - New composer ID for the copy
- * @param sourceWorkspace - Source workspace path (for path transformation)
- * @param destWorkspace - Destination workspace path (for path transformation)
- * @param debug - Whether to log detailed path transformations
- * @returns Map of old bubble IDs to new bubble IDs
+ * Check the Store stack's addressing metadata without opening a transcript,
+ * meta.json, or store.db payload. Copy IDs share one logical UUID namespace
+ * across Composer and Store, so a Store-only occurrence is a real collision.
  */
-function copyBubbleDataInGlobalStorage(
-  oldComposerId: string,
-  newComposerId: string,
-  sourceWorkspace: string,
-  destWorkspace: string,
-  destWorkspaceId?: string,
-  debug: boolean = false,
-  dataPath?: string
-): Map<string, string> {
-  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+interface StoreMetadataInventoryResult {
+  readonly exists: boolean;
+  readonly complete: boolean;
+}
 
-  if (!existsSync(globalDbPath)) {
-    return new Map();
-  }
-
-  const bubbleIdMap = new Map<string, string>();
-  const db = new BetterSqlite3(globalDbPath, { readonly: false });
-
-  // Normalize workspace paths for transformation
-  const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
-  const destPrefix = normalizePath(destWorkspace).replace(/\/+$/, '');
+function inspectStoreSessionIdMetadataOnly(
+  sessionId: string,
+  storeRoot: string,
+  signal?: AbortSignal
+): StoreMetadataInventoryResult {
+  throwIfMigrationAborted(signal);
 
   try {
-    // 1. Copy composerData entry with new ID
-    const composerDataRow = db
-      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
-      .get(`composerData:${oldComposerId}`) as { value: string } | undefined;
-
-    if (composerDataRow) {
-      const composerData = JSON.parse(composerDataRow.value);
-
-      // Update composerId in the data
-      composerData.composerId = newComposerId;
-      updateComposerWorkspaceMetadata(composerData, destWorkspace, destWorkspaceId);
-
-      // We'll update fullConversationHeadersOnly after generating new bubble IDs
-      const oldBubbleHeaders = composerData.fullConversationHeadersOnly || [];
-
-      // Generate new bubble IDs and build the mapping
-      const newBubbleHeaders: Array<{ bubbleId: string; type: number; serverBubbleId?: string }> =
-        [];
-      for (const header of oldBubbleHeaders) {
-        if (header.bubbleId) {
-          const newBubbleId = generateSessionId();
-          bubbleIdMap.set(header.bubbleId, newBubbleId);
-          newBubbleHeaders.push({
-            ...header,
-            bubbleId: newBubbleId,
-          });
+    const chats = join(storeRoot, 'chats');
+    if (existsSync(chats)) {
+      for (const hash of readdirSync(chats, { withFileTypes: true })) {
+        throwIfMigrationAborted(signal);
+        if (!hash.isDirectory()) continue;
+        const sessionEntries = readdirSync(join(chats, hash.name), { withFileTypes: true });
+        if (sessionEntries.some((entry) => entry.isDirectory() && entry.name === sessionId)) {
+          return { exists: true, complete: true };
         }
       }
-      composerData.fullConversationHeadersOnly = newBubbleHeaders;
-
-      // Insert new composerData
-      db.prepare('INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)').run(
-        `composerData:${newComposerId}`,
-        JSON.stringify(composerData)
-      );
     }
 
-    // 2. Copy all bubble entries with new IDs and transform paths
-    const bubbleRows = db
-      .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ?')
-      .all(`bubbleId:${oldComposerId}:%`) as Array<{ key: string; value: string }>;
-
-    for (const row of bubbleRows) {
-      // Extract old bubble ID from key: bubbleId:<composerId>:<bubbleId>
-      const parts = row.key.split(':');
-      const oldBubbleId = parts[2];
-
-      if (!oldBubbleId) continue;
-
-      // Get or generate new bubble ID
-      let newBubbleId = bubbleIdMap.get(oldBubbleId);
-      if (!newBubbleId) {
-        newBubbleId = generateSessionId();
-        bubbleIdMap.set(oldBubbleId, newBubbleId);
+    const acp = join(storeRoot, 'acp-sessions');
+    if (existsSync(acp)) {
+      const sessionEntries = readdirSync(acp, { withFileTypes: true });
+      if (sessionEntries.some((entry) => entry.isDirectory() && entry.name === sessionId)) {
+        return { exists: true, complete: true };
       }
+    }
 
-      // Parse and update the bubble data
+    const projects = join(storeRoot, 'projects');
+    if (existsSync(projects)) {
+      for (const project of readdirSync(projects, { withFileTypes: true })) {
+        throwIfMigrationAborted(signal);
+        if (!project.isDirectory()) continue;
+        const transcripts = join(projects, project.name, 'agent-transcripts');
+        if (!existsSync(transcripts)) continue;
+        const transcriptEntries = readdirSync(transcripts, { withFileTypes: true });
+        const direct = transcriptEntries.some(
+          (entry) => entry.isFile() && entry.name === `${sessionId}.jsonl`
+        );
+        const nested = transcriptEntries.some(
+          (entry) => entry.isDirectory() && entry.name === sessionId
+        );
+        if (direct || nested) {
+          return { exists: true, complete: true };
+        }
+      }
+    }
+    return { exists: false, complete: true };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    return { exists: false, complete: false };
+  }
+}
+
+async function sessionIdExistsForCopy(
+  sessionId: string,
+  sourceResult: ComposerDataResult | null,
+  destinationResult: ComposerDataResult | null,
+  dataPath: string | undefined,
+  guard: MigrationReadGuard,
+  storeRootPath: string,
+  owningSessionId: string
+): Promise<boolean> {
+  throwIfMigrationAborted(guard.signal);
+  const storeInventory = inspectStoreSessionIdMetadataOnly(sessionId, storeRootPath, guard.signal);
+  if (!storeInventory.complete) {
+    throw new UnsupportedSessionMigrationError(owningSessionId, 'incomplete-store-inventory');
+  }
+  if (storeInventory.exists) return true;
+  if (
+    sourceResult?.composers.some((composer) => composer.composerId === sessionId) ||
+    destinationResult?.composers.some((composer) => composer.composerId === sessionId)
+  ) {
+    return true;
+  }
+  const composerInventory = await collectComposerOccurrences(sessionId, dataPath, guard);
+  if (!composerInventory.complete) {
+    throw new UnsupportedSessionMigrationError(owningSessionId, 'incomplete-composer-inventory');
+  }
+  if (composerInventory.occurrences.length > 0) {
+    return true;
+  }
+  return (await readGlobalSessionRows(sessionId, dataPath, guard)).length > 0;
+}
+
+async function allocateUniqueCopySessionId(
+  sourceResult: ComposerDataResult | null,
+  destinationResult: ComposerDataResult | null,
+  dataPath: string | undefined,
+  guard: MigrationReadGuard,
+  storeRootPath: string,
+  owningSessionId: string,
+  uuidFactory: () => string = generateSessionId
+): Promise<string> {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    throwIfMigrationAborted(guard.signal);
+    const candidate = uuidFactory();
+    if (
+      !(await sessionIdExistsForCopy(
+        candidate,
+        sourceResult,
+        destinationResult,
+        dataPath,
+        guard,
+        storeRootPath,
+        owningSessionId
+      ))
+    ) {
+      return candidate;
+    }
+  }
+  throw new MigrationTargetChangedError('copy-session-id');
+}
+
+function opaqueOccurrenceRefs(occurrences: readonly ComposerOccurrence[]): string[] {
+  return occurrences
+    .map((occurrence) => `occurrence:${occurrence.fingerprint.slice(0, 24)}`)
+    .sort();
+}
+
+/** Bind selectors once against the same immutable scope that produced their indices. */
+export async function bindMigrationTargets(
+  selectors: readonly (number | string)[],
+  options: MigrationBindingOptions,
+  context?: SessionReadContext
+): Promise<BoundMigrationTarget[]> {
+  const contextOptions = contextMigrationOptions(context);
+  const dataPath = options.dataPath ?? contextOptions.dataPath;
+  const signal = options.signal ?? contextOptions.signal;
+  const sourceReadLimitsOverride = options.sourceReadLimits ?? contextOptions.sourceReadLimits;
+  // Policy validation and cancellation are intentionally the first operations
+  // that can fail. Workspace resolution calls findWorkspaces(), which may read
+  // both workspace and global catalog data.
+  const sourceReadLimits = resolveSourceReadLimits(sourceReadLimitsOverride);
+  throwIfMigrationAborted(signal);
+  const storeRootPath = normalizePath(options.storeRootPath ?? getStoreStackRoot(dataPath));
+  const selectedDriver = await selectDatabaseDriver({
+    operation: 'migrate',
+    required: new Set(['readWrite']),
+    ...((options.sqliteDriver ?? contextOptions.sqliteDriver)
+      ? { forcedDriver: options.sqliteDriver ?? contextOptions.sqliteDriver }
+      : {}),
+  });
+  const sqliteDriver = selectedDriver.name as DriverName;
+  await preflightComposerSourceLimits(dataPath, sourceReadLimits, signal, sqliteDriver);
+  const readGuard = createMigrationReadGuard(sourceReadLimits, signal, sqliteDriver);
+  const workspacePath = await resolveMigrationWorkspacePath(
+    options.workspacePath ?? contextOptions.workspacePath,
+    dataPath,
+    readGuard
+  );
+  throwIfMigrationAborted(signal);
+
+  // Never reuse a caller context whose cache/options may have been created
+  // under a different operation. Capture one provider, signal, and branded
+  // effective limits map for every nested catalog read performed by binding.
+  const operationContext = createSessionReadContext(dataPath, undefined, {
+    sqliteDriver,
+    sourceReadLimits,
+    signal,
+  });
+  let summariesPromise: Promise<ChatSessionSummary[]> | undefined;
+  const scopedSummaries = (): Promise<ChatSessionSummary[]> => {
+    summariesPromise ??= listSessions(
+      { limit: 0, all: true, workspacePath },
+      dataPath,
+      undefined,
+      operationContext
+    );
+    return summariesPromise;
+  };
+  const numericBase = options.numericBase ?? 1;
+  const targets: BoundMigrationTarget[] = [];
+
+  for (const selector of selectors) {
+    throwIfMigrationAborted(signal);
+    if (typeof selector === 'string' && selector.startsWith('occurrence:')) {
+      throw new UnsupportedSessionMigrationError(selector, 'diagnostic-occurrence-reference');
+    }
+    const numeric =
+      typeof selector === 'number' ||
+      (!options.treatStringSelectorsAsIds && /^\d+$/.test(String(selector)))
+        ? Number(selector)
+        : undefined;
+    let sessionId: string;
+    if (numeric === undefined) {
+      sessionId = String(selector);
+    } else {
+      const summary = (await scopedSummaries()).find(
+        (candidate) => candidate.index === numeric + (numericBase === 0 ? 1 : 0)
+      );
+      if (!summary) throw new SessionNotFoundError(selector);
+      sessionId = summary.id;
+    }
+
+    const composerInventory = await collectComposerOccurrences(sessionId, dataPath, readGuard);
+    if (!composerInventory.complete) {
+      throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-composer-inventory');
+    }
+    const occurrences = [...composerInventory.occurrences];
+    const globalRows = await readGlobalSessionRows(sessionId, dataPath, readGuard);
+    const membershipPaths = new Set([
+      ...occurrences.map((occurrence) => normalizedPathKey(occurrence.workspacePath)),
+      ...composerInventory.pointerMembershipPaths.map(normalizedPathKey),
+      ...globalWorkspaceMembershipPaths(sessionId, globalRows),
+    ]);
+
+    const fallbackSource =
+      membershipPaths.size === 1
+        ? await findMigrationWorkspaceByPath([...membershipPaths][0]!, dataPath, readGuard)
+        : undefined;
+
+    const storeInventory = inspectStoreSessionIdMetadataOnly(sessionId, storeRootPath, signal);
+    if (!storeInventory.complete) {
+      throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-store-inventory');
+    }
+    if (storeInventory.exists && (occurrences.length > 0 || globalRows.length > 0)) {
+      throw new UnsupportedSessionMigrationError(sessionId, 'merged');
+    }
+    if (storeInventory.exists) {
+      throw new UnsupportedSessionMigrationError(sessionId, 'store-only');
+    }
+
+    if (membershipPaths.size > 1) {
+      throw new UnsupportedSessionMigrationError(sessionId, 'shared-membership');
+    }
+    if (occurrences.length > 1) {
+      const fingerprints = new Set(occurrences.map((occurrence) => occurrence.fingerprint));
+      if (fingerprints.size > 1) {
+        throw new SessionAmbiguityError(sessionId, opaqueOccurrenceRefs(occurrences));
+      }
+      throw new UnsupportedSessionMigrationError(sessionId, 'multiple-composer-occurrences');
+    }
+
+    let occurrence = occurrences[0];
+    if (!occurrence) {
+      if (globalRows.length === 0) {
+        throw new SessionNotFoundError(sessionId);
+      }
+      if (!fallbackSource) {
+        throw new UnsupportedSessionMigrationError(sessionId, 'unbound-global-occurrence');
+      }
+      membershipPaths.add(normalizedPathKey(fallbackSource.workspace.path));
+      occurrence = {
+        workspaceId: fallbackSource.workspace.id,
+        workspacePath: normalizePath(fallbackSource.workspace.path),
+        databasePath: fallbackSource.dbPath,
+        composerIndex: -1,
+        composer: { composerId: sessionId },
+        fingerprint: migrationFingerprint({ composerId: sessionId, globalOnly: true }),
+      };
+    }
+
+    if (workspacePath && !pathsEqual(occurrence.workspacePath, workspacePath)) {
+      throw new SessionScopeMismatchError(sessionId, workspacePath);
+    }
+
+    const composerLocator = Object.freeze({
+      workspaceId: occurrence.workspaceId,
+      databasePath: occurrence.databasePath,
+      dbPath: occurrence.databasePath,
+      sessionId,
+      composerIndex: occurrence.composerIndex,
+      recordFingerprint: occurrence.fingerprint,
+    });
+
+    const target: BoundMigrationTarget = {
+      logicalSessionId: sessionId,
+      composerLocator,
+      sourceWorkspacePath: normalizePath(occurrence.workspacePath),
+      sqliteDriver,
+      storeRootPath,
+      dataSourceIdentity: currentDataSourceIdentity(
+        dataPath,
+        occurrence.databasePath,
+        storeRootPath
+      ),
+      occurrenceFingerprint: migrationFingerprint({
+        occurrence: occurrence.fingerprint,
+        globalRows,
+      }),
+      eligibility: 'eligible-composer',
+      dataPath,
+      sourceReadLimits,
+      signal,
+    };
+    targets.push(freezeBoundMigrationTarget(target));
+  }
+
+  return targets;
+}
+
+/** Resolve destination/capability/source state and freeze it before preview or application. */
+export async function prepareSessionMigration(
+  target: BoundMigrationTarget,
+  destination: string,
+  options: MigrationOptions
+): Promise<PreparedSessionMigration> {
+  const dataPath = options.dataPath ?? target.dataPath;
+  const signal = options.signal ?? target.signal;
+  const sourceReadLimits = options.sourceReadLimits
+    ? resolveSourceReadLimits(options.sourceReadLimits)
+    : (target.sourceReadLimits ?? resolveSourceReadLimits());
+  const readGuard = createMigrationReadGuard(sourceReadLimits, signal, target.sqliteDriver);
+  const frozenTarget = freezeBoundMigrationTarget(target);
+  throwIfMigrationAborted(signal);
+  if (frozenTarget.eligibility !== 'eligible-composer') {
+    throw new UnsupportedSessionMigrationError(
+      frozenTarget.logicalSessionId,
+      frozenTarget.eligibility
+    );
+  }
+  const normalizedDest = normalizePath(destination);
+  if (pathsEqual(frozenTarget.sourceWorkspacePath, normalizedDest)) {
+    throw new SameWorkspaceError(normalizedDest);
+  }
+  if (isNestedPath(frozenTarget.sourceWorkspacePath, normalizedDest)) {
+    throw new NestedPathError(frozenTarget.sourceWorkspacePath, normalizedDest);
+  }
+
+  await preflightComposerSourceLimits(
+    dataPath,
+    sourceReadLimits,
+    signal,
+    frozenTarget.sqliteDriver
+  );
+  await ensureDriver({
+    operation: 'migrate',
+    required: new Set(['readWrite']),
+    forcedDriver: frozenTarget.sqliteDriver,
+  });
+  const destinationInfo = await findMigrationWorkspaceByPath(normalizedDest, dataPath, readGuard);
+  if (!destinationInfo) throw new WorkspaceNotFoundError(normalizedDest);
+
+  const sourceDb = await openDatabaseReadWrite(frozenTarget.composerLocator.databasePath, {
+    sqliteDriver: frozenTarget.sqliteDriver,
+    signal,
+  });
+  let destinationDb: Awaited<ReturnType<typeof openDatabaseReadWrite>> | null = null;
+  try {
+    destinationDb = await openDatabaseReadWrite(destinationInfo.dbPath, {
+      sqliteDriver: frozenTarget.sqliteDriver,
+      signal,
+    });
+    const sourceResult = getComposerDataBounded(sourceDb, readGuard);
+    const destinationResult = getComposerDataBounded(destinationDb, readGuard);
+    const globalRows = await readGlobalSessionRows(
+      frozenTarget.logicalSessionId,
+      dataPath,
+      readGuard
+    );
+    await assertBoundInventoryStillExclusive(frozenTarget, dataPath, globalRows, readGuard);
+    assertExactBoundOccurrence(frozenTarget, dataPath, sourceResult, globalRows);
+    const proposedCopySessionId =
+      options.mode === 'copy'
+        ? await allocateUniqueCopySessionId(
+            sourceResult,
+            destinationResult,
+            dataPath,
+            readGuard,
+            frozenTarget.storeRootPath,
+            frozenTarget.logicalSessionId,
+            options.uuidFactory
+          )
+        : undefined;
+
+    const prepared: PreparedSessionMigration = {
+      target: frozenTarget,
+      destinationWorkspacePath: normalizedDest,
+      destinationWorkspaceId: destinationInfo.workspace?.id,
+      destinationDatabasePath: destinationInfo.dbPath,
+      destinationDataSourceIdentity: destinationDataSourceIdentity(destinationInfo.dbPath),
+      mode: options.mode,
+      sourceFingerprint: sourceFingerprint(frozenTarget, sourceResult, globalRows),
+      destinationFingerprint: destinationFingerprint(destinationResult),
+      proposedCopySessionId,
+      dataPath,
+      debug: options.debug ?? false,
+      sourceReadLimits,
+      signal,
+    };
+    return Object.freeze(prepared);
+  } finally {
+    sourceDb.close();
+    destinationDb?.close();
+  }
+}
+
+interface StagedGlobalMutation {
+  readonly mode: MigrationMode;
+  readonly sessionId: string;
+  readonly databasePath: string;
+  readonly rows: readonly GlobalSessionRow[];
+}
+
+function hydrateComposerFromGlobalRows(
+  composer: Record<string, unknown>,
+  composerId: string,
+  rows: readonly GlobalSessionRow[]
+): Record<string, unknown> {
+  const row = rows.find((candidate) => candidate.key === `composerData:${composerId}`);
+  if (!row) return composer;
+  const globalComposer = JSON.parse(row.value) as {
+    name?: string;
+    createdAt?: number | string;
+    updatedAt?: number | string;
+    lastUpdatedAt?: number | string;
+    unifiedMode?: string;
+  };
+  const lastUpdatedAt = globalComposer.lastUpdatedAt ?? globalComposer.updatedAt;
+  return {
+    ...composer,
+    composerId,
+    ...(typeof globalComposer.name === 'string' ? { name: globalComposer.name } : {}),
+    ...(globalComposer.createdAt !== undefined && globalComposer.createdAt !== null
+      ? { createdAt: globalComposer.createdAt }
+      : {}),
+    ...(lastUpdatedAt !== undefined && lastUpdatedAt !== null ? { lastUpdatedAt } : {}),
+    ...(typeof globalComposer.unifiedMode === 'string'
+      ? { unifiedMode: globalComposer.unifiedMode }
+      : {}),
+  };
+}
+
+function stageMoveGlobalMutation(
+  composerId: string,
+  rows: readonly GlobalSessionRow[],
+  sourceWorkspace: string,
+  destinationWorkspace: string,
+  destinationWorkspaceId: string | undefined,
+  debug: boolean,
+  dataPath: string | undefined,
+  signal?: AbortSignal
+): StagedGlobalMutation {
+  const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
+  const destinationPrefix = normalizePath(destinationWorkspace).replace(/\/+$/, '');
+  const stagedRows = rows.map((row): GlobalSessionRow => {
+    throwIfMigrationAborted(signal);
+    if (row.key === `composerData:${composerId}`) {
+      const composerData = JSON.parse(row.value) as Record<string, unknown>;
+      updateComposerWorkspaceMetadata(composerData, destinationWorkspace, destinationWorkspaceId);
+      return { key: row.key, value: JSON.stringify(composerData) };
+    }
+    if (row.key.startsWith(`bubbleId:${composerId}:`)) {
       const bubbleData = JSON.parse(row.value) as Record<string, unknown>;
-      bubbleData.bubbleId = newBubbleId;
+      const bubbleId = typeof bubbleData['bubbleId'] === 'string' ? bubbleData['bubbleId'] : null;
+      if (debug && bubbleId) console.error(`[DEBUG] Processing bubble: ${bubbleId}`);
+      transformBubblePaths(bubbleData, sourcePrefix, destinationPrefix, debug);
+      return { key: row.key, value: JSON.stringify(bubbleData) };
+    }
+    return { ...row };
+  });
+  return {
+    mode: 'move',
+    sessionId: composerId,
+    databasePath: join(getGlobalStoragePath(dataPath), 'state.vscdb'),
+    rows: stagedRows,
+  };
+}
 
-      // T010-T011: Transform file paths in the bubble data
-      if (debug) {
-        console.error(`[DEBUG] Processing bubble: ${oldBubbleId} -> ${newBubbleId}`);
-      }
-      transformBubblePaths(bubbleData, sourcePrefix, destPrefix, debug);
+function stageCopyGlobalMutation(
+  sourceComposerId: string,
+  copyComposerId: string,
+  rows: readonly GlobalSessionRow[],
+  sourceWorkspace: string,
+  destinationWorkspace: string,
+  destinationWorkspaceId: string | undefined,
+  debug: boolean,
+  dataPath: string | undefined,
+  signal?: AbortSignal
+): StagedGlobalMutation {
+  const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
+  const destinationPrefix = normalizePath(destinationWorkspace).replace(/\/+$/, '');
+  const bubbleIdMap = new Map<string, string>();
+  const composerRow = rows.find((row) => row.key === `composerData:${sourceComposerId}`);
+  let stagedComposerRow: GlobalSessionRow | undefined;
 
-      // Create new key with new IDs
-      const newKey = `bubbleId:${newComposerId}:${newBubbleId}`;
+  if (composerRow) {
+    throwIfMigrationAborted(signal);
+    const composerData = JSON.parse(composerRow.value) as Record<string, unknown>;
+    composerData['composerId'] = copyComposerId;
+    updateComposerWorkspaceMetadata(composerData, destinationWorkspace, destinationWorkspaceId);
+    const headers = Array.isArray(composerData['fullConversationHeadersOnly'])
+      ? (composerData['fullConversationHeadersOnly'] as Array<Record<string, unknown>>)
+      : [];
+    composerData['fullConversationHeadersOnly'] = headers.flatMap((header) => {
+      const oldBubbleId = header['bubbleId'];
+      if (typeof oldBubbleId !== 'string' || oldBubbleId.length === 0) return [];
+      const newBubbleId = generateSessionId();
+      bubbleIdMap.set(oldBubbleId, newBubbleId);
+      return [{ ...header, bubbleId: newBubbleId }];
+    });
+    stagedComposerRow = {
+      key: `composerData:${copyComposerId}`,
+      value: JSON.stringify(composerData),
+    };
+  }
 
-      // Insert the copied bubble with transformed paths
-      db.prepare('INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)').run(
-        newKey,
-        JSON.stringify(bubbleData)
+  const stagedBubbleRows: GlobalSessionRow[] = [];
+  for (const row of rows) {
+    throwIfMigrationAborted(signal);
+    if (!row.key.startsWith(`bubbleId:${sourceComposerId}:`)) continue;
+    const oldBubbleId = row.key.slice(`bubbleId:${sourceComposerId}:`.length);
+    if (!oldBubbleId) continue;
+    const newBubbleId = bubbleIdMap.get(oldBubbleId) ?? generateSessionId();
+    bubbleIdMap.set(oldBubbleId, newBubbleId);
+    const bubbleData = JSON.parse(row.value) as Record<string, unknown>;
+    bubbleData['bubbleId'] = newBubbleId;
+    if (debug) console.error(`[DEBUG] Processing bubble: ${oldBubbleId} -> ${newBubbleId}`);
+    transformBubblePaths(bubbleData, sourcePrefix, destinationPrefix, debug);
+    stagedBubbleRows.push({
+      key: `bubbleId:${copyComposerId}:${newBubbleId}`,
+      value: JSON.stringify(bubbleData),
+    });
+  }
+
+  return {
+    mode: 'copy',
+    sessionId: copyComposerId,
+    databasePath: join(getGlobalStoragePath(dataPath), 'state.vscdb'),
+    rows: [...(stagedComposerRow ? [stagedComposerRow] : []), ...stagedBubbleRows],
+  };
+}
+
+/** Apply an already-decoded mutation inside the caller's locked transaction. */
+function applyStagedGlobalMutation(
+  db: Database,
+  mutation: StagedGlobalMutation,
+  expectedRows: readonly GlobalSessionRow[]
+): void {
+  if (mutation.rows.length === 0) return;
+  if (mutation.mode === 'copy') {
+    const insert = db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)');
+    for (const row of mutation.rows) {
+      const result = insert.run(row.key, row.value);
+      if (result.changes !== 1) throw new MigrationTargetChangedError(mutation.sessionId);
+    }
+    return;
+  }
+
+  const expectedByKey = new Map(expectedRows.map((row) => [row.key, row.value] as const));
+  if (expectedByKey.size !== mutation.rows.length) {
+    throw new MigrationTargetChangedError(mutation.sessionId);
+  }
+  const update = db.prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ? AND value = ?');
+  for (const row of mutation.rows) {
+    const expectedValue = expectedByKey.get(row.key);
+    if (expectedValue === undefined) throw new MigrationTargetChangedError(mutation.sessionId);
+    const result = update.run(row.value, row.key, expectedValue);
+    if (result.changes !== 1) throw new MigrationTargetChangedError(mutation.sessionId);
+  }
+}
+
+interface CompensationAction {
+  readonly label: string;
+  readonly restore: () => void | Promise<void>;
+}
+
+async function rethrowAfterCompensation(
+  originalError: unknown,
+  actions: readonly CompensationAction[]
+): Promise<never> {
+  const failures: Error[] = [];
+  for (const action of actions) {
+    try {
+      await action.restore();
+    } catch (error) {
+      failures.push(
+        new Error(`Migration compensation failed for ${action.label}.`, { cause: error })
       );
     }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(
+      [originalError, ...failures],
+      `Migration failed and ${String(failures.length)} compensation action(s) also failed.`,
+      { cause: originalError }
+    );
+  }
+  throw originalError;
+}
 
-    return bubbleIdMap;
+async function snapshotGlobalSessionRows(
+  sessionId: string,
+  dataPath?: string,
+  guard: MigrationReadGuard = createMigrationReadGuard(resolveSourceReadLimits())
+): Promise<GlobalSessionRow[]> {
+  return (await readGlobalSessionRows(sessionId, dataPath, guard)).map((row) => ({ ...row }));
+}
+
+async function restoreGlobalSessionRows(
+  sessionId: string,
+  rows: readonly GlobalSessionRow[],
+  dataPath: string | undefined,
+  sqliteDriver: DriverName
+): Promise<void> {
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+  if (!existsSync(globalDbPath)) return;
+  const db = await openDatabaseReadWrite(globalDbPath, { sqliteDriver });
+  try {
+    db.runSQL('BEGIN IMMEDIATE');
+    db.prepare('DELETE FROM cursorDiskKV WHERE key = ? OR key LIKE ?').run(
+      `composerData:${sessionId}`,
+      `bubbleId:${sessionId}:%`
+    );
+    const insert = db.prepare('INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)');
+    for (const row of rows) insert.run(row.key, row.value);
+    db.runSQL('COMMIT');
+  } catch (error) {
+    try {
+      db.runSQL('ROLLBACK');
+    } catch {
+      // The original restore failure remains authoritative.
+    }
+    throw error;
   } finally {
     db.close();
   }
 }
 
-/**
- * Update file paths in existing bubble data for move operations.
- * Unlike copy mode, this modifies bubbles in place (no new IDs needed).
- *
- * @param composerId - Composer ID to update
- * @param sourceWorkspace - Source workspace path
- * @param destWorkspace - Destination workspace path
- * @param debug - Whether to log detailed path transformations
- */
-function updateBubblePathsInGlobalStorage(
-  composerId: string,
-  sourceWorkspace: string,
-  destWorkspace: string,
-  debug: boolean = false,
-  dataPath?: string
-): void {
-  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+interface WorkspaceComposerRowSnapshot {
+  readonly databasePath: string;
+  readonly sqliteDriver?: DriverName;
+  readonly value?: string;
+}
 
-  if (!existsSync(globalDbPath)) {
-    return;
-  }
+function snapshotWorkspaceComposerRowFromDatabase(
+  databasePath: string,
+  db: Database,
+  guard: MigrationReadGuard
+): WorkspaceComposerRowSnapshot {
+  throwIfMigrationAborted(guard.signal);
+  const budget = new SqliteSourceReadBudget(guard.limits, 'fatal');
+  const metadata = db
+    .prepare(
+      "SELECT length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key = 'composer.composerData'"
+    )
+    .all() as Array<{ valueBytes: number }>;
+  budget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
+  throwIfMigrationAborted(guard.signal);
+  const row = db
+    .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+    .get() as { value: string } | undefined;
+  if (row) budget.admitDecodedValue(Buffer.byteLength(row.value));
+  return Object.freeze({
+    databasePath,
+    sqliteDriver: guard.sqliteDriver,
+    ...(row ? { value: row.value } : {}),
+  });
+}
 
-  const db = new BetterSqlite3(globalDbPath, { readonly: false });
-
-  // Normalize workspace paths for transformation
-  const sourcePrefix = normalizePath(sourceWorkspace).replace(/\/+$/, '');
-  const destPrefix = normalizePath(destWorkspace).replace(/\/+$/, '');
-
+async function snapshotWorkspaceComposerRow(
+  databasePath: string,
+  guard: MigrationReadGuard
+): Promise<WorkspaceComposerRowSnapshot> {
+  throwIfMigrationAborted(guard.signal);
+  const db = await openDatabaseReadWrite(databasePath, {
+    sqliteDriver: guard.sqliteDriver,
+    signal: guard.signal,
+  });
   try {
-    // Get all bubble entries for this composer
-    const bubbleRows = db
-      .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ?')
-      .all(`bubbleId:${composerId}:%`) as Array<{ key: string; value: string }>;
+    return snapshotWorkspaceComposerRowFromDatabase(databasePath, db, guard);
+  } finally {
+    db.close();
+  }
+}
 
-    for (const row of bubbleRows) {
-      // Parse the bubble data
-      const bubbleData = JSON.parse(row.value) as Record<string, unknown>;
-      const bubbleId = bubbleData.bubbleId as string | undefined;
+function serializeComposerDataForMigration(
+  composers: Array<{ composerId?: string; [key: string]: unknown }>,
+  isNewFormat: boolean,
+  originalRawData?: unknown
+): string {
+  let serialized: string | undefined;
+  const captureDatabase: Database = {
+    prepare() {
+      return {
+        get: () => undefined,
+        all: () => [],
+        run: (...params: unknown[]) => {
+          serialized = typeof params[0] === 'string' ? params[0] : undefined;
+          return { changes: 1, lastInsertRowid: 0 };
+        },
+      };
+    },
+    runSQL() {},
+    close() {},
+  };
+  updateComposerData(captureDatabase, composers, isNewFormat, originalRawData);
+  if (serialized === undefined) {
+    throw new Error('Failed to serialize Composer workspace state.');
+  }
+  return serialized;
+}
 
-      // Transform file paths in the bubble data
-      if (debug && bubbleId) {
-        console.error(`[DEBUG] Processing bubble: ${bubbleId}`);
-      }
-      const result = transformBubblePaths(bubbleData, sourcePrefix, destPrefix, debug);
+function compareAndSwapComposerData(
+  db: Database,
+  expectedValue: string | undefined,
+  nextValue: string,
+  sessionId: string
+): void {
+  const result =
+    expectedValue === undefined
+      ? db
+          .prepare(
+            'INSERT INTO ItemTable (key, value) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM ItemTable WHERE key = ?)'
+          )
+          .run('composer.composerData', nextValue, 'composer.composerData')
+      : db
+          .prepare('UPDATE ItemTable SET value = ? WHERE key = ? AND value = ?')
+          .run(nextValue, 'composer.composerData', expectedValue);
+  if (result.changes !== 1) throw new MigrationTargetChangedError(sessionId);
+}
 
-      // Only update if paths were transformed
-      if (result.transformed > 0) {
-        db.prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ?').run(
-          JSON.stringify(bubbleData),
-          row.key
-        );
-      }
+interface MigrationTransactionState {
+  readonly orderedPaths: readonly string[];
+  readonly databases: ReadonlyMap<string, Database>;
+  readonly activePaths: Set<string>;
+  readonly committedPaths: Set<string>;
+}
+
+function beginMigrationTransactions(
+  databases: ReadonlyMap<string, Database>
+): MigrationTransactionState {
+  const orderedPaths = [...databases.keys()].sort((left, right) =>
+    normalizedPathKey(left).localeCompare(normalizedPathKey(right))
+  );
+  const state: MigrationTransactionState = {
+    orderedPaths,
+    databases,
+    activePaths: new Set<string>(),
+    committedPaths: new Set<string>(),
+  };
+  try {
+    for (const databasePath of orderedPaths) {
+      databases.get(databasePath)!.runSQL('BEGIN IMMEDIATE');
+      state.activePaths.add(databasePath);
+    }
+    return state;
+  } catch (error) {
+    rollbackMigrationTransactions(state);
+    throw error;
+  }
+}
+
+function rollbackMigrationTransactions(state: MigrationTransactionState): void {
+  for (const databasePath of [...state.orderedPaths].reverse()) {
+    if (!state.activePaths.has(databasePath)) continue;
+    try {
+      state.databases.get(databasePath)?.runSQL('ROLLBACK');
+    } catch {
+      // The original operation failure remains authoritative.
+    } finally {
+      state.activePaths.delete(databasePath);
+    }
+  }
+}
+
+function commitMigrationTransactions(state: MigrationTransactionState): void {
+  for (const databasePath of state.orderedPaths) {
+    if (!state.activePaths.has(databasePath)) continue;
+    // A provider can surface an acknowledgement error after SQLite has
+    // already committed. Mark the path conservatively before the attempt so
+    // callers always compensate an indeterminate commit outcome.
+    state.committedPaths.add(databasePath);
+    try {
+      state.databases.get(databasePath)!.runSQL('COMMIT');
+    } finally {
+      state.activePaths.delete(databasePath);
+    }
+  }
+}
+
+function assertMigrationPhysicalIdentity(prepared: PreparedSessionMigration): void {
+  assertPreparedDestinationIdentity(prepared);
+  if (
+    prepared.target.dataSourceIdentity !==
+    currentDataSourceIdentity(
+      prepared.dataPath,
+      prepared.target.composerLocator.databasePath,
+      prepared.target.storeRootPath
+    )
+  ) {
+    throw new MigrationTargetChangedError(prepared.target.logicalSessionId);
+  }
+}
+
+function assertStoreStillAbsent(target: BoundMigrationTarget): void {
+  // Store metadata is ordinary filesystem state and Cursor does not honor a
+  // cursor-history lock. This is therefore a best-effort boundary check: drift
+  // observed before return is compensated; a Store write after return belongs
+  // to a later external operation and cannot be serialized by this process.
+  const inventory = inspectStoreSessionIdMetadataOnly(
+    target.logicalSessionId,
+    target.storeRootPath,
+    target.signal
+  );
+  if (!inventory.complete || inventory.exists) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
+  }
+}
+
+async function restoreWorkspaceComposerRow(snapshot: WorkspaceComposerRowSnapshot): Promise<void> {
+  const db = await openDatabaseReadWrite(snapshot.databasePath, {
+    sqliteDriver: snapshot.sqliteDriver,
+  });
+  try {
+    if (snapshot.value === undefined) {
+      db.prepare("DELETE FROM ItemTable WHERE key = 'composer.composerData'").run();
+    } else {
+      db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(
+        'composer.composerData',
+        snapshot.value
+      );
     }
   } finally {
     db.close();
   }
+}
+
+async function revalidatePreparedMigration(
+  prepared: PreparedSessionMigration,
+  expectedDestinationFingerprint = prepared.destinationFingerprint
+): Promise<void> {
+  const guard = createMigrationReadGuard(
+    prepared.sourceReadLimits,
+    prepared.signal,
+    prepared.target.sqliteDriver
+  );
+  throwIfMigrationAborted(prepared.signal);
+  assertPreparedDestinationIdentity(prepared);
+  const sourceDb = await openDatabaseReadWrite(prepared.target.composerLocator.databasePath, {
+    sqliteDriver: prepared.target.sqliteDriver,
+    signal: prepared.signal,
+  });
+  let destinationDb: Awaited<ReturnType<typeof openDatabaseReadWrite>> | null = null;
+  try {
+    destinationDb = await openDatabaseReadWrite(prepared.destinationDatabasePath, {
+      sqliteDriver: prepared.target.sqliteDriver,
+      signal: prepared.signal,
+    });
+    const sourceResult = getComposerDataBounded(sourceDb, guard);
+    const destinationResult = getComposerDataBounded(destinationDb, guard);
+    const globalRows = await readGlobalSessionRows(
+      prepared.target.logicalSessionId,
+      prepared.dataPath,
+      guard
+    );
+    await assertBoundInventoryStillExclusive(prepared.target, prepared.dataPath, globalRows, guard);
+    assertExactBoundOccurrence(prepared.target, prepared.dataPath, sourceResult, globalRows);
+    if (
+      sourceFingerprint(prepared.target, sourceResult, globalRows) !== prepared.sourceFingerprint ||
+      destinationFingerprint(destinationResult) !== expectedDestinationFingerprint
+    ) {
+      throw new MigrationTargetChangedError(prepared.target.logicalSessionId);
+    }
+    if (
+      prepared.proposedCopySessionId &&
+      (await sessionIdExistsForCopy(
+        prepared.proposedCopySessionId,
+        sourceResult,
+        destinationResult,
+        prepared.dataPath,
+        guard,
+        prepared.target.storeRootPath,
+        prepared.target.logicalSessionId
+      ))
+    ) {
+      throw new MigrationTargetChangedError(prepared.target.logicalSessionId);
+    }
+  } finally {
+    sourceDb.close();
+    destinationDb?.close();
+  }
+}
+
+async function applyPreparedMigrationBatch(
+  prepared: readonly PreparedSessionMigration[]
+): Promise<SessionMigrationResult[]> {
+  if (prepared.length === 0) return [];
+  const first = prepared[0]!;
+  if (
+    prepared.some(
+      (item) =>
+        item.target.sqliteDriver !== first.target.sqliteDriver ||
+        item.sourceReadLimits !== first.sourceReadLimits ||
+        item.signal !== first.signal ||
+        item.dataPath !== first.dataPath ||
+        item.target.storeRootPath !== first.target.storeRootPath
+    )
+  ) {
+    throw new MigrationTargetChangedError(first.target.logicalSessionId);
+  }
+  await ensureDriver({
+    operation: 'migrate',
+    required: new Set(['readWrite']),
+    forcedDriver: first.target.sqliteDriver,
+  });
+
+  const copyIds = prepared
+    .map((item) => item.proposedCopySessionId)
+    .filter((value): value is string => value !== undefined);
+  if (new Set(copyIds).size !== copyIds.length) {
+    throw new MigrationTargetChangedError(prepared[0]!.target.logicalSessionId);
+  }
+
+  // Every precondition is checked against the common pre-write state before
+  // any member of the batch is allowed to mutate a database.
+  for (const item of prepared) await revalidatePreparedMigration(item);
+
+  const databasePaths = [
+    ...new Set(
+      prepared.flatMap((item) => [
+        item.target.composerLocator.databasePath,
+        item.destinationDatabasePath,
+      ])
+    ),
+  ];
+  const workspaceSnapshots: WorkspaceComposerRowSnapshot[] = [];
+  for (const databasePath of databasePaths) {
+    workspaceSnapshots.push(
+      await snapshotWorkspaceComposerRow(
+        databasePath,
+        createMigrationReadGuard(first.sourceReadLimits, first.signal, first.target.sqliteDriver)
+      )
+    );
+  }
+  // Revalidation and snapshotting are separate reads. The destination may be
+  // changed after the former but before the latter, so the immutable snapshot
+  // that will actually seed staging must still match every prepared plan.
+  const workspaceSnapshotByPath = new Map(
+    workspaceSnapshots.map((snapshot) => [snapshot.databasePath, snapshot] as const)
+  );
+  for (const item of prepared) {
+    assertPreparedDestinationIdentity(item);
+    const snapshot = workspaceSnapshotByPath.get(item.destinationDatabasePath);
+    if (
+      !snapshot ||
+      destinationFingerprint(decodeComposerDataValue(snapshot.value)) !==
+        item.destinationFingerprint
+    ) {
+      throw new MigrationTargetChangedError(item.target.logicalSessionId);
+    }
+  }
+  const globalSnapshots = new Map<string, GlobalSessionRow[]>();
+  for (const sessionId of [
+    ...new Set(
+      prepared.flatMap((item) => [
+        item.target.logicalSessionId,
+        ...(item.proposedCopySessionId ? [item.proposedCopySessionId] : []),
+      ])
+    ),
+  ]) {
+    globalSnapshots.set(
+      sessionId,
+      await snapshotGlobalSessionRows(
+        sessionId,
+        first.dataPath,
+        createMigrationReadGuard(first.sourceReadLimits, first.signal, first.target.sqliteDriver)
+      )
+    );
+  }
+
+  throwIfMigrationAborted(first.signal);
+  const ordered = prepared
+    .map((item, originalIndex) => ({ item, originalIndex }))
+    .sort((left, right) => {
+      const sourceOrder = left.item.target.composerLocator.databasePath.localeCompare(
+        right.item.target.composerLocator.databasePath
+      );
+      if (sourceOrder !== 0) return sourceOrder;
+      if (left.item.mode !== right.item.mode) return left.item.mode === 'copy' ? -1 : 1;
+      if (left.item.mode === 'move') {
+        return (
+          right.item.target.composerLocator.composerIndex -
+          left.item.target.composerLocator.composerIndex
+        );
+      }
+      return left.originalIndex - right.originalIndex;
+    });
+  const destinationFingerprints = new Map<string, string>();
+  for (const item of prepared) {
+    const existing = destinationFingerprints.get(item.destinationDatabasePath);
+    if (existing !== undefined && existing !== item.destinationFingerprint) {
+      throw new MigrationTargetChangedError(item.target.logicalSessionId);
+    }
+    destinationFingerprints.set(item.destinationDatabasePath, item.destinationFingerprint);
+  }
+
+  interface MutableWorkspaceState {
+    result: ComposerDataResult | null;
+    rawValue?: string;
+  }
+  interface StagedBatchOperation {
+    item: PreparedSessionMigration;
+    originalIndex: number;
+    sourceResult: ComposerDataResult | null;
+    destinationResult: ComposerDataResult | null;
+    sourceNext: Array<{ composerId?: string; [key: string]: unknown }>;
+    destinationNext: Array<{ composerId?: string; [key: string]: unknown }>;
+    sourceExpectedValue?: string;
+    sourceNextValue?: string;
+    destinationExpectedValue?: string;
+    destinationNextValue: string;
+    globalMutation: StagedGlobalMutation;
+  }
+
+  const workspaceStates = new Map<string, MutableWorkspaceState>();
+  for (const snapshot of workspaceSnapshots) {
+    workspaceStates.set(snapshot.databasePath, {
+      result: decodeComposerDataValue(snapshot.value),
+      rawValue: snapshot.value,
+    });
+  }
+
+  // Build the complete mutation program from admitted snapshots. This stage
+  // performs every parse, path transform, collision-dependent allocation, and
+  // cancellation check before any database is writable by this batch.
+  const stagedOperations: StagedBatchOperation[] = [];
+  for (const { item, originalIndex } of ordered) {
+    throwIfMigrationAborted(item.signal);
+    const sourceState = workspaceStates.get(item.target.composerLocator.databasePath);
+    const destinationState = workspaceStates.get(item.destinationDatabasePath);
+    if (!sourceState || !destinationState) {
+      throw new MigrationTargetChangedError(item.target.logicalSessionId);
+    }
+    const sourceResult = sourceState.result;
+    const destinationResult = destinationState.result;
+    const globalRows = globalSnapshots.get(item.target.logicalSessionId) ?? [];
+    const sourceComposer = assertExactBoundOccurrence(
+      item.target,
+      item.dataPath,
+      sourceResult,
+      globalRows
+    );
+    if (sourceFingerprint(item.target, sourceResult, globalRows) !== item.sourceFingerprint) {
+      throw new MigrationTargetChangedError(item.target.logicalSessionId);
+    }
+
+    const hydrated = hydrateComposerFromGlobalRows(
+      sourceComposer,
+      item.target.logicalSessionId,
+      globalRows
+    );
+    const sourceOriginal = sourceResult?.composers ?? [];
+    const destinationOriginal = destinationResult?.composers ?? [];
+    const sourceIndex = item.target.composerLocator.composerIndex;
+    const sourceNext = sourceOriginal.filter((_, index) => index !== sourceIndex);
+    let destinationNext: Array<{ composerId?: string; [key: string]: unknown }>;
+    let globalMutation: StagedGlobalMutation;
+    if (item.mode === 'move') {
+      destinationNext = [
+        ...destinationOriginal.filter(
+          (composer) => composer.composerId !== item.target.logicalSessionId
+        ),
+        hydrated,
+      ];
+      globalMutation = stageMoveGlobalMutation(
+        item.target.logicalSessionId,
+        globalRows,
+        item.target.sourceWorkspacePath,
+        item.destinationWorkspacePath,
+        item.destinationWorkspaceId,
+        item.debug,
+        item.dataPath,
+        item.signal
+      );
+    } else {
+      const copyId = item.proposedCopySessionId;
+      if (!copyId) throw new MigrationTargetChangedError(item.target.logicalSessionId);
+      const copied = structuredClone(hydrated) as Record<string, unknown>;
+      copied['composerId'] = copyId;
+      destinationNext = [...destinationOriginal, copied];
+      globalMutation = stageCopyGlobalMutation(
+        item.target.logicalSessionId,
+        copyId,
+        globalRows,
+        item.target.sourceWorkspacePath,
+        item.destinationWorkspacePath,
+        item.destinationWorkspaceId,
+        item.debug,
+        item.dataPath,
+        item.signal
+      );
+    }
+
+    const destinationNextValue = serializeComposerDataForMigration(
+      destinationNext,
+      destinationResult?.isNewFormat ?? sourceResult?.isNewFormat ?? true,
+      destinationResult?.rawData
+    );
+    const sourceNextValue =
+      item.mode === 'move' && sourceIndex !== -1
+        ? serializeComposerDataForMigration(
+            sourceNext,
+            sourceResult?.isNewFormat ?? true,
+            sourceResult?.rawData
+          )
+        : undefined;
+    stagedOperations.push({
+      item,
+      originalIndex,
+      sourceResult,
+      destinationResult,
+      sourceNext,
+      destinationNext,
+      sourceExpectedValue: sourceState.rawValue,
+      sourceNextValue,
+      destinationExpectedValue: destinationState.rawValue,
+      destinationNextValue,
+      globalMutation,
+    });
+    destinationState.result = {
+      composers: destinationNext,
+      rawData: destinationResult?.rawData ?? null,
+      isNewFormat: destinationResult?.isNewFormat ?? sourceResult?.isNewFormat ?? true,
+    };
+    destinationState.rawValue = destinationNextValue;
+    if (item.mode === 'move' && sourceIndex !== -1) {
+      sourceState.result = {
+        composers: sourceNext,
+        rawData: sourceResult?.rawData ?? null,
+        isNewFormat: sourceResult?.isNewFormat ?? true,
+      };
+      sourceState.rawValue = sourceNextValue;
+    }
+  }
+
+  for (const item of prepared) throwIfMigrationAborted(item.signal);
+  const globalDatabasePath = join(getGlobalStoragePath(first.dataPath), 'state.vscdb');
+  const transactionPaths = [
+    ...databasePaths,
+    ...(existsSync(globalDatabasePath) ? [globalDatabasePath] : []),
+  ];
+  const writableDatabases = new Map<string, Awaited<ReturnType<typeof openDatabaseReadWrite>>>();
+  try {
+    for (const databasePath of [...new Set(transactionPaths)]) {
+      writableDatabases.set(
+        databasePath,
+        await openDatabaseReadWrite(databasePath, {
+          sqliteDriver: first.target.sqliteDriver,
+          signal: first.signal,
+        })
+      );
+    }
+  } catch (error) {
+    for (const db of writableDatabases.values()) db.close();
+    throw error;
+  }
+
+  const results = new Array<SessionMigrationResult>(prepared.length);
+  let transactionState: MigrationTransactionState | undefined;
+  try {
+    throwIfMigrationAborted(first.signal);
+    transactionState = beginMigrationTransactions(writableDatabases);
+
+    // Recheck the exact admitted bytes while every database that can be
+    // mutated is protected by a deterministic BEGIN IMMEDIATE lock.
+    for (const snapshot of workspaceSnapshots) {
+      const database = writableDatabases.get(snapshot.databasePath);
+      if (!database) throw new MigrationTargetChangedError(first.target.logicalSessionId);
+      const current = snapshotWorkspaceComposerRowFromDatabase(
+        snapshot.databasePath,
+        database,
+        createMigrationReadGuard(first.sourceReadLimits, first.signal, first.target.sqliteDriver)
+      );
+      if (current.value !== snapshot.value) {
+        throw new MigrationTargetChangedError(first.target.logicalSessionId);
+      }
+    }
+    const globalDatabase = writableDatabases.get(globalDatabasePath);
+    for (const [sessionId, expectedRows] of globalSnapshots) {
+      const currentRows = globalDatabase
+        ? readGlobalSessionRowsFromDatabase(
+            sessionId,
+            globalDatabase,
+            createMigrationReadGuard(
+              first.sourceReadLimits,
+              first.signal,
+              first.target.sqliteDriver
+            )
+          )
+        : [];
+      if (migrationFingerprint(currentRows) !== migrationFingerprint(expectedRows)) {
+        throw new MigrationTargetChangedError(sessionId);
+      }
+    }
+    for (const item of prepared) {
+      assertMigrationPhysicalIdentity(item);
+      await assertBoundInventoryStillExclusive(
+        item.target,
+        item.dataPath,
+        globalSnapshots.get(item.target.logicalSessionId) ?? [],
+        createMigrationReadGuard(item.sourceReadLimits, item.signal, item.target.sqliteDriver)
+      );
+    }
+
+    for (const operation of stagedOperations) {
+      const { item } = operation;
+      const sourceDb = writableDatabases.get(item.target.composerLocator.databasePath);
+      const destinationDb = writableDatabases.get(item.destinationDatabasePath);
+      if (!sourceDb || !destinationDb) {
+        throw new MigrationTargetChangedError(item.target.logicalSessionId);
+      }
+      compareAndSwapComposerData(
+        destinationDb,
+        operation.destinationExpectedValue,
+        operation.destinationNextValue,
+        item.target.logicalSessionId
+      );
+      if (item.mode === 'move' && item.target.composerLocator.composerIndex !== -1) {
+        if (operation.sourceNextValue === undefined) {
+          throw new MigrationTargetChangedError(item.target.logicalSessionId);
+        }
+        compareAndSwapComposerData(
+          sourceDb,
+          operation.sourceExpectedValue,
+          operation.sourceNextValue,
+          item.target.logicalSessionId
+        );
+      }
+      if (operation.globalMutation.rows.length > 0) {
+        if (!globalDatabase) throw new MigrationTargetChangedError(item.target.logicalSessionId);
+        applyStagedGlobalMutation(
+          globalDatabase,
+          operation.globalMutation,
+          globalSnapshots.get(operation.globalMutation.sessionId) ?? []
+        );
+      }
+      results[operation.originalIndex] = {
+        success: true,
+        sessionId: item.target.logicalSessionId,
+        sourceWorkspace: item.target.sourceWorkspacePath,
+        destinationWorkspace: item.destinationWorkspacePath,
+        mode: item.mode,
+        ...(item.proposedCopySessionId ? { newSessionId: item.proposedCopySessionId } : {}),
+        dryRun: false,
+        eligibility: 'eligible-composer',
+        targetFingerprint: item.target.occurrenceFingerprint,
+      };
+    }
+
+    // Store metadata is not part of SQLite's locking domain. Recheck it while
+    // the SQLite mutations remain invisible, then once again after commit.
+    for (const item of prepared) {
+      await assertBoundInventoryStillExclusive(
+        item.target,
+        item.dataPath,
+        globalSnapshots.get(item.target.logicalSessionId) ?? [],
+        createMigrationReadGuard(item.sourceReadLimits, item.signal, item.target.sqliteDriver)
+      );
+      assertMigrationPhysicalIdentity(item);
+    }
+    commitMigrationTransactions(transactionState);
+    for (const item of prepared) {
+      assertStoreStillAbsent(item.target);
+      assertMigrationPhysicalIdentity(item);
+    }
+    return results;
+  } catch (error) {
+    if (transactionState) rollbackMigrationTransactions(transactionState);
+    if (transactionState && transactionState.committedPaths.size > 0) {
+      const compensation: CompensationAction[] = [
+        ...[...workspaceSnapshots].reverse().map((snapshot) => ({
+          label: 'workspace batch snapshot',
+          restore: () => restoreWorkspaceComposerRow(snapshot),
+        })),
+        ...[...globalSnapshots].map(([sessionId, rows]) => ({
+          label: 'global batch snapshot',
+          restore: () =>
+            restoreGlobalSessionRows(sessionId, rows, first.dataPath, first.target.sqliteDriver),
+        })),
+      ];
+      await rethrowAfterCompensation(error, compensation);
+    }
+    throw error;
+  } finally {
+    for (const db of writableDatabases.values()) db.close();
+  }
+}
+
+/** Revalidate the prepared locator/fingerprints, then cross the first-write boundary once. */
+async function applySessionMigrationInternal(
+  prepared: PreparedSessionMigration,
+  onFirstWrite?: () => void
+): Promise<SessionMigrationResult> {
+  const { target } = prepared;
+  const readGuard = createMigrationReadGuard(
+    prepared.sourceReadLimits,
+    prepared.signal,
+    target.sqliteDriver
+  );
+  throwIfMigrationAborted(prepared.signal);
+  assertPreparedDestinationIdentity(prepared);
+  await ensureDriver({
+    operation: 'migrate',
+    required: new Set(['readWrite']),
+    forcedDriver: target.sqliteDriver,
+  });
+  const sourceDb = await openDatabaseReadWrite(target.composerLocator.databasePath, {
+    sqliteDriver: target.sqliteDriver,
+    signal: prepared.signal,
+  });
+  let destinationDb: Awaited<ReturnType<typeof openDatabaseReadWrite>> | null = null;
+  try {
+    destinationDb = await openDatabaseReadWrite(prepared.destinationDatabasePath, {
+      sqliteDriver: target.sqliteDriver,
+      signal: prepared.signal,
+    });
+    const sourceSnapshot = snapshotWorkspaceComposerRowFromDatabase(
+      target.composerLocator.databasePath,
+      sourceDb,
+      readGuard
+    );
+    const destinationSnapshot = snapshotWorkspaceComposerRowFromDatabase(
+      prepared.destinationDatabasePath,
+      destinationDb,
+      readGuard
+    );
+    const sourceResult = decodeComposerDataValue(sourceSnapshot.value);
+    const destinationResult = decodeComposerDataValue(destinationSnapshot.value);
+    assertPreparedDestinationIdentity(prepared);
+    if (
+      destinationFingerprint(decodeComposerDataValue(destinationSnapshot.value)) !==
+      prepared.destinationFingerprint
+    ) {
+      throw new MigrationTargetChangedError(target.logicalSessionId);
+    }
+    const globalRows = await readGlobalSessionRows(
+      target.logicalSessionId,
+      prepared.dataPath,
+      readGuard
+    );
+    await assertBoundInventoryStillExclusive(target, prepared.dataPath, globalRows, readGuard);
+    const sourceComposer = assertExactBoundOccurrence(
+      target,
+      prepared.dataPath,
+      sourceResult,
+      globalRows
+    );
+    if (
+      sourceFingerprint(target, sourceResult, globalRows) !== prepared.sourceFingerprint ||
+      destinationFingerprint(destinationResult) !== prepared.destinationFingerprint
+    ) {
+      throw new MigrationTargetChangedError(target.logicalSessionId);
+    }
+    const sourceIndex = target.composerLocator.composerIndex;
+    const globalOnly = sourceIndex === -1;
+    const sourceOriginal = sourceResult?.composers ?? [];
+    const hydrated = hydrateComposerFromGlobalRows(
+      sourceComposer,
+      target.logicalSessionId,
+      globalRows
+    );
+    const destinationOriginal = destinationResult?.composers ?? [];
+    const oldGlobalRows = globalRows.map((row) => ({ ...row }));
+    const copyId = prepared.proposedCopySessionId;
+    if (
+      copyId &&
+      (await sessionIdExistsForCopy(
+        copyId,
+        sourceResult,
+        destinationResult,
+        prepared.dataPath,
+        readGuard,
+        target.storeRootPath,
+        target.logicalSessionId
+      ))
+    ) {
+      throw new MigrationTargetChangedError(target.logicalSessionId);
+    }
+    // A proposed copy ID was admitted only after proving that every logical
+    // namespace was empty, so its compensation snapshot is deterministically
+    // empty and does not require another global payload read.
+    const copyGlobalRows: GlobalSessionRow[] = [];
+    const destinationNext =
+      prepared.mode === 'move'
+        ? [
+            ...destinationOriginal.filter(
+              (composer) => composer.composerId !== target.logicalSessionId
+            ),
+            hydrated,
+          ]
+        : (() => {
+            if (!copyId) throw new MigrationTargetChangedError(target.logicalSessionId);
+            const copied = structuredClone(hydrated) as Record<string, unknown>;
+            copied['composerId'] = copyId;
+            return [...destinationOriginal, copied];
+          })();
+    const sourceNext = sourceOriginal.filter((_, index) => index !== sourceIndex);
+    // Parse, transform, allocate bubble IDs, and observe cancellation before
+    // crossing the first-write boundary. Applying this plan is write-only.
+    const stagedGlobalMutation =
+      prepared.mode === 'move'
+        ? stageMoveGlobalMutation(
+            target.logicalSessionId,
+            globalRows,
+            target.sourceWorkspacePath,
+            prepared.destinationWorkspacePath,
+            prepared.destinationWorkspaceId,
+            prepared.debug,
+            prepared.dataPath,
+            prepared.signal
+          )
+        : stageCopyGlobalMutation(
+            target.logicalSessionId,
+            copyId!,
+            globalRows,
+            target.sourceWorkspacePath,
+            prepared.destinationWorkspacePath,
+            prepared.destinationWorkspaceId,
+            prepared.debug,
+            prepared.dataPath,
+            prepared.signal
+          );
+    const destinationNextValue = serializeComposerDataForMigration(
+      destinationNext,
+      destinationResult?.isNewFormat ?? sourceResult?.isNewFormat ?? true,
+      destinationResult?.rawData
+    );
+    const sourceNextValue = globalOnly
+      ? undefined
+      : serializeComposerDataForMigration(
+          sourceNext,
+          sourceResult?.isNewFormat ?? true,
+          sourceResult?.rawData
+        );
+
+    const globalDatabasePath = join(getGlobalStoragePath(prepared.dataPath), 'state.vscdb');
+    let globalDatabase: Awaited<ReturnType<typeof openDatabaseReadWrite>> | null = null;
+    const transactionDatabases = new Map<string, Database>([
+      [target.composerLocator.databasePath, sourceDb],
+      [prepared.destinationDatabasePath, destinationDb],
+    ]);
+    if (existsSync(globalDatabasePath)) {
+      globalDatabase = await openDatabaseReadWrite(globalDatabasePath, {
+        sqliteDriver: target.sqliteDriver,
+        signal: prepared.signal,
+      });
+      transactionDatabases.set(globalDatabasePath, globalDatabase);
+    }
+
+    let transactionState: MigrationTransactionState | undefined;
+    try {
+      throwIfMigrationAborted(prepared.signal);
+      transactionState = beginMigrationTransactions(transactionDatabases);
+
+      const lockedSourceSnapshot = snapshotWorkspaceComposerRowFromDatabase(
+        target.composerLocator.databasePath,
+        sourceDb,
+        readGuard
+      );
+      const lockedDestinationSnapshot = snapshotWorkspaceComposerRowFromDatabase(
+        prepared.destinationDatabasePath,
+        destinationDb,
+        readGuard
+      );
+      if (
+        lockedSourceSnapshot.value !== sourceSnapshot.value ||
+        lockedDestinationSnapshot.value !== destinationSnapshot.value
+      ) {
+        throw new MigrationTargetChangedError(target.logicalSessionId);
+      }
+      const lockedGlobalRows = globalDatabase
+        ? readGlobalSessionRowsFromDatabase(target.logicalSessionId, globalDatabase, readGuard)
+        : [];
+      if (migrationFingerprint(lockedGlobalRows) !== migrationFingerprint(globalRows)) {
+        throw new MigrationTargetChangedError(target.logicalSessionId);
+      }
+      if (copyId) {
+        const lockedCopyRows = globalDatabase
+          ? readGlobalSessionRowsFromDatabase(copyId, globalDatabase, readGuard)
+          : [];
+        if (lockedCopyRows.length !== 0) {
+          throw new MigrationTargetChangedError(target.logicalSessionId);
+        }
+      }
+      assertMigrationPhysicalIdentity(prepared);
+      await assertBoundInventoryStillExclusive(
+        target,
+        prepared.dataPath,
+        lockedGlobalRows,
+        readGuard
+      );
+
+      // This hook is deliberately before the atomic CAS statements and after
+      // all locks/revalidation, so fault-injection writers must either block or
+      // cause the guarded update to report MIGRATION_TARGET_CHANGED.
+      throwIfMigrationAborted(prepared.signal);
+      onFirstWrite?.();
+      compareAndSwapComposerData(
+        destinationDb,
+        lockedDestinationSnapshot.value,
+        destinationNextValue,
+        target.logicalSessionId
+      );
+      if (prepared.mode === 'move' && !globalOnly) {
+        if (sourceNextValue === undefined) {
+          throw new MigrationTargetChangedError(target.logicalSessionId);
+        }
+        compareAndSwapComposerData(
+          sourceDb,
+          lockedSourceSnapshot.value,
+          sourceNextValue,
+          target.logicalSessionId
+        );
+      }
+      if (stagedGlobalMutation.rows.length > 0) {
+        if (!globalDatabase) throw new MigrationTargetChangedError(target.logicalSessionId);
+        applyStagedGlobalMutation(
+          globalDatabase,
+          stagedGlobalMutation,
+          prepared.mode === 'move' ? lockedGlobalRows : copyGlobalRows
+        );
+      }
+
+      // Other workspace databases and Store metadata do not share these
+      // SQLite locks. Recheck while our writes are still uncommitted, then
+      // recheck Store/physical identity after commit and compensate on drift.
+      await assertBoundInventoryStillExclusive(
+        target,
+        prepared.dataPath,
+        lockedGlobalRows,
+        readGuard
+      );
+      assertMigrationPhysicalIdentity(prepared);
+      commitMigrationTransactions(transactionState);
+      assertStoreStillAbsent(target);
+      assertMigrationPhysicalIdentity(prepared);
+    } catch (error) {
+      if (transactionState) rollbackMigrationTransactions(transactionState);
+      if (transactionState && transactionState.committedPaths.size > 0) {
+        const compensation: CompensationAction[] = [
+          {
+            label: 'destination workspace state',
+            restore: () => restoreWorkspaceComposerRow(destinationSnapshot),
+          },
+          ...(globalOnly
+            ? []
+            : [
+                {
+                  label: 'source workspace state',
+                  restore: () => restoreWorkspaceComposerRow(sourceSnapshot),
+                },
+              ]),
+          {
+            label: 'source global state',
+            restore: () =>
+              restoreGlobalSessionRows(
+                target.logicalSessionId,
+                oldGlobalRows,
+                prepared.dataPath,
+                target.sqliteDriver
+              ),
+          },
+          ...(copyId
+            ? [
+                {
+                  label: 'copy global state',
+                  restore: () =>
+                    restoreGlobalSessionRows(
+                      copyId,
+                      copyGlobalRows,
+                      prepared.dataPath,
+                      target.sqliteDriver
+                    ),
+                },
+              ]
+            : []),
+        ];
+        await rethrowAfterCompensation(error, compensation);
+      }
+      throw error;
+    } finally {
+      globalDatabase?.close();
+    }
+
+    return {
+      success: true,
+      sessionId: target.logicalSessionId,
+      sourceWorkspace: target.sourceWorkspacePath,
+      destinationWorkspace: prepared.destinationWorkspacePath,
+      mode: prepared.mode,
+      ...(copyId ? { newSessionId: copyId } : {}),
+      dryRun: false,
+      eligibility: 'eligible-composer',
+      targetFingerprint: target.occurrenceFingerprint,
+    };
+  } finally {
+    sourceDb.close();
+    destinationDb?.close();
+  }
+}
+
+/** Revalidate one prepared target and apply it without rediscovery. */
+export async function applySessionMigration(
+  prepared: PreparedSessionMigration
+): Promise<SessionMigrationResult> {
+  return applySessionMigrationInternal(prepared);
+}
+
+function previewPreparedMigration(prepared: PreparedSessionMigration): SessionMigrationResult {
+  return {
+    success: true,
+    sessionId: prepared.target.logicalSessionId,
+    sourceWorkspace: prepared.target.sourceWorkspacePath,
+    destinationWorkspace: prepared.destinationWorkspacePath,
+    mode: prepared.mode,
+    ...(prepared.proposedCopySessionId ? { newSessionId: prepared.proposedCopySessionId } : {}),
+    dryRun: true,
+    pathsWillBeUpdated: true,
+    eligibility: 'eligible-composer',
+    targetFingerprint: prepared.target.occurrenceFingerprint,
+  };
+}
+
+function isFatalMigrationFailure(error: unknown): boolean {
+  return (
+    isSessionIntegrityError(error) ||
+    error instanceof WorkspaceNotFoundError ||
+    error instanceof SameWorkspaceError ||
+    error instanceof NestedPathError ||
+    error instanceof AggregateError ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }
 
 /**
@@ -639,194 +2804,45 @@ function updateBubblePathsInGlobalStorage(
  */
 export async function migrateSession(
   sessionId: string,
-  options: Omit<MigrateSessionOptions, 'sessionIds'> & { sourceWorkspacePath?: string }
+  options: Omit<MigrateSessionOptions, 'sessionIds'> & {
+    sourceWorkspacePath?: string;
+    /** @internal Provider already selected by a containing workspace operation. */
+    sqliteDriver?: DriverName;
+  }
 ): Promise<SessionMigrationResult> {
-  const { destination, mode, dryRun, dataPath, debug = false, sourceWorkspacePath } = options;
-  // Note: force option is used at the CLI layer for validation, not in core migration
-
-  // Normalize destination path
-  const normalizedDest = normalizePath(destination);
-
-  // Find source workspace for this session (or use explicit source workspace in workspace migration mode)
-  const sourceInfo = sourceWorkspacePath
-    ? await findWorkspaceByPath(sourceWorkspacePath, dataPath)
-    : await findWorkspaceForSession(sessionId, dataPath);
-  if (!sourceInfo) {
-    if (sourceWorkspacePath) {
-      throw new WorkspaceNotFoundError(sourceWorkspacePath);
-    }
-    throw new SessionNotFoundError(sessionId);
-  }
-
-  const sourceWorkspace = sourceInfo.workspace.path;
-
-  // Check if source and destination are the same
-  if (pathsEqual(sourceWorkspace, normalizedDest)) {
-    throw new SameWorkspaceError(normalizedDest);
-  }
-
-  // T013: Check for nested paths (would cause infinite replacement loops)
-  if (isNestedPath(sourceWorkspace, normalizedDest)) {
-    throw new NestedPathError(sourceWorkspace, normalizedDest);
-  }
-
-  // Find destination workspace
-  const destInfo = await findWorkspaceByPath(normalizedDest, dataPath);
-  if (!destInfo) {
-    throw new WorkspaceNotFoundError(normalizedDest);
-  }
-
-  // If dry run, return preview result without making changes
-  if (dryRun) {
-    return {
-      success: true,
-      sessionId,
-      sourceWorkspace,
-      destinationWorkspace: normalizedDest,
-      mode,
-      dryRun: true,
-      pathsWillBeUpdated: true,
-    };
-  }
-
-  // Perform the actual migration
+  const sourceReadLimits = resolveSourceReadLimits(options.sourceReadLimits);
+  throwIfMigrationAborted(options.signal);
+  const [target] = await bindMigrationTargets([sessionId], {
+    numericBase: 1,
+    treatStringSelectorsAsIds: true,
+    sqliteDriver: options.sqliteDriver,
+    workspacePath: options.sourceWorkspacePath ?? options.workspacePath,
+    dataPath: options.dataPath,
+    sourceReadLimits,
+    signal: options.signal,
+  });
+  if (!target) throw new SessionNotFoundError(sessionId);
   try {
-    // Open both databases for read-write
-    const sourceDb = await openDatabaseReadWrite(sourceInfo.dbPath);
-    const destDb = await openDatabaseReadWrite(destInfo.dbPath);
-
-    try {
-      // Get composer data from both workspaces
-      const sourceResult = getComposerData(sourceDb);
-      const destResult = getComposerData(destDb);
-
-      if (!sourceResult) {
-        throw new Error('Source workspace has no composer data');
-      }
-
-      // Find the session in source data. It may live only in global storage
-      // (linked to the workspace via workspaceIdentifier), in which case there is
-      // no workspace-DB composer entry to remove.
-      const sessionIndex = sourceResult.composers.findIndex((s) => s.composerId === sessionId);
-      const isGlobalOnly = sessionIndex === -1;
-      if (isGlobalOnly && !composerExistsInGlobalStorage(sessionId, dataPath)) {
-        throw new SessionNotFoundError(sessionId);
-      }
-
-      const sessionToMigrate: Record<string, unknown> =
-        sessionIndex >= 0
-          ? (sourceResult.composers[sessionIndex]! as Record<string, unknown>)
-          : { composerId: sessionId };
-      const hydratedSession = hydrateComposerFromGlobalStorage(
-        sessionToMigrate,
-        sessionId,
-        dataPath
-      );
-
-      if (mode === 'move') {
-        // Remove from source (skip when the session is only in global storage)
-        if (!isGlobalOnly) {
-          const newSourceComposers = sourceResult.composers.filter((_, i) => i !== sessionIndex);
-          updateComposerData(
-            sourceDb,
-            newSourceComposers,
-            sourceResult.isNewFormat,
-            sourceResult.rawData
-          );
-        }
-
-        // Add to destination
-        const destComposers = destResult ? destResult.composers : [];
-        const newDestComposers = [
-          ...destComposers.filter((composer) => composer.composerId !== sessionId),
-          hydratedSession,
-        ];
-        updateComposerData(
-          destDb,
-          newDestComposers,
-          destResult?.isNewFormat ?? sourceResult.isNewFormat,
-          destResult?.rawData
-        );
-
-        // T010-T012: Update file paths in global storage bubble data for move mode
-        updateBubblePathsInGlobalStorage(
-          sessionId,
-          sourceWorkspace,
-          normalizedDest,
-          debug,
-          dataPath
-        );
-        updateComposerWorkspaceInGlobalStorage(
-          sessionId,
-          normalizedDest,
-          destInfo.workspace?.id,
-          dataPath
-        );
-
-        return {
-          success: true,
-          sessionId,
-          sourceWorkspace,
-          destinationWorkspace: normalizedDest,
-          mode: 'move',
-          dryRun: false,
-        };
-      } else {
-        // Copy mode - duplicate session to destination, keep source intact
-        // Generate new session ID for the copy
-        const newSessionId = generateSessionId();
-
-        // Copy all bubble data in global storage with new IDs
-        // This ensures the copy is fully independent from the original
-        // T014: Transform paths during copy (AFTER copying, on new data only)
-        copyBubbleDataInGlobalStorage(
-          sessionId,
-          newSessionId,
-          sourceWorkspace,
-          normalizedDest,
-          destInfo.workspace?.id,
-          debug,
-          dataPath
-        );
-
-        // Deep clone and update the session with new ID
-        const copiedSession = JSON.parse(JSON.stringify(hydratedSession)) as {
-          composerId?: string;
-        };
-        copiedSession.composerId = newSessionId;
-
-        // Add to destination (don't modify source)
-        const destComposers = destResult ? destResult.composers : [];
-        const newDestComposers = [...destComposers, copiedSession];
-        updateComposerData(
-          destDb,
-          newDestComposers,
-          destResult?.isNewFormat ?? sourceResult.isNewFormat,
-          destResult?.rawData
-        );
-
-        return {
-          success: true,
-          sessionId,
-          sourceWorkspace,
-          destinationWorkspace: normalizedDest,
-          mode: 'copy',
-          newSessionId,
-          dryRun: false,
-        };
-      }
-    } finally {
-      sourceDb.close();
-      destDb.close();
-    }
+    const prepared = await prepareSessionMigration(target, options.destination, {
+      mode: options.mode,
+      force: options.force,
+      dataPath: target.dataPath,
+      debug: options.debug,
+      sourceReadLimits: target.sourceReadLimits,
+      signal: target.signal,
+    });
+    if (options.dryRun) return previewPreparedMigration(prepared);
+    return await applySessionMigrationInternal(prepared);
   } catch (error) {
-    // Return failure result instead of throwing for partial failure handling
+    if (isFatalMigrationFailure(error)) throw error;
+    // Preserve the released single-session result shape for ordinary database
+    // failures while keeping integrity/cancellation failures typed and atomic.
     return {
       success: false,
       sessionId,
-      sourceWorkspace,
-      destinationWorkspace: normalizedDest,
-      mode,
+      sourceWorkspace: target.sourceWorkspacePath,
+      destinationWorkspace: normalizePath(options.destination),
+      mode: options.mode,
       error: error instanceof Error ? error.message : String(error),
       dryRun: false,
     };
@@ -836,8 +2852,11 @@ export async function migrateSession(
 /**
  * Migrate multiple sessions to a destination workspace.
  *
- * Handles batch migration with partial failure support.
- * Each session is migrated independently - failures don't stop the batch.
+ * The complete batch is bound and prepared before its first write. A refusal
+ * therefore changes no member; failures after the write boundary trigger
+ * compensation for every member already touched. The legacy `sessionIds`
+ * route retains ordered ordinary-failure result objects without reverting to
+ * partial application.
  *
  * @param options - Migration options including session IDs
  * @returns Array of results for each session
@@ -845,28 +2864,76 @@ export async function migrateSession(
 export async function migrateSessions(
   options: MigrateSessionOptions
 ): Promise<SessionMigrationResult[]> {
-  const { sessionIds, ...sessionOptions } = options;
-  const results: SessionMigrationResult[] = [];
+  const legacyIds = options.selectors === undefined;
+  const selectors: readonly (number | string)[] = options.selectors ?? options.sessionIds ?? [];
+  if (selectors.length === 0) return [];
+  const sourceReadLimits = resolveSourceReadLimits(options.sourceReadLimits);
+  throwIfMigrationAborted(options.signal);
+  let targets: BoundMigrationTarget[] = [];
 
-  for (const sessionId of sessionIds) {
-    try {
-      const result = await migrateSession(sessionId, sessionOptions);
-      results.push(result);
-    } catch (error) {
-      // Convert thrown errors to result objects for partial failure handling
-      results.push({
+  try {
+    // Resolve and prepare every member against one provider, one cancellation
+    // signal, and the exact same branded limits object before any member can
+    // write. This also makes the released sessionIds route batch-atomic.
+    targets = await bindMigrationTargets(selectors, {
+      numericBase: 1,
+      treatStringSelectorsAsIds: legacyIds,
+      workspacePath: options.workspacePath,
+      dataPath: options.dataPath,
+      sourceReadLimits,
+      signal: options.signal,
+    });
+    const duplicateTarget = targets.find(
+      (target, index) =>
+        targets.findIndex((candidate) => candidate.logicalSessionId === target.logicalSessionId) !==
+        index
+    );
+    if (duplicateTarget) {
+      throw new UnsupportedSessionMigrationError(
+        duplicateTarget.logicalSessionId,
+        'duplicate-batch-selector'
+      );
+    }
+    const prepared: PreparedSessionMigration[] = [];
+    for (const target of targets) {
+      prepared.push(
+        await prepareSessionMigration(target, options.destination, {
+          mode: options.mode,
+          force: options.force,
+          dataPath: target.dataPath,
+          debug: options.debug,
+          sourceReadLimits: target.sourceReadLimits,
+          signal: target.signal,
+        })
+      );
+    }
+    if (options.dryRun) return prepared.map(previewPreparedMigration);
+    return await applyPreparedMigrationBatch(prepared);
+  } catch (error) {
+    if (isFatalMigrationFailure(error)) throw error;
+    // The package-root selector API historically resolved every selector
+    // before migration. Preserve a fatal lookup/preflight failure when binding
+    // never completed, but keep ordinary post-bind database/write failures in
+    // the released per-session result envelope.
+    if (!legacyIds && targets.length !== selectors.length) throw error;
+    // Legacy sessionIds returned result objects for ordinary failures. Keep
+    // that same shape for package-root selectors, but abort the whole bound
+    // batch so an earlier valid member is never committed before a later
+    // member fails preparation/application.
+    return selectors.map((selector, index) => {
+      const target = targets[index];
+      const sessionId = target?.logicalSessionId ?? String(selector);
+      return {
         success: false,
         sessionId,
-        sourceWorkspace: 'unknown',
-        destinationWorkspace: options.destination,
+        sourceWorkspace: target?.sourceWorkspacePath ?? 'unknown',
+        destinationWorkspace: normalizePath(options.destination),
         mode: options.mode,
         error: error instanceof Error ? error.message : String(error),
         dryRun: options.dryRun,
-      });
-    }
+      };
+    });
   }
-
-  return results;
 }
 
 /**
@@ -881,7 +2948,29 @@ export async function migrateSessions(
 export async function migrateWorkspace(
   options: MigrateWorkspaceOptions
 ): Promise<WorkspaceMigrationResult> {
-  const { source, destination, mode, dryRun, force, dataPath, debug = false } = options;
+  const {
+    source,
+    destination,
+    mode,
+    dryRun,
+    force,
+    dataPath,
+    debug = false,
+    sourceReadLimits: sourceReadLimitsOverride,
+    signal,
+  } = options;
+  // Validation is deliberately first: malformed policy never triggers source
+  // discovery, and even dry-run proves a readWrite-capable provider exists.
+  const sourceReadLimits = resolveSourceReadLimits(sourceReadLimitsOverride);
+  throwIfMigrationAborted(signal);
+  const storeRootPath = normalizePath(getStoreStackRoot(dataPath));
+  const selectedDriver = await selectDatabaseDriver({
+    operation: 'migrate',
+    required: new Set(['readWrite']),
+  });
+  const sqliteDriver = selectedDriver.name as DriverName;
+  const readGuard = createMigrationReadGuard(sourceReadLimits, signal, sqliteDriver);
+  await preflightComposerSourceLimits(dataPath, sourceReadLimits, signal, sqliteDriver);
 
   // Normalize paths
   const normalizedSource = normalizePath(source);
@@ -898,21 +2987,120 @@ export async function migrateWorkspace(
   }
 
   // Find source workspace
-  const sourceInfo = await findWorkspaceByPath(normalizedSource, dataPath);
+  const sourceInfo = await findMigrationWorkspaceByPath(normalizedSource, dataPath, readGuard);
   if (!sourceInfo) {
     throw new WorkspaceNotFoundError(normalizedSource);
   }
 
   // Find destination workspace
-  const destInfo = await findWorkspaceByPath(normalizedDest, dataPath);
+  const destInfo = await findMigrationWorkspaceByPath(normalizedDest, dataPath, readGuard);
   if (!destInfo) {
     throw new WorkspaceNotFoundError(normalizedDest);
   }
 
+  // Real database-backed workspace migration inventories the complete scoped
+  // logical catalog first, including Store-only and merged rows. Binding every
+  // unique UUID before applying any target prevents a workspace command from
+  // moving only the Composer half of a multi-source session.
+  if (existsSync(sourceInfo.dbPath)) {
+    const context = createSessionReadContext(dataPath, undefined, {
+      sqliteDriver,
+      sourceReadLimits,
+      signal,
+    });
+    const summaries = await listSessions(
+      {
+        limit: 0,
+        all: true,
+        workspacePath: normalizedSource,
+      },
+      dataPath,
+      undefined,
+      context
+    );
+    const sessionIds = [...new Set(summaries.map((summary) => summary.id))];
+    if (sessionIds.length === 0) throw new NoSessionsFoundError(normalizedSource);
+
+    if (!force) {
+      const destDb = await openDatabaseReadWrite(destInfo.dbPath, { sqliteDriver, signal });
+      try {
+        const destResult = getComposerDataBounded(destDb, readGuard);
+        if (destResult && destResult.composers.length > 0) {
+          throw new DestinationHasSessionsError(normalizedDest, destResult.composers.length);
+        }
+      } finally {
+        destDb.close();
+      }
+    }
+
+    const targets = await bindMigrationTargets(
+      sessionIds,
+      {
+        numericBase: 1,
+        treatStringSelectorsAsIds: true,
+        storeRootPath,
+        workspacePath: normalizedSource,
+        dataPath,
+        sourceReadLimits,
+        signal,
+      },
+      context
+    );
+    const prepared: PreparedSessionMigration[] = [];
+    for (const target of targets) {
+      prepared.push(
+        await prepareSessionMigration(target, normalizedDest, {
+          mode,
+          force,
+          dataPath: target.dataPath,
+          debug,
+          sourceReadLimits: target.sourceReadLimits,
+          signal: target.signal,
+        })
+      );
+    }
+    let results: SessionMigrationResult[];
+    if (dryRun) {
+      results = prepared.map(previewPreparedMigration);
+    } else {
+      try {
+        results = await applyPreparedMigrationBatch(prepared);
+      } catch (error) {
+        if (isFatalMigrationFailure(error)) throw error;
+        results = prepared.map((item) => ({
+          success: false,
+          sessionId: item.target.logicalSessionId,
+          sourceWorkspace: item.target.sourceWorkspacePath,
+          destinationWorkspace: item.destinationWorkspacePath,
+          mode: item.mode,
+          error: error instanceof Error ? error.message : String(error),
+          dryRun: false,
+        }));
+      }
+    }
+    const successCount = results.filter((result) => result.success).length;
+    const failureCount = results.length - successCount;
+    return {
+      success: failureCount === 0,
+      source: normalizedSource,
+      destination: normalizedDest,
+      mode,
+      totalSessions: results.length,
+      successCount,
+      failureCount,
+      results,
+      dryRun,
+    };
+  }
+
   // Get sessions from source workspace
-  const sourceDb = await openDatabaseReadWrite(sourceInfo.dbPath);
-  const sourceResult = getComposerData(sourceDb);
-  sourceDb.close();
+  const sourceDb = await openDatabaseReadWrite(sourceInfo.dbPath, { sqliteDriver, signal });
+  let sourceResult: ComposerDataResult | null;
+  try {
+    sourceResult = getComposerDataBounded(sourceDb, readGuard);
+  } finally {
+    sourceDb.close();
+  }
 
   // Extract session IDs from the workspace composer list, then union in any
   // sessions discoverable only through global storage (linked to this workspace
@@ -937,9 +3125,13 @@ export async function migrateWorkspace(
 
   // Check if destination has existing sessions (unless force is set)
   if (!force) {
-    const destDb = await openDatabaseReadWrite(destInfo.dbPath);
-    const destResult = getComposerData(destDb);
-    destDb.close();
+    const destDb = await openDatabaseReadWrite(destInfo.dbPath, { sqliteDriver, signal });
+    let destResult: ComposerDataResult | null;
+    try {
+      destResult = getComposerDataBounded(destDb, readGuard);
+    } finally {
+      destDb.close();
+    }
 
     if (destResult && destResult.composers.length > 0) {
       throw new DestinationHasSessionsError(normalizedDest, destResult.composers.length);
@@ -957,10 +3149,14 @@ export async function migrateWorkspace(
         force,
         dataPath,
         debug,
+        sourceReadLimits,
+        signal,
         sourceWorkspacePath: normalizedSource,
+        sqliteDriver,
       });
       results.push(result);
     } catch (error) {
+      if (isFatalMigrationFailure(error)) throw error;
       results.push({
         success: false,
         sessionId,

@@ -551,8 +551,12 @@ export type MigrationMode = 'move' | 'copy';
  * Options for migrating one or more sessions
  */
 export interface MigrateSessionOptions {
-  /** Session ID(s) to migrate (resolved from index or UUID) */
-  sessionIds: string[];
+  /** Legacy pre-resolved session ID(s). New callers should pass selectors. */
+  sessionIds?: string[];
+  /** Numeric/direct-ID selectors bound once inside the active migration scope. */
+  selectors?: Array<string | number>;
+  /** Workspace scope used for both numeric and direct-ID migration selectors. */
+  workspacePath?: string;
   /** Destination workspace path */
   destination: string;
   /** Migration mode: 'move' (default) or 'copy' */
@@ -565,6 +569,10 @@ export interface MigrateSessionOptions {
   dataPath?: string;
   /** If true, log detailed path transformation info to stderr */
   debug?: boolean;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel before mutation or between bounded stages. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -585,6 +593,10 @@ export interface MigrateWorkspaceOptions {
   dataPath?: string;
   /** If true, log detailed path transformation info to stderr */
   debug?: boolean;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel before mutation or between bounded stages. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -607,9 +619,24 @@ export interface SessionMigrationResult {
   error?: string;
   /** Whether this was a dry run */
   dryRun: boolean;
+  /** Safe eligibility projection; physical locators are never exposed. */
+  eligibility?: MigrationEligibilityResult;
+  /** Opaque fingerprint shared by preview/apply for the bound occurrence. */
+  targetFingerprint?: string;
+  /** Stable typed error code for batch-result failures. */
+  errorCode?: string;
   /** Indicates file paths in session data will be updated (dry run preview) */
   pathsWillBeUpdated?: boolean;
 }
+
+/** Public-safe migration eligibility values. */
+export type MigrationEligibilityResult =
+  | 'eligible-composer'
+  | 'multiple-composer-occurrences'
+  | 'shared-membership'
+  | 'ambiguous'
+  | 'store-only'
+  | 'merged';
 
 /**
  * Aggregate result of workspace migration
