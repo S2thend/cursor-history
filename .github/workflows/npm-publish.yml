@@ -5,27 +5,43 @@ on:
     tags:
       - 'v*'
 
+concurrency:
+  group: npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
-  publish:
+  validate:
+    name: Validate on Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - '20.0.0'
+          - '22.15.1'
+          - '22.16.0'
+          - '23.7.0'
+          - '23.8.0'
+          - '24.x'
+          - '26.x'
 
     steps:
-      - name: Checkout code
+      - name: Checkout exact tag revision
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: ${{ matrix.node-version }}
+          cache: npm
 
-      - name: Show versions
+      - name: Show toolchain versions
         run: node -v && npm -v
 
-      - name: Install dependencies
+      - name: Install locked dependencies
         run: npm ci
 
       - name: Run type check
@@ -34,19 +50,136 @@ jobs:
       - name: Run lint
         run: npm run lint
 
-      - name: Run tests
-        run: npm test || echo "No tests found, skipping"
+      - name: Run nonempty verified tests
+        run: npm test
 
-      - name: Build
+      - name: Build distributable files
         run: npm run build
 
-      - name: Force OIDC (clear any token config)
-        run: |
-          rm -f .npmrc ~/.npmrc || true
-          npm config delete //registry.npmjs.org/:_authToken || true
+  package-candidate:
+    name: Pack one immutable candidate
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      tarball: ${{ steps.identity.outputs.tarball }}
+      sha256: ${{ steps.identity.outputs.sha256 }}
 
-      - name: Publish to NPM
-        run: npm publish --provenance --access public
+    steps:
+      - name: Checkout exact tag revision
+        uses: actions/checkout@v4
+
+      - name: Setup packaging runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install and rebuild exact revision
+        run: |
+          npm ci
+          npm run build
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(npm pkg get version | tr -d '"')
+          TAG_VERSION=${GITHUB_REF_NAME#v}
+          test "$TAG_VERSION" = "$PACKAGE_VERSION"
+
+      - name: Pack candidate once and record identity
+        id: identity
+        shell: bash
+        run: |
+          mkdir -p release-candidate
+          PACKAGE_VERSION=$(npm pkg get version | tr -d '"')
+          TARBALL=$(npm pack --pack-destination release-candidate --silent)
+          SHA256=$(sha256sum "release-candidate/$TARBALL" | cut -d ' ' -f 1)
+          printf '%s  %s\n' "$SHA256" "$TARBALL" > release-candidate/candidate.sha256
+          node -e 'const fs=require("node:fs"); const [tag,version,tarball,sha,revision]=process.argv.slice(1); fs.writeFileSync("release-candidate/candidate-metadata.json", JSON.stringify({tag,version,tarball,sha256:sha,revision}, null, 2)+"\n", {mode:0o600})' "$GITHUB_REF_NAME" "$PACKAGE_VERSION" "$TARBALL" "$SHA256" "$GITHUB_SHA"
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve checksum-addressed candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-candidate-${{ steps.identity.outputs.sha256 }}
+          path: release-candidate/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-candidate:
+    name: Verify exact packed bytes
+    needs: package-candidate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout verification scripts
+        uses: actions/checkout@v4
+
+      - name: Setup smoke-test runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Download preserved candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-candidate-${{ needs.package-candidate.outputs.sha256 }}
+          path: release-candidate
+
+      - name: Verify candidate checksum and metadata
+        shell: bash
+        working-directory: release-candidate
+        run: |
+          sha256sum -c candidate.sha256
+          test "$(node -p 'require("./candidate-metadata.json").revision')" = "$GITHUB_SHA"
+
+      - name: Clean-install and smoke exact package
+        run: node scripts/smoke-packed-package.mjs "release-candidate/${{ needs.package-candidate.outputs.tarball }}"
+
+  approve-candidate:
+    name: Approve maintainer verification
+    needs: verify-candidate
+    runs-on: ubuntu-latest
+    environment: npm-release-verification
+
+    steps:
+      - name: Record protected approval
+        run: echo "Exact candidate passed protected maintainer verification."
+
+  publish:
+    name: Publish preserved candidate
+    needs: [package-candidate, approve-candidate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Setup npm trusted publishing
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download the approved candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-candidate-${{ needs.package-candidate.outputs.sha256 }}
+          path: release-candidate
+
+      - name: Recheck preserved checksum
+        shell: bash
+        working-directory: release-candidate
+        run: sha256sum -c candidate.sha256
+
+      - name: Remove token-based npm configuration
+        run: npm config delete //registry.npmjs.org/:_authToken
+
+      - name: Publish the exact verified tarball without rebuilding
+        run: npm publish "release-candidate/${{ needs.package-candidate.outputs.tarball }}" --provenance --access public
         env:
-          NODE_AUTH_TOKEN: ""
-          NPM_TOKEN: ""
+          NODE_AUTH_TOKEN: ''
+          NPM_TOKEN: ''

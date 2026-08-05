@@ -23,7 +23,12 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "test": "vitest run",
+    "test": "vitest run --reporter=json --outputFile=.vitest-results.tmp && npm run test:verify",
+    "test:verify": "node scripts/verify-test-results.mjs .vitest-results.tmp",
+    "test:compatibility": "vitest run tests/compatibility --reporter=json --outputFile=.vitest-compatibility-results.tmp && node scripts/verify-test-results.mjs .vitest-compatibility-results.tmp",
+    "test:e2e": "vitest run tests/e2e --reporter=json --outputFile=.vitest-e2e-results.tmp && node scripts/verify-test-results.mjs .vitest-e2e-results.tmp",
+    "test:package-smoke": "vitest run tests/e2e/package-smoke.test.ts --reporter=json --outputFile=.vitest-package-results.tmp && node scripts/verify-test-results.mjs .vitest-package-results.tmp",
+    "test:release-gates": "vitest run tests/unit/verify-test-results.test.ts tests/e2e/publish-workflow.test.ts --reporter=json --outputFile=.vitest-release-results.tmp && node scripts/verify-test-results.mjs .vitest-release-results.tmp",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
