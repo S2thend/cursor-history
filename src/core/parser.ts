@@ -236,6 +236,41 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     return resolved;
   });
 
+  const selectedEvidenceRepresentation =
+    ss.resolvedSource === 'store-db' ||
+    (ss.resolvedSource === undefined &&
+      (ss.source === 'store-complete' || ss.source === 'store-partial'))
+      ? 'db'
+      : ss.resolvedSource === 'store-transcript' ||
+          (ss.resolvedSource === undefined && ss.source === 'transcript')
+        ? 'transcript'
+        : undefined;
+  const hasUnsupportedSelectedEvidence =
+    selectedEvidenceRepresentation !== undefined &&
+    (ss.rawContentBlockEvidence ?? []).some(
+      (evidence) =>
+        evidence.representation === selectedEvidenceRepresentation &&
+        evidence.disposition === 'unsupported'
+    );
+  const resolution = ss.resolution
+    ? {
+        ...ss.resolution,
+        expectedSourceRoles: [...ss.resolution.expectedSourceRoles],
+        loadedSourceRoles: [...ss.resolution.loadedSourceRoles],
+        omittedSourceRoles: [...ss.resolution.omittedSourceRoles],
+        failedSourceRoles: [...ss.resolution.failedSourceRoles],
+        reasonCodes: [...ss.resolution.reasonCodes],
+      }
+    : undefined;
+  if (hasUnsupportedSelectedEvidence) {
+    if (resolution) {
+      resolution.state = 'partial';
+      if (!resolution.reasonCodes.includes('source-partial')) {
+        resolution.reasonCodes.push('source-partial');
+      }
+    }
+  }
+
   const result: ChatSession = {
     id: ss.id,
     index,
@@ -246,18 +281,20 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     messages,
     workspaceId: 'store',
     workspacePath: ss.workspacePath,
-    source: ss.source,
+    source: hasUnsupportedSelectedEvidence ? 'workspace-fallback' : ss.source,
     resolvedSource: ss.resolvedSource,
-    resolution: ss.resolution
-      ? {
-          ...ss.resolution,
-          expectedSourceRoles: [...ss.resolution.expectedSourceRoles],
-          loadedSourceRoles: [...ss.resolution.loadedSourceRoles],
-          omittedSourceRoles: [...ss.resolution.omittedSourceRoles],
-          failedSourceRoles: [...ss.resolution.failedSourceRoles],
-          reasonCodes: [...ss.resolution.reasonCodes],
-        }
-      : undefined,
+    resolution:
+      resolution ??
+      (hasUnsupportedSelectedEvidence
+        ? {
+            state: 'partial',
+            expectedSourceRoles: ['store'],
+            loadedSourceRoles: ['store'],
+            omittedSourceRoles: [],
+            failedSourceRoles: [],
+            reasonCodes: ['source-partial'],
+          }
+        : undefined),
     messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
     transcriptState: ss.transcriptState,
   };

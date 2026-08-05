@@ -44,6 +44,10 @@
 import type { ChatSession, ChatSessionSummary, Message, ToolCall } from '../types.js';
 import { findEmbeddedToolCallIndex } from '../parser.js';
 import {
+  renderInlineAttachmentProjections,
+  splitInlineAttachmentProjections,
+} from './content-evidence.js';
+import {
   allocateStoreMessageIdentities,
   allocateToolCallIdentities,
   matchAlignedToolCalls,
@@ -88,6 +92,12 @@ function unwrapUserQuery(text: string): string {
  */
 function matchContent(text: string): string {
   if (text === EMPTY_PLACEHOLDER) return '';
+  const projected = splitInlineAttachmentProjections(text);
+  const base = normalizeText(unwrapUserQuery(projected.baseContent));
+  if (base.length > 0) return base;
+  if (projected.encodedAttachments.length > 0) {
+    return JSON.stringify(['attachments', projected.encodedAttachments]);
+  }
   return normalizeText(unwrapUserQuery(text));
 }
 
@@ -240,9 +250,59 @@ function contentCompatible(a: string, b: string): boolean {
     return ca === 'corrupt' && cb === 'corrupt';
   }
   if (ca === 'real' && cb === 'real') {
+    const aProjected = splitInlineAttachmentProjections(a);
+    const bProjected = splitInlineAttachmentProjections(b);
+    const aBase = normalizeText(unwrapUserQuery(aProjected.baseContent));
+    const bBase = normalizeText(unwrapUserQuery(bProjected.baseContent));
+    if (aBase.length > 0 || bBase.length > 0) {
+      return aBase.length > 0 && aBase === bBase;
+    }
+    if (aProjected.encodedAttachments.length > 0 && bProjected.encodedAttachments.length > 0) {
+      const bAttachments = new Set(bProjected.encodedAttachments);
+      return aProjected.encodedAttachments.some((attachment) => bAttachments.has(attachment));
+    }
     return matchContent(a) === matchContent(b);
   }
   return true; // empty involved (but no corrupt) -> fillable
+}
+
+/**
+ * Merge attachment enrichment only when the pair has a content bridge. The
+ * projection sequence is always Composer then Store, independent of the
+ * rendering backbone, while exact base formatting still follows the preferred
+ * source like other scalar content.
+ */
+function mergeProjectedAttachmentContent(
+  composerContent: string,
+  storeContent: string,
+  preferredSource: 'composer' | 'store'
+): string | null {
+  const composer = splitInlineAttachmentProjections(composerContent);
+  const store = splitInlineAttachmentProjections(storeContent);
+  if (composer.encodedAttachments.length === 0 && store.encodedAttachments.length === 0) {
+    return null;
+  }
+
+  const composerBase = normalizeText(unwrapUserQuery(composer.baseContent));
+  const storeBase = normalizeText(unwrapUserQuery(store.baseContent));
+  const sameNonemptyBase = composerBase.length > 0 && composerBase === storeBase;
+  const sharedAttachment = composer.encodedAttachments.some((attachment) =>
+    store.encodedAttachments.includes(attachment)
+  );
+  const oneSideMissing = contentMissing(composerContent) || contentMissing(storeContent);
+  if (!sameNonemptyBase && !sharedAttachment && !oneSideMissing) return null;
+
+  const preferred = preferredSource === 'composer' ? composer : store;
+  const other = preferredSource === 'composer' ? store : composer;
+  const baseContent =
+    normalizeText(preferred.baseContent).length > 0 ? preferred.baseContent : other.baseContent;
+  const encodedAttachments = [
+    ...composer.encodedAttachments,
+    ...store.encodedAttachments.filter(
+      (attachment) => !composer.encodedAttachments.includes(attachment)
+    ),
+  ];
+  return renderInlineAttachmentProjections(baseContent, encodedAttachments);
 }
 
 /**
@@ -484,6 +544,12 @@ function mergeMessage(
     // marker even when Composer is the scalar-conflict backbone.
     merged.content = other.content;
   }
+  const projectedAttachmentContent = mergeProjectedAttachmentContent(
+    composer.content,
+    store.content,
+    preferredSource
+  );
+  if (projectedAttachmentContent !== null) merged.content = projectedAttachmentContent;
 
   // Thinking: fill from other when the backbone lacks it.
   if (!isPresent(merged.thinking) && isPresent(other.thinking)) {

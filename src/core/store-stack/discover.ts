@@ -217,6 +217,12 @@ export async function discoverStoreSessions(
     const transcriptFailures = selectedTranscriptFailures.get(ss.id) ?? [];
     const transcriptUsable = ss.messages.length > 0;
     const dbUsable = Boolean(deep && deep.messages.length > 0);
+    if (deep?.rawContentBlockEvidence.length) {
+      ss.rawContentBlockEvidence = [
+        ...(ss.rawContentBlockEvidence ?? []),
+        ...deep.rawContentBlockEvidence,
+      ];
+    }
     retainSafeSourceFailures(
       ss,
       transcriptFailures,
@@ -322,6 +328,7 @@ function emptyStoreSession(
     ...fields,
     messages: [],
     messageIdentityEvidence: [],
+    rawContentBlockEvidence: [],
     source: 'workspace-fallback',
     transcriptState: 'missing',
   };
@@ -482,6 +489,7 @@ function attachTranscript(
     existing.transcriptPath = file;
     existing.messages = parsed.messages;
     existing.messageIdentityEvidence = parsed.messageIdentityEvidence;
+    existing.rawContentBlockEvidence = parsed.rawContentBlockEvidence;
     selectedFailures.set(uuid, failures);
     if (!existing.chatDir) {
       existing.createdAt = modifiedAt;
@@ -498,6 +506,7 @@ function attachTranscript(
     lastUpdatedAt: modifiedAt,
     messages: parsed.messages,
     messageIdentityEvidence: parsed.messageIdentityEvidence,
+    rawContentBlockEvidence: parsed.rawContentBlockEvidence,
     source: 'workspace-fallback',
     transcriptState: parsed.state,
     transcriptPath: file,

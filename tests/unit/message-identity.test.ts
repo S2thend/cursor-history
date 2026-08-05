@@ -14,14 +14,13 @@ import {
   rewriteRelationshipReferences,
   sha256CanonicalJsonV1,
 } from '../../src/core/session-identity.js';
+import { mapStoreSession } from '../../src/core/parser.js';
 import { mergeCrossStackSessions } from '../../src/core/store-stack/merge.js';
 import { parseTranscriptFile } from '../../src/core/store-stack/transcript.js';
 import type { ChatSession } from '../../src/core/types.js';
+import type { StoreSession } from '../../src/core/store-stack/types.js';
 import type { Session } from '../../src/lib/types.js';
-import {
-  computeV016MessageDigest,
-  normalizeCursorSessionV016,
-} from '../helpers/v016-consumer.js';
+import { computeV016MessageDigest, normalizeCursorSessionV016 } from '../helpers/v016-consumer.js';
 
 describe('canonical JSON and SHA-256 v1', () => {
   it('sorts keys by Unicode code point, preserves arrays, and applies JSON undefined rules', () => {
@@ -319,6 +318,34 @@ describe('unchanged-consumer attachment projection and fidelity', () => {
     };
   }
 
+  function mapParsedTranscript(
+    parsed: ReturnType<typeof parseTranscriptFile>,
+    resolutionState: 'complete' | 'partial' = 'complete'
+  ): ChatSession {
+    const storeSession: StoreSession = {
+      id: '00000000-0017-4017-8017-000000000017',
+      workspacePath: '/fixture/attachments',
+      title: 'Synthetic attachment contract',
+      createdAt: new Date('2024-01-17T00:00:00.000Z'),
+      lastUpdatedAt: new Date('2024-01-17T00:00:01.000Z'),
+      messages: parsed.messages,
+      messageIdentityEvidence: parsed.messageIdentityEvidence,
+      rawContentBlockEvidence: parsed.rawContentBlockEvidence,
+      source: 'transcript',
+      resolvedSource: 'store-transcript',
+      resolution: {
+        state: resolutionState,
+        expectedSourceRoles: ['store'],
+        loadedSourceRoles: ['store'],
+        omittedSourceRoles: [],
+        failedSourceRoles: [],
+        reasonCodes: [],
+      },
+      transcriptState: parsed.state,
+    };
+    return mapStoreSession(storeSession, 1);
+  }
+
   it('changes replacement digest only when attachment evidence reaches consumed fields', () => {
     const baseline: Session = {
       id: '00000000-0016-4016-8016-000000000016',
@@ -370,6 +397,93 @@ describe('unchanged-consumer attachment projection and fidelity', () => {
     expect(compatibilityDigest(toolProjected)).not.toBe(baselineDigest);
   });
 
+  it('losslessly projects an inline transcript attachment into content used by identity, digest, and equivalence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cursor-history-inline-attachment-'));
+    const transcriptPath = join(root, 'session.jsonl');
+    const rawAttachment = {
+      type: 'attachment',
+      name: 'synthetic.txt',
+      mediaType: 'text/plain',
+      content: 'line one\n```\nline two',
+    };
+    try {
+      writeFileSync(
+        transcriptPath,
+        `${JSON.stringify({
+          role: 'assistant',
+          message: {
+            content: [{ type: 'text', text: 'Synthetic known transcript content.' }, rawAttachment],
+          },
+        })}\n`,
+        { mode: 0o600 }
+      );
+
+      const parsed = parseTranscriptFile(transcriptPath);
+      expect(parsed.state).toBe('parsed');
+      expect(parsed.rawContentBlockEvidence).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            representation: 'transcript',
+            disposition: 'projected-attachment',
+            raw: rawAttachment,
+          }),
+        ])
+      );
+
+      const projectedContent = parsed.messages[0]!.content;
+      const payload = projectedContent.match(
+        /```cursor_attachment_v1\n([A-Za-z0-9+/=]+)\n```/
+      )?.[1];
+      expect(payload).toBeDefined();
+      expect(Buffer.from(payload!, 'base64').toString('utf8')).toBe(canonicalJsonV1(rawAttachment));
+
+      const store = mapParsedTranscript(parsed);
+      const composer = sourceSession('global', [
+        {
+          id: 'composer-inline-attachment',
+          role: 'assistant',
+          content: 'Synthetic known transcript content.',
+          codeBlocks: [],
+        },
+      ]);
+      const composerBackbone = mergeCrossStackSessions(composer, store, 'composer', 1);
+      const storeBackbone = mergeCrossStackSessions(composer, store, 'store', 1);
+      for (const merged of [composerBackbone, storeBackbone]) {
+        expect(merged).toMatchObject({ source: 'global', resolution: { state: 'complete' } });
+        expect(merged.messages).toHaveLength(1);
+        expect(merged.messages[0]).toMatchObject({
+          id: 'composer-inline-attachment',
+          source: 'both',
+          content: projectedContent,
+        });
+      }
+      expect(storeBackbone.messages.map(({ id }) => id)).toEqual(
+        composerBackbone.messages.map(({ id }) => id)
+      );
+
+      const withoutAttachment: Session = {
+        id: composerBackbone.id,
+        workspace: '/fixture/attachments',
+        timestamp: composerBackbone.createdAt.toISOString(),
+        source: 'global',
+        messageCount: 1,
+        messages: [
+          {
+            id: 'composer-inline-attachment',
+            role: 'assistant',
+            content: 'Synthetic known transcript content.',
+            timestamp: composerBackbone.createdAt.toISOString(),
+          },
+        ],
+      };
+      const withAttachment = structuredClone(withoutAttachment);
+      withAttachment.messages[0]!.content = projectedContent;
+      expect(compatibilityDigest(withAttachment)).not.toBe(compatibilityDigest(withoutAttachment));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps known content, marks unsupported raw attachment evidence partial, and never dereferences its URI', () => {
     const root = mkdtempSync(join(tmpdir(), 'cursor-history-attachment-poison-'));
     const poisonPath = join(root, 'must-not-be-read.txt');
@@ -402,7 +516,17 @@ describe('unchanged-consumer attachment projection and fidelity', () => {
         'Synthetic known transcript content.',
       ]);
       expect(JSON.stringify(parsed)).not.toContain(poisonPayload);
-      expect(JSON.stringify(parsed)).not.toContain(pathToFileURL(poisonPath).href);
+      expect(JSON.stringify(parsed)).toContain(pathToFileURL(poisonPath).href);
+      expect(parsed.rawContentBlockEvidence).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            representation: 'transcript',
+            disposition: 'unsupported',
+            raw: expect.objectContaining({ uri: pathToFileURL(poisonPath).href }),
+          }),
+        ])
+      );
+      expect(Object.isFrozen(parsed.rawContentBlockEvidence.at(-1)?.raw)).toBe(true);
 
       const composer = sourceSession('global', [
         {
@@ -412,13 +536,22 @@ describe('unchanged-consumer attachment projection and fidelity', () => {
           codeBlocks: [],
         },
       ]);
-      const store = sourceSession('transcript', parsed.messages, parsed.state);
+      // Deliberately claim complete input resolution: mapStoreSession must
+      // independently prevent unsupported selected evidence from crossing the
+      // legacy replacement-safe boundary.
+      const store = mapParsedTranscript(parsed, 'complete');
+      expect(store).toMatchObject({
+        source: 'workspace-fallback',
+        resolution: { state: 'partial', reasonCodes: ['source-partial'] },
+      });
       const merged = mergeCrossStackSessions(composer, store, 'composer', 1);
       expect(merged.source).toBe('workspace-fallback');
       expect(merged.resolution).toMatchObject({
         state: 'partial',
         reasonCodes: ['source-partial'],
       });
+      expect(JSON.stringify(merged)).not.toContain(pathToFileURL(poisonPath).href);
+      expect(JSON.stringify(merged)).not.toContain(poisonPayload);
     } finally {
       if (process.platform !== 'win32') chmodSync(poisonPath, 0o600);
       rmSync(root, { recursive: true, force: true });

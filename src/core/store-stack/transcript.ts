@@ -16,7 +16,12 @@ import {
   type SourceFailureOutcome,
 } from '../source-read-limits.js';
 import type { Message, MessageRole, SourceReadLimitsV1, ToolCall } from '../types.js';
-import type { StoreMessageIdentityEvidence, TranscriptState } from './types.js';
+import { projectInlineAttachment, retainRawContentBlock } from './content-evidence.js';
+import type {
+  StoreMessageIdentityEvidence,
+  StoreRawContentBlockEvidence,
+  TranscriptState,
+} from './types.js';
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
@@ -27,6 +32,8 @@ export interface TranscriptParseResult {
   state: TranscriptState;
   /** Source-native canonical inputs, aligned with `messages`. */
   messageIdentityEvidence: StoreMessageIdentityEvidence[];
+  /** Internal source-native evidence; never projected as a public attachment field. */
+  rawContentBlockEvidence: StoreRawContentBlockEvidence[];
   /** A present transcript is positive conversation evidence even if corrupt/empty. */
   positiveEvidence: boolean;
   /** Typed safe failure retained when the caller has a documented safe fallback. */
@@ -53,6 +60,7 @@ export function parseTranscriptFile(
 
   const messages: Message[] = [];
   const messageIdentityEvidence: StoreMessageIdentityEvidence[] = [];
+  const rawContentBlockEvidence: StoreRawContentBlockEvidence[] = [];
   const budget = new JsonlSourceReadBudget(limits, failureOutcome);
   const recordChunks: Buffer[] = [];
   let recordRawBytes = 0;
@@ -99,10 +107,12 @@ export function parseTranscriptFile(
     if (result.kind === 'message') {
       messages.push(result.message);
       messageIdentityEvidence.push(result.identityEvidence);
+      rawContentBlockEvidence.push(...result.rawContentBlocks);
       if (!result.complete) unsupportedLines++;
     } else if (result.kind === 'error') {
       errorLines++;
     } else if (result.kind === 'skip') {
+      rawContentBlockEvidence.push(...(result.rawContentBlocks ?? []));
       unsupportedLines++;
     } else {
       ignoredLines++;
@@ -179,6 +189,7 @@ export function parseTranscriptFile(
     messages,
     state,
     messageIdentityEvidence,
+    rawContentBlockEvidence,
     positiveEvidence: true,
     ...(diagnostic ? { diagnostic } : {}),
   };
@@ -195,7 +206,13 @@ function chunkByteAt(chunks: readonly Buffer[], index: number): number | undefin
 }
 
 function emptyResult(state: TranscriptState, positiveEvidence: boolean): TranscriptParseResult {
-  return { messages: [], state, messageIdentityEvidence: [], positiveEvidence };
+  return {
+    messages: [],
+    state,
+    messageIdentityEvidence: [],
+    rawContentBlockEvidence: [],
+    positiveEvidence,
+  };
 }
 
 function determineState(values: {
@@ -228,11 +245,12 @@ type LineResult =
       kind: 'message';
       message: Message;
       identityEvidence: StoreMessageIdentityEvidence;
+      rawContentBlocks: StoreRawContentBlockEvidence[];
       complete: boolean;
     }
   | { kind: 'error' }
   | { kind: 'ignore' }
-  | { kind: 'skip' };
+  | { kind: 'skip'; rawContentBlocks?: StoreRawContentBlockEvidence[] };
 
 function mapLine(parsed: unknown, sourceLine: number): LineResult {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'skip' };
@@ -240,16 +258,22 @@ function mapLine(parsed: unknown, sourceLine: number): LineResult {
 
   if (obj['type'] === 'error') return { kind: 'error' };
   if (obj['role'] === 'system') return { kind: 'ignore' };
-  if (obj['role'] !== 'user' && obj['role'] !== 'assistant') return { kind: 'skip' };
+  if (obj['role'] !== 'user' && obj['role'] !== 'assistant') {
+    return { kind: 'skip', rawContentBlocks: retainUnprojectedTranscriptContent(obj) };
+  }
 
   const nested = obj['message'];
   if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return { kind: 'skip' };
   const nestedRecord = nested as Record<string, unknown>;
   const content = nestedRecord['content'];
-  if (!Array.isArray(content)) return { kind: 'skip' };
+  if (!Array.isArray(content)) {
+    return { kind: 'skip', rawContentBlocks: retainUnsupportedTranscriptValue(content) };
+  }
 
-  const { text, toolCalls, toolActivity, complete } = extractContent(content);
-  if (text.length === 0 && toolCalls.length === 0) return { kind: 'skip' };
+  const { text, toolCalls, toolActivity, rawContentBlocks, complete } = extractContent(content);
+  if (text.length === 0 && toolCalls.length === 0) {
+    return { kind: 'skip', rawContentBlocks };
+  }
 
   const sourceRelationships: Record<string, unknown> = {};
   const parent = firstString(
@@ -276,6 +300,7 @@ function mapLine(parsed: unknown, sourceLine: number): LineResult {
     kind: 'message',
     message,
     complete,
+    rawContentBlocks,
     identityEvidence: {
       representation: 'transcript',
       sourceLine,
@@ -285,6 +310,20 @@ function mapLine(parsed: unknown, sourceLine: number): LineResult {
       sourceRelationships,
     },
   };
+}
+
+function retainUnprojectedTranscriptContent(
+  line: Readonly<Record<string, unknown>>
+): StoreRawContentBlockEvidence[] {
+  const nested = line['message'];
+  if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return [];
+  return retainUnsupportedTranscriptValue((nested as Record<string, unknown>)['content']);
+}
+
+function retainUnsupportedTranscriptValue(value: unknown): StoreRawContentBlockEvidence[] {
+  if (value === undefined || value === null) return [];
+  const blocks = Array.isArray(value) ? value : [value];
+  return blocks.map((block) => retainRawContentBlock(block, 'unsupported', 'transcript'));
 }
 
 function firstString(...values: unknown[]): string | undefined {
@@ -299,21 +338,25 @@ function extractContent(parts: unknown[]): {
   text: string;
   toolCalls: ToolCall[];
   toolActivity: Readonly<Record<string, unknown>>[];
+  rawContentBlocks: StoreRawContentBlockEvidence[];
   complete: boolean;
 } {
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
   const toolActivity: Record<string, unknown>[] = [];
+  const rawContentBlocks: StoreRawContentBlockEvidence[] = [];
   let complete = true;
 
   for (const part of parts) {
     if (!part || typeof part !== 'object' || Array.isArray(part)) {
+      rawContentBlocks.push(retainRawContentBlock(part, 'unsupported', 'transcript'));
       complete = false;
       continue;
     }
     const value = part as Record<string, unknown>;
     if (value['type'] === 'text' && typeof value['text'] === 'string') {
       texts.push(value['text']);
+      rawContentBlocks.push(retainRawContentBlock(value, 'projected-text', 'transcript'));
       continue;
     }
     if (value['type'] === 'tool_use' && typeof value['name'] === 'string') {
@@ -325,10 +368,18 @@ function extractContent(parts: unknown[]): {
       }
       toolCalls.push(call);
       toolActivity.push(activity);
+      rawContentBlocks.push(retainRawContentBlock(value, 'projected-tool', 'transcript'));
       continue;
     }
+    const attachment = projectInlineAttachment(value);
+    if (attachment !== null) {
+      texts.push(attachment);
+      rawContentBlocks.push(retainRawContentBlock(value, 'projected-attachment', 'transcript'));
+      continue;
+    }
+    rawContentBlocks.push(retainRawContentBlock(value, 'unsupported', 'transcript'));
     complete = false;
   }
 
-  return { text: texts.join(''), toolCalls, toolActivity, complete };
+  return { text: texts.join(''), toolCalls, toolActivity, rawContentBlocks, complete };
 }

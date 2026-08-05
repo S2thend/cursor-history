@@ -38,7 +38,8 @@ import {
   type SourceFailureOutcome,
 } from '../source-read-limits.js';
 import type { Message, MessageRole, SourceReadLimitsV1, ToolCall } from '../types.js';
-import type { StoreMessageIdentityEvidence } from './types.js';
+import { projectInlineAttachment, retainRawContentBlock } from './content-evidence.js';
+import type { StoreMessageIdentityEvidence, StoreRawContentBlockEvidence } from './types.js';
 
 export type StoreCompleteness = 'complete' | 'partial';
 
@@ -46,6 +47,7 @@ export interface StoreDbData {
   title: string | null;
   messages: Message[];
   messageIdentityEvidence: StoreMessageIdentityEvidence[];
+  rawContentBlockEvidence: StoreRawContentBlockEvidence[];
   createdAt: Date | null;
   completeness: StoreCompleteness;
 }
@@ -129,12 +131,14 @@ export async function parseStoreDb(
       : {
           messages: [] as Message[],
           messageIdentityEvidence: [] as StoreMessageIdentityEvidence[],
+          rawContentBlockEvidence: [] as StoreRawContentBlockEvidence[],
           complete: true,
         };
     result = {
       title,
       messages: parsed.messages,
       messageIdentityEvidence: parsed.messageIdentityEvidence,
+      rawContentBlockEvidence: parsed.rawContentBlockEvidence,
       createdAt,
       completeness: parsed.complete ? 'complete' : 'partial',
     };
@@ -331,10 +335,12 @@ function readMessages(
 ): {
   messages: Message[];
   messageIdentityEvidence: StoreMessageIdentityEvidence[];
+  rawContentBlockEvidence: StoreRawContentBlockEvidence[];
   complete: boolean;
 } {
   const messages: Message[] = [];
   const messageIdentityEvidence: StoreMessageIdentityEvidence[] = [];
+  const rawContentBlockEvidence: StoreRawContentBlockEvidence[] = [];
   const visited = new Set<string>();
   const reachableLeaves: Array<{ hash: string; object: LeafObj }> = [];
   const blobs = new BoundedBlobReader(db, budget);
@@ -428,9 +434,14 @@ function readMessages(
   for (let traversalOrdinal = 0; traversalOrdinal < reachableLeaves.length; traversalOrdinal++) {
     const { hash, object } = reachableLeaves[traversalOrdinal]!;
     const leaf = classifyLeaf(object, toolResults);
+    rawContentBlockEvidence.push(...leaf.rawContentBlocks);
     if (leaf.kind === 'message') {
       messages.push(leaf.message);
-      messageIdentityEvidence.push({ representation: 'db', leafHash: hash, traversalOrdinal });
+      messageIdentityEvidence.push({
+        representation: 'db',
+        leafHash: hash,
+        traversalOrdinal,
+      });
       if (!leaf.complete) {
         complete = false;
         debugLogStorage('store.db: unsupported message content block → partial');
@@ -449,14 +460,24 @@ function readMessages(
     complete = false;
     debugLogStorage('store.db: orphan tool result (no tool_call_id match) → partial');
   }
-  return { messages, messageIdentityEvidence, complete };
+  return { messages, messageIdentityEvidence, rawContentBlockEvidence, complete };
 }
 
 type LeafResult =
-  | { kind: 'message'; message: Message; complete: boolean }
-  | { kind: 'tool-result'; callIds: string[]; complete: boolean }
-  | { kind: 'ignore' }
-  | { kind: 'malformed' };
+  | {
+      kind: 'message';
+      message: Message;
+      complete: boolean;
+      rawContentBlocks: StoreRawContentBlockEvidence[];
+    }
+  | {
+      kind: 'tool-result';
+      callIds: string[];
+      complete: boolean;
+      rawContentBlocks: StoreRawContentBlockEvidence[];
+    }
+  | { kind: 'ignore'; rawContentBlocks: StoreRawContentBlockEvidence[] }
+  | { kind: 'malformed'; rawContentBlocks: StoreRawContentBlockEvidence[] };
 
 type DecodedLeaf = { kind: 'decoded'; object: LeafObj } | { kind: 'malformed' };
 
@@ -486,27 +507,38 @@ function classifyLeaf(obj: LeafObj, toolResults: ToolResultIndex): LeafResult {
       kind: 'tool-result',
       callIds: getToolResultIds(obj),
       complete: hasOnlySupportedToolResultContent(obj),
+      rawContentBlocks: retainToolResultBlocks(obj),
     };
   }
   if (obj.role === 'user' || obj.role === 'assistant') {
     const built = buildMessage(obj, obj.role as MessageRole, toolResults);
     return built.message
-      ? { kind: 'message', message: built.message, complete: built.complete }
-      : { kind: 'malformed' };
+      ? {
+          kind: 'message',
+          message: built.message,
+          complete: built.complete,
+          rawContentBlocks: built.rawContentBlocks,
+        }
+      : { kind: 'malformed', rawContentBlocks: built.rawContentBlocks };
   }
-  if (obj.role === 'system') return { kind: 'ignore' };
+  if (obj.role === 'system') return { kind: 'ignore', rawContentBlocks: [] };
   // Unknown roles can contain data from a newer schema; silently dropping them
   // would incorrectly report a complete parse.
-  return { kind: 'malformed' };
+  return { kind: 'malformed', rawContentBlocks: retainUnsupportedContent(obj.content) };
 }
 
 function buildMessage(
   obj: LeafObj,
   role: MessageRole,
   toolResults: ToolResultIndex
-): { message: Message | null; complete: boolean } {
+): {
+  message: Message | null;
+  complete: boolean;
+  rawContentBlocks: StoreRawContentBlockEvidence[];
+} {
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
+  const rawContentBlocks: StoreRawContentBlockEvidence[] = [];
   let complete = true;
   if (typeof obj.content === 'string') {
     texts.push(obj.content);
@@ -514,11 +546,13 @@ function buildMessage(
     const r = extractBlocks(obj.content, toolResults);
     texts.push(r.text);
     toolCalls.push(...r.toolCalls);
+    rawContentBlocks.push(...r.rawContentBlocks);
     complete = r.complete;
   } else if (obj.content !== undefined && obj.content !== null) {
     // Missing/null content is valid for a tool-only assistant turn. Any other
     // unrecognized value can hide user-visible data.
     complete = false;
+    rawContentBlocks.push(retainRawContentBlock(obj.content, 'unsupported', 'db'));
   }
   if (Array.isArray(obj.tool_calls)) {
     for (const tc of obj.tool_calls) {
@@ -548,22 +582,29 @@ function buildMessage(
   // No directly-stored per-message timestamp at this layer; leave undefined.
   const content = texts.join('');
   if (content.length === 0 && toolCalls.length === 0) {
-    return { message: null, complete: false };
+    return { message: null, complete: false, rawContentBlocks };
   }
   const msg: Message = { id: null, role, content, codeBlocks: [] };
   if (toolCalls.length > 0) msg.toolCalls = toolCalls;
-  return { message: msg, complete };
+  return { message: msg, complete, rawContentBlocks };
 }
 
 function extractBlocks(
   blocks: unknown[],
   toolResults: ToolResultIndex
-): { text: string; toolCalls: ToolCall[]; complete: boolean } {
+): {
+  text: string;
+  toolCalls: ToolCall[];
+  complete: boolean;
+  rawContentBlocks: StoreRawContentBlockEvidence[];
+} {
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
+  const rawContentBlocks: StoreRawContentBlockEvidence[] = [];
   let complete = true;
   for (const b of blocks) {
     if (!b || typeof b !== 'object') {
+      rawContentBlocks.push(retainRawContentBlock(b, 'unsupported', 'db'));
       complete = false;
       continue;
     }
@@ -580,6 +621,7 @@ function extractBlocks(
     };
     if (block.type === 'text' && typeof block.text === 'string') {
       texts.push(block.text);
+      rawContentBlocks.push(retainRawContentBlock(block, 'projected-text', 'db'));
     } else if (
       (block.type === 'tool_use' || block.type === 'tool-call' || block.type === 'tool_call') &&
       (typeof block.toolName === 'string' || typeof block.name === 'string')
@@ -599,13 +641,40 @@ function extractBlocks(
         toolResults
       );
       toolCalls.push(tc);
+      rawContentBlocks.push(retainRawContentBlock(block, 'projected-tool', 'db'));
     } else {
+      const attachment = projectInlineAttachment(block);
+      if (attachment !== null) {
+        texts.push(attachment);
+        rawContentBlocks.push(retainRawContentBlock(block, 'projected-attachment', 'db'));
+        continue;
+      }
       // Unknown content blocks can carry user-visible data (for example image
       // or reasoning content). Keep known fields, but report degraded fidelity.
+      rawContentBlocks.push(retainRawContentBlock(block, 'unsupported', 'db'));
       complete = false;
     }
   }
-  return { text: texts.join(''), toolCalls, complete };
+  return { text: texts.join(''), toolCalls, complete, rawContentBlocks };
+}
+
+function retainUnsupportedContent(content: unknown): StoreRawContentBlockEvidence[] {
+  if (content === undefined || content === null || typeof content === 'string') return [];
+  const values = Array.isArray(content) ? content : [content];
+  return values.map((value) => retainRawContentBlock(value, 'unsupported', 'db'));
+}
+
+function retainToolResultBlocks(obj: LeafObj): StoreRawContentBlockEvidence[] {
+  if (!Array.isArray(obj.content)) return [];
+  return obj.content.map((raw) => {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const block = raw as Record<string, unknown>;
+      if (block['type'] === 'tool-result' || block['type'] === 'tool_result') {
+        return retainRawContentBlock(raw, 'projected-tool', 'db');
+      }
+    }
+    return retainRawContentBlock(raw, 'unsupported', 'db');
+  });
 }
 
 /** Whether a role:tool leaf contains only tool-result shapes we understand. */

@@ -103,6 +103,14 @@ export type StoreMessageIdentityEvidence =
       sourceRelationships: Readonly<Record<string, unknown>>;
     };
 
+/** Internal-only evidence; it is never exposed as a public attachment field. */
+export interface StoreRawContentBlockEvidence {
+  readonly representation: 'db' | 'transcript';
+  readonly disposition:
+    'projected-text' | 'projected-tool' | 'projected-attachment' | 'unsupported';
+  readonly raw: unknown;
+}
+
 /**
  * Internal role the transcript played in resolving a session's messages (P15).
  * Diagnostics-only — never serialized.
@@ -137,6 +145,8 @@ export interface StoreSession {
   messages: Message[];
   /** Identity inputs aligned one-to-one with `messages` in source-native order. */
   messageIdentityEvidence: StoreMessageIdentityEvidence[];
+  /** All retained source-native content blocks, including blocks with no public message. */
+  rawContentBlockEvidence?: StoreRawContentBlockEvidence[];
   /**
    * Backing data for `messages` (P15 — `store.db` is the primary source):
    * - `'store-complete'` / `'store-partial'`: `store.db` supplied the messages
