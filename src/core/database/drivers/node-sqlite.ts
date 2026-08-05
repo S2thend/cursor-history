@@ -8,9 +8,17 @@
  * on Node.js versions before it becomes stable.
  */
 
-import type { Database, DatabaseDriver, DatabaseOptions, Statement, RunResult } from '../types.js';
+import type {
+  Database,
+  DatabaseCapability,
+  DatabaseCapabilityProfile,
+  DatabaseDriver,
+  DatabaseOptions,
+  Statement,
+  RunResult,
+} from '../types.js';
 import { debugLog } from '../debug.js';
-import { ReadonlyDatabaseError } from '../errors.js';
+import { DatabaseCapabilityError, ReadonlyDatabaseError } from '../errors.js';
 
 // Type definitions for node:sqlite (not yet in @types/node)
 interface NodeSqliteStatement {
@@ -22,6 +30,7 @@ interface NodeSqliteStatement {
 interface NodeSqliteDatabase {
   prepare(sql: string): NodeSqliteStatement;
   close(): void;
+  exec?(sql: string): void;
 }
 
 interface NodeSqliteModule {
@@ -29,7 +38,7 @@ interface NodeSqliteModule {
     path: string,
     options?: { open?: boolean; readOnly?: boolean }
   ) => NodeSqliteDatabase;
-  backup: (
+  backup?: (
     sourceDb: NodeSqliteDatabase,
     destPath: string,
     options?: { rate?: number }
@@ -38,6 +47,119 @@ interface NodeSqliteModule {
 
 // Lazy-loaded node:sqlite module
 let nodeSqliteModule: NodeSqliteModule | null = null;
+let nodeSqliteProfilePromise: Promise<DatabaseCapabilityProfile> | null = null;
+
+function unavailableProfile(reason: string): DatabaseCapabilityProfile {
+  return {
+    driver: 'node:sqlite',
+    available: false,
+    capabilities: new Set<DatabaseCapability>(),
+    unavailableReason: reason,
+  };
+}
+
+/**
+ * Probe the node:sqlite surface cursor-history actually calls.
+ *
+ * Exported for deterministic runtime-boundary tests: older supported Node releases can import the
+ * module and perform reads while legitimately lacking the later online backup API.
+ */
+export function probeNodeSqliteCapabilities(moduleValue: unknown): DatabaseCapabilityProfile {
+  if (typeof moduleValue !== 'object' || moduleValue === null) {
+    return unavailableProfile('node:sqlite did not expose a module object.');
+  }
+
+  const candidate = moduleValue as Partial<NodeSqliteModule>;
+  if (typeof candidate.DatabaseSync !== 'function') {
+    return unavailableProfile('node:sqlite does not expose DatabaseSync.');
+  }
+
+  let testDb: NodeSqliteDatabase;
+  try {
+    testDb = new candidate.DatabaseSync(':memory:');
+  } catch {
+    return unavailableProfile('node:sqlite could not open an in-memory database.');
+  }
+
+  const capabilities = new Set<DatabaseCapability>();
+  let readSupported = false;
+  let writeSupported = false;
+
+  if (typeof testDb.prepare === 'function' && typeof testDb.close === 'function') {
+    try {
+      const getStatement = testDb.prepare('SELECT 1 AS capability_probe');
+      const allStatement = testDb.prepare('SELECT 1 AS capability_probe');
+      if (typeof getStatement.get === 'function' && typeof allStatement.all === 'function') {
+        getStatement.get();
+        allStatement.all();
+        readSupported = true;
+      }
+    } catch {
+      readSupported = false;
+    }
+
+    if (readSupported) {
+      try {
+        if (typeof testDb.exec === 'function') {
+          testDb.exec('CREATE TABLE cursor_history_capability_probe (value INTEGER)');
+        } else {
+          const createStatement = testDb.prepare(
+            'CREATE TABLE cursor_history_capability_probe (value INTEGER)'
+          );
+          if (typeof createStatement.run !== 'function') throw new Error('run unavailable');
+          createStatement.run();
+        }
+
+        const insertStatement = testDb.prepare(
+          'INSERT INTO cursor_history_capability_probe (value) VALUES (1)'
+        );
+        if (typeof insertStatement.run !== 'function') throw new Error('run unavailable');
+        insertStatement.run();
+        writeSupported = true;
+      } catch {
+        writeSupported = false;
+      }
+    }
+  }
+
+  try {
+    testDb.close();
+  } catch {
+    return unavailableProfile('node:sqlite could not close a probed database safely.');
+  }
+
+  if (!readSupported) {
+    return unavailableProfile('node:sqlite statement read APIs are unavailable.');
+  }
+
+  capabilities.add('read');
+  if (writeSupported) capabilities.add('readWrite');
+  if (typeof candidate.backup === 'function') capabilities.add('onlineBackup');
+
+  return {
+    driver: 'node:sqlite',
+    available: true,
+    capabilities,
+  };
+}
+
+async function loadNodeSqliteProfile(): Promise<DatabaseCapabilityProfile> {
+  if (!nodeSqliteProfilePromise) {
+    nodeSqliteProfilePromise = (async () => {
+      try {
+        // Import availability and API capability are deliberately separate checks. In particular,
+        // backup() was added after DatabaseSync on supported Node release lines.
+        const module = await import('node:sqlite');
+        const profile = probeNodeSqliteCapabilities(module);
+        if (profile.available) nodeSqliteModule = module as unknown as NodeSqliteModule;
+        return profile;
+      } catch {
+        return unavailableProfile('node:sqlite could not be imported in this runtime.');
+      }
+    })();
+  }
+  return nodeSqliteProfilePromise;
+}
 
 /**
  * Wrapper for node:sqlite Statement
@@ -129,21 +251,17 @@ export const nodeSqliteDriver: DatabaseDriver = {
   name: 'node:sqlite',
 
   async isAvailable(): Promise<boolean> {
-    try {
-      if (!nodeSqliteModule) {
-        // Dynamic import to check availability
-        // This will fail if:
-        // 1. Node.js version doesn't have node:sqlite
-        // 2. --experimental-sqlite flag is not set (on older versions)
-        const module = await import('node:sqlite');
-        nodeSqliteModule = module as unknown as NodeSqliteModule;
-      }
+    const profile = await loadNodeSqliteProfile();
+    if (profile.available) {
       debugLog('node:sqlite is available');
       return true;
-    } catch {
-      debugLog('node:sqlite is not available');
-      return false;
     }
+    debugLog(`node:sqlite is not available: ${profile.unavailableReason ?? 'probe failed'}`);
+    return false;
+  },
+
+  getCapabilityProfile(): Promise<DatabaseCapabilityProfile> {
+    return loadNodeSqliteProfile();
   },
 
   open(path: string, options: DatabaseOptions): Database {
@@ -158,6 +276,9 @@ export const nodeSqliteDriver: DatabaseDriver = {
   async backup(sourcePath: string, destPath: string): Promise<void> {
     if (!nodeSqliteModule) {
       throw new Error('node:sqlite is not loaded. Call isAvailable() first.');
+    }
+    if (typeof nodeSqliteModule.backup !== 'function') {
+      throw new DatabaseCapabilityError('node:sqlite', 'backup', ['onlineBackup']);
     }
     const sourceDb = new nodeSqliteModule.DatabaseSync(sourcePath, { readOnly: true });
     try {

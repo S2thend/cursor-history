@@ -75,6 +75,32 @@ export interface DatabaseOptions {
   readonly: boolean;
 }
 
+/** SQLite operations whose requirements can differ between providers. */
+export type DatabaseOperation = 'read-session' | 'migrate' | 'backup' | 'store-snapshot';
+
+/** Independently probed capabilities used by cursor-history database operations. */
+export type DatabaseCapability = 'read' | 'readWrite' | 'onlineBackup';
+
+/**
+ * Runtime capability result for one database provider.
+ *
+ * Profiles are intentionally independent from the currently selected provider: a provider may be
+ * suitable for ordinary reads while another provider is required for an online snapshot.
+ */
+export interface DatabaseCapabilityProfile {
+  readonly driver: string;
+  readonly available: boolean;
+  readonly capabilities: ReadonlySet<DatabaseCapability>;
+  readonly unavailableReason?: string;
+}
+
+/** Requirements and optional explicit preference for one database operation. */
+export interface DatabaseOperationRequest {
+  readonly operation: DatabaseOperation;
+  readonly required: ReadonlySet<DatabaseCapability>;
+  readonly forcedDriver?: DriverName;
+}
+
 /**
  * Pluggable database driver implementation
  *
@@ -96,6 +122,14 @@ export interface DatabaseDriver {
    * @returns Promise resolving to availability status
    */
   isAvailable(): Promise<boolean>;
+
+  /**
+   * Probe the constructor and APIs used by cursor-history in the current runtime.
+   *
+   * Implementations cache this profile for the lifetime of the loaded provider/runtime. Importing
+   * a provider alone is not sufficient evidence that every operation it exposes is available.
+   */
+  getCapabilityProfile(): Promise<DatabaseCapabilityProfile>;
 
   /**
    * Open a database connection using this driver

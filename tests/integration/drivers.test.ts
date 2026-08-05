@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { existsSync, unlinkSync } from 'node:fs';
 import { betterSqlite3Driver } from '../../src/core/database/drivers/better-sqlite3.js';
 import { nodeSqliteDriver } from '../../src/core/database/drivers/node-sqlite.js';
-import type { DatabaseDriver, Database } from '../../src/core/database/types.js';
+import type { DatabaseDriver } from '../../src/core/database/types.js';
 
 const tempFiles: string[] = [];
 
@@ -39,6 +39,16 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
     it('isAvailable returns true', async () => {
       driver = await getDriver();
       expect(await driver.isAvailable()).toBe(true);
+    });
+
+    it('reports the read and read-write APIs exercised by cursor-history', async () => {
+      driver = await getDriver();
+      const profile = await driver.getCapabilityProfile();
+
+      expect(profile.driver).toBe(driverName);
+      expect(profile.available).toBe(true);
+      expect(profile.capabilities.has('read')).toBe(true);
+      expect(profile.capabilities.has('readWrite')).toBe(true);
     });
 
     it('opens a read-write database and creates table', async () => {
@@ -145,11 +155,20 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
       roDb.close();
     });
 
-    it('backup creates a copy of the database', async () => {
+    it('backup behavior matches the advertised onlineBackup capability', async () => {
       driver = await getDriver();
       await driver.isAvailable();
+      const profile = await driver.getCapabilityProfile();
       const srcPath = tempDbPath();
       const destPath = tempDbPath();
+
+      if (!profile.capabilities.has('onlineBackup')) {
+        await expect(driver.backup(srcPath, destPath)).rejects.toMatchObject({
+          code: 'DATABASE_CAPABILITY_MISSING',
+          details: { driver: driverName, missingCapabilities: ['onlineBackup'] },
+        });
+        return;
+      }
 
       // Create source DB with data
       const srcDb = driver.open(srcPath, { readonly: false });

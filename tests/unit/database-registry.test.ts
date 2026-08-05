@@ -3,7 +3,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // We test the DriverRegistry class by importing the singleton and using reset()
 import { registry } from '../../src/core/database/registry.js';
 import { NoDriverAvailableError, DriverNotAvailableError } from '../../src/core/database/errors.js';
-import type { DatabaseDriver, Database } from '../../src/core/database/types.js';
+import type {
+  DatabaseCapability,
+  DatabaseDriver,
+  Database,
+} from '../../src/core/database/types.js';
+
+const ALL_CAPABILITIES = new Set<DatabaseCapability>(['read', 'readWrite', 'onlineBackup']);
 
 function mockDriver(name: string, available = true): DatabaseDriver {
   const mockDb: Database = {
@@ -14,6 +20,11 @@ function mockDriver(name: string, available = true): DatabaseDriver {
   return {
     name,
     isAvailable: vi.fn().mockResolvedValue(available),
+    getCapabilityProfile: vi.fn().mockResolvedValue({
+      driver: name,
+      available,
+      capabilities: available ? ALL_CAPABILITIES : new Set<DatabaseCapability>(),
+    }),
     open: vi.fn().mockReturnValue(mockDb),
     backup: vi.fn().mockResolvedValue(undefined),
   };
@@ -84,23 +95,23 @@ describe('autoSelect', () => {
 });
 
 describe('setDriver', () => {
-  it('sets available driver', async () => {
+  it('records a preference synchronously and validates it on the next operation', async () => {
     registry.register(mockDriver('test', true));
-    await registry.setDriver('test' as 'better-sqlite3');
+    expect(registry.setDriver('test' as 'better-sqlite3')).toBeUndefined();
+    expect(registry.hasActiveDriver()).toBe(false);
+    await registry.ensureDriver();
     expect(registry.getActiveDriver()).toBe('test');
   });
 
-  it('throws for unavailable driver', async () => {
+  it('throws for an unavailable preferred driver on the next operation', async () => {
     registry.register(mockDriver('test', false));
-    await expect(registry.setDriver('test' as 'better-sqlite3')).rejects.toThrow(
-      DriverNotAvailableError
-    );
+    registry.setDriver('test' as 'better-sqlite3');
+    await expect(registry.ensureDriver()).rejects.toThrow(DriverNotAvailableError);
   });
 
-  it('throws for unregistered driver', async () => {
-    await expect(registry.setDriver('unknown' as 'better-sqlite3')).rejects.toThrow(
-      DriverNotAvailableError
-    );
+  it('throws for an unregistered preferred driver on the next operation', async () => {
+    registry.setDriver('unknown' as 'better-sqlite3');
+    await expect(registry.ensureDriver()).rejects.toThrow(DriverNotAvailableError);
   });
 });
 
