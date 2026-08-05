@@ -7,6 +7,7 @@ import {
   SessionNotFoundError,
   FileExistsError,
   NoSearchResultsError,
+  formatFatalJson,
   handleError,
   mapSessionIntegrityError,
 } from '../../src/cli/errors.js';
@@ -118,6 +119,67 @@ describe('handleError', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     handleError('string error');
     expect(mockExit).toHaveBeenCalledWith(ExitCode.GENERAL_ERROR);
+  });
+
+  it('writes one fatal JSON object to stderr and leaves stdout unused', () => {
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+    const stdout = vi.spyOn(process.stdout, 'write');
+
+    handleError(new CliError('missing', ExitCode.NOT_FOUND), { json: true });
+
+    expect(mockExit).toHaveBeenCalledWith(ExitCode.NOT_FOUND);
+    expect(stdout).not.toHaveBeenCalled();
+    const fatalWrites = stderr.mock.calls
+      .map(([chunk]) => String(chunk))
+      .filter((chunk) => chunk.startsWith('{'));
+    expect(fatalWrites).toHaveLength(1);
+    expect(JSON.parse(fatalWrites[0]!)).toEqual({
+      error: 'missing',
+      code: 'CLI_NOT_FOUND',
+    });
+  });
+
+  it('preserves locked legacy fields while adding a stable code', () => {
+    const output = formatFatalJson(
+      new CliError('Cursor data not found', ExitCode.NOT_FOUND, undefined, undefined, {
+        error: 'Cursor data not found',
+        path: '/fixture/v017/missing-data',
+      })
+    );
+
+    expect(JSON.parse(output)).toEqual({
+      error: 'Cursor data not found',
+      path: '/fixture/v017/missing-data',
+      code: 'CLI_NOT_FOUND',
+    });
+  });
+
+  it('serializes only typed safe details for integrity failures', () => {
+    const output = formatFatalJson(
+      new SourceLimitExceededError({
+        sourceKind: 'sqlite',
+        bound: 'sqlite-row-count',
+        unit: 'rows',
+        limit: 5,
+        observedAtLeast: 6,
+        outcome: 'fatal',
+      })
+    );
+    const parsed = JSON.parse(output) as Record<string, unknown>;
+
+    expect(parsed['code']).toBe('SOURCE_LIMIT_EXCEEDED');
+    expect(parsed['details']).toMatchObject({
+      sourceKind: 'sqlite',
+      bound: 'sqlite-row-count',
+      unit: 'rows',
+      limit: 5,
+      observedAtLeast: 6,
+      outcome: 'fatal',
+    });
+    expect(output).not.toContain('/private/');
   });
 });
 
