@@ -90,3 +90,26 @@ export {
   sourceLimitDimension,
   exceedsInclusiveLimit,
 } from './source-read-limits.js';
+
+export {
+  MESSAGE_IDENTITY_VERSION,
+  REPLICA_EQUIVALENCE_VERSION,
+  canonicalJsonV1,
+  sha256CanonicalJsonV1,
+  projectV016ComposerMessages,
+  prepareStoreIdentityCandidates,
+  allocateStoreMessageIdentities,
+  matchAlignedToolCalls,
+  allocateToolCallIdentities,
+  rewriteRelationshipReferences,
+} from './session-identity.js';
+export type {
+  StableMessageIdentity,
+  ProjectedComposerMessage,
+  StoreIdentityRecord,
+  StoreIdentityCandidate,
+  AllocatedStoreMessageIdentity,
+  ToolIdentityInput,
+  ToolCallAlignment,
+  ToolCallMatch,
+} from './session-identity.js';

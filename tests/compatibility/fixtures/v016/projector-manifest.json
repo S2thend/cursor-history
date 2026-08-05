@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "repository": "S2thend/cursor-history",
+  "tag": "v0.16.0",
+  "commit": "e8a7abf8cea3419a9dda911e174a05f82a9b260e",
+  "sources": [
+    {
+      "path": "src/core/storage.ts",
+      "gitBlob": "9b593c764e3ffb2f2c597bacff731a51009e5179",
+      "projectedSymbols": [
+        "mapBubbleToMessage",
+        "resolveBubbleMessages",
+        "extractActiveBranchBubbleIds",
+        "fillTimestampGaps"
+      ]
+    },
+    {
+      "path": "src/core/parser.ts",
+      "gitBlob": "110a31865caa49a2c8b15707dc7535761ce3dbf6",
+      "projectedSymbols": ["parseChatData", "parseComposerFormat", "parseSession", "parseMessage"]
+    },
+    {
+      "path": "src/core/types.ts",
+      "gitBlob": "ed6352d26831e0744aa9da5ff1be7a58f8e9ced4",
+      "projectedSymbols": ["ChatSession", "Message", "ToolCall"]
+    }
+  ],
+  "invariants": {
+    "globalBubbleQueryOrder": "rowid ASC",
+    "globalBubbleId": "data.bubbleId ?? final row-key segment",
+    "corruptPlaceholder": "[corrupted message]",
+    "emptyPlaceholder": "[empty message]",
+    "workspaceMissingId": null,
+    "workspaceMessageFilter": "drop only messages with no content/text and no role/type"
+  }
+}

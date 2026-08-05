@@ -1,0 +1,278 @@
+import { describe, expect, it } from 'vitest';
+import {
+  MESSAGE_IDENTITY_VERSION,
+  allocateStoreMessageIdentities,
+  allocateToolCallIdentities,
+  canonicalJsonV1,
+  matchAlignedToolCalls,
+  prepareStoreIdentityCandidates,
+  projectV016ComposerMessages,
+  rewriteRelationshipReferences,
+  sha256CanonicalJsonV1,
+} from '../../src/core/session-identity.js';
+
+describe('canonical JSON and SHA-256 v1', () => {
+  it('sorts keys by Unicode code point, preserves arrays, and applies JSON undefined rules', () => {
+    const value = {
+      z: 1,
+      nested: { b: true, a: 'é', omitted: undefined },
+      array: [1, undefined, 3],
+      a: 2,
+    };
+
+    expect(canonicalJsonV1(value)).toBe(
+      '{"a":2,"array":[1,null,3],"nested":{"a":"é","b":true},"z":1}'
+    );
+    expect(sha256CanonicalJsonV1(value)).toBe(
+      '275c76c3cb77d8c33b369b35a6d3685656effe2b6629235ccbfcfbcdfd4e88d5'
+    );
+    expect(canonicalJsonV1({ '😀': 2, '\uE000': 1 })).toBe('{"":1,"😀":2}');
+  });
+
+  it('rejects non-finite numbers, unsupported values, and cycles instead of changing identity', () => {
+    expect(() => canonicalJsonV1({ value: Number.NaN })).toThrow(/finite/i);
+    expect(() => canonicalJsonV1({ value: Number.POSITIVE_INFINITY })).toThrow(/finite/i);
+    expect(() => canonicalJsonV1(1n)).toThrow(/unsupported/i);
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    expect(() => canonicalJsonV1(cyclic)).toThrow(/circular/i);
+  });
+});
+
+describe('v0.16 Composer message projection', () => {
+  it('preserves every nonempty native ID byte-for-byte and freezes fallback positions', () => {
+    const projected = projectV016ComposerMessages([
+      { id: ' native-id ', content: 'A' },
+      { id: null, content: 'B' },
+      { content: 'C' },
+      { id: '', content: 'D' },
+      { id: 'msg:1', content: 'native collision' },
+    ]);
+
+    expect(projected.map((message) => message.id)).toEqual([
+      ' native-id ',
+      'msg:1',
+      'msg:2',
+      'msg:3',
+      'msg:1',
+    ]);
+    expect(projected.map((message) => message.identityOrigin)).toEqual([
+      'composer-native',
+      'composer-v0.16-index',
+      'composer-v0.16-index',
+      'composer-v0.16-index',
+      'composer-native',
+    ]);
+    expect(projected.every((message) => message.messageIdentityVersion === 1)).toBe(true);
+    expect(MESSAGE_IDENTITY_VERSION).toBe(1);
+  });
+
+  it('does not change old Composer identities when Store-only content is inserted', () => {
+    const original = projectV016ComposerMessages([
+      { id: null, content: 'old A' },
+      { id: null, content: 'old B' },
+    ]);
+    const store = prepareStoreIdentityCandidates([
+      {
+        representation: 'transcript',
+        role: 'assistant',
+        content: 'new middle Store message',
+        toolActivity: [],
+        sourceRelationships: [],
+      },
+    ]);
+    const allocated = allocateStoreMessageIdentities(original, store);
+
+    expect(original.map((message) => message.id)).toEqual(['msg:0', 'msg:1']);
+    expect(allocated[0]?.identity.value).toMatch(/^store:v1:transcript:/);
+  });
+});
+
+describe('Store message candidates and collisions', () => {
+  const LEAF = 'A'.repeat(64);
+
+  it('uses lowercase DB leaf hashes and one-based equal-hash occurrences in native order', () => {
+    const candidates = prepareStoreIdentityCandidates([
+      { representation: 'db', leafHash: LEAF },
+      { representation: 'db', leafHash: LEAF },
+      { representation: 'db', leafHash: 'b'.repeat(64) },
+    ]);
+
+    expect(candidates.map((candidate) => candidate.candidateId)).toEqual([
+      `store:v1:db:${LEAF.toLowerCase()}:1`,
+      `store:v1:db:${LEAF.toLowerCase()}:2`,
+      `store:v1:db:${'b'.repeat(64)}:1`,
+    ]);
+    expect(candidates.map((candidate) => candidate.sourceOrdinal)).toEqual([0, 1, 2]);
+  });
+
+  it('hashes transcript source-native inputs canonically and counts duplicate occurrences', () => {
+    const first = {
+      representation: 'transcript' as const,
+      role: 'user',
+      content: 'hello',
+      toolActivity: [],
+      sourceRelationships: [],
+    };
+    const candidates = prepareStoreIdentityCandidates([
+      first,
+      { ...first, ignoredPath: '/different/discovery/path' },
+    ]);
+
+    expect(candidates[0]?.baseFingerprint).toBe(
+      '75c3adca566f82abbd8525b79ae2516e8d70e1244c704057e922efc8f49c16b5'
+    );
+    expect(candidates.map((candidate) => candidate.occurrence)).toEqual([1, 2]);
+    expect(candidates[1]?.candidateId).toBe(
+      `store:v1:transcript:${candidates[0]?.baseFingerprint}:2`
+    );
+  });
+
+  it('inherits matched Composer IDs and suffixes only unmatched Store collisions', () => {
+    const composer = projectV016ComposerMessages([
+      { id: 'composer-native' },
+      { id: `store:v1:db:${'c'.repeat(64)}:1` },
+      { id: `store:v1:db:${'c'.repeat(64)}:1:collision:1` },
+    ]);
+    const candidates = prepareStoreIdentityCandidates([
+      { representation: 'db', leafHash: 'd'.repeat(64) },
+      { representation: 'db', leafHash: 'c'.repeat(64) },
+    ]);
+    const allocated = allocateStoreMessageIdentities(composer, candidates, new Map([[0, 0]]));
+
+    expect(allocated[0]?.identity).toMatchObject({
+      value: 'composer-native',
+      origin: 'composer-native',
+    });
+    expect(allocated[1]?.identity.value).toBe(`store:v1:db:${'c'.repeat(64)}:1:collision:2`);
+    expect(composer.map((message) => message.id)).toEqual([
+      'composer-native',
+      `store:v1:db:${'c'.repeat(64)}:1`,
+      `store:v1:db:${'c'.repeat(64)}:1:collision:1`,
+    ]);
+  });
+
+  it('distinguishes retained duplicate Composer values by projection ordinal', () => {
+    const composer = projectV016ComposerMessages([{ id: null }, { id: 'msg:0' }]);
+    const candidates = prepareStoreIdentityCandidates([
+      { representation: 'db', leafHash: 'e'.repeat(64) },
+      { representation: 'db', leafHash: 'f'.repeat(64) },
+    ]);
+
+    const allocated = allocateStoreMessageIdentities(
+      composer,
+      candidates,
+      new Map([
+        [0, 0],
+        [1, 1],
+      ])
+    );
+
+    expect(allocated.map(({ identity }) => [identity.value, identity.origin])).toEqual([
+      ['msg:0', 'composer-v0.16-index'],
+      ['msg:0', 'composer-native'],
+    ]);
+  });
+});
+
+describe('tool identities and fixed Composer-to-Store matching', () => {
+  it('matches native IDs, then canonical params, then missing-param fills without reordering', () => {
+    const composer = [
+      { id: 'native-call', name: 'Read', params: { path: '/native' } },
+      { name: 'Read', params: { b: 2, a: 1 } },
+      { name: 'Grep' },
+      { name: 'Write', params: { path: '/composer' } },
+    ];
+    const store = [
+      { name: 'Grep', params: { pattern: 'x' }, status: 'error' },
+      { name: 'Read', params: { a: 1, b: 2 }, result: 'enrichment' },
+      { id: 'native-call', name: 'Read', params: { path: '/store-difference' } },
+      { name: 'Write', params: { path: '/store' } },
+    ];
+
+    expect(matchAlignedToolCalls(composer, store)).toEqual({
+      pairs: [
+        { composerIndex: 0, storeIndex: 2, pass: 'native-id' },
+        { composerIndex: 1, storeIndex: 1, pass: 'canonical-params' },
+        { composerIndex: 2, storeIndex: 0, pass: 'missing-params' },
+      ],
+      unmatchedComposerIndices: [3],
+      unmatchedStoreIndices: [3],
+    });
+  });
+
+  it('preserves native IDs and keeps synthetic IDs stable across outcome enrichment', () => {
+    const base = allocateToolCallIdentities('msg:4', [
+      { id: ' native-tool ', name: 'Read', params: { path: '/a' } },
+      { name: 'Read', params: { b: 2, a: 1 }, status: 'completed', result: 'old' },
+      { name: 'Read', params: { a: 1, b: 2 }, status: 'error', error: 'new' },
+    ]);
+
+    expect(base[0]?.id).toBe(' native-tool ');
+    expect(base[0]?.identityOrigin).toBe('source-native');
+    expect(base[1]?.id).toBe(
+      'tool:v1:msg:4:bdb3d2003e2bdaa55e1345c97787e8411f174109346a8d5c92be0dbb42a204ac:1'
+    );
+    expect(base[2]?.id).toBe(
+      'tool:v1:msg:4:bdb3d2003e2bdaa55e1345c97787e8411f174109346a8d5c92be0dbb42a204ac:2'
+    );
+  });
+
+  it('excludes outcome enrichment and standalone files from compatibility pairing', () => {
+    expect(
+      matchAlignedToolCalls(
+        [
+          {
+            name: 'Read',
+            params: { path: '/a' },
+            status: 'completed',
+            result: 'old',
+            files: ['/composer'],
+          },
+        ],
+        [
+          {
+            name: 'Read',
+            params: { path: '/a' },
+            status: 'error',
+            error: 'new',
+            files: ['/store'],
+          },
+        ]
+      ).pairs
+    ).toEqual([{ composerIndex: 0, storeIndex: 0, pass: 'canonical-params' }]);
+  });
+
+  it('treats standalone files and poison URI strings as inert identity data, never resources', () => {
+    const poison = 'file:///definitely-must-not-be-opened/identity-poison';
+    const calls = allocateToolCallIdentities('msg:5', [
+      { name: 'Read', params: { uri: poison }, files: [poison] },
+    ]);
+    expect(calls[0]?.id).toMatch(/^tool:v1:msg:5:[a-f0-9]{64}:1$/);
+  });
+});
+
+describe('relationship rewriting', () => {
+  it('rewrites parent, branch, leaf, and sidechain references without guessing unknown IDs', () => {
+    const rewritten = rewriteRelationshipReferences(
+      {
+        parentId: 'composer-parent',
+        branchIds: ['composer-parent', 'store-gap'],
+        leafId: 'store-gap',
+        sidechainIds: ['unknown', 'composer-parent'],
+      },
+      new Map([
+        ['composer-parent', 'msg:0'],
+        ['store-gap', 'store:v1:transcript:abc:1'],
+      ])
+    );
+
+    expect(rewritten).toEqual({
+      parentMessageId: 'msg:0',
+      branchMessageIds: ['msg:0', 'store:v1:transcript:abc:1'],
+      leafMessageId: 'store:v1:transcript:abc:1',
+      sidechainMessageIds: ['msg:0'],
+      unresolvedSourceIds: ['unknown'],
+    });
+  });
+});
