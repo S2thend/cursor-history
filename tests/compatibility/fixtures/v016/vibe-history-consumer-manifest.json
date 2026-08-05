@@ -1,0 +1,24 @@
+{
+  "repository": "S2thend/vibe-history",
+  "revision": "698701775144f7d8875330e1f8caec9ddfc27744",
+  "schemaVersion": "2",
+  "archiveAssumptions": {
+    "hostnamePartitioned": true,
+    "replacementTransactionOwner": "vibe-history",
+    "cursorHistoryProvidesCompleteView": true,
+    "cursorHistoryDoesNotOwnPersistence": true
+  },
+  "sourceBlobs": {
+    "packages/core/src/providers/cursor/index.ts": "cb986058e481bebe6a902d80519f17813b53bc8f",
+    "packages/core/src/sync/engine.ts": "48b82557d32225f6489f329e2a349aa93d0d149f",
+    "packages/core/src/sync/policy.ts": "d5a16bca2b3169c00ba08076422a7f44b6627b4f",
+    "packages/core/src/sync/state.ts": "ce51f1429f7169f5586dcc5e66eed9df22c46d22",
+    "packages/core/src/sync/targets/sql/base.ts": "893f60fcd0abf85d4eebfc728c0d70836006f316",
+    "packages/core/src/sync/targets/sql/migrations.ts": "7c5e88ce0d0d496abea6fb45b7c2b0fc8bceef07",
+    "packages/core/src/sync/targets/sql/schema.sqlite.ts": "6e20c92853765086c9bb8b3d0395882817f6b556",
+    "packages/core/src/sync/targets/sql/sqlite.ts": "cb9e7e6ba4126fba14192af88bbd3b33f3f42348",
+    "packages/core/src/types/message.ts": "cab7fa684c7685b4b0c7a6813391c53eee8c1d31",
+    "packages/core/src/types/session.ts": "c8c337fc34da8c28cb9adc9f063135339a92ac9b"
+  },
+  "localHarness": "tests/helpers/v016-consumer.ts"
+}

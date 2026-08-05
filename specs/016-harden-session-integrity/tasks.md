@@ -25,10 +25,10 @@ optional or permit publication before it passes.
 
 **Purpose**: Add reusable test infrastructure without changing production resolution behavior.
 
-- [ ] T001 Create deterministic Composer, Store DB, transcript, backup, duplicate-UUID, and workspace A/B fixture builders in `tests/helpers/session-integrity-fixtures.ts`
-- [ ] T002 Create the unchanged v0.16 vibe-history identity, digest, parent, and real SQLite atomic-replacement harness—where cursor-history supplies one complete replacement-safe view and compatibility signal while the unchanged consumer owns persistence, transaction, and rollback—pinned to `S2thend/vibe-history` revision `698701775144f7d8875330e1f8caec9ddfc27744`; record and verify the copied adapter/type/digest/policy/engine/SQLite-target/schema source-path and Git-blob inventory plus archive schema/migration assumptions without a live adjacent-repository dependency in `tests/helpers/v016-consumer.ts`, `tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json`, and `tests/compatibility/v016-consumer-provenance.test.ts`
-- [ ] T003 [P] Create a built-CLI subprocess helper that captures stdout bytes, stderr bytes, exit status, signals, and temporary roots in `tests/helpers/run-cli.ts`
-- [ ] T004 [P] Create low-level filesystem/SQLite/key-value event recording and poison-canary helpers in `tests/helpers/io-probe.ts`
+- [X] T001 Create deterministic Composer, Store DB, transcript, backup, duplicate-UUID, and workspace A/B fixture builders in `tests/helpers/session-integrity-fixtures.ts`
+- [X] T002 Create the unchanged v0.16 vibe-history identity, digest, parent, and real SQLite atomic-replacement harness—where cursor-history supplies one complete replacement-safe view and compatibility signal while the unchanged consumer owns persistence, transaction, and rollback—pinned to `S2thend/vibe-history` revision `698701775144f7d8875330e1f8caec9ddfc27744`; record and verify the copied adapter/type/digest/policy/engine/SQLite-target/schema source-path and Git-blob inventory plus archive schema/migration assumptions without a live adjacent-repository dependency in `tests/helpers/v016-consumer.ts`, `tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json`, and `tests/compatibility/v016-consumer-provenance.test.ts`
+- [X] T003 [P] Create a built-CLI subprocess helper that captures stdout bytes, stderr bytes, exit status, signals, and temporary roots in `tests/helpers/run-cli.ts`
+- [X] T004 [P] Create low-level filesystem/SQLite/key-value event recording and poison-canary helpers in `tests/helpers/io-probe.ts`
 - [ ] T005 [P] Add explicit compatibility, e2e, package-smoke, and required-gate scripts while retaining Vitest discovery of every required suite in `package.json` and `vitest.config.ts`
 
 **Checkpoint**: Shared fixtures and real-process test helpers are available; existing tests still pass unchanged.
@@ -41,11 +41,11 @@ optional or permit publication before it passes.
 
 **⚠️ CRITICAL**: Complete this phase before production work in any user-story phase.
 
-- [ ] T006 Define source roles, representations, resolution/fidelity states, identity origins, timestamp provenance, workspace memberships, source instances, fixed interface-specific index bases/scope, additive `listSessionSummaries()` rows, Source Read Limits v1/default/override types, exact source-kind/bound/unit discriminated diagnostic types for all 13 bounds, opaque public read-context lifecycle types, and diagnostics in `src/core/types.ts` and additive source-compatible declarations in `src/lib/types.ts`
-- [ ] T007 [P] Add failing safe-detail, stable-code, no-raw-locator, and exhaustive source-kind/bound/unit mismatch tests—including fractional ZIP-ratio observations but integer byte/count/row observations—for new core, CLI, and library failures in `tests/unit/cli-errors.test.ts` and `tests/unit/lib-errors.test.ts`
-- [ ] T008 Implement the typed scope, ambiguity, migration, temporary-artifact, read-context source/scope/options/disposed, source-encoding, source-limit, and source-limit-configuration error hierarchy in `src/core/errors.ts`
-- [ ] T009 Map core failures without exposing physical locators or content and export the new contracts through `src/core/index.ts`, `src/cli/errors.ts`, `src/lib/errors.ts`, and `src/lib/index.ts`
-- [ ] T010 [P] Create deterministic set-order, identity, pathless-alias, and structured-output assertion helpers in `tests/helpers/contract-assertions.ts`
+- [X] T006 Define source roles, representations, resolution/fidelity states, identity origins, timestamp provenance, workspace memberships, source instances, fixed interface-specific index bases/scope, additive `listSessionSummaries()` rows, Source Read Limits v1/default/override types, exact source-kind/bound/unit discriminated diagnostic types for all 13 bounds, opaque public read-context lifecycle types, and diagnostics in `src/core/types.ts` and additive source-compatible declarations in `src/lib/types.ts`
+- [X] T007 [P] Add failing safe-detail, stable-code, no-raw-locator, and exhaustive source-kind/bound/unit mismatch tests—including fractional ZIP-ratio observations but integer byte/count/row observations—for new core, CLI, and library failures in `tests/unit/cli-errors.test.ts` and `tests/unit/lib-errors.test.ts`
+- [X] T008 Implement the typed scope, ambiguity, migration, temporary-artifact, read-context source/scope/options/disposed, source-encoding, source-limit, and source-limit-configuration error hierarchy in `src/core/errors.ts`
+- [X] T009 Map core failures without exposing physical locators or content and export the new contracts through `src/core/index.ts`, `src/cli/errors.ts`, `src/lib/errors.ts`, and `src/lib/index.ts`
+- [X] T010 [P] Create deterministic set-order, identity, pathless-alias, and structured-output assertion helpers in `tests/helpers/contract-assertions.ts`
 
 **Checkpoint**: All later modules can depend on one typed compatibility vocabulary without changing existing public values.
 
@@ -96,7 +96,7 @@ optional or permit publication before it passes.
 
 ### Tests for User Story 2
 
-- [ ] T030 [P] [US2] Add lexical normalization, exact-first, unique component-suffix, ambiguous suffix, historical-path, drive/WSL, case, and pre-I/O failure tests in `tests/unit/workspace-scope.test.ts`
+- [X] T030 [P] [US2] Add lexical normalization, exact-first, unique component-suffix, ambiguous suffix, historical-path, drive/WSL, case, and pre-I/O failure tests in `tests/unit/workspace-scope.test.ts`
 - [ ] T031 [P] [US2] Add low-level metadata/payload events, poison DB/transcript/blob/key-value resources, observer-bypass fault failure, partial omission, and opt-in broadening tests in `tests/integration/workspace-io-boundary.test.ts`
 - [ ] T032 [P] [US2] Add built-CLI A/B list/show/search/export, first-row-one-based index, and JSON scope/path assertions in `tests/e2e/cli-session-integrity.test.ts`
 - [ ] T033 [P] [US2] Extend scoped/global index conflicts, wrong-ID/path/index mutation failures, direct-ID membership, ambiguity round-trip, workspace counts, backup/custom-path parity, and the FR-042 included/excluded-field equivalence matrix—including direct timestamp divergence and provenance/inferred/path/standalone-field equivalence—in `tests/integration/workspace-index-roundtrip.test.ts` and `tests/unit/session-replica-equivalence.test.ts`
@@ -104,8 +104,8 @@ optional or permit publication before it passes.
 
 ### Implementation for User Story 2
 
-- [ ] T035 [P] [US2] Implement lexical historical-path normalization and exact-first/unambiguous component-suffix matching in `src/core/workspace-scope.ts`
-- [ ] T036 [P] [US2] Implement safe low-level metadata-versus-payload event classification and observer registration in `src/core/io-observer.ts`
+- [X] T035 [P] [US2] Implement lexical historical-path normalization and exact-first/unambiguous component-suffix matching in `src/core/workspace-scope.ts`
+- [X] T036 [P] [US2] Implement safe low-level metadata-versus-payload event classification and observer registration in `src/core/io-observer.ts`
 - [ ] T037 [US2] Route actual filesystem/backup opens and reads, SQLite driver/index open/prepare/query/backup calls, and Store/key-value reads through the observer seam in `src/core/backup.ts`, `src/core/database/index.ts`, `src/core/database/drivers/node-sqlite.ts`, `src/core/database/drivers/better-sqlite3.ts`, `src/core/storage.ts`, `src/core/store-stack/discover.ts`, `src/core/store-stack/store-db.ts`, and `src/core/store-stack/transcript.ts`
 - [ ] T038 [US2] Build metadata-only physical inventory, native-UUID/source-role/representation/tier grouping, workspace memberships, and lazy selected-instance hydration in `src/core/session-catalog.ts` and `src/core/store-stack/discover.ts`
 - [ ] T039 [US2] Implement versioned consumed-payload equivalence, one minimal ambiguous logical summary/opaque reference path, immutable workspace content scope, and explicit partial plans before payload access in `src/core/session-catalog.ts` and `src/core/storage.ts`
