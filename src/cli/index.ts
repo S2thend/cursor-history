@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { handleError, ExitCode } from './errors.js';
+import { parseSourceLimitOption } from './source-limit-option.js';
 
 // Read version from package.json
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,12 @@ program
   .version(packageJson.version, '-v, --version', 'Show version number')
   .option('--json', 'Output in JSON format')
   .option('--data-path <path>', 'Custom Cursor data directory')
+  .option(
+    '--source-limit <field=value>',
+    'Override one Source Read Limits v1 field for this operation (repeatable)',
+    parseSourceLimitOption,
+    Object.freeze({})
+  )
   .option(
     '-w, --workspace <path>',
     'Filter by workspace path (no session deduplication across workspaces when set)'
