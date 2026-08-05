@@ -5,7 +5,7 @@
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { createBackup } from '../../core/backup.js';
-import type { BackupProgress, BackupResult } from '../../core/types.js';
+import type { BackupProgress, BackupResult, SourceReadLimitsOverride } from '../../core/types.js';
 import { handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 
@@ -14,6 +14,7 @@ interface BackupCommandOptions {
   force?: boolean;
   json?: boolean;
   dataPath?: string;
+  shared?: boolean;
 }
 
 /**
@@ -114,8 +115,13 @@ export function registerBackupCommand(program: Command): void {
       'Output file path (default: ~/cursor-history-backups/<timestamp>.zip)'
     )
     .option('-f, --force', 'Overwrite existing backup file')
+    .option('--shared', 'Create the final archive with platform-default shared permissions')
     .action(async (options: BackupCommandOptions, command: Command) => {
-      const globalOptions = command.parent?.opts() as { json?: boolean; dataPath?: string };
+      const globalOptions = command.parent?.opts() as {
+        json?: boolean;
+        dataPath?: string;
+        sourceLimit?: SourceReadLimitsOverride;
+      };
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
 
@@ -131,6 +137,8 @@ export function registerBackupCommand(program: Command): void {
           sourcePath: customPath ? expandPath(customPath) : undefined,
           outputPath,
           force: options.force ?? false,
+          sharedPermissions: options.shared ?? false,
+          sourceReadLimits: globalOptions?.sourceLimit,
           onProgress,
         });
 

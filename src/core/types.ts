@@ -120,22 +120,35 @@ export interface SourceReadLimitsV1 {
 /** Per-operation overrides; policyVersion is deliberately not caller-settable. */
 export type SourceReadLimitsOverride = Partial<Omit<SourceReadLimitsV1, 'policyVersion'>>;
 
+/** Per-operation options shared by bounded source-reading APIs. */
+export interface SourceReadOptions {
+  /** Immutable partial override of Source Read Limits v1 defaults. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel parsing/materialization while retaining cleanup guarantees. */
+  signal?: AbortSignal;
+}
+
+/** Source Read Limits v1 bounds applied to one transcript JSONL carrier. */
 export type JsonlSourceBoundKind =
   'jsonl-record-bytes' | 'jsonl-source-bytes' | 'jsonl-record-count';
+/** Source Read Limits v1 bounds applied to one SQLite session or catalog scan. */
 export type SqliteSourceBoundKind =
   | 'sqlite-page-rows'
   | 'sqlite-page-bytes'
   | 'sqlite-value-bytes'
   | 'sqlite-row-count'
   | 'sqlite-decoded-bytes';
+/** Source Read Limits v1 bounds applied while reading one backup ZIP archive. */
 export type ZipSourceBoundKind =
   | 'zip-compressed-bytes'
   | 'zip-entry-count'
   | 'zip-entry-bytes'
   | 'zip-aggregate-bytes'
   | 'zip-compression-ratio';
+/** Every stable Source Read Limits v1 bound name accepted by diagnostics and overrides. */
 export type SourceBoundKind = JsonlSourceBoundKind | SqliteSourceBoundKind | ZipSourceBoundKind;
 
+/** Exact JSONL carrier/bound/unit correlations used by structured diagnostics. */
 export type JsonlSourceLimitDimension =
   | {
       sourceKind: 'jsonl';
@@ -143,6 +156,7 @@ export type JsonlSourceLimitDimension =
       unit: 'bytes';
     }
   | { sourceKind: 'jsonl'; bound: 'jsonl-record-count'; unit: 'records' };
+/** Exact SQLite carrier/bound/unit correlations used by structured diagnostics. */
 export type SqliteSourceLimitDimension =
   | {
       sourceKind: 'sqlite';
@@ -154,6 +168,7 @@ export type SqliteSourceLimitDimension =
       bound: 'sqlite-page-bytes' | 'sqlite-value-bytes' | 'sqlite-decoded-bytes';
       unit: 'bytes';
     };
+/** Exact ZIP carrier/bound/unit correlations used by fatal structured errors. */
 export type ZipSourceLimitDimension =
   | {
       sourceKind: 'zip';
@@ -163,6 +178,7 @@ export type ZipSourceLimitDimension =
   | { sourceKind: 'zip'; bound: 'zip-entry-count'; unit: 'records' }
   | { sourceKind: 'zip'; bound: 'zip-compression-ratio'; unit: 'ratio' };
 
+/** Safe partial-result diagnostic for nondeterministic Store-source text encoding. */
 export interface SourceEncodingDiagnostic {
   code: 'SOURCE_ENCODING_INVALID';
   message: string;
@@ -173,6 +189,7 @@ export interface SourceEncodingDiagnostic {
   remedy: string;
 }
 
+/** Safe partial-result diagnostic for a bounded Store source that exceeded policy. */
 export type SourceLimitExceededDiagnostic = {
   code: 'SOURCE_LIMIT_EXCEEDED';
   message: string;
@@ -186,6 +203,7 @@ export type SourceLimitExceededDiagnostic = {
   remedy: string;
 } & (JsonlSourceLimitDimension | SqliteSourceLimitDimension);
 
+/** Public content-free diagnostic attached to a logical summary, session, or bulk result. */
 export type SessionDiagnostic =
   GeneralSessionDiagnostic | SourceEncodingDiagnostic | SourceLimitExceededDiagnostic;
 
@@ -677,8 +695,14 @@ export interface BackupConfig {
   outputPath?: string;
   /** Overwrite existing file without prompting */
   force?: boolean;
+  /** Request platform-default shared permissions for the completed archive. */
+  sharedPermissions?: boolean;
   /** Progress callback for UI updates */
   onProgress?: (progress: BackupProgress) => void;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel snapshot/compression work and clean private staging. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -725,6 +749,10 @@ export interface RestoreConfig {
   force?: boolean;
   /** Progress callback for UI updates */
   onProgress?: (progress: RestoreProgress) => void;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel validation/extraction and clean private staging. */
+  signal?: AbortSignal;
 }
 
 /**

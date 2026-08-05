@@ -8,26 +8,45 @@
  * - Integrity validation
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
+  chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  copyFileSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
+  renameSync,
   statSync,
   unlinkSync,
-  readFileSync,
-  writeFileSync,
-  rmdirSync,
 } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, dirname, sep } from 'node:path';
-import JSZip from 'jszip';
+import { basename, join, dirname, sep } from 'node:path';
 import type { Database as DatabaseInterface, Statement } from './database/types.js';
 import { registry } from './database/registry.js';
 import { backupDatabase } from './database/index.js';
 import { createPrivateTempWorkspace, type PrivateTempWorkspace } from './private-temp.js';
 import { PACKAGE_VERSION } from './package-version.generated.js';
+import {
+  BoundedZipArchive,
+  ZipArchiveFormatError,
+  openBoundedZipArchive,
+  prepareZipFileInputs,
+  writeBoundedZipArchive,
+  type BoundedZipWriteInput,
+  type PreparedZipFileInput,
+} from './zip-stream.js';
+import { resolveSourceReadLimits } from './source-read-limits.js';
+import {
+  SourceLimitConfigurationError,
+  SourceLimitExceededError,
+  TemporaryArtifactCleanupError,
+} from './errors.js';
 import type {
   BackupManifest,
   BackupFileEntry,
@@ -38,9 +57,32 @@ import type {
   RestoreResult,
   BackupValidation,
   BackupInfo,
+  SourceReadOptions,
 } from './types.js';
 
 const MANIFEST_VERSION = '1.0.0';
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') return signal.reason;
+  const error = new Error('The backup operation was aborted.', {
+    ...(signal.reason === undefined ? {} : { cause: signal.reason }),
+  });
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError(signal);
+}
+
+function freezeSourceReadOptions(options: SourceReadOptions = {}): Readonly<SourceReadOptions> {
+  const sourceReadLimits = resolveSourceReadLimits(options.sourceReadLimits);
+  return Object.freeze({
+    sourceReadLimits,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
 
 // ============================================================================
 // Foundational Utilities (T005-T009)
@@ -245,17 +287,113 @@ export function checkDiskSpace(
   }
 }
 
+function syncParentDirectory(path: string): void {
+  if (process.platform === 'win32') return;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(dirname(path), constants.O_RDONLY);
+    fsyncSync(descriptor);
+  } catch {
+    // The complete archive has already been fsynced. Some filesystems do not permit directory
+    // fsync through Node; publication remains atomic even when that extra durability step is absent.
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Directory sync is explicitly best-effort; a close failure after publication must not
+        // turn a complete atomic replacement into a reported creation failure.
+      }
+    }
+  }
+}
+
+function removePrivateArchiveStage(path: string, operationError?: unknown): void {
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return;
+    const cleanupError = new TemporaryArtifactCleanupError([path]);
+    attachCleanupCause(cleanupError, operationError ?? error);
+    throw cleanupError;
+  }
+}
+
+async function writeAndPublishBackupArchive(
+  outputPath: string,
+  entries: readonly BoundedZipWriteInput[],
+  config: Pick<BackupConfig, 'force' | 'sharedPermissions' | 'sourceReadLimits' | 'signal'>
+): Promise<void> {
+  throwIfAborted(config.signal);
+  let existingMode: number | undefined;
+  if (existsSync(outputPath)) {
+    const existing = lstatSync(outputPath);
+    if (!existing.isFile()) {
+      throw new Error(`Backup destination is not a regular file: ${basename(outputPath)}`);
+    }
+    if (!config.force) {
+      const error = new Error(`Backup destination already exists: ${basename(outputPath)}`);
+      Object.defineProperty(error, 'code', { value: 'EEXIST' });
+      throw error;
+    }
+    existingMode = existing.mode & 0o777;
+  }
+
+  const stagePath = join(dirname(outputPath), `.cursor-history-backup-${randomUUID()}.tmp`);
+  let operationError: unknown;
+  try {
+    await writeBoundedZipArchive(stagePath, entries, {
+      ...(config.sourceReadLimits ? { sourceReadLimits: config.sourceReadLimits } : {}),
+      ...(config.signal ? { signal: config.signal } : {}),
+    });
+    throwIfAborted(config.signal);
+
+    const requestedMode = config.sharedPermissions
+      ? 0o666 & ~process.umask()
+      : (existingMode ?? 0o600);
+
+    if (config.force) {
+      renameSync(stagePath, outputPath);
+    } else {
+      // A same-directory hard link publishes without replacing a target created by a racing
+      // process. Unlinking the private sibling leaves the final path on the complete inode.
+      linkSync(stagePath, outputPath);
+      unlinkSync(stagePath);
+    }
+    // Keep the unpublished sibling owner-only. Broader permissions, when explicitly requested or
+    // inherited from an overwritten archive, are applied only after the complete inode is visible
+    // at its final path.
+    if (process.platform !== 'win32') chmodSync(outputPath, requestedMode);
+    syncParentDirectory(outputPath);
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    removePrivateArchiveStage(stagePath, operationError);
+  }
+}
+
 /**
  * T012-T016: Create a full backup of all Cursor chat history
  */
 export async function createBackup(config?: BackupConfig): Promise<BackupResult> {
   const startTime = Date.now();
+  // Validate the immutable operation policy before touching a source or destination. Archive
+  // creation consumes these bounds in T069; validating them here prevents a configuration from
+  // being silently ignored during snapshot preparation.
+  const readOptions = freezeSourceReadOptions({
+    sourceReadLimits: config?.sourceReadLimits,
+    signal: config?.signal,
+  });
+  const signal = readOptions.signal;
+  throwIfAborted(signal);
 
   // Determine paths
   const sourcePath = config?.sourcePath ?? getDefaultCursorDataPath();
   const outputDir = config?.outputPath ? dirname(config.outputPath) : getDefaultBackupDir();
   const outputPath = config?.outputPath ?? join(outputDir, generateBackupFilename());
   const force = config?.force ?? false;
+  const sharedPermissions = config?.sharedPermissions ?? false;
   const onProgress = config?.onProgress;
 
   // Ensure output directory exists
@@ -285,6 +423,7 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
 
   // T008: Scan for database files
   const dbFiles = scanDatabaseFiles(sourcePath);
+  throwIfAborted(signal);
 
   if (dbFiles.length === 0) {
     return {
@@ -310,18 +449,22 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
     };
   }
 
-  // Create temp directory for backed up databases
-  const tempDir = join(outputDir, `.backup_temp_${Date.now()}`);
-  mkdirSync(tempDir, { recursive: true });
+  // Snapshot plaintext into flat, exclusive files inside one private workspace. ZIP entry paths
+  // remain logical metadata and are never reused as temporary filesystem paths.
+  const workspace = createPrivateTempWorkspace({
+    prefix: 'cursor-history-backup-create-',
+  });
+  const stagedFiles: string[] = [];
+  let operationError: unknown;
 
   try {
     // Phase: Backing up databases
-    const fileEntries: BackupFileEntry[] = [];
     let bytesCompleted = 0;
     let sessionCount = 0;
     const workspaceIds = new Set<string>();
 
     for (let i = 0; i < dbFiles.length; i++) {
+      throwIfAborted(signal);
       const dbFile = dbFiles[i]!;
 
       onProgress?.({
@@ -333,30 +476,20 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
         totalBytes,
       });
 
-      // Create directory structure in temp
-      const tempFilePath = join(tempDir, dbFile.relativePath);
-      mkdirSync(dirname(tempFilePath), { recursive: true });
+      const extension = dbFile.type === 'workspace-json' ? '.json' : '.vscdb';
+      const tempFilePath = workspace.createFile(`snapshot-${i}${extension}`);
+      stagedFiles.push(tempFilePath);
 
       // For SQLite databases, use backup API; for other files, just copy
       if (dbFile.type === 'global-db' || dbFile.type === 'workspace-db') {
         // T011: Backup database using SQLite backup API
         await backupDatabase(dbFile.absolutePath, tempFilePath);
       } else {
-        // For non-DB files (like workspace.json), just copy
-        const content = readFileSync(dbFile.absolutePath);
-        writeFileSync(tempFilePath, content);
+        // For non-DB files (like workspace.json), retain streaming archive behavior by copying the
+        // private snapshot without materializing it as one aggregate buffer.
+        copyFileSync(dbFile.absolutePath, tempFilePath);
       }
-
-      // Read backed up file and compute checksum
-      const buffer = readFileSync(tempFilePath);
-      const checksum = computeChecksum(buffer);
-
-      fileEntries.push({
-        path: dbFile.relativePath,
-        size: buffer.length,
-        checksum,
-        type: dbFile.type,
-      });
+      if (process.platform !== 'win32') chmodSync(tempFilePath, 0o600);
 
       // Count sessions (only for DB files)
       if (dbFile.type === 'global-db' || dbFile.type === 'workspace-db') {
@@ -378,17 +511,19 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       totalBytes,
     });
 
-    // T014: Create zip file
-    const zip = new JSZip();
-
-    // Add all backed up database files
-    for (const entry of fileEntries) {
-      const filePath = join(tempDir, entry.path);
-      // Convert path to use forward slashes for cross-platform compatibility
-      const zipPath = entry.path.split(sep).join('/');
-      const fileContent = readFileSync(filePath);
-      zip.file(zipPath, fileContent);
-    }
+    const preparedFiles: readonly PreparedZipFileInput[] = await prepareZipFileInputs(
+      dbFiles.map((dbFile, index) => ({
+        name: dbFile.relativePath.split(sep).join('/'),
+        sourcePath: stagedFiles[index]!,
+      })),
+      readOptions
+    );
+    const fileEntries: BackupFileEntry[] = preparedFiles.map((prepared, index) => ({
+      path: prepared.name,
+      size: prepared.size,
+      checksum: prepared.checksum,
+      type: dbFiles[index]!.type,
+    }));
 
     // T015: Create and add manifest
     const stats: BackupStats = {
@@ -397,7 +532,10 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       workspaceCount: workspaceIds.size,
     };
     const manifest = createManifest(fileEntries, stats);
-    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+    const archiveEntries: BoundedZipWriteInput[] = [
+      ...preparedFiles,
+      { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest, null, 2)) },
+    ];
 
     // Phase: Finalizing
     onProgress?.({
@@ -408,12 +546,12 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       totalBytes,
     });
 
-    // Write zip file
-    if (existsSync(outputPath)) {
-      unlinkSync(outputPath);
-    }
-    const zipContent = await zip.generateAsync({ type: 'nodebuffer' });
-    await writeFile(outputPath, zipContent);
+    await writeAndPublishBackupArchive(outputPath, archiveEntries, {
+      force,
+      sharedPermissions,
+      sourceReadLimits: readOptions.sourceReadLimits,
+      signal,
+    });
 
     return {
       success: true,
@@ -421,32 +559,11 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       manifest,
       durationMs: Date.now() - startTime,
     };
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    // Clean up temp directory
-    try {
-      const cleanupDir = (dir: string) => {
-        const entries = readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          const fullPath = join(dir, entry.name);
-          if (entry.isDirectory()) {
-            cleanupDir(fullPath);
-          } else {
-            unlinkSync(fullPath);
-          }
-        }
-        // Remove the directory itself
-        try {
-          rmdirSync(dir);
-        } catch {
-          // Ignore
-        }
-      };
-      if (existsSync(tempDir)) {
-        cleanupDir(tempDir);
-      }
-    } catch {
-      // Ignore cleanup errors
-    }
+    disposePrivateWorkspace(workspace, operationError);
   }
 }
 
@@ -467,8 +584,238 @@ function attachCleanupCause(cleanupError: unknown, operationError: unknown): voi
   }
 }
 
+function disposePrivateWorkspace(workspace: PrivateTempWorkspace, operationError?: unknown): void {
+  try {
+    workspace.dispose();
+  } catch (cleanupError) {
+    attachCleanupCause(cleanupError, operationError);
+    throw cleanupError;
+  }
+}
+
+async function closeBoundedArchive(
+  archive: BoundedZipArchive,
+  operationError?: unknown
+): Promise<void> {
+  try {
+    await archive.close();
+  } catch (closeError) {
+    attachCleanupCause(closeError, operationError);
+    throw closeError;
+  }
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error instanceof Error && 'code' in error
+    ? String((error as NodeJS.ErrnoException).code)
+    : undefined;
+}
+
+function shouldPropagateBoundedReadError(error: unknown): boolean {
+  return (
+    error instanceof SourceLimitExceededError ||
+    error instanceof SourceLimitConfigurationError ||
+    error instanceof TemporaryArtifactCleanupError ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
+}
+
+async function withBoundedArchive<T>(
+  backupPath: string,
+  options: SourceReadOptions,
+  operation: (archive: BoundedZipArchive) => Promise<T>
+): Promise<T> {
+  let archive: BoundedZipArchive | undefined;
+  let operationError: unknown;
+  try {
+    archive = await openBoundedZipArchive(backupPath, options);
+    return await operation(archive);
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    if (archive) {
+      await closeBoundedArchive(archive, operationError);
+    }
+  }
+}
+
+function decodeManifest(buffer: Buffer): BackupManifest {
+  let bytes = buffer;
+  if (bytes.subarray(0, UTF8_BOM.length).equals(UTF8_BOM)) {
+    bytes = bytes.subarray(UTF8_BOM.length);
+  }
+  if (bytes.indexOf(UTF8_BOM) >= 0) {
+    throw new ZipArchiveFormatError('Backup manifest contains an unexpected UTF-8 BOM.');
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new ZipArchiveFormatError('Backup manifest is not deterministic UTF-8.');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new ZipArchiveFormatError(
+      `Backup manifest JSON is invalid: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new ZipArchiveFormatError('Backup manifest root must be an object.');
+  }
+  return parsed as BackupManifest;
+}
+
+async function readManifestFromArchive(archive: BoundedZipArchive): Promise<BackupManifest | null> {
+  if (!archive.getEntry('manifest.json')) return null;
+  return decodeManifest(await archive.readEntryBuffer('manifest.json'));
+}
+
+function validatedManifestFiles(manifest: BackupManifest): BackupFileEntry[] {
+  if (!Array.isArray(manifest.files)) {
+    throw new ZipArchiveFormatError('Backup manifest files must be an array.');
+  }
+  const allowedTypes = new Set<BackupFileEntry['type']>([
+    'global-db',
+    'workspace-db',
+    'workspace-json',
+    'manifest',
+  ]);
+  return manifest.files.map((value, index) => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} must be an object.`);
+    }
+    const entry = value as unknown as Record<string, unknown>;
+    if (typeof entry['path'] !== 'string' || entry['path'].length === 0) {
+      throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} has an invalid path.`);
+    }
+    if (!Number.isSafeInteger(entry['size']) || Number(entry['size']) < 0) {
+      throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} has an invalid size.`);
+    }
+    if (
+      typeof entry['checksum'] !== 'string' ||
+      !/^sha256:[0-9a-f]{64}$/iu.test(entry['checksum'])
+    ) {
+      throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} has an invalid checksum.`);
+    }
+    if (!allowedTypes.has(entry['type'] as BackupFileEntry['type'])) {
+      throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} has an invalid type.`);
+    }
+    return {
+      path: entry['path'],
+      size: Number(entry['size']),
+      checksum: entry['checksum'].toLowerCase(),
+      type: entry['type'] as BackupFileEntry['type'],
+    };
+  });
+}
+
+interface StagedBackupFile {
+  readonly manifestEntry: BackupFileEntry;
+  readonly archiveEntryName: string;
+  readonly temporaryPath?: string;
+}
+
+interface ArchiveInspection {
+  readonly validation: BackupValidation;
+  readonly stagedFiles: StagedBackupFile[];
+}
+
+async function inspectArchive(
+  archive: BoundedZipArchive,
+  options: SourceReadOptions,
+  workspace?: PrivateTempWorkspace
+): Promise<ArchiveInspection> {
+  const manifest = await readManifestFromArchive(archive);
+  if (!manifest) {
+    return {
+      validation: {
+        status: 'invalid',
+        validFiles: [],
+        corruptedFiles: [],
+        missingFiles: [],
+        errors: ['Manifest file not found in backup'],
+      },
+      stagedFiles: [],
+    };
+  }
+
+  const manifestFiles = validatedManifestFiles(manifest);
+  const validFiles: string[] = [];
+  const corruptedFiles: string[] = [];
+  const missingFiles: string[] = [];
+  const stagedFiles: StagedBackupFile[] = [];
+  const representedNames = new Set<string>();
+
+  for (let index = 0; index < manifestFiles.length; index++) {
+    throwIfAborted(options.signal);
+    const fileEntry = manifestFiles[index]!;
+    const archiveEntry = archive.getEntry(fileEntry.path);
+    if (!archiveEntry || archiveEntry.isDirectory) {
+      missingFiles.push(fileEntry.path);
+      continue;
+    }
+    if (archiveEntry.name !== fileEntry.path.normalize('NFC')) {
+      throw new ZipArchiveFormatError('Manifest path is not the canonical ZIP entry name.');
+    }
+    if (representedNames.has(archiveEntry.name)) {
+      throw new ZipArchiveFormatError(`Manifest contains a duplicate file: ${archiveEntry.name}`);
+    }
+    representedNames.add(archiveEntry.name);
+
+    let checksum: string;
+    let temporaryPath: string | undefined;
+    if (workspace) {
+      temporaryPath = workspace.createFile(`restore-${index}.bin`);
+      checksum = (await archive.extractEntryToFileWithChecksum(archiveEntry.name, temporaryPath))
+        .checksum;
+    } else {
+      checksum = (await archive.checksumEntry(archiveEntry.name)).checksum;
+    }
+
+    if (archiveEntry.uncompressedSize === fileEntry.size && checksum === fileEntry.checksum) {
+      validFiles.push(fileEntry.path);
+    } else {
+      corruptedFiles.push(fileEntry.path);
+    }
+    stagedFiles.push({
+      manifestEntry: fileEntry,
+      archiveEntryName: archiveEntry.name,
+      ...(temporaryPath ? { temporaryPath } : {}),
+    });
+  }
+
+  const errors: string[] = [];
+  if (missingFiles.length > 0) errors.push(`Missing files: ${missingFiles.join(', ')}`);
+  if (corruptedFiles.length > 0) errors.push(`Corrupted files: ${corruptedFiles.join(', ')}`);
+  const status =
+    missingFiles.length > 0 || (corruptedFiles.length > 0 && validFiles.length === 0)
+      ? 'invalid'
+      : corruptedFiles.length > 0
+        ? 'warnings'
+        : 'valid';
+
+  return {
+    validation: {
+      status,
+      manifest,
+      validFiles,
+      corruptedFiles,
+      missingFiles,
+      errors,
+    },
+    stagedFiles,
+  };
+}
+
 /** Wrapper that always disposes the private plaintext snapshot workspace. */
 class TempFileCleanupWrapper implements DatabaseInterface {
+  private closed = false;
+
   constructor(
     private innerDb: DatabaseInterface,
     private workspace: PrivateTempWorkspace
@@ -483,6 +830,8 @@ class TempFileCleanupWrapper implements DatabaseInterface {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     let closeError: unknown;
     try {
       this.innerDb.close();
@@ -509,53 +858,56 @@ class TempFileCleanupWrapper implements DatabaseInterface {
  */
 export async function openBackupDatabase(
   backupPath: string,
-  dbPath: string
+  dbPath: string,
+  options: SourceReadOptions = {}
 ): Promise<DatabaseInterface> {
-  const data = await readFile(backupPath);
-  const zip = await JSZip.loadAsync(data);
-  const dbFile = zip.file(dbPath);
-
-  if (!dbFile) {
-    throw new Error(`Database not found in backup: ${dbPath}`);
-  }
-
-  const buffer = await dbFile.async('nodebuffer');
-
-  // SQLite needs a filesystem path. Keep the plaintext snapshot inside one exclusive private
-  // workspace rather than exposing it as an ordinary file in a shared temporary directory.
-  const workspace = createPrivateTempWorkspace({ prefix: 'cursor-history-backup-read-' });
-  const tempFile = workspace.createFile('state.vscdb');
-
-  // Use pluggable driver system - registry.openSync requires driver to already be selected
+  const readOptions = freezeSourceReadOptions(options);
+  throwIfAborted(readOptions.signal);
+  let workspace: PrivateTempWorkspace | undefined;
+  let operationError: unknown;
   try {
-    writeFileSync(tempFile, buffer, { mode: 0o600 });
+    const tempFile = await withBoundedArchive(backupPath, readOptions, async (archive) => {
+      const entry = archive.getEntry(dbPath);
+      if (!entry || entry.isDirectory) {
+        throw new Error(`Database not found in backup: ${dbPath}`);
+      }
+      workspace = createPrivateTempWorkspace({
+        prefix: 'cursor-history-backup-read-',
+      });
+      const snapshotPath = workspace.createFile('state.vscdb');
+      await archive.extractEntryToFile(entry.name, snapshotPath);
+      return snapshotPath;
+    });
+
+    throwIfAborted(readOptions.signal);
     const db = registry.openSync(tempFile, { readonly: true });
-    return new TempFileCleanupWrapper(db, workspace);
-  } catch (operationError) {
-    try {
-      workspace.dispose();
-    } catch (cleanupError) {
-      attachCleanupCause(cleanupError, operationError);
-      throw cleanupError;
+    return new TempFileCleanupWrapper(db, workspace!);
+  } catch (error) {
+    operationError = error;
+    if (workspace) {
+      try {
+        workspace.dispose();
+      } catch (cleanupError) {
+        attachCleanupCause(cleanupError, operationError);
+        throw cleanupError;
+      }
     }
-    throw operationError;
+    throw error;
   }
 }
 
 /**
  * Read manifest from a backup file
  */
-export async function readBackupManifest(backupPath: string): Promise<BackupManifest | null> {
+export async function readBackupManifest(
+  backupPath: string,
+  options: SourceReadOptions = {}
+): Promise<BackupManifest | null> {
+  const readOptions = freezeSourceReadOptions(options);
   try {
-    const data = await readFile(backupPath);
-    const zip = await JSZip.loadAsync(data);
-    const manifestFile = zip.file('manifest.json');
-    if (!manifestFile) {
-      return null;
-    }
-    const manifestBuffer = await manifestFile.async('nodebuffer');
-    return JSON.parse(manifestBuffer.toString('utf-8')) as BackupManifest;
-  } catch {
+    return await withBoundedArchive(backupPath, readOptions, readManifestFromArchive);
+  } catch (error) {
+    if (shouldPropagateBoundedReadError(error)) throw error;
     return null;
   }
 }
@@ -563,106 +915,28 @@ export async function readBackupManifest(backupPath: string): Promise<BackupMani
 /**
  * T026: Validate backup integrity
  */
-export async function validateBackup(backupPath: string): Promise<BackupValidation> {
-  const errors: string[] = [];
-  const validFiles: string[] = [];
-  const corruptedFiles: string[] = [];
-  const missingFiles: string[] = [];
-
-  // Check if file exists
-  if (!existsSync(backupPath)) {
-    return {
-      status: 'invalid',
-      validFiles: [],
-      corruptedFiles: [],
-      missingFiles: [],
-      errors: [`Backup file not found: ${backupPath}`],
-    };
-  }
-
-  // Try to open as zip
-  let zip: JSZip;
+export async function validateBackup(
+  backupPath: string,
+  options: SourceReadOptions = {}
+): Promise<BackupValidation> {
+  const readOptions = freezeSourceReadOptions(options);
   try {
-    const data = await readFile(backupPath);
-    zip = await JSZip.loadAsync(data);
-  } catch (e) {
+    return await withBoundedArchive(
+      backupPath,
+      readOptions,
+      async (archive) => (await inspectArchive(archive, readOptions)).validation
+    );
+  } catch (error) {
+    if (shouldPropagateBoundedReadError(error)) throw error;
+    const prefix = errorCode(error) === 'ENOENT' ? 'Backup file not found' : 'Invalid zip file';
     return {
       status: 'invalid',
       validFiles: [],
       corruptedFiles: [],
       missingFiles: [],
-      errors: [`Invalid zip file: ${e instanceof Error ? e.message : String(e)}`],
+      errors: [`${prefix}: ${error instanceof Error ? error.message : String(error)}`],
     };
   }
-
-  // Read manifest
-  const manifestFile = zip.file('manifest.json');
-  if (!manifestFile) {
-    return {
-      status: 'invalid',
-      validFiles: [],
-      corruptedFiles: [],
-      missingFiles: [],
-      errors: ['Manifest file not found in backup'],
-    };
-  }
-
-  let manifest: BackupManifest;
-  try {
-    const manifestBuffer = await manifestFile.async('nodebuffer');
-    manifest = JSON.parse(manifestBuffer.toString('utf-8')) as BackupManifest;
-  } catch (e) {
-    return {
-      status: 'invalid',
-      validFiles: [],
-      corruptedFiles: [],
-      missingFiles: [],
-      errors: [`Invalid manifest JSON: ${e instanceof Error ? e.message : String(e)}`],
-    };
-  }
-
-  // Verify each file
-  for (const fileEntry of manifest.files) {
-    const file = zip.file(fileEntry.path);
-    if (!file) {
-      missingFiles.push(fileEntry.path);
-      continue;
-    }
-
-    const buffer = await file.async('nodebuffer');
-    const actualChecksum = computeChecksum(buffer);
-    if (actualChecksum === fileEntry.checksum) {
-      validFiles.push(fileEntry.path);
-    } else {
-      corruptedFiles.push(fileEntry.path);
-    }
-  }
-
-  // Determine status
-  let status: 'valid' | 'warnings' | 'invalid';
-  if (missingFiles.length > 0 || (corruptedFiles.length > 0 && validFiles.length === 0)) {
-    status = 'invalid';
-  } else if (corruptedFiles.length > 0) {
-    status = 'warnings';
-  } else {
-    status = 'valid';
-  }
-
-  if (missingFiles.length > 0) {
-    errors.push(`Missing files: ${missingFiles.join(', ')}`);
-  }
-  if (corruptedFiles.length > 0) {
-    errors.push(`Corrupted files: ${corruptedFiles.join(', ')}`);
-  }
-
-  return {
-    status,
-    manifest,
-    validFiles,
-    corruptedFiles,
-    missingFiles,
-    errors,
-  };
 }
 
 // ============================================================================
@@ -678,6 +952,12 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
   const targetPath = config.targetPath ?? getDefaultCursorDataPath();
   const force = config.force ?? false;
   const onProgress = config.onProgress;
+  const readOptions = freezeSourceReadOptions({
+    sourceReadLimits: config.sourceReadLimits,
+    signal: config.signal,
+  });
+  const signal = readOptions.signal;
+  throwIfAborted(signal);
 
   // Phase: Validating
   onProgress?.({
@@ -686,91 +966,101 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     totalFiles: 0,
     integrityStatus: 'pending',
   });
+  throwIfAborted(signal);
 
-  // Validate backup
-  const validation = await validateBackup(backupPath);
-
-  if (validation.status === 'invalid') {
-    return {
-      success: false,
-      targetPath,
-      filesRestored: 0,
-      warnings: [],
-      durationMs: Date.now() - startTime,
-      error: validation.errors.join('; '),
-    };
-  }
-
-  const manifest = validation.manifest!;
-
-  // Check target directory
-  const userDir = dirname(targetPath);
-  const globalDbPath = join(userDir, 'globalStorage', 'state.vscdb');
-
-  if (!force && existsSync(globalDbPath)) {
-    return {
-      success: false,
-      targetPath,
-      filesRestored: 0,
-      warnings: [],
-      durationMs: Date.now() - startTime,
-      error: `Target already has Cursor data: ${userDir}. Use --force to overwrite.`,
-    };
-  }
-
-  onProgress?.({
-    phase: 'validating',
-    filesCompleted: 0,
-    totalFiles: manifest.files.length,
-    integrityStatus: validation.status === 'warnings' ? 'warnings' : 'passed',
-    corruptedFiles: validation.corruptedFiles,
+  const workspace = createPrivateTempWorkspace({
+    prefix: 'cursor-history-restore-',
   });
-
-  // Phase: Extracting
-  const data = await readFile(backupPath);
-  const zip = await JSZip.loadAsync(data);
-  const restoredFiles: string[] = [];
-  const warnings: string[] = validation.corruptedFiles.map((f) => `Checksum mismatch: ${f}`);
-
+  const restoredFiles: Array<{
+    manifestPath: string;
+    destinationPath: string;
+    previousPath?: string;
+  }> = [];
+  let operationError: unknown;
   try {
-    for (let i = 0; i < manifest.files.length; i++) {
-      const fileEntry = manifest.files[i]!;
+    const inspection = await withBoundedArchive(backupPath, readOptions, (archive) =>
+      inspectArchive(archive, readOptions, workspace)
+    );
+    throwIfAborted(signal);
+    const validation = inspection.validation;
+    if (validation.status === 'invalid') {
+      return {
+        success: false,
+        targetPath,
+        filesRestored: 0,
+        warnings: [],
+        durationMs: Date.now() - startTime,
+        error: validation.errors.join('; '),
+      };
+    }
+
+    const manifest = validation.manifest!;
+    const userDir = dirname(targetPath);
+    const globalDbPath = join(userDir, 'globalStorage', 'state.vscdb');
+    if (!force && existsSync(globalDbPath)) {
+      return {
+        success: false,
+        targetPath,
+        filesRestored: 0,
+        warnings: [],
+        durationMs: Date.now() - startTime,
+        error: `Target already has Cursor data: ${userDir}. Use --force to overwrite.`,
+      };
+    }
+
+    onProgress?.({
+      phase: 'validating',
+      filesCompleted: 0,
+      totalFiles: manifest.files.length,
+      integrityStatus: validation.status === 'warnings' ? 'warnings' : 'passed',
+      corruptedFiles: validation.corruptedFiles,
+    });
+    throwIfAborted(signal);
+
+    const warnings = validation.corruptedFiles.map((file) => `Checksum mismatch: ${file}`);
+    for (let index = 0; index < inspection.stagedFiles.length; index++) {
+      throwIfAborted(signal);
+      const staged = inspection.stagedFiles[index]!;
+      if (!staged.temporaryPath) {
+        throw new Error(`Private restore staging is missing: ${staged.manifestEntry.path}`);
+      }
 
       onProgress?.({
         phase: 'extracting',
-        currentFile: fileEntry.path,
-        filesCompleted: i,
-        totalFiles: manifest.files.length,
+        currentFile: staged.manifestEntry.path,
+        filesCompleted: index,
+        totalFiles: inspection.stagedFiles.length,
         integrityStatus: validation.status === 'warnings' ? 'warnings' : 'passed',
         corruptedFiles: validation.corruptedFiles,
       });
+      throwIfAborted(signal);
 
-      const file = zip.file(fileEntry.path);
-      if (!file) {
-        continue; // Skip missing files
-      }
-
-      const buffer = await file.async('nodebuffer');
-
-      // Convert forward slashes to platform-specific separators
-      const platformPath = fileEntry.path.split('/').join(sep);
+      const platformPath = staged.archiveEntryName.split('/').join(sep);
       const destPath = join(userDir, platformPath);
-
-      // Create directory structure
+      throwIfAborted(signal);
       mkdirSync(dirname(destPath), { recursive: true });
-
-      // Write file
-      writeFileSync(destPath, buffer);
-      restoredFiles.push(fileEntry.path);
+      let previousPath: string | undefined;
+      if (existsSync(destPath)) {
+        previousPath = workspace.createFile(`previous-${index}.bin`);
+        copyFileSync(destPath, previousPath);
+      }
+      restoredFiles.push({
+        manifestPath: staged.manifestEntry.path,
+        destinationPath: destPath,
+        ...(previousPath ? { previousPath } : {}),
+      });
+      throwIfAborted(signal);
+      copyFileSync(staged.temporaryPath, destPath);
     }
 
     // Phase: Finalizing
     onProgress?.({
       phase: 'finalizing',
-      filesCompleted: manifest.files.length,
-      totalFiles: manifest.files.length,
+      filesCompleted: inspection.stagedFiles.length,
+      totalFiles: inspection.stagedFiles.length,
       integrityStatus: validation.status === 'warnings' ? 'warnings' : 'passed',
     });
+    throwIfAborted(signal);
 
     return {
       success: true,
@@ -779,28 +1069,34 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
       warnings,
       durationMs: Date.now() - startTime,
     };
-  } catch (e) {
-    // T043: Rollback on failure - delete any files we created
-    for (const filePath of restoredFiles) {
+  } catch (error) {
+    operationError = error;
+    for (const restored of [...restoredFiles].reverse()) {
       try {
-        const platformPath = filePath.split('/').join(sep);
-        const destPath = join(userDir, platformPath);
-        if (existsSync(destPath)) {
-          unlinkSync(destPath);
+        if (restored.previousPath) {
+          copyFileSync(restored.previousPath, restored.destinationPath);
+        } else if (existsSync(restored.destinationPath)) {
+          unlinkSync(restored.destinationPath);
         }
       } catch {
-        // Ignore rollback errors
+        // Preserve the primary operation failure; rollback residue remains at the explicit target.
       }
     }
+
+    if (shouldPropagateBoundedReadError(error)) throw error;
 
     return {
       success: false,
       targetPath,
       filesRestored: 0,
-      warnings,
+      warnings: [],
       durationMs: Date.now() - startTime,
-      error: `Restore failed: ${e instanceof Error ? e.message : String(e)}`,
+      error: `${errorCode(error) === 'ENOENT' ? 'Backup file not found' : 'Restore failed'}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     };
+  } finally {
+    disposePrivateWorkspace(workspace, operationError);
   }
 }
 
@@ -811,7 +1107,14 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
 /**
  * T055-T057: List all backup files in a directory
  */
-export async function listBackups(directory?: string): Promise<BackupInfo[]> {
+export async function listBackups(
+  directory?: string,
+  options: SourceReadOptions = {}
+): Promise<BackupInfo[]> {
+  // Invalid policy input is rejected before touching the directory, even when it does not exist.
+  const readOptions = freezeSourceReadOptions(options);
+  const signal = readOptions.signal;
+  throwIfAborted(signal);
   const dir = directory ?? getDefaultBackupDir();
 
   if (!existsSync(dir)) {
@@ -824,6 +1127,7 @@ export async function listBackups(directory?: string): Promise<BackupInfo[]> {
     const entries = readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
+      throwIfAborted(signal);
       if (!entry.isFile() || !entry.name.endsWith('.zip')) {
         continue;
       }
@@ -840,19 +1144,21 @@ export async function listBackups(directory?: string): Promise<BackupInfo[]> {
 
       // Try to read manifest
       try {
-        const manifest = await readBackupManifest(filePath);
+        const manifest = await readBackupManifest(filePath, readOptions);
         if (manifest) {
           info.manifest = manifest;
         } else {
           info.error = 'No manifest found';
         }
       } catch (e) {
+        if (shouldPropagateBoundedReadError(e)) throw e;
         info.error = e instanceof Error ? e.message : String(e);
       }
 
       backups.push(info);
     }
-  } catch {
+  } catch (error) {
+    if (shouldPropagateBoundedReadError(error)) throw error;
     // Directory might not be readable
   }
 

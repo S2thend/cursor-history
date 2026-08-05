@@ -36,6 +36,7 @@ export type {
   SessionTimestampSource,
   SourceBoundKind,
   SourceReadLimitsOverride,
+  SourceReadOptions,
   SourceReadLimitsV1,
   SourceRepresentation,
   SourceRole,
@@ -639,8 +640,17 @@ export interface BackupConfig {
   /** Overwrite existing file without prompting */
   force?: boolean;
 
+  /** Request platform-default shared permissions for the completed archive. */
+  sharedPermissions?: boolean;
+
   /** Progress callback for UI updates */
   onProgress?: (progress: BackupProgress) => void;
+
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+
+  /** Cooperatively cancel creation and private staging cleanup. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -697,6 +707,12 @@ export interface RestoreConfig {
 
   /** Progress callback for UI updates */
   onProgress?: (progress: RestoreProgress) => void;
+
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+
+  /** Cooperatively cancel validation, extraction, and cleanup. */
+  signal?: AbortSignal;
 }
 
 /**

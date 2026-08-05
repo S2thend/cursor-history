@@ -6,7 +6,7 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { existsSync } from 'node:fs';
 import { listBackups, getDefaultBackupDir } from '../../core/backup.js';
-import type { BackupInfo } from '../../core/types.js';
+import type { BackupInfo, SourceReadLimitsOverride } from '../../core/types.js';
 import { handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 
@@ -133,7 +133,10 @@ export function registerListBackupsCommand(program: Command): void {
     .description('List available backup files')
     .option('-d, --directory <path>', 'Directory to scan (default: ~/cursor-history-backups)')
     .action(async (options: ListBackupsCommandOptions, command: Command) => {
-      const globalOptions = command.parent?.opts() as { json?: boolean };
+      const globalOptions = command.parent?.opts() as {
+        json?: boolean;
+        sourceLimit?: SourceReadLimitsOverride;
+      };
       const useJson = options.json ?? globalOptions?.json ?? false;
 
       try {
@@ -161,7 +164,9 @@ export function registerListBackupsCommand(program: Command): void {
         }
 
         // List backups
-        const backups = await listBackups(directory);
+        const backups = await listBackups(directory, {
+          sourceReadLimits: globalOptions?.sourceLimit,
+        });
 
         // T063: Handle no backups found
         if (backups.length === 0) {

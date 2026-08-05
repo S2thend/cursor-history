@@ -45,11 +45,12 @@ vi.mock('../../src/core/storage.js', () => ({
 const mockListBackups = vi.fn();
 const mockGetDefaultBackupDir = vi.fn(() => '/home/user/cursor-history-backups');
 const mockCreateBackup = vi.fn();
+const mockRestoreBackup = vi.fn();
 
 vi.mock('../../src/core/backup.js', () => ({
   validateBackup: (...args: unknown[]) => mockValidateBackup(...args),
   createBackup: (...args: unknown[]) => mockCreateBackup(...args),
-  restoreBackup: vi.fn(),
+  restoreBackup: (...args: unknown[]) => mockRestoreBackup(...args),
   listBackups: (...args: unknown[]) => mockListBackups(...args),
   getDefaultBackupDir: () => mockGetDefaultBackupDir(),
 }));
@@ -114,8 +115,8 @@ import { registerExportCommand } from '../../src/cli/commands/export.js';
 import { registerListBackupsCommand } from '../../src/cli/commands/list-backups.js';
 import { registerMigrateCommand } from '../../src/cli/commands/migrate.js';
 import { registerBackupCommand } from '../../src/cli/commands/backup.js';
+import { registerRestoreCommand } from '../../src/cli/commands/restore.js';
 import { writeFileSync } from 'node:fs';
-import { createBackup } from '../../src/core/backup.js';
 
 let consoleSpy: ReturnType<typeof vi.spyOn>;
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
@@ -1034,7 +1035,24 @@ describe('list-backups command', () => {
     registerListBackupsCommand(program);
     await program.parseAsync(['node', 'test', 'list-backups', '-d', '/custom/backups']);
 
-    expect(mockListBackups).toHaveBeenCalledWith('/custom/backups');
+    expect(mockListBackups).toHaveBeenCalledWith('/custom/backups', {
+      sourceReadLimits: undefined,
+    });
+  });
+
+  it('forwards the immutable source-limit override to archive inspection', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockListBackups.mockResolvedValue([]);
+    const sourceReadLimits = Object.freeze({ zipEntryCount: 17 });
+
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerListBackupsCommand(program);
+    await program.parseAsync(['node', 'test', 'list-backups']);
+
+    expect(mockListBackups).toHaveBeenCalledWith('/home/user/cursor-history-backups', {
+      sourceReadLimits,
+    });
   });
 
   it('displays backup with error status', async () => {
@@ -1262,10 +1280,8 @@ describe('migrate command', () => {
 // ==================== BACKUP COMMAND ====================
 
 describe('backup command', () => {
-  let stdoutSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
-    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   });
 
   it('creates backup with default options', async () => {
@@ -1331,6 +1347,31 @@ describe('backup command', () => {
     expect(mockCreateBackup).toHaveBeenCalledWith(
       expect.objectContaining({
         force: true,
+      })
+    );
+  });
+
+  it('forwards explicit shared permissions and the immutable source-limit override', async () => {
+    mockCreateBackup.mockResolvedValue({
+      success: true,
+      backupPath: '/backups/test.zip',
+      durationMs: 500,
+      manifest: {
+        stats: { sessionCount: 10, workspaceCount: 3, totalSize: 5000 },
+        files: [],
+      },
+    });
+    const sourceReadLimits = Object.freeze({ zipEntryBytes: 1024 });
+
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerBackupCommand(program);
+    await program.parseAsync(['node', 'test', 'backup', '--shared']);
+
+    expect(mockCreateBackup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sharedPermissions: true,
+        sourceReadLimits,
       })
     );
   });
@@ -1433,5 +1474,39 @@ describe('backup command', () => {
     await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
+  });
+});
+
+// ==================== RESTORE COMMAND ====================
+
+describe('restore command source-read options', () => {
+  it('uses one source-limit override for validation and restore', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockValidateBackup.mockResolvedValue({
+      status: 'valid',
+      validFiles: [],
+      corruptedFiles: [],
+      missingFiles: [],
+      errors: [],
+      manifest: { files: [] },
+    });
+    mockRestoreBackup.mockResolvedValue({
+      success: true,
+      targetPath: '/target',
+      filesRestored: 0,
+      warnings: [],
+      durationMs: 1,
+    });
+    const sourceReadLimits = Object.freeze({ zipAggregateBytes: 2048 });
+
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerRestoreCommand(program);
+    await program.parseAsync(['node', 'test', '--json', 'restore', '/backups/test.zip']);
+
+    expect(mockValidateBackup).toHaveBeenCalledWith('/backups/test.zip', {
+      sourceReadLimits,
+    });
+    expect(mockRestoreBackup).toHaveBeenCalledWith(expect.objectContaining({ sourceReadLimits }));
   });
 });

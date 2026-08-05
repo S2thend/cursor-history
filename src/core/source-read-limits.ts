@@ -12,6 +12,9 @@ import type {
   ZipSourceLimitDimension,
 } from './types.js';
 
+/** Internal identity brand for policies already validated, copied, and frozen by this module. */
+const RESOLVED_SOURCE_READ_LIMITS = new WeakSet<object>();
+
 /** Frozen exact inclusive defaults for Source Read Limits v1. */
 export const SOURCE_READ_LIMITS_V1_DEFAULTS: Readonly<SourceReadLimitsV1> = Object.freeze({
   policyVersion: 'source-read-limits/v1',
@@ -29,6 +32,7 @@ export const SOURCE_READ_LIMITS_V1_DEFAULTS: Readonly<SourceReadLimitsV1> = Obje
   zipAggregateBytes: 17_179_869_184,
   zipCompressionRatio: 200,
 });
+RESOLVED_SOURCE_READ_LIMITS.add(SOURCE_READ_LIMITS_V1_DEFAULTS);
 
 export const SOURCE_READ_LIMIT_FIELDS = Object.freeze([
   'jsonlRecordBytes',
@@ -66,12 +70,13 @@ function assertRelationship(
 
 /** Validate, copy, and freeze an immutable per-operation limit map. */
 export function resolveSourceReadLimits(
-  override?: SourceReadLimitsOverride
+  override?: SourceReadLimitsOverride | Readonly<SourceReadLimitsV1>
 ): Readonly<SourceReadLimitsV1> {
   if (override === undefined) return SOURCE_READ_LIMITS_V1_DEFAULTS;
   if (override === null || typeof override !== 'object' || Array.isArray(override)) {
     throw new SourceLimitConfigurationError('sourceReadLimits', override, 'must be an object');
   }
+  if (RESOLVED_SOURCE_READ_LIMITS.has(override)) return override as Readonly<SourceReadLimitsV1>;
 
   for (const key of Object.keys(override)) {
     if (!SOURCE_READ_LIMIT_FIELD_SET.has(key)) {
@@ -99,7 +104,9 @@ export function resolveSourceReadLimits(
   assertRelationship(result, 'sqlitePageBytes', 'sqliteDecodedBytes');
   assertRelationship(result, 'zipEntryBytes', 'zipAggregateBytes');
 
-  return Object.freeze(result);
+  const resolved = Object.freeze(result);
+  RESOLVED_SOURCE_READ_LIMITS.add(resolved);
+  return resolved;
 }
 
 /** Exact source-kind/bound/unit mapping used by all typed limit diagnostics. */

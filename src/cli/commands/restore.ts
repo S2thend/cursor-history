@@ -6,7 +6,7 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { existsSync } from 'node:fs';
 import { restoreBackup, validateBackup } from '../../core/backup.js';
-import type { RestoreProgress, RestoreResult } from '../../core/types.js';
+import type { RestoreProgress, RestoreResult, SourceReadLimitsOverride } from '../../core/types.js';
 import { handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 
@@ -114,7 +114,11 @@ export function registerRestoreCommand(program: Command): void {
     )
     .option('-f, --force', 'Overwrite existing data without prompting')
     .action(async (backupArg: string, options: RestoreCommandOptions, command: Command) => {
-      const globalOptions = command.parent?.opts() as { json?: boolean; dataPath?: string };
+      const globalOptions = command.parent?.opts() as {
+        json?: boolean;
+        dataPath?: string;
+        sourceLimit?: SourceReadLimitsOverride;
+      };
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
 
@@ -134,7 +138,9 @@ export function registerRestoreCommand(program: Command): void {
         }
 
         // T052: Validate backup before attempting restore
-        const validation = await validateBackup(backupPath);
+        const validation = await validateBackup(backupPath, {
+          sourceReadLimits: globalOptions?.sourceLimit,
+        });
         if (validation.status === 'invalid') {
           if (useJson) {
             console.log(
@@ -177,6 +183,7 @@ export function registerRestoreCommand(program: Command): void {
           backupPath,
           targetPath,
           force: options.force ?? false,
+          sourceReadLimits: globalOptions?.sourceLimit,
           onProgress,
         });
 

@@ -54,6 +54,7 @@ export type {
   WorkspaceMembership,
   SourceReadLimitsV1,
   SourceReadLimitsOverride,
+  SourceReadOptions,
   SourceBoundKind,
   SessionReadContextOptions,
   SessionReadContext,
