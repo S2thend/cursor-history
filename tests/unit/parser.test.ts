@@ -518,6 +518,64 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
     expect(parsed.preferredSource).toBe('store');
   });
 
+  it('serializes additive resolution and stable identity metadata', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          source: 'global',
+          resolvedSource: 'merged',
+          sources: ['composer', 'store'],
+          messageIdentityVersion: 1,
+          resolution: {
+            state: 'complete',
+            expectedSourceRoles: ['composer', 'store'],
+            loadedSourceRoles: ['composer', 'store'],
+            omittedSourceRoles: [],
+            failedSourceRoles: [],
+            reasonCodes: [],
+          },
+          activeBranchMessageIds: ['msg:0'],
+          messages: [
+            msg('assistant', 'done', {
+              id: 'msg:0',
+              messageIdentityVersion: 1,
+              identityOrigin: 'composer-v0.16-index',
+              parentMessageId: 'native-parent',
+              isSidechain: false,
+              toolCalls: [
+                {
+                  id: 'tool:v1:synthetic',
+                  identityOrigin: 'tool-v1',
+                  name: 'Read',
+                  status: 'completed',
+                },
+              ],
+            }),
+          ],
+        })
+      )
+    );
+
+    expect(parsed).toMatchObject({
+      source: 'global',
+      resolvedSource: 'merged',
+      messageIdentityVersion: 1,
+      activeBranchMessageIds: ['msg:0'],
+      resolution: { state: 'complete' },
+    });
+    expect(parsed.messages[0]).toMatchObject({
+      id: 'msg:0',
+      messageIdentityVersion: 1,
+      identityOrigin: 'composer-v0.16-index',
+      parentMessageId: 'native-parent',
+      isSidechain: false,
+    });
+    expect(parsed.messages[0].toolCalls[0]).toMatchObject({
+      id: 'tool:v1:synthetic',
+      identityOrigin: 'tool-v1',
+    });
+  });
+
   it('preserves Store transcript state in JSON', () => {
     const parsed = JSON.parse(exportToJson(session({ transcriptState: 'partial' })));
     expect(parsed.transcriptState).toBe('partial');
@@ -531,6 +589,8 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
             msg('assistant', '', {
               toolCalls: [
                 {
+                  id: 'native-tool',
+                  identityOrigin: 'source-native',
                   name: 'Write',
                   status: 'error',
                   params: { file: '/a' },
@@ -547,6 +607,8 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
     expect(tc).toMatchObject({ name: 'Write', status: 'error', params: { file: '/a' } });
     expect(tc.error).toBe('disk full');
     expect(tc.files).toEqual(['/a']);
+    expect(tc.id).toBe('native-tool');
+    expect(tc.identityOrigin).toBe('source-native');
   });
 
   it('preserves defined empty tool fields', () => {

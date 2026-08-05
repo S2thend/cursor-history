@@ -87,7 +87,10 @@ describe('Composer + Store stack integration', () => {
     expect(duplicates).toHaveLength(1);
     expect(duplicates[0]).toMatchObject({
       title: 'Hybrid fixture session',
-      source: 'merged',
+      // Listing cannot prove Composer fidelity without payload hydration, so it
+      // remains conservative while still advertising actual merged provenance.
+      source: 'workspace-fallback',
+      resolvedSource: 'merged',
       sources: ['composer', 'store'],
       preferredSource: 'composer',
       workspacePath: PROJECT_PATH,
@@ -98,7 +101,8 @@ describe('Composer + Store stack integration', () => {
     expect(session).toMatchObject({
       id: SESSION_ID,
       title: 'Hybrid fixture session',
-      source: 'merged',
+      source: 'global',
+      resolvedSource: 'merged',
       sources: ['composer', 'store'],
       preferredSource: 'composer',
     });

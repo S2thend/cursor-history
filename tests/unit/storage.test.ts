@@ -1411,7 +1411,8 @@ describe('listSessions', () => {
     );
 
     expect(summaries).toHaveLength(2);
-    expect(summaries.every((summary) => summary.source === 'merged')).toBe(true);
+    expect(summaries.every((summary) => summary.source === 'workspace-fallback')).toBe(true);
+    expect(summaries.every((summary) => summary.resolvedSource === 'merged')).toBe(true);
 
     const sessions = await Promise.all(
       summaries.map((summary) => getSession(summary.id, '/data', undefined, context, summary.index))

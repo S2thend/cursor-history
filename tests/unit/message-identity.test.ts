@@ -206,6 +206,7 @@ describe('tool identities and fixed Composer-to-Store matching', () => {
       { id: ' native-tool ', name: 'Read', params: { path: '/a' } },
       { name: 'Read', params: { b: 2, a: 1 }, status: 'completed', result: 'old' },
       { name: 'Read', params: { a: 1, b: 2 }, status: 'error', error: 'new' },
+      { id: 'tool:v1:existing', identityOrigin: 'tool-v1', name: 'Grep' },
     ]);
 
     expect(base[0]?.id).toBe(' native-tool ');
@@ -216,6 +217,10 @@ describe('tool identities and fixed Composer-to-Store matching', () => {
     expect(base[2]?.id).toBe(
       'tool:v1:msg:4:bdb3d2003e2bdaa55e1345c97787e8411f174109346a8d5c92be0dbb42a204ac:2'
     );
+    expect(base[3]).toMatchObject({
+      id: 'tool:v1:existing',
+      identityOrigin: 'tool-v1',
+    });
   });
 
   it('excludes outcome enrichment and standalone files from compatibility pairing', () => {

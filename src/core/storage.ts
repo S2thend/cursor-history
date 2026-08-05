@@ -1604,6 +1604,7 @@ export async function listSessions(
               lastUpdatedAt: ss.lastUpdatedAt,
               workspacePath: ss.workspacePath,
               messageCount: ss.messages.length,
+              source: ss.source,
               transcriptState: ss.transcriptState,
             },
             preferredSource
@@ -1699,7 +1700,8 @@ export async function listWorkspaces(
       summary.source === 'store' ||
       summary.source === 'store-complete' ||
       summary.source === 'store-partial' ||
-      summary.source === 'merged';
+      summary.source === 'merged' ||
+      summary.resolvedSource === 'merged';
     if (!storeBacked) continue;
 
     const rawPath = summary.workspacePath?.trim() ? summary.workspacePath : UNKNOWN_WORKSPACE_PATH;
@@ -1709,7 +1711,7 @@ export async function listWorkspaces(
     // that count when both stacks resolve to the same workspace. If the
     // preferred Store metadata resolves the session elsewhere, move (rather
     // than duplicate) the count to the canonical resolved workspace.
-    if (summary.source === 'merged') {
+    if (summary.source === 'merged' || summary.resolvedSource === 'merged') {
       const countedComposerWorkspaces = composerWorkspaces.filter(
         (workspace) =>
           getCountedComposerSessionIds(workspace)?.has(summary.id) ??
@@ -1832,7 +1834,7 @@ async function resolveFinalSession(
   context: SessionReadContext
 ): Promise<ChatSession | null> {
   // Merged: same ID exists in both stacks, so field-merge the two representations.
-  if (summary.source === 'merged') {
+  if (summary.source === 'merged' || summary.resolvedSource === 'merged') {
     return loadMergedSession(summary, index, customDataPath, backupPath, context);
   }
 

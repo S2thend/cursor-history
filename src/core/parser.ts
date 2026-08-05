@@ -13,12 +13,14 @@ import type {
 import type { StoreSession } from './store-stack/types.js';
 
 /**
- * Serialize a `ToolCall` to a plain object preserving EVERY defined field
- * (name, status, params, result, error, files). Shared by CLI JSON and export
- * JSON so tool information is complete and consistent across formats.
+ * Serialize a `ToolCall` to a plain object preserving EVERY defined field.
+ * Shared by CLI JSON and export JSON so identity and tool information stay
+ * complete and consistent across formats.
  */
 export function serializeToolCall(tc: ToolCall): Record<string, unknown> {
   const obj: Record<string, unknown> = { name: tc.name, status: tc.status };
+  if (tc.id !== undefined) obj['id'] = tc.id;
+  if (tc.identityOrigin !== undefined) obj['identityOrigin'] = tc.identityOrigin;
   if (tc.params !== undefined) obj['params'] = tc.params;
   if (tc.result !== undefined) obj['result'] = tc.result;
   if (tc.error !== undefined) obj['error'] = tc.error;
@@ -614,7 +616,7 @@ export function getSearchSnippets(
  * where the source is implied.
  */
 function describeSessionSource(session: ChatSession): string {
-  if (session.source === 'merged') {
+  if (session.resolvedSource === 'merged' || session.source === 'merged') {
     const stacks = session.sources?.join(' + ') ?? 'composer + store';
     return `merged from ${stacks} (backbone: ${session.preferredSource ?? 'composer'})`;
   }
@@ -753,6 +755,9 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
   if (session.source !== undefined) {
     exportData['source'] = session.source;
   }
+  if (session.resolvedSource !== undefined) {
+    exportData['resolvedSource'] = session.resolvedSource;
+  }
   if (session.sources) {
     exportData['sources'] = session.sources;
   }
@@ -761,6 +766,12 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
   }
   if (session.transcriptState) {
     exportData['transcriptState'] = session.transcriptState;
+  }
+  if (session.resolution !== undefined) {
+    exportData['resolution'] = session.resolution;
+  }
+  if (session.messageIdentityVersion !== undefined) {
+    exportData['messageIdentityVersion'] = session.messageIdentityVersion;
   }
 
   // Add session-level usage data if available
@@ -788,6 +799,9 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
   if (session.activeBranchBubbleIds !== undefined) {
     exportData['activeBranchBubbleIds'] = session.activeBranchBubbleIds;
   }
+  if (session.activeBranchMessageIds !== undefined) {
+    exportData['activeBranchMessageIds'] = session.activeBranchMessageIds;
+  }
 
   // Map messages with token usage fields
   exportData['messages'] = session.messages.map((m) => {
@@ -807,6 +821,18 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
     }
     if (m.source) {
       msg['source'] = m.source;
+    }
+    if (m.messageIdentityVersion !== undefined) {
+      msg['messageIdentityVersion'] = m.messageIdentityVersion;
+    }
+    if (m.identityOrigin !== undefined) {
+      msg['identityOrigin'] = m.identityOrigin;
+    }
+    if (m.parentMessageId !== undefined) {
+      msg['parentMessageId'] = m.parentMessageId;
+    }
+    if (m.isSidechain !== undefined) {
+      msg['isSidechain'] = m.isSidechain;
     }
 
     if (m.toolCalls && m.toolCalls.length > 0) {

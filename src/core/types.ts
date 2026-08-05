@@ -18,19 +18,11 @@ export type SourceRole = 'composer' | 'store';
 
 /** Physical representation used by one source contribution. */
 export type SourceRepresentation =
-  | 'composer-global'
-  | 'composer-workspace'
-  | 'store-db'
-  | 'store-transcript'
-  | 'store-metadata';
+  'composer-global' | 'composer-workspace' | 'store-db' | 'store-transcript' | 'store-metadata';
 
 /** Actual representation selected for a resolved logical session. */
 export type ResolvedSource =
-  | 'composer'
-  | 'store-db'
-  | 'store-transcript'
-  | 'store-metadata'
-  | 'merged';
+  'composer' | 'store-db' | 'store-transcript' | 'store-metadata' | 'merged';
 
 /** Whether a resolved view is replacement-safe or degraded. */
 export type ResolutionState = 'complete' | 'partial';
@@ -53,21 +45,14 @@ export type WorkspaceMatchKind = 'exact' | 'unique-suffix';
 
 /** Stable identity origin for a resolved message. */
 export type MessageIdentityOrigin =
-  | 'composer-native'
-  | 'composer-v0.16-index'
-  | 'store-db-v1'
-  | 'store-transcript-v1';
+  'composer-native' | 'composer-v0.16-index' | 'store-db-v1' | 'store-transcript-v1';
 
 /** Stable identity origin for a resolved tool call. */
 export type ToolIdentityOrigin = 'source-native' | 'tool-v1';
 
 /** Deterministic provenance for resolved session timestamps. */
 export type SessionTimestampSource =
-  | 'composer-metadata'
-  | 'store-db-metadata'
-  | 'store-meta'
-  | 'direct-message'
-  | 'epoch-unknown';
+  'composer-metadata' | 'store-db-metadata' | 'store-meta' | 'direct-message' | 'epoch-unknown';
 
 /** Membership of one logical UUID in a historical workspace. */
 export interface WorkspaceMembership {
@@ -136,9 +121,7 @@ export interface SourceReadLimitsV1 {
 export type SourceReadLimitsOverride = Partial<Omit<SourceReadLimitsV1, 'policyVersion'>>;
 
 export type JsonlSourceBoundKind =
-  | 'jsonl-record-bytes'
-  | 'jsonl-source-bytes'
-  | 'jsonl-record-count';
+  'jsonl-record-bytes' | 'jsonl-source-bytes' | 'jsonl-record-count';
 export type SqliteSourceBoundKind =
   | 'sqlite-page-rows'
   | 'sqlite-page-bytes'
@@ -204,9 +187,7 @@ export type SourceLimitExceededDiagnostic = {
 } & (JsonlSourceLimitDimension | SqliteSourceLimitDimension);
 
 export type SessionDiagnostic =
-  | GeneralSessionDiagnostic
-  | SourceEncodingDiagnostic
-  | SourceLimitExceededDiagnostic;
+  GeneralSessionDiagnostic | SourceEncodingDiagnostic | SourceLimitExceededDiagnostic;
 
 /** Parse state of the Store transcript associated with a resolved session. */
 export type TranscriptState =
@@ -309,8 +290,8 @@ export interface ChatSession {
   /** Actual selected source representation; `source` remains the fidelity signal. */
   resolvedSource?: ResolvedSource;
   /**
-   * Cross-stack provenance. Present only when `source === 'merged'`: lists the
-   * stacks that contributed and which stack supplies the canonical order /
+   * Cross-stack provenance. Present when `resolvedSource === 'merged'`: lists
+   * the stacks that contributed and which stack supplies canonical rendering /
    * wins true scalar conflicts. Additive — absent for single-source sessions.
    */
   sources?: SessionStackSource[];
@@ -449,7 +430,7 @@ export interface ChatSessionSummary {
     | 'store-partial'
     | 'merged';
   resolvedSource?: ResolvedSource;
-  /** Cross-stack provenance (present only when `source === 'merged'`). */
+  /** Cross-stack provenance (present when `resolvedSource === 'merged'`). */
   sources?: SessionStackSource[];
   preferredSource?: SessionStackSource;
   /** Store transcript state when the Store stack contributes to this session. */

@@ -100,7 +100,8 @@ export function sha256CanonicalJsonV1(value: unknown): string {
 
 export interface ComposerMessageInput {
   id?: string | null;
-  [key: string]: unknown;
+  messageIdentityVersion?: number;
+  identityOrigin?: MessageIdentityOrigin;
 }
 
 export type ProjectedComposerMessage<T extends ComposerMessageInput = ComposerMessageInput> = T & {
@@ -119,26 +120,31 @@ export function projectV016ComposerMessages<T extends ComposerMessageInput>(
 ): Array<ProjectedComposerMessage<T>> {
   return messages.map((message, sourceOrdinal) => {
     const hasNativeId = typeof message.id === 'string' && message.id.length > 0;
+    const projectedOrigin =
+      message['messageIdentityVersion'] === MESSAGE_IDENTITY_VERSION &&
+      (message['identityOrigin'] === 'composer-native' ||
+        message['identityOrigin'] === 'composer-v0.16-index')
+        ? message['identityOrigin']
+        : undefined;
     return {
       ...message,
       id: hasNativeId ? message.id! : `msg:${sourceOrdinal}`,
       messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
-      identityOrigin: hasNativeId ? 'composer-native' : 'composer-v0.16-index',
+      // Projection is intentionally idempotent. A Composer session may already
+      // have crossed a source adapter before reaching the merge boundary; do
+      // not relabel its compatibility `msg:<index>` as a native Cursor ID.
+      identityOrigin: projectedOrigin ?? (hasNativeId ? 'composer-native' : 'composer-v0.16-index'),
       sourceOrdinal,
     };
   });
 }
 
-interface StoreIdentityRecordBase {
-  [key: string]: unknown;
-}
-
-export interface StoreDbMessageRecord extends StoreIdentityRecordBase {
+export interface StoreDbMessageRecord {
   representation: 'db';
   leafHash: string;
 }
 
-export interface TranscriptMessageRecord extends StoreIdentityRecordBase {
+export interface TranscriptMessageRecord {
   representation: 'transcript';
   role: string;
   content: string;
@@ -283,11 +289,11 @@ export function allocateStoreMessageIdentities<
 
 export interface ToolIdentityInput {
   id?: string | null;
+  identityOrigin?: ToolIdentityOrigin;
   name: string;
   params?: unknown;
   files?: readonly string[];
   sourceRelationships?: unknown;
-  [key: string]: unknown;
 }
 
 export interface ToolCallMatch {
@@ -392,7 +398,10 @@ export function allocateToolCallIdentities<T extends ToolIdentityInput>(
       return {
         call,
         id: call.id,
-        identityOrigin: 'source-native',
+        identityOrigin:
+          call.identityOrigin === 'source-native' || call.identityOrigin === 'tool-v1'
+            ? call.identityOrigin
+            : 'source-native',
         sourceOrdinal,
       };
     }
