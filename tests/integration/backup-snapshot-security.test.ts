@@ -27,8 +27,9 @@ import {
 } from '../../src/core/errors.js';
 import type { SourceReadLimitsOverride, ZipSourceBoundKind } from '../../src/core/types.js';
 
-const { backupDatabaseMock, openSyncMock } = vi.hoisted(() => ({
+const { backupDatabaseMock, openDatabaseMock, openSyncMock } = vi.hoisted(() => ({
   backupDatabaseMock: vi.fn(),
+  openDatabaseMock: vi.fn(),
   openSyncMock: vi.fn(),
 }));
 
@@ -40,6 +41,7 @@ vi.mock('../../src/core/database/registry.js', () => ({
 
 vi.mock('../../src/core/database/index.js', () => ({
   backupDatabase: backupDatabaseMock,
+  openDatabase: openDatabaseMock,
 }));
 
 import {
@@ -343,6 +345,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     vi.clearAllMocks();
     backupDatabaseMock.mockResolvedValue(undefined);
     openSyncMock.mockImplementation(() => databaseWithClose(vi.fn()));
+    openDatabaseMock.mockImplementation(() => databaseWithClose(vi.fn()));
     snapshotPath = undefined;
     fixtureRoot = mkdtempSync(join(tmpdir(), 'cursor-history-backup-security-test-'));
     archivePath = join(fixtureRoot, 'fixture.zip');
@@ -360,7 +363,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
   it.runIf(process.platform !== 'win32')(
     'platform:posix: confines an open snapshot under umask 000 without changing process or parent modes',
     async () => {
-      openSyncMock.mockImplementation((path: string) => {
+      openDatabaseMock.mockImplementation((path: string) => {
         snapshotPath = path;
         return databaseWithClose(vi.fn());
       });
@@ -391,7 +394,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
   );
 
   it('removes the private workspace when opening the snapshot fails', async () => {
-    openSyncMock.mockImplementation((path: string) => {
+    openDatabaseMock.mockImplementation((path: string) => {
       snapshotPath = path;
       throw new Error('synthetic open failure');
     });
@@ -405,8 +408,49 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     expect(existsSync(dirname(snapshotPath!))).toBe(false);
   });
 
+  it('binds the forced provider to the extracted database open without global openSync state', async () => {
+    openDatabaseMock.mockImplementation((path: string) => {
+      snapshotPath = path;
+      return databaseWithClose(vi.fn());
+    });
+
+    const database = await openBackupDatabase(archivePath, 'globalStorage/state.vscdb', {
+      sqliteDriver: 'better-sqlite3',
+    });
+    expect(openDatabaseMock).toHaveBeenCalledWith(
+      snapshotPath,
+      expect.objectContaining({
+        operation: 'read-session',
+        required: new Set(['read']),
+        forcedDriver: 'better-sqlite3',
+      })
+    );
+    expect(openSyncMock).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it('honors cancellation that arrives during the operation-bound database open', async () => {
+    const controller = new AbortController();
+    const close = vi.fn();
+    openDatabaseMock.mockImplementation(async (path: string) => {
+      snapshotPath = path;
+      controller.abort();
+      return databaseWithClose(close);
+    });
+
+    await expect(
+      openBackupDatabase(archivePath, 'globalStorage/state.vscdb', {
+        signal: controller.signal,
+      })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(close).toHaveBeenCalledOnce();
+    expect(snapshotPath).toBeDefined();
+    expect(existsSync(snapshotPath!)).toBe(false);
+    expect(existsSync(dirname(snapshotPath!))).toBe(false);
+  });
+
   it('removes the private workspace even when closing the database fails', async () => {
-    openSyncMock.mockImplementation((path: string) => {
+    openDatabaseMock.mockImplementation((path: string) => {
       snapshotPath = path;
       return databaseWithClose(() => {
         throw new Error('synthetic close failure');
@@ -846,7 +890,9 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     writeFileSync(malformedPath, Buffer.from('not a zip'), { mode: 0o600 });
     const before = currentPrivateTempPaths();
 
-    expect(await readBackupManifest(malformedPath)).toBeNull();
+    await expect(readBackupManifest(malformedPath)).rejects.toBeInstanceOf(
+      ZipArchiveFormatError
+    );
     const validation = await validateBackup(malformedPath);
     expect(validation.status).toBe('invalid');
     const restored = await restoreBackup({
@@ -1031,7 +1077,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
 
   it('uses isolated workspaces for concurrent reads and cleans both', async () => {
     const paths: string[] = [];
-    openSyncMock.mockImplementation((path: string) => {
+    openDatabaseMock.mockImplementation((path: string) => {
       paths.push(path);
       return databaseWithClose(vi.fn());
     });
@@ -1234,7 +1280,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
   it.runIf(process.platform !== 'win32')(
     'surfaces cleanup residue paths under an intentional permission leak mutation',
     async () => {
-      openSyncMock.mockImplementation((path: string) => {
+      openDatabaseMock.mockImplementation((path: string) => {
         snapshotPath = path;
         return databaseWithClose(vi.fn());
       });

@@ -10,6 +10,7 @@ import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { SourceEncodingError, SourceLimitExceededError } from '../errors.js';
 import { debugLogStorage } from '../database/debug.js';
+import type { DriverName } from '../database/index.js';
 import { decodeDeterministicUtf8, resolveSourceReadLimits } from '../source-read-limits.js';
 import type {
   ResolutionReasonCode,
@@ -30,6 +31,10 @@ import type {
 export interface StoreDiscoveryOptions {
   /** Validated before any source content or directory inventory is read. */
   sourceReadLimits?: SourceReadLimitsOverride;
+  /** Strict SQLite provider preference for Store snapshot/read operations. */
+  sqliteDriver?: DriverName;
+  /** Cooperatively cancel inventory, transcript parsing, and Store snapshots. */
+  signal?: AbortSignal;
   /** Receives only safe typed diagnostics (never a locator or content). */
   onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
 }
@@ -43,6 +48,7 @@ interface InventoryEvidence {
   hasConversationTrue: boolean;
   hasConversationFalse: boolean;
   unsupportedExpectationMetadata: boolean;
+  metadataFailures: SourceEncodingError[];
 }
 
 interface MetaReadResult {
@@ -50,6 +56,7 @@ interface MetaReadResult {
   present: boolean;
   hasConversation?: boolean;
   unsupportedExpectationMetadata: boolean;
+  diagnostic?: SourceEncodingError;
 }
 
 interface DirectoryListing<T> {
@@ -69,6 +76,8 @@ export async function discoverStoreSessions(
   // Validation is deliberately the first operation: invalid caller policy
   // must fail before even a payload-presence check can trigger source I/O.
   const limits = resolveSourceReadLimits(options.sourceReadLimits);
+  const signal = options.signal;
+  throwIfAborted(signal);
   const byId = new Map<string, StoreSession>();
   const inventory = new Map<string, InventoryEvidence>();
   const selectedTranscriptFailures = new Map<string, TranscriptSourceFailure[]>();
@@ -87,6 +96,7 @@ export async function discoverStoreSessions(
         hasConversationTrue: false,
         hasConversationFalse: false,
         unsupportedExpectationMetadata: false,
+        metadataFailures: [],
       };
       inventory.set(uuid, value);
     }
@@ -95,23 +105,25 @@ export async function discoverStoreSessions(
 
   // 1. chats/ metadata inventory.
   const chats = chatsDir(storeRoot);
-  if (pathExists(chats)) {
-    const hashListing = listDirs(chats);
+  if (pathExists(chats, signal)) {
+    const hashListing = listDirs(chats, signal);
     perSessionInventoryComplete &&= hashListing.complete;
     for (const hash of hashListing.entries) {
-      const sessionListing = listDirs(join(chats, hash));
+      throwIfAborted(signal);
+      const sessionListing = listDirs(join(chats, hash), signal);
       perSessionInventoryComplete &&= sessionListing.complete;
       for (const uuid of sessionListing.entries) {
         const sessionDir = join(chats, hash, uuid);
-        const metaRead = readMeta(join(sessionDir, 'meta.json'));
+        throwIfAborted(signal);
+        const metaRead = readMeta(join(sessionDir, 'meta.json'), signal);
         const dbPath = join(sessionDir, 'store.db');
-        const dbInventoried = pathExists(dbPath);
+        const dbInventoried = pathExists(dbPath, signal);
         recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
 
         const meta = metaRead.meta;
         const createdAt = isValidMs(meta?.createdAtMs)
           ? new Date(meta.createdAtMs)
-          : (readMtime(sessionDir) ?? new Date(0));
+          : (readMtime(sessionDir, signal) ?? new Date(0));
         const hasExplicitUpdatedAt = isValidMs(meta?.updatedAtMs);
         const updatedAt = hasExplicitUpdatedAt ? new Date(meta!.updatedAtMs!) : createdAt;
         const candidate = emptyStoreSession({
@@ -130,16 +142,18 @@ export async function discoverStoreSessions(
 
   // 2. ACP metadata inventory.
   const acp = acpSessionsDir(storeRoot);
-  if (pathExists(acp)) {
-    const sessionListing = listDirs(acp);
+  throwIfAborted(signal);
+  if (pathExists(acp, signal)) {
+    const sessionListing = listDirs(acp, signal);
     perSessionInventoryComplete &&= sessionListing.complete;
     for (const uuid of sessionListing.entries) {
       const sessionDir = join(acp, uuid);
-      const metaRead = readMeta(join(sessionDir, 'meta.json'));
+      throwIfAborted(signal);
+      const metaRead = readMeta(join(sessionDir, 'meta.json'), signal);
       const dbPath = join(sessionDir, 'store.db');
-      const dbInventoried = pathExists(dbPath);
+      const dbInventoried = pathExists(dbPath, signal);
       recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
-      const createdAt = readMtime(sessionDir) ?? new Date(0);
+      const createdAt = readMtime(sessionDir, signal) ?? new Date(0);
       const candidate = emptyStoreSession({
         id: uuid,
         workspacePath: metaRead.meta?.cwd,
@@ -155,19 +169,22 @@ export async function discoverStoreSessions(
 
   // 3. Canonical transcript inventory and bounded parse.
   const projects = projectsDir(storeRoot);
-  if (pathExists(projects)) {
-    const projectListing = listDirs(projects);
+  throwIfAborted(signal);
+  if (pathExists(projects, signal)) {
+    const projectListing = listDirs(projects, signal);
     for (const sanitized of projectListing.entries) {
+      throwIfAborted(signal);
       const transcriptDir = join(projects, sanitized, 'agent-transcripts');
-      if (!pathExists(transcriptDir)) continue;
-      const transcriptListing = listEntries(transcriptDir);
+      if (!pathExists(transcriptDir, signal)) continue;
+      const transcriptListing = listEntries(transcriptDir, signal);
       for (const entry of transcriptListing.entries) {
+        throwIfAborted(signal);
         if (entry.isDirectory()) {
           const uuid = entry.name;
           const nested = join(transcriptDir, uuid, `${uuid}.jsonl`);
-          if (pathExists(nested)) {
+          if (pathExists(nested, signal)) {
             evidenceFor(uuid).transcriptInventoried = true;
-            attachTranscript(byId, selectedTranscriptFailures, uuid, nested, limits);
+            attachTranscript(byId, selectedTranscriptFailures, uuid, nested, limits, signal);
           }
         } else if (entry.name.endsWith('.jsonl')) {
           const uuid = entry.name.slice(0, -'.jsonl'.length);
@@ -177,7 +194,8 @@ export async function discoverStoreSessions(
             selectedTranscriptFailures,
             uuid,
             join(transcriptDir, entry.name),
-            limits
+            limits,
+            signal
           );
         }
       }
@@ -197,6 +215,7 @@ export async function discoverStoreSessions(
   // 4. Exhaustive representation selection.
   const resolved: StoreSession[] = [];
   for (const ss of byId.values()) {
+    throwIfAborted(signal);
     const evidence = evidenceFor(ss.id);
     const expectation = classifyStoreDbExpectation(evidence, perSessionInventoryComplete);
     ss.storeDbExpectation = expectation;
@@ -211,6 +230,8 @@ export async function discoverStoreSessions(
           limits,
           failureOutcome: 'partial',
           onDiagnostic: (error) => dbFailures.push(error),
+          sqliteDriver: options.sqliteDriver,
+          signal,
         })
       : null;
 
@@ -223,8 +244,9 @@ export async function discoverStoreSessions(
         ...deep.rawContentBlockEvidence,
       ];
     }
-    retainSafeSourceFailures(
+    const retainedSourceFailure = retainSafeSourceFailures(
       ss,
+      evidence.metadataFailures,
       transcriptFailures,
       dbFailures,
       transcriptUsable,
@@ -252,10 +274,13 @@ export async function discoverStoreSessions(
       ss.messages = deep.messages;
       ss.messageIdentityEvidence = deep.messageIdentityEvidence;
       ss.resolvedSource = 'store-db';
-      if (deep.completeness === 'complete') {
+      if (deep.completeness === 'complete' && !retainedSourceFailure) {
         setResolution(ss, 'complete', []);
       } else {
-        setResolution(ss, 'partial', ['source-partial']);
+        setResolution(ss, 'partial', [
+          ...(deep.completeness === 'complete' ? [] : (['source-partial'] as const)),
+          ...(retainedSourceFailure ? (['source-read-failed'] as const) : []),
+        ]);
       }
       logStoreResolution(ss, dbState, 'unused');
       resolved.push(ss);
@@ -267,6 +292,7 @@ export async function discoverStoreSessions(
       if (expectation === 'expected') reasons.push('expected-store-db-unavailable');
       if (expectation === 'unknown') reasons.push('store-db-expectation-unknown');
       if (ss.transcriptState !== 'parsed') reasons.push('source-partial');
+      if (retainedSourceFailure) reasons.push('source-read-failed');
       ss.resolvedSource = 'store-transcript';
       setResolution(ss, reasons.length === 0 ? 'complete' : 'partial', reasons);
       logStoreResolution(ss, dbState, ss.storeDbPath ? 'fallback' : 'only-source');
@@ -346,6 +372,7 @@ function recordInventory(
   evidence.hasConversationTrue ||= metaRead.hasConversation === true;
   evidence.hasConversationFalse ||= metaRead.hasConversation === false;
   evidence.unsupportedExpectationMetadata ||= metaRead.unsupportedExpectationMetadata;
+  if (metaRead.diagnostic) evidence.metadataFailures.push(metaRead.diagnostic);
   if (dbInventoried) {
     evidence.dbInventoried = true;
     if (!evidence.dbPaths.includes(dbPath)) evidence.dbPaths.push(dbPath);
@@ -444,14 +471,18 @@ function promoteSourceFailure(error: TranscriptSourceFailure): TranscriptSourceF
  */
 function retainSafeSourceFailures(
   session: StoreSession,
+  metadataFailures: readonly SourceEncodingError[],
   transcriptFailures: readonly TranscriptSourceFailure[],
   dbFailures: readonly TranscriptSourceFailure[],
   transcriptUsable: boolean,
   dbUsable: boolean,
   onDiagnostic?: (diagnostic: SessionDiagnostic) => void
-): void {
+): boolean {
   const transcriptSafe = transcriptUsable && transcriptFailures.length === 0;
   const dbSafe = dbUsable && dbFailures.length === 0;
+  if (metadataFailures.length > 0 && !transcriptSafe && !dbSafe) {
+    throw promoteSourceFailure(metadataFailures[0]!);
+  }
   if (transcriptFailures.length > 0 && !dbSafe) {
     throw promoteSourceFailure(transcriptFailures[0]!);
   }
@@ -459,12 +490,13 @@ function retainSafeSourceFailures(
     throw promoteSourceFailure(dbFailures[0]!);
   }
 
-  const diagnostics = [...transcriptFailures, ...dbFailures].map((error) =>
+  const diagnostics = [...metadataFailures, ...transcriptFailures, ...dbFailures].map((error) =>
     toSessionDiagnostic(error, session.id)
   );
-  if (diagnostics.length === 0) return;
+  if (diagnostics.length === 0) return false;
   session.diagnostics = [...(session.diagnostics ?? []), ...diagnostics];
   for (const diagnostic of diagnostics) onDiagnostic?.(diagnostic);
+  return true;
 }
 
 function attachTranscript(
@@ -472,16 +504,25 @@ function attachTranscript(
   selectedFailures: Map<string, TranscriptSourceFailure[]>,
   uuid: string,
   file: string,
-  limits: ReturnType<typeof resolveSourceReadLimits>
+  limits: ReturnType<typeof resolveSourceReadLimits>,
+  signal?: AbortSignal
 ): void {
-  const parsed = parseTranscriptFile(file, limits, 'partial');
-  const modifiedAt = readMtime(file) ?? new Date(0);
+  throwIfAborted(signal);
+  const parsed = parseTranscriptFile(file, limits, 'partial', signal);
+  const modifiedAt = readMtime(file, signal) ?? new Date(0);
   const existing = byId.get(uuid);
   const failures = parsed.diagnostic ? [parsed.diagnostic] : [];
 
   if (existing) {
     if (
-      !shouldReplaceTranscript(existing, parsed.state, parsed.messages.length, modifiedAt, file)
+      !shouldReplaceTranscript(
+        existing,
+        parsed.state,
+        parsed.messages.length,
+        modifiedAt,
+        file,
+        signal
+      )
     ) {
       return;
     }
@@ -520,8 +561,10 @@ function shouldReplaceTranscript(
   candidateState: StoreSession['transcriptState'],
   candidateMessageCount: number,
   candidateModifiedAt: Date,
-  candidatePath: string
+  candidatePath: string,
+  signal?: AbortSignal
 ): boolean {
+  throwIfAborted(signal);
   if (!existing.transcriptPath) return true;
   const rank: Record<StoreSession['transcriptState'], number> = {
     parsed: 6,
@@ -538,7 +581,7 @@ function shouldReplaceTranscript(
   if (candidateMessageCount !== existing.messages.length) {
     return candidateMessageCount > existing.messages.length;
   }
-  const existingModifiedAt = readMtime(existing.transcriptPath)?.getTime() ?? 0;
+  const existingModifiedAt = readMtime(existing.transcriptPath, signal)?.getTime() ?? 0;
   if (candidateModifiedAt.getTime() !== existingModifiedAt) {
     return candidateModifiedAt.getTime() > existingModifiedAt;
   }
@@ -574,7 +617,8 @@ function logStoreResolution(
   );
 }
 
-function listDirs(dir: string): DirectoryListing<string> {
+function listDirs(dir: string, signal?: AbortSignal): DirectoryListing<string> {
+  throwIfAborted(signal);
   try {
     return {
       entries: readdirSync(dir, { withFileTypes: true })
@@ -594,7 +638,8 @@ function listDirs(dir: string): DirectoryListing<string> {
   }
 }
 
-function listEntries(dir: string): DirectoryListing<Dirent> {
+function listEntries(dir: string, signal?: AbortSignal): DirectoryListing<Dirent> {
+  throwIfAborted(signal);
   try {
     return {
       entries: readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
@@ -613,7 +658,8 @@ function listEntries(dir: string): DirectoryListing<Dirent> {
   }
 }
 
-function readMeta(path: string): MetaReadResult {
+function readMeta(path: string, signal?: AbortSignal): MetaReadResult {
+  throwIfAborted(signal);
   let raw: Buffer;
   try {
     raw = readFileSync(path);
@@ -628,7 +674,14 @@ function readMeta(path: string): MetaReadResult {
   try {
     parsed = JSON.parse(decodeDeterministicUtf8(raw, 'jsonl', 'partial').text) as unknown;
   } catch (error) {
-    if (error instanceof SyntaxError || error instanceof SourceEncodingError) {
+    if (error instanceof SourceEncodingError) {
+      return {
+        present: true,
+        unsupportedExpectationMetadata: true,
+        diagnostic: error,
+      };
+    }
+    if (error instanceof SyntaxError) {
       return { present: true, unsupportedExpectationMetadata: true };
     }
     throw error;
@@ -668,7 +721,8 @@ function readMeta(path: string): MetaReadResult {
   };
 }
 
-function pathExists(path: string): boolean {
+function pathExists(path: string, signal?: AbortSignal): boolean {
+  throwIfAborted(signal);
   try {
     statSync(path);
     return true;
@@ -678,7 +732,8 @@ function pathExists(path: string): boolean {
   }
 }
 
-function readMtime(path: string): Date | undefined {
+function readMtime(path: string, signal?: AbortSignal): Date | undefined {
+  throwIfAborted(signal);
   try {
     return statSync(path).mtime ?? undefined;
   } catch (error) {
@@ -690,6 +745,19 @@ function readMtime(path: string): Date | undefined {
 function isAbsentOrWrongType(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException)?.code;
   return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') return signal.reason;
+  const error = new Error('The Store discovery operation was aborted.', {
+    ...(signal.reason === undefined ? {} : { cause: signal.reason }),
+  });
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError(signal);
 }
 
 function isValidMs(value: unknown): value is number {

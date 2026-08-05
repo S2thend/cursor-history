@@ -292,7 +292,10 @@ describe('StoreDbExpectation and representation selection', () => {
     );
     expect(transcriptFallback).toMatchObject({
       resolvedSource: 'store-transcript',
-      resolution: { state: 'partial', reasonCodes: ['expected-store-db-unavailable'] },
+      resolution: {
+        state: 'partial',
+        reasonCodes: ['expected-store-db-unavailable', 'source-read-failed'],
+      },
       diagnostics: [
         expect.objectContaining({
           code: 'SOURCE_ENCODING_INVALID',
@@ -313,7 +316,7 @@ describe('StoreDbExpectation and representation selection', () => {
     );
     expect(dbFallback).toMatchObject({
       resolvedSource: 'store-db',
-      resolution: { state: 'complete', reasonCodes: [] },
+      resolution: { state: 'partial', reasonCodes: ['source-read-failed'] },
       diagnostics: [
         expect.objectContaining({
           code: 'SOURCE_ENCODING_INVALID',

@@ -21,9 +21,15 @@
  * while driver, snapshot, cleanup, encoding, and fatal limit failures remain
  * typed operation failures.
  */
-import { statSync } from 'node:fs';
-import { join } from 'node:path';
-import { backupDatabase, openDatabase, type Database } from '../database/index.js';
+import { chmodSync, statSync } from 'node:fs';
+import {
+  backupDatabase,
+  openDatabase,
+  type Database,
+  type DatabaseCapability,
+  type DatabaseOperationRequest,
+  type DriverName,
+} from '../database/index.js';
 import { debugLogStorage } from '../database/debug.js';
 import {
   SourceEncodingError,
@@ -56,6 +62,52 @@ export interface StoreDbParseOptions {
   limits?: Readonly<SourceReadLimitsV1>;
   failureOutcome?: SourceFailureOutcome;
   onDiagnostic?: (error: SourceEncodingError | SourceLimitExceededError) => void;
+  /** Strict provider preference for this Store snapshot/read operation. */
+  sqliteDriver?: DriverName;
+  /** Cooperatively cancel snapshot creation and bounded payload reads. */
+  signal?: AbortSignal;
+}
+
+const STORE_SNAPSHOT_CAPABILITIES = new Set<DatabaseCapability>(['read', 'onlineBackup']);
+const STORE_READ_CAPABILITIES = new Set<DatabaseCapability>(['read']);
+
+function databaseRequest(
+  operation: DatabaseOperationRequest['operation'],
+  required: ReadonlySet<DatabaseCapability>,
+  forcedDriver?: DriverName
+): DatabaseOperationRequest {
+  return {
+    operation,
+    required,
+    ...(forcedDriver ? { forcedDriver } : {}),
+  };
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') return signal.reason;
+  const error = new Error('The Store database read was aborted.', {
+    ...(signal.reason === undefined ? {} : { cause: signal.reason }),
+  });
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError(signal);
+}
+
+/** Preserve the primary failure when a later close/cleanup failure takes precedence. */
+function attachErrorCause(error: unknown, cause: unknown): void {
+  if (
+    error instanceof Error &&
+    cause !== undefined &&
+    !Object.prototype.hasOwnProperty.call(error, 'cause')
+  ) {
+    Object.defineProperty(error, 'cause', {
+      configurable: true,
+      value: cause,
+    });
+  }
 }
 
 interface LeafObj {
@@ -87,9 +139,12 @@ export async function parseStoreDb(
   path: string,
   options: StoreDbParseOptions = {}
 ): Promise<StoreDbData | null> {
-  if (!pathExists(path)) return null;
   const limits = options.limits ?? SOURCE_READ_LIMITS_V1_DEFAULTS;
   const failureOutcome = options.failureOutcome ?? 'fatal';
+  // Operation policy and cancellation are checked before even the source
+  // presence probe, keeping invalid/pre-aborted requests I/O-free.
+  throwIfAborted(options.signal);
+  if (!pathExists(path, options.signal)) return null;
   const budget = new SqliteSourceReadBudget(limits, failureOutcome);
   let workspace: PrivateTempWorkspace | null = null;
   let db: Database | null = null;
@@ -100,14 +155,27 @@ export async function parseStoreDb(
     // Snapshot failures are operation-level infrastructure failures and must
     // propagate. Only payload/schema corruption may resolve through a safe
     // transcript/metadata fallback chosen by discover.ts.
-    workspace = createPrivateTempWorkspace({ prefix: 'ch-store-' });
-    const tmpPath = join(workspace.path, 'store.db');
-    workspace.register(tmpPath);
-    await backupDatabase(path, tmpPath);
+    workspace = createPrivateTempWorkspace({ prefix: 'ch-store-', signal: options.signal });
+    const tmpPath = workspace.createFile('store.db');
+    throwIfAborted(options.signal);
+    await backupDatabase(
+      path,
+      tmpPath,
+      databaseRequest('store-snapshot', STORE_SNAPSHOT_CAPABILITIES, options.sqliteDriver)
+    );
     snapshotComplete = true;
-    db = await openDatabase(tmpPath);
+    throwIfAborted(options.signal);
+    // A provider may replace/recreate the destination. Reassert the plaintext
+    // mode immediately after the online backup and before any subsequent open.
+    if (process.platform !== 'win32') chmodSync(tmpPath, 0o600);
+    throwIfAborted(options.signal);
+    db = await openDatabase(
+      tmpPath,
+      databaseRequest('read-session', STORE_READ_CAPABILITIES, options.sqliteDriver)
+    );
+    throwIfAborted(options.signal);
 
-    const metaValue = readBoundedValue(db, budget, 'meta', 'value', 'key', '0');
+    const metaValue = readBoundedValue(db, budget, 'meta', 'value', 'key', '0', options.signal);
     if (typeof metaValue !== 'string') throw new StoreSourceCorruptError();
     const metaBytes = decodeHexText(metaValue, failureOutcome);
     let meta: { name?: string; latestRootBlobId?: string; createdAt?: number };
@@ -127,7 +195,14 @@ export async function parseStoreDb(
     const title = typeof meta.name === 'string' ? meta.name : null;
     const createdAt = validDateFromMs(meta.createdAt);
     const parsed = meta.latestRootBlobId
-      ? readMessages(db, meta.latestRootBlobId, budget, failureOutcome, options.onDiagnostic)
+      ? readMessages(
+          db,
+          meta.latestRootBlobId,
+          budget,
+          failureOutcome,
+          options.onDiagnostic,
+          options.signal
+        )
       : {
           messages: [] as Message[],
           messageIdentityEvidence: [] as StoreMessageIdentityEvidence[],
@@ -171,6 +246,8 @@ export async function parseStoreDb(
     } catch (error) {
       cleanupError = error;
     }
+    attachErrorCause(closeError, operationError);
+    attachErrorCause(cleanupError, closeError ?? operationError);
     operationError = cleanupError ?? closeError ?? operationError;
   }
   if (operationError !== undefined) throw operationError;
@@ -181,7 +258,8 @@ export async function parseStoreDb(
 class StoreSourceCorruptError extends Error {}
 
 /** Missing paths are normal inventory races; all other filesystem failures propagate. */
-function pathExists(path: string): boolean {
+function pathExists(path: string, signal?: AbortSignal): boolean {
+  throwIfAborted(signal);
   try {
     statSync(path);
     return true;
@@ -223,8 +301,10 @@ function readBoundedValue(
   table: 'meta' | 'blobs',
   valueColumn: 'value' | 'data',
   keyColumn: 'key' | 'id',
-  key: string
+  key: string,
+  signal?: AbortSignal
 ): unknown {
+  throwIfAborted(signal);
   const metadata = db
     .prepare(
       `SELECT rowid AS rowId, length(${valueColumn}) AS byteLength FROM ${table} WHERE ${keyColumn} = ?`
@@ -238,6 +318,7 @@ function readBoundedValue(
     throw new TypeError('SQLite returned an invalid declared payload length');
   }
   budget.admitMetadataPage([declared]);
+  throwIfAborted(signal);
   const row = db
     .prepare(`SELECT ${valueColumn} AS value FROM ${table} WHERE rowid = ?`)
     .get(metadata.rowId) as { value?: unknown } | undefined;
@@ -269,13 +350,16 @@ class BoundedBlobReader {
 
   constructor(
     private readonly db: Database,
-    private readonly budget: SqliteSourceReadBudget
+    private readonly budget: SqliteSourceReadBudget,
+    private readonly signal?: AbortSignal
   ) {}
 
   prefetch(ids: readonly string[]): void {
+    throwIfAborted(this.signal);
     const unresolved = [...new Set(ids)].filter((id) => !this.metadata.has(id));
     const fixedPageRows = SOURCE_READ_LIMITS_V1_DEFAULTS.sqlitePageRows;
     for (let start = 0; start < unresolved.length; start += fixedPageRows) {
+      throwIfAborted(this.signal);
       const pageIds = unresolved.slice(start, start + fixedPageRows);
       if (pageIds.length === 0) continue;
       const placeholders = pageIds.map(() => '?').join(', ');
@@ -291,6 +375,7 @@ class BoundedBlobReader {
 
       const admitted: Array<{ id: string; metadata: BlobMetadata }> = [];
       for (const row of rows) {
+        throwIfAborted(this.signal);
         if (
           (typeof row.rowId !== 'number' && typeof row.rowId !== 'bigint') ||
           typeof row.id !== 'string' ||
@@ -313,9 +398,11 @@ class BoundedBlobReader {
   }
 
   read(id: string): Uint8Array | undefined {
+    throwIfAborted(this.signal);
     this.prefetch([id]);
     const metadata = this.metadata.get(id);
     if (!metadata) return undefined;
+    throwIfAborted(this.signal);
     const row = this.db
       .prepare('SELECT data AS value FROM blobs WHERE rowid = ?')
       .get(metadata.rowId) as { value?: unknown } | undefined;
@@ -331,7 +418,8 @@ function readMessages(
   rootId: string,
   budget: SqliteSourceReadBudget,
   failureOutcome: SourceFailureOutcome,
-  onDiagnostic?: (error: SourceEncodingError | SourceLimitExceededError) => void
+  onDiagnostic?: (error: SourceEncodingError | SourceLimitExceededError) => void,
+  signal?: AbortSignal
 ): {
   messages: Message[];
   messageIdentityEvidence: StoreMessageIdentityEvidence[];
@@ -343,7 +431,7 @@ function readMessages(
   const rawContentBlockEvidence: StoreRawContentBlockEvidence[] = [];
   const visited = new Set<string>();
   const reachableLeaves: Array<{ hash: string; object: LeafObj }> = [];
-  const blobs = new BoundedBlobReader(db, budget);
+  const blobs = new BoundedBlobReader(db, budget, signal);
   let complete = true;
   let halted = false;
 
@@ -359,6 +447,7 @@ function readMessages(
   };
 
   const walk = (blobId: string): void => {
+    throwIfAborted(signal);
     if (halted || visited.has(blobId)) return; // cycle / exhausted-budget guard
     visited.add(blobId);
     let raw: unknown;
@@ -395,6 +484,7 @@ function readMessages(
       throw error;
     }
     for (const { tag, childHash } of references) {
+      throwIfAborted(signal);
       if (halted) return;
       if (tag === 0x0a) {
         let leaf: DecodedLeaf | null;
@@ -424,6 +514,7 @@ function readMessages(
   // abandoned blobs must not enrich the current conversation DAG.
   const toolResults: ToolResultIndex = { byId: new Map(), usedIds: new Set() };
   for (const { object } of reachableLeaves) {
+    throwIfAborted(signal);
     for (const [callId, stored] of extractToolResults(object)) {
       toolResults.byId.set(callId, stored);
     }
@@ -432,6 +523,7 @@ function readMessages(
   const encounteredToolResultIds: string[] = [];
   let encounteredUnkeyedToolResult = false;
   for (let traversalOrdinal = 0; traversalOrdinal < reachableLeaves.length; traversalOrdinal++) {
+    throwIfAborted(signal);
     const { hash, object } = reachableLeaves[traversalOrdinal]!;
     const leaf = classifyLeaf(object, toolResults);
     rawContentBlockEvidence.push(...leaf.rawContentBlocks);

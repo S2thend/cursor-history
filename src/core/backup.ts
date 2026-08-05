@@ -27,9 +27,15 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, dirname, sep } from 'node:path';
-import type { Database as DatabaseInterface, Statement } from './database/types.js';
+import type {
+  Database as DatabaseInterface,
+  DatabaseCapability,
+  DatabaseOperationRequest,
+  DriverName,
+  Statement,
+} from './database/types.js';
 import { registry } from './database/registry.js';
-import { backupDatabase } from './database/index.js';
+import { backupDatabase, openDatabase } from './database/index.js';
 import { createPrivateTempWorkspace, type PrivateTempWorkspace } from './private-temp.js';
 import { PACKAGE_VERSION } from './package-version.generated.js';
 import {
@@ -62,6 +68,31 @@ import type {
 
 const MANIFEST_VERSION = '1.0.0';
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const BACKUP_METADATA_MEMORY_LIMIT = 16 * 1024 * 1024;
+const BACKUP_DATABASE_READ_CAPABILITIES = new Set<DatabaseCapability>(['read']);
+
+/** Internal options for opening one database carried by a bounded backup archive. */
+export interface BackupDatabaseReadOptions extends SourceReadOptions {
+  /** Strict provider preference for the extracted database open. */
+  sqliteDriver?: DriverName;
+}
+
+/** Internal signal that an optional or manifest-referenced archive entry is absent. */
+export class BackupEntryNotFoundError extends Error {
+  override readonly name = 'BackupEntryNotFoundError';
+
+  constructor(readonly entryPath: string) {
+    super(`Database not found in backup: ${entryPath}`);
+  }
+}
+
+function backupDatabaseReadRequest(sqliteDriver?: DriverName): DatabaseOperationRequest {
+  return {
+    operation: 'read-session',
+    required: BACKUP_DATABASE_READ_CAPABILITIES,
+    ...(sqliteDriver ? { forcedDriver: sqliteDriver } : {}),
+  };
+}
 
 function abortError(signal: AbortSignal): Error {
   if (signal.reason instanceof Error && signal.reason.name === 'AbortError') return signal.reason;
@@ -667,12 +698,19 @@ function decodeManifest(buffer: Buffer): BackupManifest {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new ZipArchiveFormatError('Backup manifest root must be an object.');
   }
-  return parsed as BackupManifest;
+  const manifest = parsed as BackupManifest;
+  // Discovery consumes manifest.files directly, so validate its complete
+  // structural contract here rather than allowing malformed iterable shapes
+  // or invalid references to masquerade as an empty archive.
+  validatedManifestFiles(manifest);
+  return manifest;
 }
 
 async function readManifestFromArchive(archive: BoundedZipArchive): Promise<BackupManifest | null> {
   if (!archive.getEntry('manifest.json')) return null;
-  return decodeManifest(await archive.readEntryBuffer('manifest.json'));
+  return decodeManifest(
+    await archive.readEntryBuffer('manifest.json', BACKUP_METADATA_MEMORY_LIMIT)
+  );
 }
 
 function validatedManifestFiles(manifest: BackupManifest): BackupFileEntry[] {
@@ -859,20 +897,23 @@ class TempFileCleanupWrapper implements DatabaseInterface {
 export async function openBackupDatabase(
   backupPath: string,
   dbPath: string,
-  options: SourceReadOptions = {}
+  options: BackupDatabaseReadOptions = {}
 ): Promise<DatabaseInterface> {
+  const sqliteDriver = options.sqliteDriver;
   const readOptions = freezeSourceReadOptions(options);
   throwIfAborted(readOptions.signal);
   let workspace: PrivateTempWorkspace | undefined;
+  let db: DatabaseInterface | undefined;
   let operationError: unknown;
   try {
     const tempFile = await withBoundedArchive(backupPath, readOptions, async (archive) => {
       const entry = archive.getEntry(dbPath);
       if (!entry || entry.isDirectory) {
-        throw new Error(`Database not found in backup: ${dbPath}`);
+        throw new BackupEntryNotFoundError(dbPath);
       }
       workspace = createPrivateTempWorkspace({
         prefix: 'cursor-history-backup-read-',
+        signal: readOptions.signal,
       });
       const snapshotPath = workspace.createFile('state.vscdb');
       await archive.extractEntryToFile(entry.name, snapshotPath);
@@ -880,20 +921,54 @@ export async function openBackupDatabase(
     });
 
     throwIfAborted(readOptions.signal);
-    const db = registry.openSync(tempFile, { readonly: true });
+    db = await openDatabase(tempFile, backupDatabaseReadRequest(sqliteDriver));
+    throwIfAborted(readOptions.signal);
     return new TempFileCleanupWrapper(db, workspace!);
   } catch (error) {
     operationError = error;
+    let closeError: unknown;
+    if (db) {
+      try {
+        db.close();
+      } catch (candidate) {
+        closeError = candidate;
+        attachCleanupCause(closeError, operationError);
+      }
+    }
     if (workspace) {
       try {
         workspace.dispose();
       } catch (cleanupError) {
-        attachCleanupCause(cleanupError, operationError);
+        attachCleanupCause(cleanupError, closeError ?? operationError);
         throw cleanupError;
       }
     }
+    if (closeError !== undefined) throw closeError;
     throw error;
   }
+}
+
+/**
+ * Read one small metadata entry through the bounded ZIP reader.
+ *
+ * Missing entries return `null`; malformed archives, source-limit failures,
+ * cancellation, and I/O failures remain fatal to the owning read operation.
+ */
+export async function readBackupEntryBuffer(
+  backupPath: string,
+  entryPath: string,
+  options: SourceReadOptions = {},
+  maxBytes = BACKUP_METADATA_MEMORY_LIMIT
+): Promise<Buffer | null> {
+  const readOptions = freezeSourceReadOptions(options);
+  return withBoundedArchive(backupPath, readOptions, async (archive) => {
+    throwIfAborted(readOptions.signal);
+    const entry = archive.getEntry(entryPath);
+    if (!entry || entry.isDirectory) return null;
+    const value = await archive.readEntryBuffer(entry.name, maxBytes);
+    throwIfAborted(readOptions.signal);
+    return value;
+  });
 }
 
 /**
@@ -907,8 +982,13 @@ export async function readBackupManifest(
   try {
     return await withBoundedArchive(backupPath, readOptions, readManifestFromArchive);
   } catch (error) {
+    // A present but malformed archive/manifest is not the same as a missing
+    // optional manifest. Owning reads must not turn CRC, encoding, or JSON
+    // integrity failures into an apparently empty backup.
+    if (error instanceof ZipArchiveFormatError) throw error;
     if (shouldPropagateBoundedReadError(error)) throw error;
-    return null;
+    if (errorCode(error) === 'ENOENT') return null;
+    throw error;
   }
 }
 

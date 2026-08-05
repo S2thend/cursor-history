@@ -3,10 +3,12 @@ import BetterSqlite3 from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { existsSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, rmSync, statSync } from 'node:fs';
 import { parseStoreDb } from '../../src/core/store-stack/store-db.js';
 import * as database from '../../src/core/database/index.js';
+import * as privateTemp from '../../src/core/private-temp.js';
 import type { Database } from '../../src/core/database/types.js';
+import { TemporaryArtifactCleanupError } from '../../src/core/errors.js';
 
 const DB_PATH = join(tmpdir(), `ch-store-test-${process.pid}.db`);
 const DB_PARTIAL = join(tmpdir(), `ch-store-partial-${process.pid}.db`);
@@ -279,6 +281,112 @@ describe('parseStoreDb (store.db primary source)', () => {
     }
   });
 
+  it('validates a pre-aborted Store read before starting source snapshot I/O', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const backupSpy = vi.spyOn(database, 'backupDatabase');
+    try {
+      await expect(
+        parseStoreDb(DB_MODERN_TOOLS, { signal: controller.signal })
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(backupSpy).not.toHaveBeenCalled();
+    } finally {
+      backupSpy.mockRestore();
+    }
+  });
+
+  it('cancels after snapshot creation, cleans the private workspace, and never opens the snapshot', async () => {
+    const controller = new AbortController();
+    let snapshotDir = '';
+    const backupSpy = vi
+      .spyOn(database, 'backupDatabase')
+      .mockImplementationOnce(async (_path, to) => {
+        snapshotDir = dirname(to);
+        controller.abort();
+      });
+    const openSpy = vi.spyOn(database, 'openDatabase');
+    try {
+      await expect(
+        parseStoreDb(DB_MODERN_TOOLS, { signal: controller.signal })
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(openSpy).not.toHaveBeenCalled();
+      expect(snapshotDir).not.toBe('');
+      expect(existsSync(snapshotDir)).toBe(false);
+    } finally {
+      openSpy.mockRestore();
+      backupSpy.mockRestore();
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'reasserts snapshot mode 0600 after backup and before the database is opened',
+    async () => {
+      const originalUmask = process.umask();
+      process.umask(0);
+      const originalBackup = database.backupDatabase;
+      const originalOpen = database.openDatabase;
+      let modeAtOpen: number | undefined;
+      let snapshotRequest: unknown;
+      let readRequest: unknown;
+      const backupSpy = vi
+        .spyOn(database, 'backupDatabase')
+        .mockImplementationOnce(async (from, to, request) => {
+          snapshotRequest = request;
+          await originalBackup(from, to, request);
+          // Simulate a provider recreating the destination with an ordinary mode.
+          chmodSync(to, 0o666);
+        });
+      const openSpy = vi
+        .spyOn(database, 'openDatabase')
+        .mockImplementationOnce(async (path, request) => {
+          modeAtOpen = statSync(path).mode & 0o777;
+          readRequest = request;
+          return originalOpen(path, request);
+        });
+      try {
+        await expect(
+          parseStoreDb(DB_MODERN_TOOLS, { sqliteDriver: 'better-sqlite3' })
+        ).resolves.toMatchObject({ completeness: 'complete' });
+        expect(modeAtOpen).toBe(0o600);
+        expect(snapshotRequest).toMatchObject({
+          operation: 'store-snapshot',
+          forcedDriver: 'better-sqlite3',
+        });
+        expect(readRequest).toMatchObject({
+          operation: 'read-session',
+          forcedDriver: 'better-sqlite3',
+        });
+      } finally {
+        openSpy.mockRestore();
+        backupSpy.mockRestore();
+        process.umask(originalUmask);
+      }
+      expect(process.umask()).toBe(originalUmask);
+    }
+  );
+
+  it('propagates typed Store snapshot capability failures without publishing partial data', async () => {
+    const failure = new database.DatabaseCapabilityError(
+      'node:sqlite',
+      'store-snapshot',
+      ['onlineBackup'],
+      ['better-sqlite3']
+    );
+    const diagnostic = vi.fn();
+    const backupSpy = vi.spyOn(database, 'backupDatabase').mockRejectedValueOnce(failure);
+    try {
+      await expect(
+        parseStoreDb(DB_MODERN_TOOLS, {
+          failureOutcome: 'partial',
+          onDiagnostic: diagnostic,
+        })
+      ).rejects.toBe(failure);
+      expect(diagnostic).not.toHaveBeenCalled();
+    } finally {
+      backupSpy.mockRestore();
+    }
+  });
+
   it('propagates generic driver open failures instead of classifying them as source corruption', async () => {
     const failure = Object.assign(new Error('simulated database open I/O failure'), {
       code: 'SQLITE_IOERR',
@@ -319,6 +427,93 @@ describe('parseStoreDb (store.db primary source)', () => {
       } finally {
         openSpy.mockRestore();
       }
+    }
+  });
+
+  it('surfaces cleanup failure while preserving the primary open failure as its cause', async () => {
+    const primary = new Error('synthetic Store open failure');
+    const cleanup = new TemporaryArtifactCleanupError(['/private/store.db']);
+    const createWorkspace = privateTemp.createPrivateTempWorkspace;
+    const workspaceSpy = vi
+      .spyOn(privateTemp, 'createPrivateTempWorkspace')
+      .mockImplementationOnce((options) => {
+        const workspace = createWorkspace(options);
+        return {
+          get path() {
+            return workspace.path;
+          },
+          get marker() {
+            return workspace.marker;
+          },
+          get state() {
+            return workspace.state;
+          },
+          createFile: (name) => workspace.createFile(name),
+          register: (path) => workspace.register(path),
+          dispose: () => {
+            workspace.dispose();
+            throw cleanup;
+          },
+        };
+      });
+    const backupSpy = vi.spyOn(database, 'backupDatabase').mockResolvedValueOnce(undefined);
+    const openSpy = vi.spyOn(database, 'openDatabase').mockRejectedValueOnce(primary);
+    try {
+      await expect(parseStoreDb(DB_MODERN_TOOLS)).rejects.toBe(cleanup);
+      expect(cleanup.cause).toBe(primary);
+    } finally {
+      openSpy.mockRestore();
+      backupSpy.mockRestore();
+      workspaceSpy.mockRestore();
+    }
+  });
+
+  it('chains operation, close, and cleanup failures in precedence order', async () => {
+    const primary = new Error('synthetic Store query failure');
+    const closeFailure = new Error('synthetic Store close failure');
+    const cleanup = new TemporaryArtifactCleanupError(['/private/store.db']);
+    const createWorkspace = privateTemp.createPrivateTempWorkspace;
+    const workspaceSpy = vi
+      .spyOn(privateTemp, 'createPrivateTempWorkspace')
+      .mockImplementationOnce((options) => {
+        const workspace = createWorkspace(options);
+        return {
+          get path() {
+            return workspace.path;
+          },
+          get marker() {
+            return workspace.marker;
+          },
+          get state() {
+            return workspace.state;
+          },
+          createFile: (name) => workspace.createFile(name),
+          register: (path) => workspace.register(path),
+          dispose: () => {
+            workspace.dispose();
+            throw cleanup;
+          },
+        };
+      });
+    const backupSpy = vi.spyOn(database, 'backupDatabase').mockResolvedValueOnce(undefined);
+    const fakeDb: Database = {
+      prepare: vi.fn(() => {
+        throw primary;
+      }),
+      runSQL: vi.fn(),
+      close: vi.fn(() => {
+        throw closeFailure;
+      }),
+    };
+    const openSpy = vi.spyOn(database, 'openDatabase').mockResolvedValueOnce(fakeDb);
+    try {
+      await expect(parseStoreDb(DB_MODERN_TOOLS)).rejects.toBe(cleanup);
+      expect(cleanup.cause).toBe(closeFailure);
+      expect(closeFailure.cause).toBe(primary);
+    } finally {
+      openSpy.mockRestore();
+      backupSpy.mockRestore();
+      workspaceSpy.mockRestore();
     }
   });
 

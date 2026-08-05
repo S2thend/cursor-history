@@ -41,6 +41,7 @@ vi.mock('../../src/core/database/registry.js', () => ({
 vi.mock('../../src/core/database/index.js', () => ({
   backupDatabase: vi.fn().mockResolvedValue(undefined),
   ensureDriver: vi.fn().mockResolvedValue(undefined),
+  openDatabase: vi.fn(),
 }));
 
 const {
@@ -83,11 +84,13 @@ import {
   createManifest,
   checkDiskSpace,
   readBackupManifest,
+  readBackupEntryBuffer,
   listBackups,
   validateBackup,
   createBackup,
   restoreBackup,
 } from '../../src/core/backup.js';
+import { ZipArchiveFormatError } from '../../src/core/zip-stream.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -270,12 +273,14 @@ describe('readBackupManifest', () => {
   it('returns manifest from valid backup', async () => {
     const manifest = { version: '1.0.0', files: [] };
     const manifestBuffer = Buffer.from(JSON.stringify(manifest));
-    openBoundedZipArchiveMock.mockResolvedValue(mockArchive({ 'manifest.json': manifestBuffer }));
+    const archive = mockArchive({ 'manifest.json': manifestBuffer });
+    openBoundedZipArchiveMock.mockResolvedValue(archive);
 
     const result = await readBackupManifest('/backup.zip');
     expect(result).not.toBeNull();
     expect(result!.version).toBe('1.0.0');
     expect(result!.producer).toBeUndefined();
+    expect(archive.readEntryBuffer).toHaveBeenCalledWith('manifest.json', 16 * 1024 * 1024);
   });
 
   it('returns null when manifest missing', async () => {
@@ -288,6 +293,32 @@ describe('readBackupManifest', () => {
   it('returns null on error', async () => {
     const result = await readBackupManifest('/nonexistent.zip');
     expect(result).toBeNull();
+  });
+
+  it('propagates backup I/O failures other than an absent archive', async () => {
+    const failure = Object.assign(new Error('synthetic archive I/O failure'), { code: 'EIO' });
+    openBoundedZipArchiveMock.mockRejectedValueOnce(failure);
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toBe(failure);
+  });
+
+  it('propagates malformed archive and manifest integrity failures', async () => {
+    const failure = new ZipArchiveFormatError('synthetic manifest CRC failure');
+    openBoundedZipArchiveMock.mockRejectedValueOnce(failure);
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toBe(failure);
+  });
+
+  it('rejects a manifest whose files inventory is not an array', async () => {
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': Buffer.from(JSON.stringify({ version: '1.0.0', files: 'not-an-array' })),
+      })
+    );
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toBeInstanceOf(
+      ZipArchiveFormatError
+    );
   });
 
   it('propagates immutable source-read options to the bounded ZIP open', async () => {
@@ -311,6 +342,28 @@ describe('readBackupManifest', () => {
       true
     );
     expect(archive.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe('readBackupEntryBuffer', () => {
+  it('reads metadata through the bounded archive and returns null for a missing entry', async () => {
+    const archive = mockArchive({ 'workspaceStorage/ws/workspace.json': Buffer.from('{"x":1}') });
+    openBoundedZipArchiveMock.mockResolvedValueOnce(archive);
+    await expect(
+      readBackupEntryBuffer('/backup.zip', 'workspaceStorage/ws/workspace.json', {
+        sourceReadLimits: { zipEntryCount: 7 },
+      })
+    ).resolves.toEqual(Buffer.from('{"x":1}'));
+    expect(archive.readEntryBuffer).toHaveBeenCalledWith(
+      'workspaceStorage/ws/workspace.json',
+      16 * 1024 * 1024
+    );
+    expect(archive.close).toHaveBeenCalledOnce();
+
+    const missing = mockArchive({});
+    openBoundedZipArchiveMock.mockResolvedValueOnce(missing);
+    await expect(readBackupEntryBuffer('/backup.zip', 'missing.json')).resolves.toBeNull();
+    expect(missing.close).toHaveBeenCalledOnce();
   });
 });
 

@@ -47,9 +47,13 @@ export interface TranscriptParseResult {
 export function parseTranscriptFile(
   filePath: string,
   limits: Readonly<SourceReadLimitsV1> = SOURCE_READ_LIMITS_V1_DEFAULTS,
-  failureOutcome: SourceFailureOutcome = 'fatal'
+  failureOutcome: SourceFailureOutcome = 'fatal',
+  signal?: AbortSignal
 ): TranscriptParseResult {
+  throwIfAborted(signal);
   let fd: number;
+  let operationFailure: unknown;
+  let retainedFailure: unknown;
   try {
     fd = openSync(filePath, 'r');
   } catch (error) {
@@ -73,6 +77,7 @@ export function parseTranscriptFile(
   let diagnostic: TranscriptSourceFailure | undefined;
 
   const processRecord = (): void => {
+    throwIfAborted(signal);
     const hasLeadingBom =
       physicalLine === 1 &&
       chunkByteAt(recordChunks, 0) === 0xef &&
@@ -120,6 +125,7 @@ export function parseTranscriptFile(
   };
 
   const appendBoundedSegment = (segmentView: Uint8Array): void => {
+    throwIfAborted(signal);
     if (segmentView.byteLength === 0) return;
     const projected = recordRawBytes + segmentView.byteLength;
     // Before the line closes, only a byte-zero BOM and one possible trailing
@@ -140,6 +146,7 @@ export function parseTranscriptFile(
   try {
     let eof = false;
     while (!eof) {
+      throwIfAborted(signal);
       // Read at most the first unit above the source bound so diagnostics never
       // depend on an arbitrary adapter chunk size.
       const remaining = Math.max(0, limits.jsonlSourceBytes - budget.sourceBytes);
@@ -168,13 +175,31 @@ export function parseTranscriptFile(
       }
     }
   } catch (error) {
+    retainedFailure = error;
     if (error instanceof SourceEncodingError || error instanceof SourceLimitExceededError) {
-      if (failureOutcome === 'fatal') throw error;
-      diagnostic = error;
-    } else throw error;
-  } finally {
-    closeSync(fd);
+      if (failureOutcome === 'partial') diagnostic = error;
+      else operationFailure = error;
+    } else operationFailure = error;
   }
+
+  let closeFailure: unknown;
+  try {
+    closeSync(fd);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      retainedFailure !== undefined &&
+      !Object.prototype.hasOwnProperty.call(error, 'cause')
+    ) {
+      Object.defineProperty(error, 'cause', {
+        configurable: true,
+        value: retainedFailure,
+      });
+    }
+    closeFailure = error;
+  }
+  if (closeFailure !== undefined) throw closeFailure;
+  if (operationFailure !== undefined) throw operationFailure;
 
   const state = determineState({
     messages: messages.length,
@@ -193,6 +218,19 @@ export function parseTranscriptFile(
     positiveEvidence: true,
     ...(diagnostic ? { diagnostic } : {}),
   };
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') return signal.reason;
+  const error = new Error('The Store transcript read was aborted.', {
+    ...(signal.reason === undefined ? {} : { cause: signal.reason }),
+  });
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError(signal);
 }
 
 function chunkByteAt(chunks: readonly Buffer[], index: number): number | undefined {

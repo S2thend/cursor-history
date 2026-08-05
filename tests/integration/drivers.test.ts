@@ -3,12 +3,15 @@
  * These tests use real SQLite databases (temp files) to verify driver adapters.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { existsSync, unlinkSync } from 'node:fs';
 import { betterSqlite3Driver } from '../../src/core/database/drivers/better-sqlite3.js';
 import { nodeSqliteDriver } from '../../src/core/database/drivers/node-sqlite.js';
 import type { DatabaseDriver } from '../../src/core/database/types.js';
+import type { DriverName } from '../../src/core/database/types.js';
+import { parseStoreDb } from '../../src/core/store-stack/store-db.js';
 
 const tempFiles: string[] = [];
 
@@ -184,6 +187,49 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
       const row = destDb.prepare('SELECT name FROM items').get() as { name: string };
       expect(row.name).toBe('backed up');
       destDb.close();
+    });
+
+    it('either resolves a real Store snapshot or fails explicitly at the capability boundary', async () => {
+      driver = await getDriver();
+      await driver.isAvailable();
+      const profile = await driver.getCapabilityProfile();
+      const storePath = tempDbPath();
+
+      const leaf = Buffer.from(JSON.stringify({ role: 'user', content: 'real driver store turn' }));
+      const leafHash = createHash('sha256').update(leaf).digest('hex');
+      const root = Buffer.concat([Buffer.from([0x0a, 0x20]), Buffer.from(leafHash, 'hex')]);
+      const rootHash = createHash('sha256').update(root).digest('hex');
+      const db = driver.open(storePath, { readonly: false });
+      db.runSQL('CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)');
+      db.runSQL('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(leafHash, leaf);
+      db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(rootHash, root);
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(
+        '0',
+        Buffer.from(
+          JSON.stringify({ latestRootBlobId: rootHash, name: 'Real driver Store fixture' })
+        ).toString('hex')
+      );
+      db.close();
+
+      const read = parseStoreDb(storePath, { sqliteDriver: driverName as DriverName });
+      if (!profile.capabilities.has('onlineBackup')) {
+        await expect(read).rejects.toMatchObject({
+          code: 'DATABASE_CAPABILITY_MISSING',
+          details: {
+            driver: driverName,
+            operation: 'store-snapshot',
+            missingCapabilities: ['onlineBackup'],
+          },
+        });
+        return;
+      }
+
+      await expect(read).resolves.toMatchObject({
+        title: 'Real driver Store fixture',
+        completeness: 'complete',
+        messages: [{ content: 'real driver store turn' }],
+      });
     });
   });
 }

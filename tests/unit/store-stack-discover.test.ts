@@ -5,6 +5,7 @@ import BetterSqlite3 from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
+import { SourceEncodingError } from '../../src/core/errors.js';
 
 const ROOT = () => join(process.cwd(), 'tests', 'fixtures', 'store-root');
 const UUID1 = 'aaaaaaaa-0000-0000-0000-000000000001';
@@ -69,6 +70,70 @@ describe('discoverStoreSessions', () => {
       expect(sessions[0]?.messages.map((message) => message.content)).toEqual([
         'main conversation',
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('discoverStoreSessions — metadata encoding fidelity', () => {
+  it('retains invalid UTF-8 as a partial diagnostic when a transcript is safe', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-meta-encoding-safe-'));
+    const uuid = 'abababab-0000-0000-0000-000000000001';
+    const diagnostics: unknown[] = [];
+    try {
+      const chatDir = join(root, 'chats', 'hash', uuid);
+      mkdirSync(chatDir, { recursive: true });
+      writeFileSync(join(chatDir, 'meta.json'), Buffer.from([0xff]));
+
+      const transcriptDir = join(root, 'projects', 'project', 'agent-transcripts', uuid);
+      mkdirSync(transcriptDir, { recursive: true });
+      writeFileSync(
+        join(transcriptDir, `${uuid}.jsonl`),
+        `${JSON.stringify({
+          role: 'user',
+          message: { content: [{ type: 'text', text: 'safe transcript' }] },
+        })}\n`
+      );
+
+      const session = (
+        await discoverStoreSessions(root, {
+          onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+        })
+      ).find((item) => item.id === uuid)!;
+
+      expect(session.messages.map((message) => message.content)).toEqual(['safe transcript']);
+      expect(session.resolution).toMatchObject({
+        state: 'partial',
+        reasonCodes: expect.arrayContaining(['source-read-failed']),
+      });
+      expect(session.diagnostics).toEqual([
+        expect.objectContaining({
+          code: 'SOURCE_ENCODING_INVALID',
+          sourceKind: 'jsonl',
+          outcome: 'partial',
+          sessionId: uuid,
+        }),
+      ]);
+      expect(diagnostics).toEqual(session.diagnostics);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('promotes invalid UTF-8 to fatal when metadata is the only contributor', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-meta-encoding-fatal-'));
+    const uuid = 'abababab-0000-0000-0000-000000000002';
+    try {
+      const chatDir = join(root, 'chats', 'hash', uuid);
+      mkdirSync(chatDir, { recursive: true });
+      writeFileSync(join(chatDir, 'meta.json'), Buffer.from([0xff]));
+
+      await expect(discoverStoreSessions(root)).rejects.toMatchObject({
+        name: SourceEncodingError.name,
+        code: 'SOURCE_ENCODING_INVALID',
+        details: expect.objectContaining({ outcome: 'fatal' }),
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

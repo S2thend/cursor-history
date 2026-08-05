@@ -3,14 +3,16 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import JSZip from 'jszip';
 import {
   openDatabase as openDatabaseAsync,
   openDatabaseReadWrite as openDatabaseReadWriteAsync,
-  ensureDriver,
+  DriverNotAvailableError,
+  NoDriverAvailableError,
   type Database,
+  type DatabaseCapability,
+  type DatabaseOperationRequest,
+  type DriverName,
 } from './database/index.js';
 import type {
   Workspace,
@@ -21,6 +23,8 @@ import type {
   MessageTimestampSource,
   SearchOptions,
   SearchResult,
+  SourceReadLimitsV1,
+  SourceReadLimitsOverride,
   TokenUsage,
   ToolCall,
   SessionUsage,
@@ -42,11 +46,105 @@ import {
   mapStoreSession,
   type CursorChatBundle,
 } from './parser.js';
-import { openBackupDatabase, readBackupManifest } from './backup.js';
+import {
+  BackupEntryNotFoundError,
+  openBackupDatabase,
+  readBackupEntryBuffer,
+  readBackupManifest,
+} from './backup.js';
+import { ZipArchiveFormatError } from './zip-stream.js';
 import { debugLogStorage } from './database/debug.js';
 import { discoverStoreSessions } from './store-stack/discover.js';
 import type { StoreSession } from './store-stack/types.js';
 import { mergeCrossStackSessions, applyStoreMergeToSummary } from './store-stack/merge.js';
+import { resolveSourceReadLimits } from './source-read-limits.js';
+import { isSessionIntegrityError } from './errors.js';
+
+interface StorageReadOperationOptions {
+  readonly sqliteDriver?: DriverName;
+  readonly sourceReadLimits?: SourceReadLimitsOverride | Readonly<SourceReadLimitsV1>;
+  readonly signal?: AbortSignal;
+}
+
+const SESSION_READ_CAPABILITIES = new Set<DatabaseCapability>(['read']);
+const MIGRATION_CAPABILITIES = new Set<DatabaseCapability>(['readWrite']);
+const OWNING_DATABASE_READ_FAILURES = new WeakSet<object>();
+
+function sessionReadRequest(sqliteDriver?: DriverName): DatabaseOperationRequest {
+  return {
+    operation: 'read-session',
+    required: SESSION_READ_CAPABILITIES,
+    ...(sqliteDriver ? { forcedDriver: sqliteDriver } : {}),
+  };
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') return signal.reason;
+  const error = new Error('The session read operation was aborted.', {
+    ...(signal.reason === undefined ? {} : { cause: signal.reason }),
+  });
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfReadAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError(signal);
+}
+
+/** Copy and validate operation options before the first await or source probe. */
+function bindStorageReadOptions(
+  options: StorageReadOperationOptions = {}
+): Readonly<StorageReadOperationOptions> {
+  const sourceReadLimits =
+    options.sourceReadLimits === undefined
+      ? undefined
+      : resolveSourceReadLimits(options.sourceReadLimits);
+  throwIfReadAborted(options.signal);
+  return Object.freeze({
+    ...(options.sqliteDriver ? { sqliteDriver: options.sqliteDriver } : {}),
+    ...(sourceReadLimits ? { sourceReadLimits } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+/** Infrastructure/cancellation failures must never become empty or partial reads. */
+function shouldPropagateReadFailure(error: unknown): boolean {
+  const code =
+    error instanceof Error && 'code' in error
+      ? String((error as NodeJS.ErrnoException).code)
+      : undefined;
+  return (
+    isSessionIntegrityError(error) ||
+    (typeof error === 'object' &&
+      error !== null &&
+      OWNING_DATABASE_READ_FAILURES.has(error)) ||
+    error instanceof ZipArchiveFormatError ||
+    error instanceof DriverNotAvailableError ||
+    error instanceof NoDriverAvailableError ||
+    Boolean(code && /^(?:ERR_)?SQLITE_/i.test(code)) ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
+}
+
+function throwOwningDatabaseReadFailure(error: unknown): never {
+  if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
+    OWNING_DATABASE_READ_FAILURES.add(error as object);
+    throw error;
+  }
+  const wrapped = new Error('Cursor database query failed.', { cause: error });
+  OWNING_DATABASE_READ_FAILURES.add(wrapped);
+  throw wrapped;
+}
+
+function attachReadFailureCause(error: unknown, cause: unknown): void {
+  if (
+    error instanceof Error &&
+    cause !== undefined &&
+    !Object.prototype.hasOwnProperty.call(error, 'cause')
+  ) {
+    Object.defineProperty(error, 'cause', { configurable: true, value: cause });
+  }
+}
 
 /**
  * Known SQLite keys for chat data (in priority order)
@@ -67,8 +165,19 @@ const GENERATIONS_KEY = 'aiService.generations';
  * Open a SQLite database file (read-only)
  * @deprecated Use openDatabaseAsync for new code
  */
-export async function openDatabase(dbPath: string): Promise<Database> {
-  return openDatabaseAsync(dbPath);
+export async function openDatabase(
+  dbPath: string,
+  options: StorageReadOperationOptions = {}
+): Promise<Database> {
+  throwIfReadAborted(options.signal);
+  const db = await openDatabaseAsync(dbPath, sessionReadRequest(options.sqliteDriver));
+  try {
+    throwIfReadAborted(options.signal);
+    return db;
+  } catch (operationError) {
+    closeDatabaseOrThrow(db, operationError);
+    throw operationError;
+  }
 }
 
 /**
@@ -76,8 +185,23 @@ export async function openDatabase(dbPath: string): Promise<Database> {
  * IMPORTANT: Only use for migration operations. Requires Cursor to be closed.
  * @deprecated Use openDatabaseReadWriteAsync for new code
  */
-export async function openDatabaseReadWrite(dbPath: string): Promise<Database> {
-  return openDatabaseReadWriteAsync(dbPath);
+export async function openDatabaseReadWrite(
+  dbPath: string,
+  options: Pick<StorageReadOperationOptions, 'sqliteDriver' | 'signal'> = {}
+): Promise<Database> {
+  throwIfReadAborted(options.signal);
+  const db = await openDatabaseReadWriteAsync(dbPath, {
+    operation: 'migrate',
+    required: MIGRATION_CAPABILITIES,
+    ...(options.sqliteDriver ? { forcedDriver: options.sqliteDriver } : {}),
+  });
+  try {
+    throwIfReadAborted(options.signal);
+    return db;
+  } catch (operationError) {
+    closeDatabaseOrThrow(db, operationError);
+    throw operationError;
+  }
 }
 
 interface ToolFormerAdditionalData {
@@ -145,6 +269,21 @@ function closeDatabase(db: Database | null): void {
     db.close();
   } catch {
     // Ignore close failures during fallback handling.
+  }
+}
+
+/**
+ * Close a database whose lifecycle owns a private snapshot or other required
+ * resource. Cleanup failures take precedence and retain the primary operation
+ * failure as their cause instead of being swallowed by a fallback path.
+ */
+function closeDatabaseOrThrow(db: Database | null, operationError?: unknown): void {
+  if (!db) return;
+  try {
+    db.close();
+  } catch (closeError) {
+    attachReadFailureCause(closeError, operationError);
+    throw closeError;
   }
 }
 
@@ -598,44 +737,53 @@ function getWorkspacePathFromJson(data: WorkspaceJsonShape): string | null {
  */
 async function readWorkspaceJsonFromBackup(
   backupPath: string,
-  workspaceId: string
+  workspaceId: string,
+  readOptions: Readonly<StorageReadOperationOptions>
 ): Promise<string | null> {
+  const jsonPath = `workspaceStorage/${workspaceId}/workspace.json`;
+  const buffer = await readBackupEntryBuffer(backupPath, jsonPath, readOptions);
+  throwIfReadAborted(readOptions.signal);
+  if (!buffer) return null;
+  let content: string;
   try {
-    const data = await readFile(backupPath);
-    const zip = await JSZip.loadAsync(data);
-    const jsonPath = `workspaceStorage/${workspaceId}/workspace.json`;
-    const file = zip.file(jsonPath);
-
-    if (!file) {
-      return null;
-    }
-
-    const buffer = await file.async('nodebuffer');
-    const content = buffer.toString('utf-8');
-    const jsonData = JSON.parse(content) as WorkspaceJsonShape;
-    return getWorkspacePathFromJson(jsonData);
+    content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(buffer);
   } catch {
-    return null;
+    throw new ZipArchiveFormatError(
+      `Backup workspace metadata for ${workspaceId} is not deterministic UTF-8.`
+    );
   }
+  let jsonData: WorkspaceJsonShape;
+  try {
+    jsonData = JSON.parse(content) as WorkspaceJsonShape;
+  } catch (error) {
+    throw new ZipArchiveFormatError(
+      `Backup workspace metadata for ${workspaceId} is invalid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+  return getWorkspacePathFromJson(jsonData);
 }
 
 /**
  * Find workspaces from a backup file
  * Note: This is async to ensure driver auto-selection happens first
  */
-async function findWorkspacesFromBackup(backupPath: string): Promise<Workspace[]> {
-  const manifest = await readBackupManifest(backupPath);
+async function findWorkspacesFromBackup(
+  backupPath: string,
+  readOptions: Readonly<StorageReadOperationOptions>
+): Promise<Workspace[]> {
+  const manifest = await readBackupManifest(backupPath, readOptions);
   if (!manifest) {
     return [];
   }
-
-  // Ensure driver is selected before proceeding (needed for openBackupDatabase's openSync)
-  await ensureDriver();
+  throwIfReadAborted(readOptions.signal);
 
   const workspaces: Workspace[] = [];
 
   // Find all workspace databases
   for (const file of manifest.files) {
+    throwIfReadAborted(readOptions.signal);
     if (file.type !== 'workspace-db') continue;
 
     // Extract workspace ID from path: workspaceStorage/{id}/state.vscdb
@@ -645,21 +793,33 @@ async function findWorkspacesFromBackup(backupPath: string): Promise<Workspace[]
     const workspaceId = match[1]!;
     // Try to get workspace path from workspace.json, fall back to workspace ID
     const workspacePath =
-      (await readWorkspaceJsonFromBackup(backupPath, workspaceId)) ?? `(workspace: ${workspaceId})`;
+      (await readWorkspaceJsonFromBackup(backupPath, workspaceId, readOptions)) ??
+      `(workspace: ${workspaceId})`;
 
     // Count sessions in this workspace
     let sessionCount = 0;
+    let db: Database | null = null;
+    let readError: unknown;
     try {
-      const db = await openBackupDatabase(backupPath, file.path);
+      db = await openBackupDatabase(backupPath, file.path, readOptions);
+      throwIfReadAborted(readOptions.signal);
       const result = getChatDataFromDb(db);
       if (result) {
         const parsed = parseChatData(result.data, result.bundle);
         sessionCount = parsed.length;
       }
-      db.close();
-    } catch {
-      continue;
+    } catch (error) {
+      readError = error;
     }
+    if (db) {
+      try {
+        db.close();
+      } catch (closeError) {
+        attachReadFailureCause(closeError, readError);
+        throw closeError;
+      }
+    }
+    if (readError !== undefined) throw readError;
 
     if (sessionCount > 0) {
       workspaces.push({
@@ -723,11 +883,13 @@ function getCountedComposerSessionIds(workspace: Workspace): ReadonlySet<string>
  */
 export async function findWorkspaces(
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  readOptions: StorageReadOperationOptions = {}
 ): Promise<Workspace[]> {
+  const operationOptions = bindStorageReadOptions(readOptions);
   // T028: Support reading from backup
   if (backupPath) {
-    return await findWorkspacesFromBackup(backupPath);
+    return await findWorkspacesFromBackup(backupPath, operationOptions);
   }
 
   const basePath = getCursorDataPath(customDataPath);
@@ -769,9 +931,12 @@ export async function findWorkspaces(
       const seenComposerIds = new Set<string>();
       const selectedIds: string[] = [];
       const pointerIds: string[] = [];
+      let workspaceDb: Database | null = null;
       try {
-        const db = await openDatabase(dbPath);
-        const result = getChatDataFromDb(db);
+        throwIfReadAborted(operationOptions.signal);
+        workspaceDb = await openDatabase(dbPath, operationOptions);
+        throwIfReadAborted(operationOptions.signal);
+        const result = getChatDataFromDb(workspaceDb);
         if (result) {
           const parsed = parseChatData(result.data, result.bundle);
           sessionCount = parsed.length;
@@ -791,12 +956,14 @@ export async function findWorkspaces(
           debugLogStorage(`No chat data keys found in workspace DB ${dbPath}`);
         }
         // Pointer keys live in ItemTable independently of composer.composerData.
-        pointerIds.push(...getWorkspaceComposerPointerIds(db));
-        db.close();
+        pointerIds.push(...getWorkspaceComposerPointerIds(workspaceDb));
       } catch (error) {
+        if (shouldPropagateReadFailure(error)) throw error;
         debugLogStorage(`Skipping unreadable workspace DB ${dbPath}: ${getErrorMessage(error)}`);
         // Skip workspaces with unreadable databases
         continue;
+      } finally {
+        closeDatabase(workspaceDb);
       }
 
       if (!globalDbChecked) {
@@ -804,7 +971,9 @@ export async function findWorkspaces(
         const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
         if (existsSync(globalDbPath)) {
           try {
-            globalDb = await openDatabase(globalDbPath);
+            throwIfReadAborted(operationOptions.signal);
+            globalDb = await openDatabase(globalDbPath, operationOptions);
+            throwIfReadAborted(operationOptions.signal);
             const tableCheck = globalDb
               .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
               .get();
@@ -813,7 +982,8 @@ export async function findWorkspaces(
               globalComposerRecords = loadGlobalComposerRecords(globalDb);
               globalBubbleCounts = loadGlobalBubbleCounts(globalDb);
             }
-          } catch {
+          } catch (error) {
+            if (shouldPropagateReadFailure(error)) throw error;
             closeDatabase(globalDb);
             globalDb = null;
             globalDbAvailable = false;
@@ -875,7 +1045,8 @@ export async function findWorkspaces(
         );
       }
     }
-  } catch {
+  } catch (error) {
+    if (shouldPropagateReadFailure(error)) throw error;
     return [];
   } finally {
     closeDatabase(globalDb);
@@ -897,8 +1068,17 @@ function getChatDataFromDb(db: Database): ChatDataResult | null {
       if (row?.value) {
         candidates.push({ key, value: row.value });
       }
-    } catch {
-      continue;
+    } catch (error) {
+      // A Cursor database without ItemTable simply has no workspace chat
+      // payload. Every other query failure is an owning-read failure and must
+      // not be converted into an empty session list.
+      if (
+        error instanceof Error &&
+        /(?:no such table|does not exist).*\bItemTable\b/i.test(error.message)
+      ) {
+        return null;
+      }
+      throwOwningDatabaseReadFailure(error);
     }
   }
 
@@ -932,24 +1112,16 @@ function getChatDataFromDb(db: Database): ChatDataResult | null {
   }
 
   // For new format, also get prompts and generations
-  try {
-    const promptsRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(PROMPTS_KEY) as
-      { value: string } | undefined;
-    if (promptsRow?.value) {
-      bundle.prompts = promptsRow.value;
-    }
-  } catch {
-    // Ignore
+  const promptsRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(PROMPTS_KEY) as
+    { value: string } | undefined;
+  if (promptsRow?.value) {
+    bundle.prompts = promptsRow.value;
   }
 
-  try {
-    const gensRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(GENERATIONS_KEY) as
-      { value: string } | undefined;
-    if (gensRow?.value) {
-      bundle.generations = gensRow.value;
-    }
-  } catch {
-    // Ignore
+  const gensRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(GENERATIONS_KEY) as
+    { value: string } | undefined;
+  if (gensRow?.value) {
+    bundle.generations = gensRow.value;
   }
 
   return { data: mainData, bundle };
@@ -1186,6 +1358,12 @@ export async function getWorkspaceLinkedComposerIds(
 export interface SessionReadContext {
   readonly customDataPath?: string;
   readonly backupPath?: string;
+  /** Strict per-operation provider preference inherited by every nested read. */
+  readonly sqliteDriver?: DriverName;
+  /** Validated immutable Source Read Limits override inherited by Store readers. */
+  readonly sourceReadLimits?: Readonly<SourceReadLimitsV1>;
+  /** Cooperative cancellation inherited by discovery, snapshot, and payload readers. */
+  readonly signal?: AbortSignal;
   /**
    * Workspace scope bound to this operation. `null` means an unfiltered
    * listing; `undefined` means no listing has been performed yet.
@@ -1217,11 +1395,18 @@ export interface SessionReadContext {
  */
 export function createSessionReadContext(
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  options: StorageReadOperationOptions = {}
 ): SessionReadContext {
+  // Validate caller policy and cancellation before any later source I/O.
+  const sourceReadLimits = resolveSourceReadLimits(options.sourceReadLimits);
+  throwIfReadAborted(options.signal);
   return {
     customDataPath,
     backupPath,
+    ...(options.sqliteDriver ? { sqliteDriver: options.sqliteDriver } : {}),
+    sourceReadLimits,
+    ...(options.signal ? { signal: options.signal } : {}),
     workspaceScope: undefined,
     storeSessions: null,
     storeSessionsPromise: null,
@@ -1299,10 +1484,11 @@ async function getWorkspacesCached(
   backupPath?: string
 ): Promise<Workspace[]> {
   assertContextSource(context, customDataPath, backupPath);
+  throwIfReadAborted(context?.signal);
   if (context?.workspaces) return context.workspaces;
   if (context?.workspacesPromise) return context.workspacesPromise;
 
-  const discovery = findWorkspaces(customDataPath, backupPath);
+  const discovery = findWorkspaces(customDataPath, backupPath, context);
   if (!context) return discovery;
 
   context.workspacesPromise = discovery;
@@ -1322,16 +1508,18 @@ async function getWorkspacesCached(
 async function getStoreSessionsCached(
   context: SessionReadContext | undefined,
   customDataPath?: string,
-  backupPath?: string,
-  sourceReadLimits?: ListOptions['sourceReadLimits']
+  backupPath?: string
 ): Promise<StoreSession[]> {
   assertContextSource(context, customDataPath, backupPath);
+  throwIfReadAborted(context?.signal);
   if (backupPath) return [];
   if (context?.storeSessions) return context.storeSessions;
   if (context?.storeSessionsPromise) return context.storeSessionsPromise;
 
   const discovery = discoverStoreSessions(getStoreStackRoot(customDataPath), {
-    sourceReadLimits,
+    sourceReadLimits: context?.sourceReadLimits,
+    sqliteDriver: context?.sqliteDriver,
+    signal: context?.signal,
   });
   if (!context) return discovery;
 
@@ -1361,6 +1549,12 @@ export async function listSessions(
   backupPath?: string,
   context?: SessionReadContext
 ): Promise<ChatSessionSummary[]> {
+  context ??= createSessionReadContext(customDataPath, backupPath, {
+    sourceReadLimits: options.sourceReadLimits,
+    signal: options.signal,
+  });
+  resolveSourceReadLimits(options.sourceReadLimits ?? context?.sourceReadLimits);
+  throwIfReadAborted(options.signal ?? context?.signal);
   assertContextSource(context, customDataPath, backupPath);
   bindContextWorkspaceScope(context, options.workspacePath);
   if (context?.summaries) {
@@ -1391,16 +1585,23 @@ export async function listSessions(
   const globalFallbackCandidates: WorkspaceGlobalCandidate[] = [];
 
   for (const workspace of filteredWorkspaces) {
+    throwIfReadAborted(options.signal ?? context?.signal);
+    let workspaceDb: Database | null = null;
+    let workspaceReadError: unknown;
     try {
       // Open database from live or backup source
-      const db = backupPath
-        ? await openBackupDatabase(backupPath, workspace.dbPath)
-        : await openDatabase(workspace.dbPath);
-      const result = getChatDataFromDb(db);
+      workspaceDb = backupPath
+        ? await openBackupDatabase(backupPath, workspace.dbPath, {
+            sourceReadLimits: context?.sourceReadLimits,
+            signal: options.signal ?? context?.signal,
+            sqliteDriver: context?.sqliteDriver,
+          })
+        : await openDatabase(workspace.dbPath, context);
+      throwIfReadAborted(options.signal ?? context?.signal);
+      const result = getChatDataFromDb(workspaceDb);
       // Pointer keys (e.g. composerChatViewPane.<guid>) live in ItemTable and link
       // this workspace to its global composers even when no workspace stamp exists.
-      const pointerIds = backupPath ? [] : getWorkspaceComposerPointerIds(db);
-      db.close();
+      const pointerIds = backupPath ? [] : getWorkspaceComposerPointerIds(workspaceDb);
 
       const sessions = result ? parseChatData(result.data, result.bundle) : [];
       const workspaceSeenIds = new Set<string>();
@@ -1448,10 +1649,14 @@ export async function listSessions(
         });
       }
     } catch (error) {
+      workspaceReadError = error;
+      if (backupPath || shouldPropagateReadFailure(error)) throw error;
       debugLogStorage(
         `Skipping workspace ${workspace.id} while listing sessions: ${getErrorMessage(error)}`
       );
       continue;
+    } finally {
+      closeDatabaseOrThrow(workspaceDb, workspaceReadError);
     }
   }
 
@@ -1460,7 +1665,8 @@ export async function listSessions(
     if (existsSync(globalDbPath)) {
       let globalDb: Database | null = null;
       try {
-        globalDb = await openDatabase(globalDbPath);
+        throwIfReadAborted(options.signal ?? context?.signal);
+        globalDb = await openDatabase(globalDbPath, context);
         const tableCheck = globalDb
           .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
           .get();
@@ -1572,6 +1778,7 @@ export async function listSessions(
           }
         }
       } catch (error) {
+        if (shouldPropagateReadFailure(error)) throw error;
         debugLogStorage(`Failed to load global fallback sessions: ${getErrorMessage(error)}`);
       } finally {
         closeDatabase(globalDb);
@@ -1584,12 +1791,7 @@ export async function listSessions(
   // Falls back to [] when ~/.cursor is absent (pure-Composer users unaffected).
   // Skipped in backup mode: backups capture vscdb, not the live ~/.cursor tree.
   if (!backupPath) {
-    const storeSessions = await getStoreSessionsCached(
-      context,
-      customDataPath,
-      backupPath,
-      options.sourceReadLimits
-    );
+    const storeSessions = await getStoreSessionsCached(context, customDataPath, backupPath);
     const storeSeenIds = new Set(allSessions.map((session) => session.id));
     // Conflict priority for sessions present in BOTH stacks (same ID).
     const preferredSource = detectPreferredStackSource(customDataPath);
@@ -1785,6 +1987,7 @@ export async function getSession(
   summaryIndexHint?: number
 ): Promise<ChatSession | null> {
   const operationContext = context ?? createSessionReadContext(customDataPath, backupPath);
+  throwIfReadAborted(operationContext.signal);
   assertContextSource(operationContext, customDataPath, backupPath);
   // Resolve the summary from the cached listing when available; otherwise
   // list once (and populate the context for downstream lookups).
@@ -1848,6 +2051,7 @@ async function resolveFinalSession(
   backupPath: string | undefined,
   context: SessionReadContext
 ): Promise<ChatSession | null> {
+  throwIfReadAborted(context.signal);
   // Merged: same ID exists in both stacks, so field-merge the two representations.
   if (summary.source === 'merged' || summary.resolvedSource === 'merged') {
     return loadMergedSession(summary, index, customDataPath, backupPath, context);
@@ -1890,24 +2094,37 @@ async function loadComposerSession(
   // Try to get full session from global storage (has AI responses)
   // This works for both live data and backup (if backup includes globalStorage)
   let globalDb: Database | null = null;
+  let globalLifecycleError: unknown;
   let globalLoadFailed = false;
   const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
 
   try {
+    throwIfReadAborted(context?.signal);
     if (backupPath) {
       try {
-        globalDb = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb');
+        globalDb = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb', {
+          sourceReadLimits: context?.sourceReadLimits,
+          signal: context?.signal,
+          sqliteDriver: context?.sqliteDriver,
+        });
       } catch (error) {
-        globalLoadFailed = true;
-        debugLogStorage(`Global DB not found in backup: ${getErrorMessage(error)}`);
+        globalLifecycleError = error;
+        if (error instanceof BackupEntryNotFoundError) {
+          globalLoadFailed = true;
+          debugLogStorage('Global DB not present in backup; using workspace fallback.');
+        } else {
+          throw error;
+        }
       }
     } else if (!existsSync(globalDbPath)) {
       globalLoadFailed = true;
       debugLogStorage(`Global DB not found at ${globalDbPath}`);
     } else {
       try {
-        globalDb = await openDatabase(globalDbPath);
+        globalDb = await openDatabase(globalDbPath, context);
       } catch (error) {
+        globalLifecycleError = error;
+        if (shouldPropagateReadFailure(error)) throw error;
         globalLoadFailed = true;
         debugLogStorage(`Failed to open global DB at ${globalDbPath}: ${getErrorMessage(error)}`);
       }
@@ -1916,8 +2133,11 @@ async function loadComposerSession(
     if (globalDb) {
       let bubbleRows: BubbleRow[] = [];
       let composerDataRow: { value: string } | undefined;
+      let globalQueryFailure: unknown;
+      let globalCloseFailure: unknown;
 
       try {
+        throwIfReadAborted(context?.signal);
         const tableCheck = globalDb
           .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
           .get();
@@ -1944,13 +2164,27 @@ async function loadComposerSession(
           }
         }
       } catch (error) {
-        globalLoadFailed = true;
-        debugLogStorage(
-          `Failed to load global bubbles for composer ${summary.id}: ${getErrorMessage(error)}`
-        );
+        globalLifecycleError = error;
+        if (shouldPropagateReadFailure(error)) {
+          globalQueryFailure = error;
+        } else {
+          globalLoadFailed = true;
+          debugLogStorage(
+            `Failed to load global bubbles for composer ${summary.id}: ${getErrorMessage(error)}`
+          );
+        }
       } finally {
-        closeDatabase(globalDb);
+        try {
+          closeDatabaseOrThrow(globalDb, globalLifecycleError);
+        } catch (closeError) {
+          globalLifecycleError = closeError;
+          globalCloseFailure = closeError;
+        } finally {
+          globalDb = null;
+        }
       }
+      if (globalCloseFailure !== undefined) throw globalCloseFailure;
+      if (globalQueryFailure !== undefined) throw globalQueryFailure;
 
       if (bubbleRows.length > 0) {
         const resolvedMessages = resolveBubbleMessages(bubbleRows, summary.createdAt);
@@ -1974,6 +2208,9 @@ async function loadComposerSession(
       }
     }
   } catch (error) {
+    if (backupPath || error === globalLifecycleError || shouldPropagateReadFailure(error)) {
+      throw error;
+    }
     globalLoadFailed = true;
     debugLogStorage(
       `Unexpected global load failure for composer ${summary.id}: ${getErrorMessage(error)}`
@@ -1988,13 +2225,19 @@ async function loadComposerSession(
     return null;
   }
 
+  let workspaceDb: Database | null = null;
+  let workspaceReadError: unknown;
   try {
     // Open database from live or backup source
-    const db = backupPath
-      ? await openBackupDatabase(backupPath, workspace.dbPath)
-      : await openDatabase(workspace.dbPath);
-    const result = getChatDataFromDb(db);
-    db.close();
+    workspaceDb = backupPath
+      ? await openBackupDatabase(backupPath, workspace.dbPath, {
+          sourceReadLimits: context?.sourceReadLimits,
+          signal: context?.signal,
+          sqliteDriver: context?.sqliteDriver,
+        })
+      : await openDatabase(workspace.dbPath, context);
+    throwIfReadAborted(context?.signal);
+    const result = getChatDataFromDb(workspaceDb);
 
     if (!result) return null;
 
@@ -2011,8 +2254,12 @@ async function loadComposerSession(
       source: globalLoadFailed ? 'workspace-fallback' : session.source,
       activeBranchBubbleIds: undefined,
     };
-  } catch {
+  } catch (error) {
+    workspaceReadError = error;
+    if (backupPath || shouldPropagateReadFailure(error)) throw error;
     return null;
+  } finally {
+    closeDatabaseOrThrow(workspaceDb, workspaceReadError);
   }
 }
 
@@ -2059,7 +2306,14 @@ export async function searchSessions(
   // Use one Store discovery per search. The context caches store sessions and
   // (after the listing below) the summaries, so each getSession avoids
   // re-discovering and re-listing.
-  const context = readContext ?? createSessionReadContext(customDataPath, backupPath);
+  const context =
+    readContext ??
+    createSessionReadContext(customDataPath, backupPath, {
+      sourceReadLimits: options.sourceReadLimits,
+      signal: options.signal,
+    });
+  resolveSourceReadLimits(options.sourceReadLimits ?? context.sourceReadLimits);
+  throwIfReadAborted(options.signal ?? context.signal);
   assertContextSource(context, customDataPath, backupPath);
   // T031: Support reading from backup
   const summaries = await listSessions(
@@ -2072,6 +2326,7 @@ export async function searchSessions(
   const lowerQuery = query.toLowerCase();
 
   for (const summary of summaries) {
+    throwIfReadAborted(options.signal ?? context.signal);
     // Resolve by stable ID via the cached context rather than mutable index.
     const session = await getSession(
       summary.id,

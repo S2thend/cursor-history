@@ -7,15 +7,26 @@ const mockOpenDatabase = vi.fn();
 const mockOpenDatabaseReadWrite = vi.fn();
 const mockEnsureDriver = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('../../src/core/database/index.js', () => ({
-  openDatabase: (...args: unknown[]) => mockOpenDatabase(...args),
-  openDatabaseReadWrite: (...args: unknown[]) => mockOpenDatabaseReadWrite(...args),
-  ensureDriver: (...args: unknown[]) => mockEnsureDriver(...args),
-}));
+vi.mock('../../src/core/database/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/database/index.js')>();
+  return {
+    ...actual,
+    openDatabase: (...args: unknown[]) => mockOpenDatabase(...args),
+    openDatabaseReadWrite: (...args: unknown[]) => mockOpenDatabaseReadWrite(...args),
+    ensureDriver: (...args: unknown[]) => mockEnsureDriver(...args),
+  };
+});
 
 // Mock backup module to avoid real zip operations
 vi.mock('../../src/core/backup.js', () => ({
+  BackupEntryNotFoundError: class BackupEntryNotFoundError extends Error {
+    override readonly name = 'BackupEntryNotFoundError';
+    constructor(readonly entryPath: string) {
+      super(`Database not found in backup: ${entryPath}`);
+    }
+  },
   openBackupDatabase: vi.fn(),
+  readBackupEntryBuffer: vi.fn().mockResolvedValue(null),
   readBackupManifest: vi.fn().mockResolvedValue(null),
 }));
 
@@ -24,19 +35,6 @@ vi.mock('../../src/core/backup.js', () => ({
 vi.mock('../../src/core/store-stack/discover.js', () => ({
   discoverStoreSessions: vi.fn(async () => []),
 }));
-
-// For backup-from-zip tests: mock zip so readWorkspaceJsonFromBackup can read workspace.json (hoisted)
-const { mockZipLoadAsync } = vi.hoisted(() => ({
-  mockZipLoadAsync: vi.fn(),
-}));
-vi.mock('jszip', () => ({
-  default: { loadAsync: mockZipLoadAsync },
-}));
-
-vi.mock('node:fs/promises', async () => {
-  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
-  return { ...actual, readFile: vi.fn().mockResolvedValue(Buffer.from('zip')) };
-});
 
 // Mock node:fs
 vi.mock('node:fs', async () => {
@@ -50,7 +48,19 @@ vi.mock('node:fs', async () => {
 });
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { readBackupManifest, openBackupDatabase } from '../../src/core/backup.js';
+import {
+  BackupEntryNotFoundError,
+  readBackupEntryBuffer,
+  readBackupManifest,
+  openBackupDatabase,
+} from '../../src/core/backup.js';
+import {
+  DatabaseCapabilityError,
+  DriverNotAvailableError,
+  NoDriverAvailableError,
+} from '../../src/core/database/index.js';
+import { TemporaryArtifactCleanupError } from '../../src/core/errors.js';
+import { ZipArchiveFormatError } from '../../src/core/zip-stream.js';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
 import * as debugModule from '../../src/core/database/debug.js';
 import {
@@ -608,28 +618,140 @@ describe('findWorkspaces (from backup)', () => {
     });
     vi.mocked(openBackupDatabase).mockResolvedValueOnce(createWorkspaceDb(composerData));
 
-    mockZipLoadAsync.mockResolvedValueOnce({
-      file: (path: string) => {
-        if (path === 'workspaceStorage/ws1/workspace.json') {
-          return {
-            async: () =>
-              Promise.resolve(
-                Buffer.from(
-                  JSON.stringify({
-                    workspace: 'file:///path/to/backup-workspace.code-workspace',
-                  })
-                )
-              ),
-          };
-        }
-        return null;
-      },
-    });
+    vi.mocked(readBackupEntryBuffer).mockResolvedValueOnce(
+      Buffer.from(
+        JSON.stringify({
+          workspace: 'file:///path/to/backup-workspace.code-workspace',
+        })
+      )
+    );
 
     const result = await findWorkspaces(undefined, '/backup.zip');
     expect(result).toHaveLength(1);
     expect(result[0]!.path).toBe('/path/to/backup-workspace.code-workspace');
     expect(result[0]!.id).toBe('ws1');
+  });
+
+  it('binds limits, cancellation, and forced driver through every backup discovery read', async () => {
+    const controller = new AbortController();
+    const sourceReadLimits = { zipEntryCount: 17 };
+    vi.mocked(readBackupManifest).mockResolvedValueOnce({
+      version: '1.0.0',
+      createdAt: '2024-01-01T00:00:00Z',
+      cursorHistoryVersion: '0.17.0',
+      sourcePlatform: 'linux',
+      files: [
+        {
+          path: 'workspaceStorage/ws-bound/state.vscdb',
+          type: 'workspace-db',
+          size: 100,
+          checksum: 'sha256:abc',
+        },
+      ],
+      stats: { totalSize: 100, sessionCount: 1, workspaceCount: 1 },
+    });
+    vi.mocked(readBackupEntryBuffer).mockResolvedValueOnce(null);
+    vi.mocked(openBackupDatabase).mockResolvedValueOnce(
+      createWorkspaceDb(JSON.stringify({ allComposers: [{ composerId: 'bound', name: 'Bound' }] }))
+    );
+
+    await expect(
+      findWorkspaces(undefined, '/backup.zip', {
+        sqliteDriver: 'better-sqlite3',
+        sourceReadLimits,
+        signal: controller.signal,
+      })
+    ).resolves.toHaveLength(1);
+
+    const expected = expect.objectContaining({
+      sqliteDriver: 'better-sqlite3',
+      sourceReadLimits: expect.objectContaining(sourceReadLimits),
+      signal: controller.signal,
+    });
+    expect(readBackupManifest).toHaveBeenCalledWith('/backup.zip', expected);
+    expect(readBackupEntryBuffer).toHaveBeenCalledWith(
+      '/backup.zip',
+      'workspaceStorage/ws-bound/workspace.json',
+      expected
+    );
+    expect(openBackupDatabase).toHaveBeenCalledWith(
+      '/backup.zip',
+      'workspaceStorage/ws-bound/state.vscdb',
+      expected
+    );
+    const manifestOptions = vi.mocked(readBackupManifest).mock.calls[0]![1]!;
+    const metadataOptions = vi.mocked(readBackupEntryBuffer).mock.calls[0]![2]!;
+    const databaseOptions = vi.mocked(openBackupDatabase).mock.calls[0]![2]!;
+    expect(manifestOptions.sourceReadLimits).toBe(metadataOptions.sourceReadLimits);
+    expect(manifestOptions.sourceReadLimits).toBe(databaseOptions.sourceReadLimits);
+    expect(manifestOptions.sourceReadLimits).toMatchObject({
+      policyVersion: 'source-read-limits/v1',
+      ...sourceReadLimits,
+    });
+    expect(Object.isFrozen(manifestOptions.sourceReadLimits)).toBe(true);
+  });
+
+  it('does not convert corrupt workspace metadata or database entries into fallback rows', async () => {
+    const manifest = {
+      version: '1.0.0',
+      createdAt: '2024-01-01T00:00:00Z',
+      cursorHistoryVersion: '0.17.0',
+      sourcePlatform: 'linux',
+      files: [
+        {
+          path: 'workspaceStorage/ws-corrupt/state.vscdb',
+          type: 'workspace-db' as const,
+          size: 100,
+          checksum: 'sha256:abc',
+        },
+      ],
+      stats: { totalSize: 100, sessionCount: 1, workspaceCount: 1 },
+    };
+    vi.mocked(readBackupManifest).mockResolvedValue(manifest);
+    vi.mocked(readBackupEntryBuffer).mockResolvedValueOnce(Buffer.from([0xff]));
+
+    await expect(findWorkspaces(undefined, '/backup.zip')).rejects.toBeInstanceOf(
+      ZipArchiveFormatError
+    );
+    expect(openBackupDatabase).not.toHaveBeenCalled();
+
+    vi.mocked(readBackupEntryBuffer).mockResolvedValueOnce(null);
+    const databaseFailure = new ZipArchiveFormatError('synthetic workspace DB CRC failure');
+    vi.mocked(openBackupDatabase).mockRejectedValueOnce(databaseFailure);
+
+    await expect(findWorkspaces(undefined, '/backup.zip')).rejects.toBe(databaseFailure);
+
+    const metadataIoFailure = Object.assign(new Error('synthetic metadata I/O failure'), {
+      code: 'EIO',
+    });
+    vi.mocked(readBackupEntryBuffer).mockRejectedValueOnce(metadataIoFailure);
+    await expect(findWorkspaces(undefined, '/backup.zip')).rejects.toBe(metadataIoFailure);
+
+    vi.mocked(readBackupEntryBuffer).mockResolvedValueOnce(null);
+    const missingDatabase = new BackupEntryNotFoundError(
+      'workspaceStorage/ws-corrupt/state.vscdb'
+    );
+    vi.mocked(openBackupDatabase).mockRejectedValueOnce(missingDatabase);
+    await expect(findWorkspaces(undefined, '/backup.zip')).rejects.toBe(missingDatabase);
+  });
+});
+
+describe('findWorkspaces (fatal read binding)', () => {
+  it.each([
+    new DriverNotAvailableError('node:sqlite', ['better-sqlite3']),
+    new NoDriverAvailableError(),
+    new DatabaseCapabilityError('node:sqlite', 'read-session', ['read'], ['better-sqlite3']),
+    Object.assign(new Error('cancelled during provider selection'), { name: 'AbortError' }),
+  ])('never converts $name into an empty workspace list', async (failure) => {
+    vi.mocked(existsSync).mockImplementation((path) =>
+      ['/data', '/data/ws', '/data/ws/state.vscdb'].includes(String(path))
+    );
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    mockOpenDatabase.mockRejectedValueOnce(failure);
+
+    await expect(findWorkspaces('/data')).rejects.toBe(failure);
   });
 });
 
@@ -637,6 +759,140 @@ describe('findWorkspaces (from backup)', () => {
 // listSessions
 // =============================================================================
 describe('listSessions', () => {
+  it('threads context limits, cancellation, and driver preference into Store discovery', async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const controller = new AbortController();
+    const sourceReadLimits = Object.freeze({ sqliteRowCount: 6_000_000 });
+    const context = createSessionReadContext('/data', undefined, {
+      sqliteDriver: 'better-sqlite3',
+      sourceReadLimits,
+      signal: controller.signal,
+    });
+
+    await expect(
+      listSessions(
+        { limit: 0, all: true, sourceReadLimits, signal: controller.signal },
+        '/data',
+        undefined,
+        context
+      )
+    ).resolves.toEqual([]);
+
+    expect(discoverStoreSessions).toHaveBeenCalledWith(expect.any(String), {
+      sourceReadLimits: context.sourceReadLimits,
+      sqliteDriver: 'better-sqlite3',
+      signal: controller.signal,
+    });
+    expect(context.sourceReadLimits).toMatchObject({
+      policyVersion: 'source-read-limits/v1',
+      ...sourceReadLimits,
+    });
+    expect(Object.isFrozen(context.sourceReadLimits)).toBe(true);
+  });
+
+  it('never rereads a mutable source-limit override after the operation is bound', async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const sourceReadLimits = { sqliteRowCount: 6_000_000 };
+    const context = createSessionReadContext('/data', undefined, { sourceReadLimits });
+    context.workspaces = [];
+
+    const listing = listSessions(
+      { limit: 0, all: true, sourceReadLimits },
+      '/data',
+      undefined,
+      context
+    );
+    sourceReadLimits.sqliteRowCount = 7_000_000;
+    await expect(listing).resolves.toEqual([]);
+
+    expect(discoverStoreSessions).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        sourceReadLimits: expect.objectContaining({ sqliteRowCount: 6_000_000 }),
+      })
+    );
+    expect(context.sourceReadLimits?.sqliteRowCount).toBe(6_000_000);
+  });
+
+  it('rejects a pre-aborted read context before Store or database I/O', () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(() =>
+      createSessionReadContext('/data', undefined, { signal: controller.signal })
+    ).toThrow(expect.objectContaining({ name: 'AbortError' }));
+    expect(discoverStoreSessions).not.toHaveBeenCalled();
+    expect(mockOpenDatabase).not.toHaveBeenCalled();
+  });
+
+  it('closes a backup workspace snapshot after cancellation during open and preserves cleanup precedence', async () => {
+    const primary = Object.assign(new Error('synthetic workspace cancellation'), {
+      name: 'AbortError',
+    });
+    const cleanup = new TemporaryArtifactCleanupError(['/private/backup-workspace']);
+    const db: Database = {
+      prepare: vi.fn(),
+      runSQL: vi.fn(),
+      close: vi.fn(() => {
+        throw cleanup;
+      }),
+    };
+    const controller = new AbortController();
+    vi.mocked(openBackupDatabase).mockImplementationOnce(async () => {
+      controller.abort(primary);
+      return db;
+    });
+    const context = createSessionReadContext(undefined, '/backup.zip', {
+      signal: controller.signal,
+    });
+    context.workspaces = [
+      {
+        id: 'workspace-a',
+        path: '/work/a',
+        dbPath: 'workspaceStorage/workspace-a/state.vscdb',
+        sessionCount: 1,
+      },
+    ];
+
+    await expect(
+      listSessions({ limit: 0, all: true }, undefined, '/backup.zip', context)
+    ).rejects.toBe(cleanup);
+    expect(db.close).toHaveBeenCalledOnce();
+    expect(cleanup.cause).toBe(primary);
+  });
+
+  it('does not convert an ItemTable I/O failure into an empty list and preserves cleanup precedence', async () => {
+    const primary = Object.assign(new Error('synthetic ItemTable read failure'), {
+      code: 'SQLITE_IOERR',
+    });
+    const cleanup = new TemporaryArtifactCleanupError(['/private/backup-workspace']);
+    const db: Database = {
+      prepare: vi.fn(() => {
+        throw primary;
+      }),
+      runSQL: vi.fn(),
+      close: vi.fn(() => {
+        throw cleanup;
+      }),
+    };
+    vi.mocked(openBackupDatabase).mockResolvedValueOnce(db);
+    const context = createSessionReadContext(undefined, '/backup.zip');
+    context.workspaces = [
+      {
+        id: 'workspace-a',
+        path: '/work/a',
+        dbPath: 'workspaceStorage/workspace-a/state.vscdb',
+        sessionCount: 1,
+      },
+    ];
+
+    await expect(
+      listSessions({ limit: 0, all: true }, undefined, '/backup.zip', context)
+    ).rejects.toBe(cleanup);
+    expect(db.close).toHaveBeenCalledOnce();
+    expect(cleanup.cause).toBe(primary);
+  });
+
   it('shares one in-flight Store discovery across concurrent context readers', async () => {
     vi.mocked(existsSync).mockReturnValue(false);
     let finishDiscovery!: (sessions: []) => void;
@@ -1431,6 +1687,84 @@ describe('listSessions', () => {
 });
 
 describe('SessionReadContext final session cache', () => {
+  function backupComposerContext(sessionId: string, signal?: AbortSignal) {
+    const context = createSessionReadContext(undefined, '/backup.zip', { signal });
+    context.workspaceScope = null;
+    context.workspaces = [
+      {
+        id: 'workspace-a',
+        path: '/work/a',
+        dbPath: 'workspaceStorage/workspace-a/state.vscdb',
+        sessionCount: 1,
+      },
+    ];
+    context.summaries = [
+      {
+        id: sessionId,
+        index: 1,
+        title: 'Backup lifecycle fixture',
+        createdAt: new Date(1783000000000),
+        lastUpdatedAt: new Date(1783000000000),
+        messageCount: 1,
+        workspaceId: 'workspace-a',
+        workspacePath: '/work/a',
+        preview: 'backup fixture',
+      },
+    ];
+    return context;
+  }
+
+  it('closes a global backup snapshot when cancellation happens as its open resolves', async () => {
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000086';
+    const controller = new AbortController();
+    const primary = Object.assign(new Error('cancelled after global backup open'), {
+      name: 'AbortError',
+    });
+    const db = createWorkspaceDb('{}');
+    vi.mocked(openBackupDatabase).mockImplementationOnce(async () => {
+      controller.abort(primary);
+      return db;
+    });
+    const context = backupComposerContext(sessionId, controller.signal);
+
+    await expect(getSession(sessionId, undefined, '/backup.zip', context)).rejects.toBe(primary);
+    expect(db.close).toHaveBeenCalledOnce();
+  });
+
+  it('allows only an absent optional global entry to use the backup workspace fallback', async () => {
+    const sessionId = 'aaaaaaaa-0000-0000-0000-000000000087';
+    const missing = new BackupEntryNotFoundError('globalStorage/state.vscdb');
+    const workspaceDb = createWorkspaceDb(
+      JSON.stringify({
+        allComposers: [{ composerId: sessionId, name: 'Workspace fallback', createdAt: 1000 }],
+      })
+    );
+    vi.mocked(openBackupDatabase)
+      .mockRejectedValueOnce(missing)
+      .mockResolvedValueOnce(workspaceDb);
+    const context = backupComposerContext(sessionId);
+
+    await expect(getSession(sessionId, undefined, '/backup.zip', context)).resolves.toMatchObject({
+      id: sessionId,
+      source: 'workspace-fallback',
+    });
+    expect(openBackupDatabase).toHaveBeenNthCalledWith(
+      2,
+      '/backup.zip',
+      'workspaceStorage/workspace-a/state.vscdb',
+      expect.any(Object)
+    );
+
+    const ioFailure = Object.assign(new Error('synthetic global backup I/O failure'), {
+      code: 'EIO',
+    });
+    vi.mocked(openBackupDatabase).mockRejectedValueOnce(ioFailure);
+    const failedContext = backupComposerContext(sessionId);
+    await expect(getSession(sessionId, undefined, '/backup.zip', failedContext)).rejects.toBe(
+      ioFailure
+    );
+  });
+
   it('removes a rejected resolution so the same operation can retry', async () => {
     const sessionId = 'aaaaaaaa-0000-0000-0000-000000000088';
     const context = createSessionReadContext('/data');
