@@ -20,12 +20,13 @@ import {
   rmdirSync,
 } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import JSZip from 'jszip';
 import type { Database as DatabaseInterface, Statement } from './database/types.js';
 import { registry } from './database/registry.js';
 import { backupDatabase } from './database/index.js';
+import { createPrivateTempWorkspace, type PrivateTempWorkspace } from './private-temp.js';
 import type {
   BackupManifest,
   BackupFileEntry,
@@ -453,13 +454,24 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
 // Backup Viewing (T025-T026)
 // ============================================================================
 
-/**
- * Wrapper that cleans up temp file when database is closed.
- */
+function attachCleanupCause(cleanupError: unknown, operationError: unknown): void {
+  if (
+    cleanupError instanceof Error &&
+    operationError !== undefined &&
+    !Object.prototype.hasOwnProperty.call(cleanupError, 'cause')
+  ) {
+    Object.defineProperty(cleanupError, 'cause', {
+      configurable: true,
+      value: operationError,
+    });
+  }
+}
+
+/** Wrapper that always disposes the private plaintext snapshot workspace. */
 class TempFileCleanupWrapper implements DatabaseInterface {
   constructor(
     private innerDb: DatabaseInterface,
-    private tempFilePath: string
+    private workspace: PrivateTempWorkspace
   ) {}
 
   prepare(sql: string): Statement {
@@ -471,13 +483,21 @@ class TempFileCleanupWrapper implements DatabaseInterface {
   }
 
   close(): void {
-    this.innerDb.close();
-    // Clean up temp file
+    let closeError: unknown;
     try {
-      unlinkSync(this.tempFilePath);
-    } catch {
-      // Ignore cleanup errors
+      this.innerDb.close();
+    } catch (error) {
+      closeError = error;
     }
+
+    try {
+      this.workspace.dispose();
+    } catch (cleanupError) {
+      attachCleanupCause(cleanupError, closeError);
+      throw cleanupError;
+    }
+
+    if (closeError !== undefined) throw closeError;
   }
 }
 
@@ -501,30 +521,25 @@ export async function openBackupDatabase(
 
   const buffer = await dbFile.async('nodebuffer');
 
-  // Extract to temp file since SQLite needs file access
-  const tempFile = join(
-    tmpdir(),
-    `cursor_history_backup_${Date.now()}_${Math.random().toString(36).slice(2)}.vscdb`
-  );
-  writeFileSync(tempFile, buffer);
+  // SQLite needs a filesystem path. Keep the plaintext snapshot inside one exclusive private
+  // workspace rather than exposing it as an ordinary file in a shared temporary directory.
+  const workspace = createPrivateTempWorkspace({ prefix: 'cursor-history-backup-read-' });
+  const tempFile = workspace.createFile('state.vscdb');
 
   // Use pluggable driver system - registry.openSync requires driver to already be selected
-  let db: DatabaseInterface | null = null;
-
   try {
-    db = registry.openSync(tempFile, { readonly: true });
-  } catch (err) {
-    // Clean up temp file on error
+    writeFileSync(tempFile, buffer, { mode: 0o600 });
+    const db = registry.openSync(tempFile, { readonly: true });
+    return new TempFileCleanupWrapper(db, workspace);
+  } catch (operationError) {
     try {
-      unlinkSync(tempFile);
-    } catch {
-      // Ignore cleanup errors
+      workspace.dispose();
+    } catch (cleanupError) {
+      attachCleanupCause(cleanupError, operationError);
+      throw cleanupError;
     }
-    throw err;
+    throw operationError;
   }
-
-  // Return wrapped database that will clean up temp file on close
-  return new TempFileCleanupWrapper(db, tempFile);
 }
 
 /**
