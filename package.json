@@ -16,7 +16,7 @@
     }
   },
   "scripts": {
-    "build": "npm run build:esm && npm run build:cjs",
+    "build": "node scripts/clean-build.mjs && npm run build:esm && npm run build:cjs",
     "build:esm": "node scripts/generate-package-version.mjs --check && tsc",
     "build:cjs": "node scripts/generate-package-version.mjs --check && tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
     "dev": "tsc --watch",
@@ -72,7 +72,9 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs/compatibility.md"
   ],
   "publishConfig": {
     "access": "public"
