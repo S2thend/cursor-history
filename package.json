@@ -74,7 +74,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "better-sqlite3": "^12.5.0",
+    "better-sqlite3": ">=12.10.0 <13",
     "commander": "^14.0.2",
     "jszip": "^3.10.1",
     "picocolors": "^1.1.1"
