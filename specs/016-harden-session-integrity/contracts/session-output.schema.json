@@ -1,0 +1,474 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cursor-history:schema:session-integrity:v1",
+  "title": "cursor-history session integrity structured output",
+  "oneOf": [
+    { "$ref": "#/$defs/ListOutput" },
+    { "$ref": "#/$defs/SessionOutput" },
+    { "$ref": "#/$defs/SearchOutput" },
+    { "$ref": "#/$defs/ExportResultOutput" },
+    { "$ref": "#/$defs/FatalError" }
+  ],
+  "$defs": {
+    "GlobalIndexAddress": {
+      "type": "object",
+      "required": ["index", "indexScope"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1 },
+        "indexScope": { "const": "global" }
+      },
+      "not": { "required": ["indexWorkspacePath"] }
+    },
+    "WorkspaceIndexAddress": {
+      "type": "object",
+      "required": ["index", "indexScope", "indexWorkspacePath"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1 },
+        "indexScope": { "const": "workspace" },
+        "indexWorkspacePath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "IndexAddress": {
+      "oneOf": [
+        { "$ref": "#/$defs/GlobalIndexAddress" },
+        { "$ref": "#/$defs/WorkspaceIndexAddress" }
+      ]
+    },
+    "SourceRole": {
+      "enum": ["composer", "store"]
+    },
+    "SourceRepresentation": {
+      "enum": [
+        "composer-global",
+        "composer-workspace",
+        "store-db",
+        "store-transcript",
+        "store-metadata"
+      ]
+    },
+    "ResolutionReasonCode": {
+      "enum": [
+        "workspace-scope-omitted",
+        "source-unavailable",
+        "source-read-failed",
+        "source-partial",
+        "expected-store-db-unavailable",
+        "store-db-expectation-unknown",
+        "store-conversation-unavailable"
+      ]
+    },
+    "SessionTimestampSource": {
+      "enum": [
+        "composer-metadata",
+        "store-db-metadata",
+        "store-meta",
+        "direct-message",
+        "epoch-unknown"
+      ]
+    },
+    "Resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "expectedSourceRoles",
+        "loadedSourceRoles",
+        "omittedSourceRoles",
+        "failedSourceRoles",
+        "reasonCodes"
+      ],
+      "properties": {
+        "state": { "enum": ["complete", "partial"] },
+        "expectedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "loadedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "omittedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "failedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "reasonCodes": {
+          "type": "array",
+          "description": "Deduplicated in ResolutionReasonCode declaration order.",
+          "items": { "$ref": "#/$defs/ResolutionReasonCode" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "WorkspaceMembership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspacePath", "sourceRoles", "contributingInstanceCount"],
+      "properties": {
+        "workspacePath": { "type": "string", "minLength": 1 },
+        "sourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "contributingInstanceCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "SourceInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRole", "representation", "workspacePaths", "state"],
+      "properties": {
+        "sourceRole": { "$ref": "#/$defs/SourceRole" },
+        "representation": { "$ref": "#/$defs/SourceRepresentation" },
+        "workspacePaths": {
+          "type": "array",
+          "description": "Deduplicated normalized paths in code-point order; empty when pathless.",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "state": {
+          "enum": [
+            "contributed",
+            "equivalent-replica",
+            "omitted-by-scope",
+            "failed",
+            "superseded"
+          ]
+        }
+      }
+    },
+    "ResolvedSessionMetadata": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "source",
+            "resolvedSource",
+            "sources",
+            "resolution",
+            "createdAt",
+            "createdAtSource",
+            "lastUpdatedAt",
+            "lastUpdatedAtSource",
+            "workspacePath",
+            "workspaceMemberships",
+            "sourceInstances",
+            "messageIdentityVersion"
+          ],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "source": { "enum": ["global", "workspace-fallback"] },
+            "resolvedSource": {
+              "enum": ["composer", "store-db", "store-transcript", "store-metadata", "merged"]
+            },
+            "sources": {
+              "type": "array",
+              "description": "Deduplicated in SourceRole declaration order.",
+              "items": { "$ref": "#/$defs/SourceRole" },
+              "uniqueItems": true,
+              "minItems": 1
+            },
+            "preferredSource": { "$ref": "#/$defs/SourceRole" },
+            "resolution": { "$ref": "#/$defs/Resolution" },
+            "createdAt": { "type": "string", "format": "date-time" },
+            "createdAtSource": { "$ref": "#/$defs/SessionTimestampSource" },
+            "lastUpdatedAt": { "type": "string", "format": "date-time" },
+            "lastUpdatedAtSource": { "$ref": "#/$defs/SessionTimestampSource" },
+            "workspacePath": {
+              "type": ["string", "null"],
+              "description": "Canonical compatibility path, or null when pathless."
+            },
+            "canonicalWorkspacePath": { "type": "string", "minLength": 1 },
+            "matchedWorkspacePath": { "type": "string", "minLength": 1 },
+            "workspaceMatchKind": { "enum": ["exact", "unique-suffix"] },
+            "workspaceMemberships": {
+              "type": "array",
+              "description": "Deduplicated by normalized path and sorted by path code-point order.",
+              "items": { "$ref": "#/$defs/WorkspaceMembership" }
+            },
+            "sourceInstances": {
+              "type": "array",
+              "description": "Sorted by role, representation, lexicographic workspacePaths, then state declaration order.",
+              "items": { "$ref": "#/$defs/SourceInstance" }
+            },
+            "messageIdentityVersion": { "const": 1 }
+          }
+        }
+      ]
+    },
+    "ToolCall": {
+      "type": "object",
+      "required": ["id", "identityOrigin", "name", "status"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "identityOrigin": { "enum": ["source-native", "tool-v1"] },
+        "name": { "type": "string" },
+        "status": { "enum": ["completed", "cancelled", "error"] }
+      },
+      "additionalProperties": true
+    },
+    "Message": {
+      "type": "object",
+      "required": [
+        "id",
+        "messageIdentityVersion",
+        "identityOrigin",
+        "role",
+        "content",
+        "timestamp",
+        "timestampSource"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "messageIdentityVersion": { "const": 1 },
+        "identityOrigin": {
+          "enum": [
+            "composer-native",
+            "composer-v0.16-index",
+            "store-db-v1",
+            "store-transcript-v1"
+          ]
+        },
+        "role": { "enum": ["user", "assistant"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "timestampSource": {
+          "enum": [
+            "composer-created-at",
+            "composer-timing",
+            "store-turn-timing",
+            "inferred-previous",
+            "inferred-next",
+            "session-fallback",
+            "unknown"
+          ]
+        },
+        "parentMessageId": { "type": "string", "minLength": 1 },
+        "isSidechain": { "type": "boolean" },
+        "toolCalls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ToolCall" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ResolvedSummary": {
+      "allOf": [
+        { "$ref": "#/$defs/ResolvedSessionMetadata" },
+        {
+          "type": "object",
+          "required": ["title", "preview", "messageCount", "resolutionState"],
+          "properties": {
+            "title": { "type": ["string", "null"] },
+            "preview": { "type": "string" },
+            "messageCount": { "type": "integer", "minimum": 0 },
+            "resolutionState": { "enum": ["complete", "partial"] }
+          },
+          "not": { "required": ["messages"] },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "AmbiguousSummary": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "resolutionState",
+            "sourceRoles",
+            "occurrenceCount",
+            "diagnosticOccurrenceRefs"
+          ],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "resolutionState": { "const": "ambiguous" },
+            "sourceRoles": {
+              "type": "array",
+              "description": "Deduplicated in SourceRole declaration order.",
+              "items": { "$ref": "#/$defs/SourceRole" },
+              "uniqueItems": true,
+              "minItems": 1
+            },
+            "occurrenceCount": { "type": "integer", "minimum": 2 },
+            "diagnosticOccurrenceRefs": {
+              "type": "array",
+              "description": "Sorted by stable payload fingerprint with opaque reference as tie-breaker.",
+              "items": { "type": "string", "minLength": 1 },
+              "minItems": 2,
+              "uniqueItems": true
+            }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["messages"] },
+              { "required": ["preview"] }
+            ]
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sourceRole": { "$ref": "#/$defs/SourceRole" },
+        "occurrenceCount": { "type": "integer", "minimum": 1 },
+        "occurrenceRefs": {
+          "type": "array",
+          "description": "Sorted by stable payload fingerprint with opaque reference as tie-breaker.",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "remedy": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "ListOutput": {
+      "type": "object",
+      "description": "count and sessions represent scoped logical rows, including ambiguous UUID rows.",
+      "required": ["count", "sessions"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "indexScope": { "enum": ["global", "workspace"] },
+        "indexWorkspacePath": { "type": "string", "minLength": 1 },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/ResolvedSummary" },
+              { "$ref": "#/$defs/AmbiguousSummary" }
+            ]
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "SessionOutput": {
+      "allOf": [
+        { "$ref": "#/$defs/ResolvedSessionMetadata" },
+        {
+          "type": "object",
+          "required": ["messages"],
+          "properties": {
+            "messages": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/Message" }
+            },
+            "activeBranchBubbleIds": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "activeBranchMessageIds": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "SearchResult": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": ["sessionId", "matchCount", "snippets"],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "workspacePath": { "type": ["string", "null"] },
+            "matchedWorkspacePath": { "type": "string", "minLength": 1 },
+            "matchCount": { "type": "integer", "minimum": 1 },
+            "snippets": { "type": "array" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "SearchOutput": {
+      "type": "object",
+      "required": ["query", "count", "totalMatches", "results"],
+      "properties": {
+        "query": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 },
+        "totalMatches": { "type": "integer", "minimum": 0 },
+        "indexScope": { "enum": ["global", "workspace"] },
+        "indexWorkspacePath": { "type": "string", "minLength": 1 },
+        "results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SearchResult" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ExportedFile": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": ["sessionId", "path"],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "ExportResultOutput": {
+      "type": "object",
+      "required": ["count", "files"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ExportedFile" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "FatalError": {
+      "type": "object",
+      "description": "Schema for branches that already emit fatal JSON; the released stdout/stderr channel and exit code remain command-specific.",
+      "required": ["error", "code"],
+      "properties": {
+        "error": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "details": { "type": "object" }
+      },
+      "additionalProperties": true
+    }
+  }
+}
