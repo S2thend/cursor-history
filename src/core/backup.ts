@@ -27,6 +27,7 @@ import type { Database as DatabaseInterface, Statement } from './database/types.
 import { registry } from './database/registry.js';
 import { backupDatabase } from './database/index.js';
 import { createPrivateTempWorkspace, type PrivateTempWorkspace } from './private-temp.js';
+import { PACKAGE_VERSION } from './package-version.generated.js';
 import type {
   BackupManifest,
   BackupFileEntry,
@@ -39,8 +40,6 @@ import type {
   BackupInfo,
 } from './types.js';
 
-// Package version for manifest
-const CURSOR_HISTORY_VERSION = '0.9.2';
 const MANIFEST_VERSION = '1.0.0';
 
 // ============================================================================
@@ -171,7 +170,8 @@ export function createManifest(files: BackupFileEntry[], stats: BackupStats): Ba
     version: MANIFEST_VERSION,
     createdAt: new Date().toISOString(),
     sourcePlatform: platform,
-    cursorHistoryVersion: CURSOR_HISTORY_VERSION,
+    producer: PACKAGE_VERSION,
+    cursorHistoryVersion: PACKAGE_VERSION,
     files,
     stats,
   };

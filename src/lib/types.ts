@@ -582,6 +582,9 @@ export interface BackupManifest {
   /** Platform where backup was created */
   sourcePlatform: 'darwin' | 'win32' | 'linux';
 
+  /** Exact package version that produced a new archive; absent in legacy manifests. */
+  producer?: string;
+
   /** cursor-history version that created the backup */
   cursorHistoryVersion: string;
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import packageJson from '../../package.json';
 
 // Mock node:fs
 vi.mock('node:fs', async () => {
@@ -180,6 +181,8 @@ describe('createManifest', () => {
     expect(manifest.sourcePlatform).toBe(expectedPlatform);
     expect(manifest.files).toEqual(files);
     expect(manifest.stats).toEqual(stats);
+    expect(manifest.producer).toBe(packageJson.version);
+    expect(manifest.cursorHistoryVersion).toBe(packageJson.version);
   });
 });
 
@@ -226,6 +229,7 @@ describe('readBackupManifest', () => {
     const result = await readBackupManifest('/backup.zip');
     expect(result).not.toBeNull();
     expect(result!.version).toBe('1.0.0');
+    expect(result!.producer).toBeUndefined();
   });
 
   it('returns null when manifest missing', async () => {

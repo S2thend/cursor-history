@@ -17,8 +17,8 @@
   },
   "scripts": {
     "build": "npm run build:esm && npm run build:cjs",
-    "build:esm": "tsc",
-    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
+    "build:esm": "node scripts/generate-package-version.mjs --check && tsc",
+    "build:cjs": "node scripts/generate-package-version.mjs --check && tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
     "lint": "eslint src/",
@@ -32,7 +32,7 @@
     "test:package-smoke": "vitest run tests/e2e/package-smoke.test.ts --reporter=json --outputFile=.vitest-package-results.tmp && node scripts/verify-test-results.mjs .vitest-package-results.tmp",
     "test:release-gates": "vitest run tests/unit/verify-test-results.test.ts tests/e2e/publish-workflow.test.ts --reporter=json --outputFile=.vitest-release-results.tmp && node scripts/verify-test-results.mjs .vitest-release-results.tmp",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "node scripts/generate-package-version.mjs --check && tsc --noEmit"
   },
   "keywords": [
     "cursor",
