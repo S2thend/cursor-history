@@ -11,6 +11,7 @@ import type {
 } from '../../core/types.js';
 import { getMessageType } from './table.js';
 import { serializeToolCall } from '../../core/parser.js';
+import { getPublicMessageTimestamp } from '../../core/timestamps.js';
 
 /**
  * Format sessions list as JSON
@@ -41,6 +42,12 @@ export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
       }
       if (s.transcriptState) {
         obj['transcriptState'] = s.transcriptState;
+      }
+      if (s.createdAtSource !== undefined) {
+        obj['createdAtSource'] = s.createdAtSource;
+      }
+      if (s.lastUpdatedAtSource !== undefined) {
+        obj['lastUpdatedAtSource'] = s.lastUpdatedAtSource;
       }
       return obj;
     }),
@@ -101,6 +108,12 @@ export function formatSessionJson(
   if (session.activeBranchBubbleIds !== undefined) {
     output['activeBranchBubbleIds'] = session.activeBranchBubbleIds;
   }
+  if (session.createdAtSource !== undefined) {
+    output['createdAtSource'] = session.createdAtSource;
+  }
+  if (session.lastUpdatedAtSource !== undefined) {
+    output['lastUpdatedAtSource'] = session.lastUpdatedAtSource;
+  }
 
   // Add filter metadata if filtering is active
   if (messageFilter && messageFilter.length > 0) {
@@ -144,13 +157,9 @@ export function formatSessionJson(
       })),
     };
 
-    // Per-message timestamp + provenance only when directly stored.
-    if (m.timestamp) {
-      msg['timestamp'] = m.timestamp.toISOString();
-    }
-    if (m.timestampSource) {
-      msg['timestampSource'] = m.timestampSource;
-    }
+    const messageTime = getPublicMessageTimestamp(m);
+    msg['timestamp'] = messageTime.timestamp.toISOString();
+    msg['timestampSource'] = messageTime.timestampSource;
     if (m.source) {
       msg['source'] = m.source;
     }

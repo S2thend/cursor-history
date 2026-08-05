@@ -15,6 +15,10 @@ import type {
 } from '../../core/types.js';
 import { MESSAGE_TYPES } from '../../core/types.js';
 import { findEmbeddedToolCallIndex } from '../../core/parser.js';
+import {
+  getPublicMessageTimestamp,
+  isDirectMessageTimestampSource,
+} from '../../core/timestamps.js';
 
 /**
  * Check if output supports colors
@@ -249,7 +253,10 @@ export function isError(content: string): boolean {
 }
 
 /**
- * Get the type of a message based on its role and content
+ * Classify a message using its role, explicit content marker, and structured tool evidence.
+ *
+ * @param message - Minimal message fields used by the public filter contract.
+ * @returns The primary public message category.
  */
 export function getMessageType(message: {
   role: string;
@@ -273,27 +280,15 @@ function matchesMessageType(
   message: { role: string; content: string; toolCalls?: unknown[] },
   type: MessageType
 ): boolean {
-  const primaryType = getMessageType(message);
-  if (primaryType === type) return true;
-
-  if (type === 'tool' && Array.isArray(message.toolCalls) && message.toolCalls.length > 0) {
-    return true;
-  }
-
-  return (
-    type === 'assistant' &&
-    primaryType === 'tool' &&
-    message.role === 'assistant' &&
-    message.content.trim().length > 0 &&
-    !isToolCall(message.content) &&
-    !isThinking(message.content) &&
-    !isError(message.content)
-  );
+  return getMessageType(message) === type;
 }
 
 /**
- * Filter messages by type
- * Returns all messages if types is empty or contains all types
+ * Filter messages by public category, preserving input order and object identity.
+ *
+ * @param messages - Messages to classify and filter.
+ * @param types - Accepted categories; an empty or complete set returns all messages.
+ * @returns The original array when no filtering is needed, otherwise a filtered array.
  */
 export function filterMessages<T extends { role: string; content: string; toolCalls?: unknown[] }>(
   messages: T[],
@@ -306,8 +301,10 @@ export function filterMessages<T extends { role: string; content: string; toolCa
 }
 
 /**
- * Validate message filter types
- * Returns array of invalid types, or empty array if all are valid
+ * Identify unsupported message filter names.
+ *
+ * @param types - Caller-supplied filter names.
+ * @returns Invalid names in caller order, or an empty array when all names are valid.
  */
 export function validateMessageTypes(types: string[]): string[] {
   return types.filter((t) => !MESSAGE_TYPES.includes(t as MessageType));
@@ -643,9 +640,12 @@ export function formatSessionDetail(
   // that distinct structured tool calls / provenance / token data are never
   // hidden. Filtering (--only) selects by type and still renders each match.
   for (const message of session.messages) {
-    // Per-message timestamp is only shown when directly stored. Missing
-    // times are omitted rather than replaced with a fabricated fallback.
-    const timeStr = message.timestamp ? ` ${pc.dim(formatTime(message.timestamp))}` : '';
+    const messageTime = message.timestamp ? getPublicMessageTimestamp(message) : undefined;
+    const timeStr = messageTime
+      ? isDirectMessageTimestampSource(messageTime.timestampSource)
+        ? ` ${pc.dim(formatTime(messageTime.timestamp))}`
+        : ` ${pc.yellow('≈')} ${pc.dim(formatTime(messageTime.timestamp))}`
+      : '';
 
     // Get usage badge for this message (if available)
     const usageBadge = formatUsageBadge(message.model, message.tokenUsage, message.durationMs);

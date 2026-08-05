@@ -269,7 +269,7 @@ describe('formatSessionDetail', () => {
     expect(result).not.toContain('×2');
   });
 
-  it('matches a mixed assistant/tool message in both filter categories', () => {
+  it('assigns a mixed assistant/tool message to its one actual category', () => {
     const mixed = {
       id: 'm1',
       role: 'assistant' as const,
@@ -278,7 +278,7 @@ describe('formatSessionDetail', () => {
       toolCalls: [{ name: 'Read', status: 'completed' as const, params: { file: '/a' } }],
     };
 
-    expect(filterMessages([mixed], ['assistant'])).toEqual([mixed]);
+    expect(filterMessages([mixed], ['assistant'])).toEqual([]);
     expect(filterMessages([mixed], ['tool'])).toEqual([mixed]);
   });
 
@@ -297,7 +297,7 @@ describe('formatSessionDetail', () => {
     ];
 
     expect(filterMessages(marked, ['assistant'])).toEqual([]);
-    expect(filterMessages(marked, ['tool'])).toEqual(marked);
+    expect(filterMessages(marked, ['tool'])).toEqual([]);
     expect(filterMessages(marked, ['thinking'])).toEqual([marked[0]]);
     expect(filterMessages(marked, ['error'])).toEqual([marked[1]]);
   });
@@ -335,12 +335,48 @@ describe('formatSessionDetail', () => {
     expect(normal).toContain('🔧 Read');
     expect(normal).toContain('🔧 Write');
 
-    const toolOnly = filterMessages(s.messages, ['tool']);
+    expect(filterMessages(s.messages, ['tool'])).toEqual([]);
+    const actualCategories = filterMessages(s.messages, ['thinking', 'error']);
     const full = stripAnsi(
-      formatSessionDetail({ ...s, messages: toolOnly }, undefined, { fullTool: true })
+      formatSessionDetail({ ...s, messages: actualCategories }, undefined, { fullTool: true })
     );
     expect(full).toContain('params: {"file":"/a"}');
     expect(full).toContain('error: disk full');
+  });
+
+  it('marks inferred and unknown human timestamps approximate but leaves direct time exact', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'direct',
+          role: 'user',
+          content: 'direct',
+          timestamp: now,
+          timestampSource: 'composer-timing',
+          codeBlocks: [],
+        },
+        {
+          id: 'inferred',
+          role: 'assistant',
+          content: 'inferred',
+          timestamp: later,
+          timestampSource: 'inferred-next',
+          codeBlocks: [],
+        },
+        {
+          id: 'unknown',
+          role: 'assistant',
+          content: 'unknown',
+          timestamp: later,
+          timestampSource: 'unknown',
+          codeBlocks: [],
+        },
+      ],
+    });
+
+    const result = stripAnsi(formatSessionDetail(s));
+    expect(result).toMatch(/You: (?!≈)/);
+    expect(result.match(/≈/g) ?? []).toHaveLength(2);
   });
 
   it('shows filter info when messageFilter is active', () => {

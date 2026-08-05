@@ -18,6 +18,13 @@ import {
   prepareStoreIdentityCandidates,
   type StoreIdentityRecord,
 } from './session-identity.js';
+import {
+  getPublicMessageTimestamp,
+  isDirectMessageTimestampSource,
+  isValidTimestamp,
+  resolveMessageTimestamps,
+  resolveSessionTimestamps,
+} from './timestamps.js';
 
 /**
  * Serialize a `ToolCall` to a plain object preserving EVERY defined field.
@@ -450,8 +457,8 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
   for (const composer of composers) {
     if (!composer.composerId) continue;
 
-    const createdAt = composer.createdAt ? new Date(composer.createdAt) : new Date();
-    const lastUpdatedAt = composer.lastUpdatedAt ? new Date(composer.lastUpdatedAt) : createdAt;
+    const composerCreatedAt = parseStoredDate(composer.createdAt);
+    const composerLastUpdatedAt = parseStoredDate(composer.lastUpdatedAt);
 
     // Try to find messages that fall within this session's time range
     const sessionMessages: Message[] = [];
@@ -471,11 +478,16 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
     }
 
     // Find generations that might belong to this session (by time proximity)
-    const sessionStart = composer.createdAt ?? 0;
-    const sessionEnd = composer.lastUpdatedAt ?? Date.now();
+    const sessionStart = composerCreatedAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+    const sessionEnd = composerLastUpdatedAt?.getTime() ?? Number.POSITIVE_INFINITY;
 
     for (const gen of sortedGenerations) {
-      if (gen.unixMs && gen.unixMs >= sessionStart && gen.unixMs <= sessionEnd + 60000) {
+      if (
+        typeof gen.unixMs === 'number' &&
+        Number.isFinite(gen.unixMs) &&
+        gen.unixMs >= sessionStart &&
+        gen.unixMs <= sessionEnd + 60000
+      ) {
         if (gen.textDescription) {
           // gen.unixMs IS a directly-stored time → keep it with its provenance.
           sessionMessages.push({
@@ -491,25 +503,39 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
       }
     }
 
+    if (sessionMessages.length === 0) {
+      sessionMessages.push({
+        id: null,
+        role: 'user',
+        content: composer.name ?? '(Empty session)',
+        codeBlocks: [],
+        source: 'composer',
+      });
+    }
+
+    const sessionTimestamps = resolveSessionTimestamps({
+      view: 'composer-backed',
+      composerMetadata: {
+        createdAt: composerCreatedAt,
+        lastUpdatedAt: composerLastUpdatedAt,
+      },
+      directMessages: sessionMessages,
+    });
+    resolveMessageTimestamps(sessionMessages, {
+      timestamp: sessionTimestamps.createdAt,
+      source: sessionTimestamps.createdAtSource,
+    });
+
     sessions.push({
       id: composer.composerId,
       index: 0,
       title: composer.name ?? null,
-      createdAt,
-      lastUpdatedAt,
-      messageCount: sessionMessages.length || 1,
-      messages:
-        sessionMessages.length > 0
-          ? sessionMessages
-          : [
-              {
-                id: null,
-                role: 'user',
-                content: composer.name ?? '(Empty session)',
-                codeBlocks: [],
-                source: 'composer',
-              },
-            ],
+      createdAt: sessionTimestamps.createdAt,
+      createdAtSource: sessionTimestamps.createdAtSource,
+      lastUpdatedAt: sessionTimestamps.lastUpdatedAt,
+      lastUpdatedAtSource: sessionTimestamps.lastUpdatedAtSource,
+      messageCount: sessionMessages.length,
+      messages: sessionMessages,
       workspaceId: '',
     });
   }
@@ -532,16 +558,18 @@ function parseSession(raw: RawChatSession): ChatSession | null {
     return null;
   }
 
-  // Derive timestamps
-  const createdAt = raw.createdAt
-    ? new Date(raw.createdAt)
-    : (messages[0]?.timestamp ?? new Date());
-
-  const lastUpdatedAt = raw.lastUpdatedAt
-    ? new Date(raw.lastUpdatedAt)
-    : raw.lastSendTime
-      ? new Date(raw.lastSendTime)
-      : (messages[messages.length - 1]?.timestamp ?? createdAt);
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'composer-backed',
+    composerMetadata: {
+      createdAt: parseStoredDate(raw.createdAt),
+      lastUpdatedAt: parseStoredDate(raw.lastUpdatedAt) ?? parseStoredDate(raw.lastSendTime),
+    },
+    directMessages: messages,
+  });
+  resolveMessageTimestamps(messages, {
+    timestamp: sessionTimestamps.createdAt,
+    source: sessionTimestamps.createdAtSource,
+  });
 
   // Derive title from first user message if not set
   const title = raw.title ?? deriveTitle(messages);
@@ -550,12 +578,20 @@ function parseSession(raw: RawChatSession): ChatSession | null {
     id: raw.id,
     index: 0, // Assigned later during listing
     title,
-    createdAt,
-    lastUpdatedAt,
+    createdAt: sessionTimestamps.createdAt,
+    createdAtSource: sessionTimestamps.createdAtSource,
+    lastUpdatedAt: sessionTimestamps.lastUpdatedAt,
+    lastUpdatedAtSource: sessionTimestamps.lastUpdatedAtSource,
     messageCount: messages.length,
     messages,
     workspaceId: '', // Assigned by caller
   };
+}
+
+function parseStoredDate(value: unknown): Date | undefined {
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const parsed = new Date(value);
+  return isValidTimestamp(parsed) ? parsed : undefined;
 }
 
 /**
@@ -796,11 +832,11 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
       lines.push(`**ID**: \`${message.id}\``);
       lines.push('');
     }
-    // Per-message time only when directly stored.
-    if (message.timestamp) {
-      lines.push(`**Time**: ${message.timestamp.toISOString()}`);
-      lines.push('');
-    }
+    const messageTime = getPublicMessageTimestamp(message);
+    const approximate = isDirectMessageTimestampSource(messageTime.timestampSource) ? '' : '≈ ';
+    lines.push(`**Time**: ${approximate}${messageTime.timestamp.toISOString()}`);
+    lines.push(`**Time Source**: ${messageTime.timestampSource}`);
+    lines.push('');
     lines.push(message.content);
     lines.push('');
     if (message.toolCalls && message.toolCalls.length > 0) {
@@ -896,6 +932,12 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
   if (session.messageIdentityVersion !== undefined) {
     exportData['messageIdentityVersion'] = session.messageIdentityVersion;
   }
+  if (session.createdAtSource !== undefined) {
+    exportData['createdAtSource'] = session.createdAtSource;
+  }
+  if (session.lastUpdatedAtSource !== undefined) {
+    exportData['lastUpdatedAtSource'] = session.lastUpdatedAtSource;
+  }
 
   // Add session-level usage data if available
   if (session.usage) {
@@ -935,13 +977,9 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
       codeBlocks: m.codeBlocks,
     };
 
-    // Per-message timestamp + provenance only when directly stored.
-    if (m.timestamp) {
-      msg['timestamp'] = m.timestamp.toISOString();
-    }
-    if (m.timestampSource) {
-      msg['timestampSource'] = m.timestampSource;
-    }
+    const messageTime = getPublicMessageTimestamp(m);
+    msg['timestamp'] = messageTime.timestamp.toISOString();
+    msg['timestampSource'] = messageTime.timestampSource;
     if (m.source) {
       msg['source'] = m.source;
     }

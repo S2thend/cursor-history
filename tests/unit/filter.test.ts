@@ -153,6 +153,25 @@ describe('filterMessages', () => {
     expect(result[0]!.content).toBe('Hello');
     expect(result[1]!.content).toBe('Thanks!');
   });
+
+  it('uses one actual category when thinking/error messages carry structured tools', () => {
+    const thinking = {
+      role: 'assistant',
+      content: '[Thinking]\nInspecting',
+      toolCalls: [{ name: 'Read' }],
+    };
+    const error = {
+      role: 'assistant',
+      content: '[Error]\nRead failed',
+      toolCalls: [{ name: 'Read' }],
+    };
+
+    expect(filterMessages([thinking, error], ['tool'])).toEqual([]);
+    expect(filterMessages([thinking, error], ['assistant'])).toEqual([]);
+    expect(filterMessages([thinking, error], ['thinking'])).toEqual([thinking]);
+    expect(filterMessages([thinking, error], ['error'])).toEqual([error]);
+    expect(filterMessages([thinking, error], ['thinking', 'error'])).toEqual([thinking, error]);
+  });
 });
 
 describe('validateMessageTypes', () => {

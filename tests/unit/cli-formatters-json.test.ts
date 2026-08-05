@@ -72,6 +72,21 @@ describe('formatSessionsJson', () => {
       transcriptState: 'partial',
     });
   });
+
+  it('includes deterministic session timestamp provenance in list output', () => {
+    const result = JSON.parse(
+      formatSessionsJson([
+        makeSummary({
+          createdAtSource: 'composer-metadata',
+          lastUpdatedAtSource: 'direct-message',
+        }),
+      ])
+    );
+    expect(result.sessions[0]).toMatchObject({
+      createdAtSource: 'composer-metadata',
+      lastUpdatedAtSource: 'direct-message',
+    });
+  });
 });
 
 describe('formatWorkspacesJson', () => {
@@ -171,6 +186,44 @@ describe('formatSessionJson', () => {
       )
     );
     expect(result.messages[0].toolCalls[0]).toMatchObject({ result: '', error: '', files: [] });
+  });
+
+  it('emits deterministic session provenance and total message timestamp pairs', () => {
+    const result = JSON.parse(
+      formatSessionJson(
+        makeSession({
+          createdAtSource: 'composer-metadata',
+          lastUpdatedAtSource: 'direct-message',
+          messages: [
+            {
+              id: 'direct',
+              role: 'user',
+              content: 'direct',
+              codeBlocks: [],
+              timestamp: now,
+              timestampSource: 'composer-timing',
+            },
+            {
+              id: 'missing',
+              role: 'assistant',
+              content: 'missing',
+              codeBlocks: [],
+            },
+          ],
+        })
+      )
+    );
+
+    expect(result.createdAtSource).toBe('composer-metadata');
+    expect(result.lastUpdatedAtSource).toBe('direct-message');
+    expect(result.messages[0]).toMatchObject({
+      timestamp: '2024-01-15T10:00:00.000Z',
+      timestampSource: 'composer-timing',
+    });
+    expect(result.messages[1]).toMatchObject({
+      timestamp: '1970-01-01T00:00:00.000Z',
+      timestampSource: 'unknown',
+    });
   });
 });
 
