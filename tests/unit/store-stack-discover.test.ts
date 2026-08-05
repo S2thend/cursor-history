@@ -291,7 +291,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
       'store-msg-2',
       'store-msg-3',
     ]);
-    expect(s?.source).toBe('store-complete');
+    expect(s?.source).toBe('global');
+    expect(s?.resolvedSource).toBe('store-db');
     // DB metadata is adopted even though a transcript also exists.
     expect(s?.title).toBe('Store Title');
     expect(s?.messages.some((m) => m.content === 'transcript-1')).toBe(false);
@@ -300,7 +301,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
   it('a complete store.db overrides a usable partial transcript', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === PUUID);
     expect(s?.transcriptState).toBe('partial'); // retained for provenance
-    expect(s?.source).toBe('store-complete');
+    expect(s?.source).toBe('global');
+    expect(s?.resolvedSource).toBe('store-db');
     expect(s?.messages.map((message) => message.content)).toEqual([
       'store-msg-1',
       'store-msg-2',
@@ -315,7 +317,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
 
   it('a partial store.db with messages still wins and reports store-partial', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === FUUID);
-    expect(s?.source).toBe('store-partial');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-db');
     // Only the 1 recoverable DB message; the longer transcript does not override.
     expect(s?.messages).toHaveLength(1);
     expect(s?.messages[0]?.content).toBe('partial-db-msg');
@@ -326,7 +329,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
   it('falls back to transcript messages when store.db yields none, keeping DB metadata', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === EUUID);
     expect(s?.transcriptState).toBe('partial');
-    expect(s?.source).toBe('transcript');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-transcript');
     expect(s?.messages).toHaveLength(1);
     expect(s?.messages[0]?.content).toBe('keep-this-message');
     // DB parsed (metadata-only) → its title is still adopted.
@@ -335,7 +339,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
 
   it('falls back to transcript when store.db is unreadable, without adopting DB metadata', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === XUUID);
-    expect(s?.source).toBe('transcript');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-transcript');
     expect(s?.messages).toHaveLength(1);
     expect(s?.messages[0]?.content).toBe('transcript-only-msg');
     // DB failed to parse → its metadata is NOT adopted; chat meta time stands.
@@ -343,17 +348,19 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
     expect(s?.createdAt).toEqual(new Date(1783000000000));
   });
 
-  it('preserves store-complete when an empty store.db has no transcript fallback', async () => {
+  it('represents an expected empty store.db without transcript as degraded metadata', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === NUUID);
-    expect(s?.source).toBe('store-complete');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-metadata');
     expect(s?.transcriptState).toBe('missing');
     expect(s?.messages).toHaveLength(0);
     expect(s?.title).toBe('Store Title');
   });
 
-  it('reports store-partial when store.db fails and no transcript fallback exists', async () => {
+  it('reports degraded metadata when store.db fails and no transcript exists', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === RUUID);
-    expect(s?.source).toBe('store-partial');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-metadata');
     expect(s?.transcriptState).toBe('missing');
     expect(s?.messages).toHaveLength(0);
     expect(s?.title).toBeNull();
@@ -445,7 +452,8 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     expect(session?.transcriptState).toBe('parsed');
     expect(session?.transcriptPath).toContain('a-good');
     expect(session?.messages.map((message) => message.content)).toEqual(['good']);
-    expect(session?.source).toBe('transcript');
+    expect(session?.source).toBe('global');
+    expect(session?.resolvedSource).toBe('store-transcript');
   });
 
   it('prefers the newer equal-quality duplicate and keeps its transcript-only timestamp', async () => {
@@ -467,7 +475,8 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     );
     const session = (await discoverStoreSessions(root)).find((item) => item.id === partialUuid);
     expect(session?.transcriptState).toBe('partial');
-    expect(session?.source).toBe('transcript');
+    expect(session?.source).toBe('workspace-fallback');
+    expect(session?.resolvedSource).toBe('store-transcript');
     expect(session?.messages.map((message) => message.content)).toEqual(['survives']);
   });
 
@@ -478,7 +487,8 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     writeFileSync(join(dir, 'meta.json'), JSON.stringify({ cwd: '/tmp/metadata-only' }));
     const session = (await discoverStoreSessions(root)).find((item) => item.id === metadataUuid);
     expect(session?.transcriptState).toBe('missing');
-    expect(session?.source).toBe('store');
+    expect(session?.source).toBe('workspace-fallback');
+    expect(session?.resolvedSource).toBe('store-metadata');
   });
 });
 

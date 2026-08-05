@@ -50,6 +50,8 @@ import {
   MESSAGE_IDENTITY_VERSION,
   prepareStoreIdentityCandidates,
   projectV016ComposerMessages,
+  type StoreIdentityCandidate,
+  type StoreIdentityRecord,
 } from '../session-identity.js';
 
 /** Sentinel content produced by the storage layer for a present-but-empty bubble. */
@@ -309,13 +311,31 @@ function messagesCompatible(a: Message, b: Message): boolean {
   if (a.role !== b.role) return false;
   const aTools = a.toolCalls ?? [];
   const bTools = b.toolCalls ?? [];
-  const compatibleTools = hasCompatibleToolPair(aTools, bTools) && !toolsConflict(aTools, bTools);
-  if (!compatibleTools) return false;
-  if (contentCompatible(a.content, b.content)) return true;
+  if (toolsConflict(aTools, bTools)) return false;
+  // Real compatible content is an anchor; distinct tool arrays are additive
+  // enrichment. When both contents are blank, however, tools are the only
+  // identity evidence and disjoint calls must remain separate turns.
+  if (contentCompatible(a.content, b.content)) {
+    if (
+      !hasRealContent(a.content) &&
+      !hasRealContent(b.content) &&
+      aTools.length > 0 &&
+      bTools.length > 0 &&
+      !hasCompatibleToolPair(aTools, bTools)
+    ) {
+      return false;
+    }
+    return true;
+  }
   // Composer can render a structured tool call as `[Tool: ...]` while Store
   // keeps the assistant's natural-language text plus the same structured call.
   // The compatible tool signature is the identity bridge in that case.
-  return isSyntheticToolContent(a) || isSyntheticToolContent(b);
+  return (
+    (isSyntheticToolContent(a) || isSyntheticToolContent(b)) &&
+    aTools.length > 0 &&
+    bTools.length > 0 &&
+    hasCompatibleToolPair(aTools, bTools)
+  );
 }
 
 function isPresent(value: string | undefined | null): value is string {
@@ -680,6 +700,41 @@ function transcriptIdentityRecords(messages: Message[]) {
   });
 }
 
+const STORE_MESSAGE_ID_PATTERN =
+  /^store:v1:(db|transcript):([0-9a-f]{64}):([1-9][0-9]*)(?::collision:[1-9][0-9]*)?$/;
+
+/** Preserve source-native DB/transcript candidates allocated before mapping. */
+function storeIdentityCandidates(
+  messages: Message[]
+): Array<StoreIdentityCandidate<StoreIdentityRecord>> {
+  const fallback = prepareStoreIdentityCandidates(transcriptIdentityRecords(messages));
+  return messages.map((message, sourceOrdinal) => {
+    const match =
+      typeof message.id === 'string' &&
+      (message.identityOrigin === 'store-db-v1' || message.identityOrigin === 'store-transcript-v1')
+        ? message.id.match(STORE_MESSAGE_ID_PATTERN)
+        : null;
+    if (!match?.[1] || !match[2] || !match[3]) return fallback[sourceOrdinal]!;
+    const occurrence = Number(match[3]);
+    if (!Number.isSafeInteger(occurrence)) return fallback[sourceOrdinal]!;
+    const representation = match[1] === 'db' ? 'db' : 'transcript';
+    const record: StoreIdentityRecord =
+      representation === 'db'
+        ? { representation: 'db', leafHash: match[2] }
+        : transcriptIdentityRecords([message])[0]!;
+    return {
+      record,
+      representation,
+      sourceOrdinal,
+      baseFingerprint: match[2],
+      occurrence,
+      candidateId: `store:v1:${match[1]}:${match[2]}:${occurrence}`,
+      identityOrigin:
+        representation === 'db' ? ('store-db-v1' as const) : ('store-transcript-v1' as const),
+    };
+  });
+}
+
 /** Allocate Store IDs only after the fixed alignment identifies Composer matches. */
 function resolveMessageIdentities(
   composerMessages: Message[],
@@ -687,7 +742,7 @@ function resolveMessageIdentities(
   pairs: AlignmentPair[]
 ): { composer: Message[]; store: Message[] } {
   const composer = freezeComposerMessages(composerMessages);
-  const candidates = prepareStoreIdentityCandidates(transcriptIdentityRecords(storeMessages));
+  const candidates = storeIdentityCandidates(storeMessages);
   const matchedComposerByStore = new Map(
     pairs.map(({ composerIndex, storeIndex }) => [storeIndex, composerIndex])
   );

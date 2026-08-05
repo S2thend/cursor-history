@@ -11,6 +11,13 @@ import type {
   ToolCall,
 } from './types.js';
 import type { StoreSession } from './store-stack/types.js';
+import {
+  MESSAGE_IDENTITY_VERSION,
+  allocateStoreMessageIdentities,
+  allocateToolCallIdentities,
+  prepareStoreIdentityCandidates,
+  type StoreIdentityRecord,
+} from './session-identity.js';
 
 /**
  * Serialize a `ToolCall` to a plain object preserving EVERY defined field.
@@ -160,12 +167,76 @@ export function findEmbeddedToolCallIndex(content: string, toolCalls: ToolCall[]
  * See specs/015-cursor-store-stack/data-model.md §2.
  */
 export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
-  // Tag each message with its Store origin. Store messages do not carry a
-  // directly-stored per-message timestamp at the transcript/store.db layer
-  // (turn_timings are not populated in current samples), so timestamp is left
-  // undefined rather than copied from session-level times.
-  const messages = ss.messages.map((m) => ({ ...m, source: 'store' as const }));
-  return {
+  const records: StoreIdentityRecord[] = ss.messages.map((message, messageIndex) => {
+    const evidence = ss.messageIdentityEvidence?.[messageIndex];
+    if (evidence?.representation === 'db') {
+      return { representation: 'db', leafHash: evidence.leafHash };
+    }
+    if (evidence?.representation === 'transcript') {
+      return {
+        representation: 'transcript',
+        role: evidence.role,
+        content: evidence.content,
+        toolActivity: evidence.toolActivity,
+        sourceRelationships: evidence.sourceRelationships,
+      };
+    }
+    // Compatibility for internal/mocked StoreSession values created before
+    // source-native evidence was added. Real adapters always supply evidence.
+    const sourceRelationships: Record<string, unknown> = {};
+    if (message.parentMessageId !== undefined) {
+      sourceRelationships['parentMessageId'] = message.parentMessageId;
+    }
+    if (message.isSidechain !== undefined) sourceRelationships['isSidechain'] = message.isSidechain;
+    return {
+      representation: 'transcript',
+      role: message.role,
+      content: message.content,
+      toolActivity: (message.toolCalls ?? []).map((call) => ({
+        name: call.name,
+        ...(call.params !== undefined ? { params: call.params } : {}),
+      })),
+      sourceRelationships,
+    };
+  });
+  const allocated = allocateStoreMessageIdentities([], prepareStoreIdentityCandidates(records));
+  const rawToResolved = new Map<string, string>();
+  for (let messageIndex = 0; messageIndex < ss.messages.length; messageIndex++) {
+    const rawId = ss.messages[messageIndex]?.id;
+    if (typeof rawId === 'string' && rawId.length > 0) {
+      rawToResolved.set(rawId, allocated[messageIndex]!.identity.value);
+    }
+  }
+
+  // Tag Store provenance only after source-native IDs/occurrences are frozen.
+  const messages = ss.messages.map((message, messageIndex) => {
+    const identity = allocated[messageIndex]!.identity;
+    const resolved: Message = {
+      ...message,
+      id: identity.value,
+      messageIdentityVersion: identity.version,
+      identityOrigin: identity.origin,
+      source: 'store',
+    };
+    if (message.toolCalls?.length) {
+      resolved.toolCalls = allocateToolCallIdentities(identity.value, message.toolCalls).map(
+        ({ call, id, identityOrigin }) => ({ ...call, id, identityOrigin })
+      );
+    }
+    const explicitParent = message.parentMessageId
+      ? rawToResolved.get(message.parentMessageId)
+      : undefined;
+    const sequentialParent =
+      messageIndex > 0 ? allocated[messageIndex - 1]!.identity.value : undefined;
+    if (explicitParent ?? sequentialParent) {
+      resolved.parentMessageId = explicitParent ?? sequentialParent;
+    } else {
+      delete resolved.parentMessageId;
+    }
+    return resolved;
+  });
+
+  const result: ChatSession = {
     id: ss.id,
     index,
     title: ss.title,
@@ -176,8 +247,23 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     workspaceId: 'store',
     workspacePath: ss.workspacePath,
     source: ss.source,
+    resolvedSource: ss.resolvedSource,
+    resolution: ss.resolution
+      ? {
+          ...ss.resolution,
+          expectedSourceRoles: [...ss.resolution.expectedSourceRoles],
+          loadedSourceRoles: [...ss.resolution.loadedSourceRoles],
+          omittedSourceRoles: [...ss.resolution.omittedSourceRoles],
+          failedSourceRoles: [...ss.resolution.failedSourceRoles],
+          reasonCodes: [...ss.resolution.reasonCodes],
+        }
+      : undefined,
+    messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
     transcriptState: ss.transcriptState,
   };
+  result.createdAtSource = ss.resolvedSource === 'store-db' ? 'store-db-metadata' : 'store-meta';
+  result.lastUpdatedAtSource = result.createdAtSource;
+  return result;
 }
 
 /**

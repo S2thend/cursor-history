@@ -1322,14 +1322,17 @@ async function getWorkspacesCached(
 async function getStoreSessionsCached(
   context: SessionReadContext | undefined,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  sourceReadLimits?: ListOptions['sourceReadLimits']
 ): Promise<StoreSession[]> {
   assertContextSource(context, customDataPath, backupPath);
   if (backupPath) return [];
   if (context?.storeSessions) return context.storeSessions;
   if (context?.storeSessionsPromise) return context.storeSessionsPromise;
 
-  const discovery = discoverStoreSessions(getStoreStackRoot(customDataPath));
+  const discovery = discoverStoreSessions(getStoreStackRoot(customDataPath), {
+    sourceReadLimits,
+  });
   if (!context) return discovery;
 
   context.storeSessionsPromise = discovery;
@@ -1581,7 +1584,12 @@ export async function listSessions(
   // Falls back to [] when ~/.cursor is absent (pure-Composer users unaffected).
   // Skipped in backup mode: backups capture vscdb, not the live ~/.cursor tree.
   if (!backupPath) {
-    const storeSessions = await getStoreSessionsCached(context, customDataPath, backupPath);
+    const storeSessions = await getStoreSessionsCached(
+      context,
+      customDataPath,
+      backupPath,
+      options.sourceReadLimits
+    );
     const storeSeenIds = new Set(allSessions.map((session) => session.id));
     // Conflict priority for sessions present in BOTH stacks (same ID).
     const preferredSource = detectPreferredStackSource(customDataPath);
@@ -1605,6 +1613,7 @@ export async function listSessions(
               workspacePath: ss.workspacePath,
               messageCount: ss.messages.length,
               source: ss.source,
+              resolution: ss.resolution,
               transcriptState: ss.transcriptState,
             },
             preferredSource
@@ -1630,6 +1639,12 @@ export async function listSessions(
         workspacePath: ss.workspacePath ? contractPath(ss.workspacePath) : '(unknown workspace)',
         preview: ss.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
         source: ss.source,
+        resolvedSource: ss.resolvedSource,
+        resolutionState: ss.resolution?.state,
+        resolution: ss.resolution,
+        messageIdentityVersion: 1,
+        createdAtSource: ss.resolvedSource === 'store-db' ? 'store-db-metadata' : 'store-meta',
+        lastUpdatedAtSource: ss.resolvedSource === 'store-db' ? 'store-db-metadata' : 'store-meta',
         transcriptState: ss.transcriptState,
       });
     }
@@ -1841,6 +1856,10 @@ async function resolveFinalSession(
   // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via
   // the cached Store discovery when available.
   if (
+    summary.workspaceId === 'store' ||
+    summary.resolvedSource === 'store-db' ||
+    summary.resolvedSource === 'store-transcript' ||
+    summary.resolvedSource === 'store-metadata' ||
     summary.source === 'transcript' ||
     summary.source === 'store' ||
     summary.source === 'store-complete' ||

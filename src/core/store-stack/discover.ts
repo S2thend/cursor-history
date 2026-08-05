@@ -1,269 +1,511 @@
 /**
- * Discover Cursor Store-stack sessions under ~/.cursor.
- * See specs/015-cursor-store-stack/research.md §4 / data-model.md §1 / P15.
+ * Discover and resolve Cursor Store-stack sessions.
  *
- *   chats/<hash>/<uuid>/meta.json        → id + workspacePath (cwd) + createdAt + updatedAt
- *   acp-sessions/<uuid>/{meta.json,...}   → metadata (no workspace-hash layer)
- *   projects/<sanitized>/agent-transcripts/<uuid>/*.jsonl → messages + TranscriptState
- *
- * Sessions are merged by UUID. `store.db` is the PRIMARY message source (P15): a
- * present store.db is always parsed first, and when it yields any messages
- * (complete OR partial) those messages win while the transcript does NOT
- * participate. Only when the DB is unreadable or yields zero messages does the
- * transcript supply messages. The transcript state is retained for provenance in
- * every case. Discovery is asynchronous because store.db parsing goes through
- * the shared SQLite registry. Session-level `lastUpdatedAt` comes from
- * `updatedAtMs` when available.
+ * Inventory fixes StoreDbExpectation before payload hydration. The exhaustive
+ * DB/transcript/metadata state machine then selects one representation without
+ * using message content, timestamps, or read failures to revise expectation.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
-import { chatsDir, projectsDir, acpSessionsDir } from './paths.js';
-import { parseTranscriptFile } from './transcript.js';
-import { parseStoreDb } from './store-db.js';
+import { SourceEncodingError, SourceLimitExceededError } from '../errors.js';
 import { debugLogStorage } from '../database/debug.js';
-import type { StoreDbState, StoreMetaJson, StoreSession, TranscriptUse } from './types.js';
+import { decodeDeterministicUtf8, resolveSourceReadLimits } from '../source-read-limits.js';
+import type {
+  ResolutionReasonCode,
+  SessionDiagnostic,
+  SourceReadLimitsOverride,
+} from '../types.js';
+import { acpSessionsDir, chatsDir, projectsDir } from './paths.js';
+import { parseStoreDb } from './store-db.js';
+import { parseTranscriptFile, type TranscriptSourceFailure } from './transcript.js';
+import type {
+  StoreDbExpectation,
+  StoreDbState,
+  StoreMetaJson,
+  StoreSession,
+  TranscriptUse,
+} from './types.js';
+
+export interface StoreDiscoveryOptions {
+  /** Validated before any source content or directory inventory is read. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Receives only safe typed diagnostics (never a locator or content). */
+  onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
+}
+
+interface InventoryEvidence {
+  perSessionDirectory: boolean;
+  metadataPresent: boolean;
+  dbInventoried: boolean;
+  dbPaths: string[];
+  transcriptInventoried: boolean;
+  hasConversationTrue: boolean;
+  hasConversationFalse: boolean;
+  unsupportedExpectationMetadata: boolean;
+}
+
+interface MetaReadResult {
+  meta?: StoreMetaJson;
+  present: boolean;
+  hasConversation?: boolean;
+  unsupportedExpectationMetadata: boolean;
+}
+
+interface DirectoryListing<T> {
+  entries: T[];
+  complete: boolean;
+}
 
 /** Best-effort error message for debug diagnostics. */
 function errMsg(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
+  return error instanceof Error ? error.message : String(error);
 }
 
-export async function discoverStoreSessions(storeRoot: string): Promise<StoreSession[]> {
+export async function discoverStoreSessions(
+  storeRoot: string,
+  options: StoreDiscoveryOptions = {}
+): Promise<StoreSession[]> {
+  // Validation is deliberately the first operation: invalid caller policy
+  // must fail before even a payload-presence check can trigger source I/O.
+  const limits = resolveSourceReadLimits(options.sourceReadLimits);
   const byId = new Map<string, StoreSession>();
+  const inventory = new Map<string, InventoryEvidence>();
+  const selectedTranscriptFailures = new Map<string, TranscriptSourceFailure[]>();
   const explicitUpdatedAt = new Set<string>();
-  const metadataBackedIds = new Set<string>();
+  let perSessionInventoryComplete = true;
 
-  // 1. chats/ → metadata (cwd, createdAt, updatedAt, title, store.db presence)
+  const evidenceFor = (uuid: string): InventoryEvidence => {
+    let value = inventory.get(uuid);
+    if (!value) {
+      value = {
+        perSessionDirectory: false,
+        metadataPresent: false,
+        dbInventoried: false,
+        dbPaths: [],
+        transcriptInventoried: false,
+        hasConversationTrue: false,
+        hasConversationFalse: false,
+        unsupportedExpectationMetadata: false,
+      };
+      inventory.set(uuid, value);
+    }
+    return value;
+  };
+
+  // 1. chats/ metadata inventory.
   const chats = chatsDir(storeRoot);
-  if (existsSync(chats)) {
-    for (const hash of listDirs(chats)) {
-      for (const uuid of listDirs(join(chats, hash))) {
-        metadataBackedIds.add(uuid);
+  if (pathExists(chats)) {
+    const hashListing = listDirs(chats);
+    perSessionInventoryComplete &&= hashListing.complete;
+    for (const hash of hashListing.entries) {
+      const sessionListing = listDirs(join(chats, hash));
+      perSessionInventoryComplete &&= sessionListing.complete;
+      for (const uuid of sessionListing.entries) {
         const sessionDir = join(chats, hash, uuid);
-        const meta = readMeta(join(sessionDir, 'meta.json'));
+        const metaRead = readMeta(join(sessionDir, 'meta.json'));
+        const dbPath = join(sessionDir, 'store.db');
+        const dbInventoried = pathExists(dbPath);
+        recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
+
+        const meta = metaRead.meta;
         const createdAt = isValidMs(meta?.createdAtMs)
           ? new Date(meta.createdAtMs)
-          : (safeMtime(sessionDir) ?? new Date(0));
-        const updatedAtMs = meta?.updatedAtMs;
-        const hasExplicitUpdatedAt = isValidMs(updatedAtMs);
-        const updatedAt = hasExplicitUpdatedAt ? new Date(updatedAtMs) : createdAt;
-        const storeDbPath = existsSync(join(sessionDir, 'store.db'))
-          ? join(sessionDir, 'store.db')
-          : undefined;
-        const candidate: StoreSession = {
+          : (readMtime(sessionDir) ?? new Date(0));
+        const hasExplicitUpdatedAt = isValidMs(meta?.updatedAtMs);
+        const updatedAt = hasExplicitUpdatedAt ? new Date(meta!.updatedAtMs!) : createdAt;
+        const candidate = emptyStoreSession({
           id: uuid,
           workspacePath: meta?.cwd,
           title: meta?.title ?? null,
           createdAt,
           lastUpdatedAt: updatedAt,
-          messages: [],
-          source: 'transcript',
-          transcriptState: 'missing',
-          storeDbPath,
+          storeDbPath: dbInventoried ? dbPath : undefined,
           chatDir: sessionDir,
-        };
-
-        const existing = byId.get(uuid);
-        if (existing) {
-          if (shouldReplaceMetadata(existing, candidate)) {
-            replaceMetadata(existing, candidate);
-            if (hasExplicitUpdatedAt) explicitUpdatedAt.add(uuid);
-            else explicitUpdatedAt.delete(uuid);
-          }
-        } else {
-          byId.set(uuid, candidate);
-          if (hasExplicitUpdatedAt) explicitUpdatedAt.add(uuid);
-        }
+        });
+        selectMetadataCandidate(byId, candidate, hasExplicitUpdatedAt, explicitUpdatedAt);
       }
     }
   }
 
-  // 2. acp-sessions/<uuid>/{meta.json, store.db} → metadata (no workspace-hash layer).
-  // Register every metadata source before attaching transcripts, so a transcript
-  // inherits its session timestamp instead of its file mtime fallback.
+  // 2. ACP metadata inventory.
   const acp = acpSessionsDir(storeRoot);
-  if (existsSync(acp)) {
-    for (const uuid of listDirs(acp)) {
-      metadataBackedIds.add(uuid);
+  if (pathExists(acp)) {
+    const sessionListing = listDirs(acp);
+    perSessionInventoryComplete &&= sessionListing.complete;
+    for (const uuid of sessionListing.entries) {
       const sessionDir = join(acp, uuid);
-      const meta = readMeta(join(sessionDir, 'meta.json'));
-      const storeDbPath = existsSync(join(sessionDir, 'store.db'))
-        ? join(sessionDir, 'store.db')
-        : undefined;
-      const createdAt = safeMtime(sessionDir) ?? new Date(0);
-      const candidate: StoreSession = {
+      const metaRead = readMeta(join(sessionDir, 'meta.json'));
+      const dbPath = join(sessionDir, 'store.db');
+      const dbInventoried = pathExists(dbPath);
+      recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
+      const createdAt = readMtime(sessionDir) ?? new Date(0);
+      const candidate = emptyStoreSession({
         id: uuid,
-        workspacePath: meta?.cwd,
-        title: meta?.title ?? null,
+        workspacePath: metaRead.meta?.cwd,
+        title: metaRead.meta?.title ?? null,
         createdAt,
         lastUpdatedAt: createdAt,
-        messages: [],
-        source: 'transcript',
-        transcriptState: 'missing',
-        storeDbPath,
+        storeDbPath: dbInventoried ? dbPath : undefined,
         chatDir: sessionDir,
-      };
-      const existing = byId.get(uuid);
-      if (existing) {
-        if (shouldReplaceMetadata(existing, candidate)) {
-          replaceMetadata(existing, candidate);
-          explicitUpdatedAt.delete(uuid);
-        }
-      } else {
-        byId.set(uuid, candidate);
-      }
+      });
+      selectMetadataCandidate(byId, candidate, false, explicitUpdatedAt);
     }
   }
 
-  // 3. projects/<sanitized>/agent-transcripts/ → messages + state (nested or flat).
+  // 3. Canonical transcript inventory and bounded parse.
   const projects = projectsDir(storeRoot);
-  if (existsSync(projects)) {
-    for (const sanitized of listDirs(projects)) {
-      const atDir = join(projects, sanitized, 'agent-transcripts');
-      if (!existsSync(atDir)) continue; // Skip if agent-transcripts dir is missing
-      // Enumerate each project's transcript directory safely so one
-      // unreadable/removed directory skips only itself.
-      for (const entry of listEntries(atDir)) {
+  if (pathExists(projects)) {
+    const projectListing = listDirs(projects);
+    for (const sanitized of projectListing.entries) {
+      const transcriptDir = join(projects, sanitized, 'agent-transcripts');
+      if (!pathExists(transcriptDir)) continue;
+      const transcriptListing = listEntries(transcriptDir);
+      for (const entry of transcriptListing.entries) {
         if (entry.isDirectory()) {
-          // Nested layout: agent-transcripts/uuid/uuid.jsonl
           const uuid = entry.name;
-          const nested = join(atDir, uuid, `${uuid}.jsonl`);
-          if (existsSync(nested)) {
-            attachTranscript(byId, uuid, nested, metadataBackedIds.has(uuid));
+          const nested = join(transcriptDir, uuid, `${uuid}.jsonl`);
+          if (pathExists(nested)) {
+            evidenceFor(uuid).transcriptInventoried = true;
+            attachTranscript(byId, selectedTranscriptFailures, uuid, nested, limits);
           }
         } else if (entry.name.endsWith('.jsonl')) {
-          // Flat layout: agent-transcripts/<uuid>.jsonl
           const uuid = entry.name.slice(0, -'.jsonl'.length);
-          attachTranscript(byId, uuid, join(atDir, entry.name), metadataBackedIds.has(uuid));
+          evidenceFor(uuid).transcriptInventoried = true;
+          attachTranscript(
+            byId,
+            selectedTranscriptFailures,
+            uuid,
+            join(transcriptDir, entry.name),
+            limits
+          );
         }
       }
     }
   }
 
-  // 4. Resolve backing data per session: store.db is the PRIMARY message source
-  //    (P15). A present store.db is always parsed first. When it yields any
-  //    messages (complete OR partial) those messages win and the transcript does
-  //    NOT participate. When the DB parses but yields no messages, the transcript
-  //    supplies messages while the DB metadata (title/createdAt) is still
-  //    adopted. When the DB is unreadable or absent, the transcript (or
-  //    metadata) is the sole source. transcriptState is retained for provenance
-  //    in every case; the DB/transcript decision is recorded as a debug
-  //    diagnostic (StoreDbState + TranscriptUse).
+  // A selected metadata replica may lack its own DB while another inventoried
+  // occurrence had one. Preserve the deterministic inventory fact and locator
+  // until replica reconciliation is introduced; never downgrade expectation.
+  for (const [uuid, ss] of byId) {
+    const evidence = evidenceFor(uuid);
+    if (!ss.storeDbPath && evidence.dbPaths.length > 0) {
+      ss.storeDbPath = [...evidence.dbPaths].sort()[0];
+    }
+  }
+
+  // 4. Exhaustive representation selection.
+  const resolved: StoreSession[] = [];
   for (const ss of byId.values()) {
-    if (!ss.storeDbPath) {
-      // No store.db → the transcript (or metadata) is the sole message source.
-      ss.source = transcriptMessageSource(ss);
-      logStoreResolution(
-        ss,
-        'missing',
-        ss.transcriptState === 'missing' ? 'unused' : 'only-source'
-      );
-      continue;
-    }
+    const evidence = evidenceFor(ss.id);
+    const expectation = classifyStoreDbExpectation(evidence, perSessionInventoryComplete);
+    ss.storeDbExpectation = expectation;
 
-    const deep = await parseStoreDb(ss.storeDbPath);
-    if (!deep) {
-      // store.db unreadable/unsupported → transcript fallback (or degraded).
-      const transcriptUse: TranscriptUse = ss.messages.length > 0 ? 'fallback' : 'unused';
-      ss.source = transcriptUse === 'fallback' ? 'transcript' : 'store-partial';
-      logStoreResolution(ss, 'failed', transcriptUse);
-      continue;
-    }
+    // Retain typed parser failures until both representations are known. A
+    // partial outcome is safe only when the other representation contributed
+    // real conversation content; otherwise the same failure is promoted to a
+    // fatal operation error instead of publishing an empty/truncated session.
+    const dbFailures: TranscriptSourceFailure[] = [];
+    const deep = ss.storeDbPath
+      ? await parseStoreDb(ss.storeDbPath, {
+          limits,
+          failureOutcome: 'partial',
+          onDiagnostic: (error) => dbFailures.push(error),
+        })
+      : null;
 
-    // Adopt DB metadata whenever the DB parsed, even if it supplies no messages.
-    if (deep.title) ss.title = deep.title;
-    if (deep.createdAt) {
+    const transcriptFailures = selectedTranscriptFailures.get(ss.id) ?? [];
+    const transcriptUsable = ss.messages.length > 0;
+    const dbUsable = Boolean(deep && deep.messages.length > 0);
+    retainSafeSourceFailures(
+      ss,
+      transcriptFailures,
+      dbFailures,
+      transcriptUsable,
+      dbUsable,
+      options.onDiagnostic
+    );
+
+    if (deep?.title) ss.title = deep.title;
+    if (deep?.createdAt) {
       ss.createdAt = deep.createdAt;
       if (!explicitUpdatedAt.has(ss.id)) ss.lastUpdatedAt = deep.createdAt;
     }
 
-    if (deep.messages.length > 0) {
-      // DB is the primary source: its messages win and the transcript does not
-      // enrich them (no heuristic cross-source merging in this increment).
+    const dbState: StoreDbState = !ss.storeDbPath
+      ? 'missing'
+      : !deep
+        ? 'failed'
+        : deep.messages.length === 0
+          ? deep.completeness === 'complete'
+            ? 'empty'
+            : 'failed'
+          : deep.completeness;
+
+    if (deep && deep.messages.length > 0) {
       ss.messages = deep.messages;
-      ss.source = deep.completeness === 'complete' ? 'store-complete' : 'store-partial';
-      logStoreResolution(ss, deep.completeness, 'unused');
+      ss.messageIdentityEvidence = deep.messageIdentityEvidence;
+      ss.resolvedSource = 'store-db';
+      if (deep.completeness === 'complete') {
+        setResolution(ss, 'complete', []);
+      } else {
+        setResolution(ss, 'partial', ['source-partial']);
+      }
+      logStoreResolution(ss, dbState, 'unused');
+      resolved.push(ss);
       continue;
     }
 
-    // DB parsed but yielded zero recoverable messages. A usable transcript
-    // fills the messages; otherwise preserve the DB's accurate empty/degraded
-    // completeness instead of presenting the session as metadata-only.
-    const transcriptUse: TranscriptUse = ss.messages.length > 0 ? 'fallback' : 'unused';
-    ss.source =
-      transcriptUse === 'fallback'
-        ? 'transcript'
-        : deep.completeness === 'complete'
-          ? 'store-complete'
-          : 'store-partial';
-    logStoreResolution(ss, 'empty', transcriptUse);
+    if (transcriptUsable) {
+      const reasons: ResolutionReasonCode[] = [];
+      if (expectation === 'expected') reasons.push('expected-store-db-unavailable');
+      if (expectation === 'unknown') reasons.push('store-db-expectation-unknown');
+      if (ss.transcriptState !== 'parsed') reasons.push('source-partial');
+      ss.resolvedSource = 'store-transcript';
+      setResolution(ss, reasons.length === 0 ? 'complete' : 'partial', reasons);
+      logStoreResolution(ss, dbState, ss.storeDbPath ? 'fallback' : 'only-source');
+      resolved.push(ss);
+      continue;
+    }
+
+    const explicitNoConversation =
+      expectation === 'not-expected' &&
+      evidence.hasConversationFalse &&
+      !evidence.hasConversationTrue;
+    const positiveConversationEvidence =
+      evidence.dbInventoried ||
+      evidence.transcriptInventoried ||
+      evidence.hasConversationTrue ||
+      expectation === 'unknown';
+
+    if (explicitNoConversation && !positiveConversationEvidence) {
+      logStoreResolution(ss, dbState, 'unused', 'omitted');
+      continue;
+    }
+
+    ss.messages = [];
+    ss.messageIdentityEvidence = [];
+    ss.resolvedSource = 'store-metadata';
+    setResolution(ss, 'partial', ['store-conversation-unavailable']);
+    logStoreResolution(ss, dbState, 'unused');
+    resolved.push(ss);
   }
 
-  return [...byId.values()];
+  return resolved;
+}
+
+export function classifyStoreDbExpectation(
+  evidence: Readonly<InventoryEvidence>,
+  inventoryComplete: boolean
+): StoreDbExpectation {
+  if (evidence.dbInventoried || evidence.hasConversationTrue) return 'expected';
+  if (evidence.unsupportedExpectationMetadata) return 'unknown';
+  if (evidence.hasConversationFalse) return 'not-expected';
+  if (
+    evidence.transcriptInventoried &&
+    !evidence.perSessionDirectory &&
+    !evidence.metadataPresent &&
+    inventoryComplete
+  ) {
+    return 'not-expected';
+  }
+  return 'unknown';
+}
+
+function emptyStoreSession(
+  fields: Pick<
+    StoreSession,
+    'id' | 'workspacePath' | 'title' | 'createdAt' | 'lastUpdatedAt' | 'storeDbPath' | 'chatDir'
+  >
+): StoreSession {
+  return {
+    ...fields,
+    messages: [],
+    messageIdentityEvidence: [],
+    source: 'workspace-fallback',
+    transcriptState: 'missing',
+  };
+}
+
+function recordInventory(
+  evidence: InventoryEvidence,
+  metaRead: MetaReadResult,
+  _sessionDir: string,
+  dbPath: string,
+  dbInventoried: boolean
+): void {
+  evidence.perSessionDirectory = true;
+  evidence.metadataPresent ||= metaRead.present;
+  evidence.hasConversationTrue ||= metaRead.hasConversation === true;
+  evidence.hasConversationFalse ||= metaRead.hasConversation === false;
+  evidence.unsupportedExpectationMetadata ||= metaRead.unsupportedExpectationMetadata;
+  if (dbInventoried) {
+    evidence.dbInventoried = true;
+    if (!evidence.dbPaths.includes(dbPath)) evidence.dbPaths.push(dbPath);
+  }
+}
+
+function setResolution(
+  ss: StoreSession,
+  state: 'complete' | 'partial',
+  reasonCodes: ResolutionReasonCode[]
+): void {
+  ss.source = state === 'complete' ? 'global' : 'workspace-fallback';
+  ss.resolution = {
+    state,
+    expectedSourceRoles: ['store'],
+    loadedSourceRoles: ['store'],
+    omittedSourceRoles: [],
+    failedSourceRoles: [],
+    reasonCodes: [...new Set(reasonCodes)],
+  };
+}
+
+function toSessionDiagnostic(
+  error: SourceEncodingError | SourceLimitExceededError,
+  sessionId: string
+): SessionDiagnostic {
+  if (error instanceof SourceEncodingError) {
+    return {
+      code: error.code,
+      message: error.message,
+      sessionId,
+      sourceRole: 'store',
+      sourceKind: error.details.sourceKind as 'jsonl' | 'sqlite',
+      outcome: 'partial',
+      remedy: error.details.remedy,
+    };
+  }
+  const details = error.details;
+  const common = {
+    code: error.code,
+    message: error.message,
+    sessionId,
+    sourceRole: 'store' as const,
+    policyVersion: details.policyVersion,
+    limit: details.limit,
+    observedAtLeast: details.observedAtLeast,
+    outcome: 'partial' as const,
+    retryableWithOverride: true as const,
+    remedy: details.remedy,
+  };
+  if (details.sourceKind === 'jsonl') {
+    return details.bound === 'jsonl-record-count'
+      ? { ...common, sourceKind: 'jsonl', bound: details.bound, unit: 'records' }
+      : {
+          ...common,
+          sourceKind: 'jsonl',
+          bound: details.bound as 'jsonl-record-bytes' | 'jsonl-source-bytes',
+          unit: 'bytes',
+        };
+  }
+  return details.bound === 'sqlite-page-rows' || details.bound === 'sqlite-row-count'
+    ? {
+        ...common,
+        sourceKind: 'sqlite',
+        bound: details.bound,
+        unit: 'rows',
+      }
+    : {
+        ...common,
+        sourceKind: 'sqlite',
+        bound: details.bound as 'sqlite-page-bytes' | 'sqlite-value-bytes' | 'sqlite-decoded-bytes',
+        unit: 'bytes',
+      };
+}
+
+/** Rebuild a retained partial parser failure with a fatal operation outcome. */
+function promoteSourceFailure(error: TranscriptSourceFailure): TranscriptSourceFailure {
+  if (error instanceof SourceEncodingError) {
+    return new SourceEncodingError(error.details.sourceKind as 'jsonl' | 'sqlite', 'fatal');
+  }
+  return new SourceLimitExceededError({
+    sourceKind: error.details.sourceKind,
+    bound: error.details.bound,
+    unit: error.details.unit,
+    limit: error.details.limit,
+    observedAtLeast: error.details.observedAtLeast,
+    outcome: 'fatal',
+  });
 }
 
 /**
- * `source` for a session whose messages come from the transcript layer (no
- * store.db, or the DB was unreadable/yielded no messages). Sessions with usable
- * transcript messages report `'transcript'`; metadata-only sessions (no
- * transcript file at all) use the generic `'store'` alias.
+ * Publish source failures as partial diagnostics only when the opposite
+ * representation yielded content without its own defensive failure. A partial
+ * prefix from either failing source cannot validate the other source and must
+ * never turn two truncated representations into success.
  */
-function transcriptMessageSource(ss: StoreSession): StoreSession['source'] {
-  if (ss.messages.length > 0) return 'transcript';
-  return ss.transcriptState === 'missing' ? 'store' : 'transcript';
-}
-
-/** Emit one type-checked diagnostic for the Store DB/transcript resolution. */
-function logStoreResolution(
-  ss: Pick<StoreSession, 'id' | 'source'>,
-  dbState: StoreDbState,
-  transcriptUse: TranscriptUse
+function retainSafeSourceFailures(
+  session: StoreSession,
+  transcriptFailures: readonly TranscriptSourceFailure[],
+  dbFailures: readonly TranscriptSourceFailure[],
+  transcriptUsable: boolean,
+  dbUsable: boolean,
+  onDiagnostic?: (diagnostic: SessionDiagnostic) => void
 ): void {
-  debugLogStorage(
-    `store: ${ss.id} dbState=${dbState} transcriptUse=${transcriptUse} source=${ss.source}`
+  const transcriptSafe = transcriptUsable && transcriptFailures.length === 0;
+  const dbSafe = dbUsable && dbFailures.length === 0;
+  if (transcriptFailures.length > 0 && !dbSafe) {
+    throw promoteSourceFailure(transcriptFailures[0]!);
+  }
+  if (dbFailures.length > 0 && !transcriptSafe) {
+    throw promoteSourceFailure(dbFailures[0]!);
+  }
+
+  const diagnostics = [...transcriptFailures, ...dbFailures].map((error) =>
+    toSessionDiagnostic(error, session.id)
   );
+  if (diagnostics.length === 0) return;
+  session.diagnostics = [...(session.diagnostics ?? []), ...diagnostics];
+  for (const diagnostic of diagnostics) onDiagnostic?.(diagnostic);
 }
 
 function attachTranscript(
   byId: Map<string, StoreSession>,
+  selectedFailures: Map<string, TranscriptSourceFailure[]>,
   uuid: string,
   file: string,
-  metadataBacked: boolean
+  limits: ReturnType<typeof resolveSourceReadLimits>
 ): void {
-  const { messages, state } = parseTranscriptFile(file);
-  const modifiedAt = safeMtime(file) ?? new Date(0);
+  const parsed = parseTranscriptFile(file, limits, 'partial');
+  const modifiedAt = readMtime(file) ?? new Date(0);
   const existing = byId.get(uuid);
+  const failures = parsed.diagnostic ? [parsed.diagnostic] : [];
+
   if (existing) {
-    if (!shouldReplaceTranscript(existing, state, messages.length, modifiedAt, file)) return;
-    // Replace state, path, and messages atomically so duplicate UUIDs cannot
-    // combine one transcript's messages with another transcript's provenance.
-    existing.transcriptState = state;
+    if (
+      !shouldReplaceTranscript(existing, parsed.state, parsed.messages.length, modifiedAt, file)
+    ) {
+      return;
+    }
+    existing.transcriptState = parsed.state;
     existing.transcriptPath = file;
-    existing.messages = messages;
-    if (!metadataBacked) {
+    existing.messages = parsed.messages;
+    existing.messageIdentityEvidence = parsed.messageIdentityEvidence;
+    selectedFailures.set(uuid, failures);
+    if (!existing.chatDir) {
       existing.createdAt = modifiedAt;
       existing.lastUpdatedAt = modifiedAt;
     }
     return;
   }
-  // Transcript-only session (no chats/acp meta). Use file mtime for session time.
-  const createdAt = modifiedAt;
+
   byId.set(uuid, {
     id: uuid,
     workspacePath: undefined,
     title: null,
-    createdAt,
-    lastUpdatedAt: createdAt,
-    messages,
-    source: 'transcript', // finalized by the resolve loop
-    transcriptState: state,
+    createdAt: modifiedAt,
+    lastUpdatedAt: modifiedAt,
+    messages: parsed.messages,
+    messageIdentityEvidence: parsed.messageIdentityEvidence,
+    source: 'workspace-fallback',
+    transcriptState: parsed.state,
     transcriptPath: file,
   });
+  selectedFailures.set(uuid, failures);
 }
 
-/** Prefer state, then message count, then recency; use path only as a stable tie-breaker. */
+/** Prefer state, then message count, then recency; path is a stable tie-breaker. */
 function shouldReplaceTranscript(
   existing: StoreSession,
   candidateState: StoreSession['transcriptState'],
@@ -281,119 +523,173 @@ function shouldReplaceTranscript(
     unreadable: 1,
     missing: 0,
   };
-  const candidateRank = rank[candidateState];
-  const existingRank = rank[existing.transcriptState];
-  if (candidateRank !== existingRank) return candidateRank > existingRank;
+  if (rank[candidateState] !== rank[existing.transcriptState]) {
+    return rank[candidateState] > rank[existing.transcriptState];
+  }
   if (candidateMessageCount !== existing.messages.length) {
     return candidateMessageCount > existing.messages.length;
   }
-  const existingModifiedAt = safeMtime(existing.transcriptPath)?.getTime() ?? 0;
+  const existingModifiedAt = readMtime(existing.transcriptPath)?.getTime() ?? 0;
   if (candidateModifiedAt.getTime() !== existingModifiedAt) {
     return candidateModifiedAt.getTime() > existingModifiedAt;
   }
   return candidatePath < existing.transcriptPath;
 }
 
-/** Safe subdirectory names; logs and continues on per-directory failure. */
-function listDirs(dir: string): string[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name);
-  } catch (error) {
-    debugLogStorage(`store: skipping unreadable directory ${dir}: ${errMsg(error)}`);
-    return [];
+function selectMetadataCandidate(
+  byId: Map<string, StoreSession>,
+  candidate: StoreSession,
+  hasExplicitUpdatedAt: boolean,
+  explicitUpdatedAt: Set<string>
+): void {
+  const existing = byId.get(candidate.id);
+  if (!existing) {
+    byId.set(candidate.id, candidate);
+    if (hasExplicitUpdatedAt) explicitUpdatedAt.add(candidate.id);
+    return;
   }
+  if (!shouldReplaceMetadata(existing, candidate)) return;
+  replaceMetadata(existing, candidate);
+  if (hasExplicitUpdatedAt) explicitUpdatedAt.add(candidate.id);
+  else explicitUpdatedAt.delete(candidate.id);
 }
 
-/** Safe directory entries (Dirent[]); logs and continues on per-directory failure. */
-function listEntries(dir: string): Dirent[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true });
-  } catch (error) {
-    debugLogStorage(`store: skipping unreadable directory ${dir}: ${errMsg(error)}`);
-    return [];
-  }
+function logStoreResolution(
+  ss: Pick<StoreSession, 'id' | 'source' | 'resolvedSource' | 'storeDbExpectation'>,
+  dbState: StoreDbState,
+  transcriptUse: TranscriptUse,
+  suffix = ''
+): void {
+  debugLogStorage(
+    `store: ${ss.id} expectation=${ss.storeDbExpectation} dbState=${dbState} transcriptUse=${transcriptUse} source=${ss.source} resolvedSource=${ss.resolvedSource ?? 'none'}${suffix ? ` ${suffix}` : ''}`
+  );
 }
 
-function readMeta(path: string): StoreMetaJson | undefined {
+function listDirs(dir: string): DirectoryListing<string> {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-
-    const record = parsed as Record<string, unknown>;
-    const meta: StoreMetaJson = {};
-    const invalidFields: string[] = [];
-
-    if (record['schemaVersion'] !== undefined) {
-      if (typeof record['schemaVersion'] === 'number' && Number.isFinite(record['schemaVersion'])) {
-        meta.schemaVersion = record['schemaVersion'];
-      } else {
-        invalidFields.push('schemaVersion');
-      }
-    }
-    if (record['hasConversation'] !== undefined) {
-      if (typeof record['hasConversation'] === 'boolean') {
-        meta.hasConversation = record['hasConversation'];
-      } else {
-        invalidFields.push('hasConversation');
-      }
-    }
-    if (record['cwd'] !== undefined) {
-      if (typeof record['cwd'] === 'string') {
-        meta.cwd = record['cwd'];
-      } else {
-        invalidFields.push('cwd');
-      }
-    }
-    if (record['title'] !== undefined) {
-      if (typeof record['title'] === 'string') {
-        meta.title = record['title'];
-      } else {
-        invalidFields.push('title');
-      }
-    }
-    if (record['createdAtMs'] !== undefined) {
-      if (isValidMs(record['createdAtMs'])) {
-        meta.createdAtMs = record['createdAtMs'];
-      } else {
-        invalidFields.push('createdAtMs');
-      }
-    }
-    if (record['updatedAtMs'] !== undefined) {
-      if (isValidMs(record['updatedAtMs'])) {
-        meta.updatedAtMs = record['updatedAtMs'];
-      } else {
-        invalidFields.push('updatedAtMs');
-      }
-    }
-
-    if (invalidFields.length > 0) {
+    return {
+      entries: readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort(),
+      complete: true,
+    };
+  } catch (error) {
+    if (isAbsentOrWrongType(error)) {
       debugLogStorage(
-        `store: ignoring invalid metadata fields in ${path}: ${invalidFields.join(', ')}`
+        `store: directory disappeared or has the wrong type ${dir}: ${errMsg(error)}`
       );
+      return { entries: [], complete: false };
     }
-    return meta;
-  } catch {
-    return undefined;
+    throw error;
   }
 }
 
-function safeMtime(path: string): Date | undefined {
+function listEntries(dir: string): DirectoryListing<Dirent> {
+  try {
+    return {
+      entries: readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+        a.name.localeCompare(b.name)
+      ),
+      complete: true,
+    };
+  } catch (error) {
+    if (isAbsentOrWrongType(error)) {
+      debugLogStorage(
+        `store: directory disappeared or has the wrong type ${dir}: ${errMsg(error)}`
+      );
+      return { entries: [], complete: false };
+    }
+    throw error;
+  }
+}
+
+function readMeta(path: string): MetaReadResult {
+  let raw: Buffer;
+  try {
+    raw = readFileSync(path);
+  } catch (error) {
+    if (isAbsentOrWrongType(error)) {
+      return { present: false, unsupportedExpectationMetadata: false };
+    }
+    throw error;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeDeterministicUtf8(raw, 'jsonl', 'partial').text) as unknown;
+  } catch (error) {
+    if (error instanceof SyntaxError || error instanceof SourceEncodingError) {
+      return { present: true, unsupportedExpectationMetadata: true };
+    }
+    throw error;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { present: true, unsupportedExpectationMetadata: true };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const meta: StoreMetaJson = {};
+  let unsupportedExpectationMetadata = false;
+  let hasConversation: boolean | undefined;
+
+  if (record['schemaVersion'] !== undefined) {
+    if (typeof record['schemaVersion'] === 'number' && Number.isFinite(record['schemaVersion'])) {
+      meta.schemaVersion = record['schemaVersion'];
+    }
+  }
+  if (record['hasConversation'] !== undefined) {
+    if (typeof record['hasConversation'] === 'boolean') {
+      meta.hasConversation = record['hasConversation'];
+      hasConversation = record['hasConversation'];
+    } else {
+      unsupportedExpectationMetadata = true;
+    }
+  }
+  if (typeof record['cwd'] === 'string') meta.cwd = record['cwd'];
+  if (typeof record['title'] === 'string') meta.title = record['title'];
+  if (isValidMs(record['createdAtMs'])) meta.createdAtMs = record['createdAtMs'];
+  if (isValidMs(record['updatedAtMs'])) meta.updatedAtMs = record['updatedAtMs'];
+
+  return {
+    meta,
+    present: true,
+    hasConversation,
+    unsupportedExpectationMetadata,
+  };
+}
+
+function pathExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (error) {
+    if (isAbsentOrWrongType(error)) return false;
+    throw error;
+  }
+}
+
+function readMtime(path: string): Date | undefined {
   try {
     return statSync(path).mtime ?? undefined;
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (isAbsentOrWrongType(error)) return undefined;
+    throw error;
   }
 }
 
-/** Validate a Unix-ms timestamp (consistent with feature 010's threshold). */
-function isValidMs(v: unknown): v is number {
-  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 1_000_000_000_000) return false;
-  return Number.isFinite(new Date(v).getTime());
+function isAbsentOrWrongType(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
-/** Choose one metadata replica atomically: newest update, then creation time, then path. */
+function isValidMs(value: unknown): value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 1_000_000_000_000) {
+    return false;
+  }
+  return Number.isFinite(new Date(value).getTime());
+}
+
 function shouldReplaceMetadata(existing: StoreSession, candidate: StoreSession): boolean {
   const updateDelta = candidate.lastUpdatedAt.getTime() - existing.lastUpdatedAt.getTime();
   if (updateDelta !== 0) return updateDelta > 0;

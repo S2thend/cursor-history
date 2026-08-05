@@ -17,22 +17,43 @@
  * `better-sqlite3` fallback and `CURSOR_HISTORY_SQLITE_DRIVER` are honored. The
  * backup yields a WAL-consistent snapshot, avoiding stale reads.
  *
- * Defensive: any failure → null (caller degrades to transcript).
+ * Source/schema corruption may fall back to an explicitly safe transcript,
+ * while driver, snapshot, cleanup, encoding, and fatal limit failures remain
+ * typed operation failures.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { backupDatabase, openDatabase, type Database } from '../database/index.js';
 import { debugLogStorage } from '../database/debug.js';
-import type { Message, MessageRole, ToolCall } from '../types.js';
+import {
+  SourceEncodingError,
+  SourceLimitExceededError,
+  isSessionIntegrityError,
+} from '../errors.js';
+import { createPrivateTempWorkspace, type PrivateTempWorkspace } from '../private-temp.js';
+import {
+  SOURCE_READ_LIMITS_V1_DEFAULTS,
+  SqliteSourceReadBudget,
+  decodeDeterministicUtf8,
+  type SourceFailureOutcome,
+} from '../source-read-limits.js';
+import type { Message, MessageRole, SourceReadLimitsV1, ToolCall } from '../types.js';
+import type { StoreMessageIdentityEvidence } from './types.js';
 
 export type StoreCompleteness = 'complete' | 'partial';
 
 export interface StoreDbData {
   title: string | null;
   messages: Message[];
+  messageIdentityEvidence: StoreMessageIdentityEvidence[];
   createdAt: Date | null;
   completeness: StoreCompleteness;
+}
+
+export interface StoreDbParseOptions {
+  limits?: Readonly<SourceReadLimitsV1>;
+  failureOutcome?: SourceFailureOutcome;
+  onDiagnostic?: (error: SourceEncodingError | SourceLimitExceededError) => void;
 }
 
 interface LeafObj {
@@ -60,97 +81,334 @@ interface ToolResultIndex {
   usedIds: Set<string>;
 }
 
-export async function parseStoreDb(path: string): Promise<StoreDbData | null> {
-  let tempDir: string | null = null;
+export async function parseStoreDb(
+  path: string,
+  options: StoreDbParseOptions = {}
+): Promise<StoreDbData | null> {
+  if (!pathExists(path)) return null;
+  const limits = options.limits ?? SOURCE_READ_LIMITS_V1_DEFAULTS;
+  const failureOutcome = options.failureOutcome ?? 'fatal';
+  const budget = new SqliteSourceReadBudget(limits, failureOutcome);
+  let workspace: PrivateTempWorkspace | null = null;
   let db: Database | null = null;
+  let snapshotComplete = false;
+  let result: StoreDbData | null = null;
+  let operationError: unknown;
   try {
-    // Keep the WAL-consistent snapshot in a process-private directory. If the
-    // native backup cannot produce an atomic snapshot, degrade to transcript
-    // instead of pairing a copied database with a separately copied WAL.
-    tempDir = mkdtempSync(join(tmpdir(), 'ch-store-'));
-    const tmpPath = join(tempDir, 'store.db');
-    try {
-      await backupDatabase(path, tmpPath);
-    } catch (backupError) {
-      debugLogStorage(
-        `store.db snapshot failed for ${path}; degrading to transcript: ${String(backupError)}`
-      );
-      return null;
-    }
+    // Snapshot failures are operation-level infrastructure failures and must
+    // propagate. Only payload/schema corruption may resolve through a safe
+    // transcript/metadata fallback chosen by discover.ts.
+    workspace = createPrivateTempWorkspace({ prefix: 'ch-store-' });
+    const tmpPath = join(workspace.path, 'store.db');
+    workspace.register(tmpPath);
+    await backupDatabase(path, tmpPath);
+    snapshotComplete = true;
     db = await openDatabase(tmpPath);
-    const metaRow = db.prepare("SELECT value FROM meta WHERE key = '0'").get() as
-      { value: string } | undefined;
-    if (!metaRow) return null;
-    const meta = JSON.parse(Buffer.from(metaRow.value, 'hex').toString('utf8')) as {
-      name?: string;
-      latestRootBlobId?: string;
-      createdAt?: number;
-    };
+
+    const metaValue = readBoundedValue(db, budget, 'meta', 'value', 'key', '0');
+    if (typeof metaValue !== 'string') throw new StoreSourceCorruptError();
+    const metaBytes = decodeHexText(metaValue, failureOutcome);
+    let meta: { name?: string; latestRootBlobId?: string; createdAt?: number };
+    try {
+      meta = JSON.parse(decodeDeterministicUtf8(metaBytes, 'sqlite', failureOutcome).text) as {
+        name?: string;
+        latestRootBlobId?: string;
+        createdAt?: number;
+      };
+    } catch (error) {
+      if (error instanceof SourceEncodingError || error instanceof SourceLimitExceededError) {
+        throw error;
+      }
+      if (error instanceof SyntaxError) throw new StoreSourceCorruptError();
+      throw error;
+    }
     const title = typeof meta.name === 'string' ? meta.name : null;
     const createdAt = validDateFromMs(meta.createdAt);
-    const { messages, complete } = meta.latestRootBlobId
-      ? readMessages(db, meta.latestRootBlobId)
-      : { messages: [] as Message[], complete: true };
-    return { title, messages, createdAt, completeness: complete ? 'complete' : 'partial' };
+    const parsed = meta.latestRootBlobId
+      ? readMessages(db, meta.latestRootBlobId, budget, failureOutcome, options.onDiagnostic)
+      : {
+          messages: [] as Message[],
+          messageIdentityEvidence: [] as StoreMessageIdentityEvidence[],
+          complete: true,
+        };
+    result = {
+      title,
+      messages: parsed.messages,
+      messageIdentityEvidence: parsed.messageIdentityEvidence,
+      createdAt,
+      completeness: parsed.complete ? 'complete' : 'partial',
+    };
   } catch (error) {
-    debugLogStorage(`store.db parse failed for ${path}: ${String(error)}`);
-    return null;
+    if (!snapshotComplete) {
+      operationError = error;
+    } else if (error instanceof SourceEncodingError || error instanceof SourceLimitExceededError) {
+      if (failureOutcome === 'fatal') operationError = error;
+      else {
+        options.onDiagnostic?.(error);
+        debugLogStorage(`store.db defensive parse failed for ${path}: ${error.code}`);
+      }
+    } else if (isSessionIntegrityError(error)) {
+      operationError = error;
+    } else if (error instanceof StoreSourceCorruptError || isSqliteSourceCorruptionError(error)) {
+      debugLogStorage(`store.db source/schema parse failed for ${path}: ${String(error)}`);
+    } else {
+      operationError = error;
+    }
   } finally {
+    let closeError: unknown;
+    let cleanupError: unknown;
     try {
       db?.close();
-    } catch {
-      // ignore
+    } catch (error) {
+      closeError = error;
     }
-    if (tempDir) {
-      try {
-        rmSync(tempDir, { recursive: true, force: true });
-      } catch {
-        // ignore
+    try {
+      workspace?.dispose();
+    } catch (error) {
+      cleanupError = error;
+    }
+    operationError = cleanupError ?? closeError ?? operationError;
+  }
+  if (operationError !== undefined) throw operationError;
+  return result;
+}
+
+/** Private control-flow marker for source/schema corruption that may fallback. */
+class StoreSourceCorruptError extends Error {}
+
+/** Missing paths are normal inventory races; all other filesystem failures propagate. */
+function pathExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    throw error;
+  }
+}
+
+/**
+ * Positively identify SQLite source/schema corruption that may use a safe
+ * alternate representation. Generic driver, I/O, lock, prepare, and query
+ * failures are deliberately not classified and therefore propagate.
+ */
+function isSqliteSourceCorruptionError(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  if (code === 'SQLITE_CORRUPT' || code === 'SQLITE_NOTADB') return true;
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  return (
+    message.includes('database disk image is malformed') ||
+    message.includes('file is not a database') ||
+    message.includes('malformed database schema') ||
+    /^no such (table|column):/.test(message)
+  );
+}
+
+function decodeHexText(value: string, outcome: SourceFailureOutcome): Buffer {
+  if (value.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(value)) {
+    throw new SourceEncodingError('sqlite', outcome);
+  }
+  return Buffer.from(value, 'hex');
+}
+
+/** Metadata preflight followed by one row-ID payload fetch. */
+function readBoundedValue(
+  db: Database,
+  budget: SqliteSourceReadBudget,
+  table: 'meta' | 'blobs',
+  valueColumn: 'value' | 'data',
+  keyColumn: 'key' | 'id',
+  key: string
+): unknown {
+  const metadata = db
+    .prepare(
+      `SELECT rowid AS rowId, length(${valueColumn}) AS byteLength FROM ${table} WHERE ${keyColumn} = ?`
+    )
+    .get(key) as { rowId?: number | bigint; byteLength?: number | bigint } | undefined;
+  if (!metadata || metadata.rowId === undefined || metadata.byteLength === undefined) {
+    return undefined;
+  }
+  const declared = Number(metadata.byteLength);
+  if (!Number.isSafeInteger(declared) || declared < 0) {
+    throw new TypeError('SQLite returned an invalid declared payload length');
+  }
+  budget.admitMetadataPage([declared]);
+  const row = db
+    .prepare(`SELECT ${valueColumn} AS value FROM ${table} WHERE rowid = ?`)
+    .get(metadata.rowId) as { value?: unknown } | undefined;
+  if (!row || row.value === undefined || row.value === null) return undefined;
+  const actual =
+    typeof row.value === 'string'
+      ? Buffer.byteLength(row.value, 'utf8')
+      : row.value instanceof Uint8Array
+        ? row.value.byteLength
+        : -1;
+  if (actual < 0) throw new TypeError('SQLite returned an unsupported payload value');
+  budget.admitDecodedValue(actual);
+  return row.value;
+}
+
+interface BlobMetadata {
+  rowId: number | bigint;
+  byteLength: number;
+}
+
+/**
+ * Finite metadata-page reader for reachable Store blobs. Metadata is fetched
+ * in fixed v1 pages, admitted as a complete page, and payloads are then fetched
+ * sequentially by row ID. A lowered per-operation page bound therefore remains
+ * an observable defensive limit rather than silently changing parser shape.
+ */
+class BoundedBlobReader {
+  private readonly metadata = new Map<string, BlobMetadata | null>();
+
+  constructor(
+    private readonly db: Database,
+    private readonly budget: SqliteSourceReadBudget
+  ) {}
+
+  prefetch(ids: readonly string[]): void {
+    const unresolved = [...new Set(ids)].filter((id) => !this.metadata.has(id));
+    const fixedPageRows = SOURCE_READ_LIMITS_V1_DEFAULTS.sqlitePageRows;
+    for (let start = 0; start < unresolved.length; start += fixedPageRows) {
+      const pageIds = unresolved.slice(start, start + fixedPageRows);
+      if (pageIds.length === 0) continue;
+      const placeholders = pageIds.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT rowid AS rowId, id, length(data) AS byteLength FROM blobs WHERE id IN (${placeholders}) ORDER BY rowid`
+        )
+        .all(...pageIds) as Array<{
+        rowId?: number | bigint;
+        id?: unknown;
+        byteLength?: number | bigint;
+      }>;
+
+      const admitted: Array<{ id: string; metadata: BlobMetadata }> = [];
+      for (const row of rows) {
+        if (
+          (typeof row.rowId !== 'number' && typeof row.rowId !== 'bigint') ||
+          typeof row.id !== 'string' ||
+          (typeof row.byteLength !== 'number' && typeof row.byteLength !== 'bigint')
+        ) {
+          throw new TypeError('SQLite returned invalid blob metadata');
+        }
+        const byteLength = Number(row.byteLength);
+        if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+          throw new TypeError('SQLite returned an invalid declared blob length');
+        }
+        admitted.push({ id: row.id, metadata: { rowId: row.rowId, byteLength } });
+      }
+      this.budget.admitMetadataPage(admitted.map(({ metadata }) => metadata.byteLength));
+      for (const { id, metadata } of admitted) this.metadata.set(id, metadata);
+      for (const id of pageIds) {
+        if (!this.metadata.has(id)) this.metadata.set(id, null);
       }
     }
+  }
+
+  read(id: string): Uint8Array | undefined {
+    this.prefetch([id]);
+    const metadata = this.metadata.get(id);
+    if (!metadata) return undefined;
+    const row = this.db
+      .prepare('SELECT data AS value FROM blobs WHERE rowid = ?')
+      .get(metadata.rowId) as { value?: unknown } | undefined;
+    if (!row || !(row.value instanceof Uint8Array)) return undefined;
+    this.budget.admitDecodedValue(row.value.byteLength);
+    return row.value;
   }
 }
 
 /** Recursive Merkle walk: 0x0a=message leaf, 0x12=subtree (recurse, ordered). */
-function readMessages(db: Database, rootId: string): { messages: Message[]; complete: boolean } {
+function readMessages(
+  db: Database,
+  rootId: string,
+  budget: SqliteSourceReadBudget,
+  failureOutcome: SourceFailureOutcome,
+  onDiagnostic?: (error: SourceEncodingError | SourceLimitExceededError) => void
+): {
+  messages: Message[];
+  messageIdentityEvidence: StoreMessageIdentityEvidence[];
+  complete: boolean;
+} {
   const messages: Message[] = [];
+  const messageIdentityEvidence: StoreMessageIdentityEvidence[] = [];
   const visited = new Set<string>();
-  const reachableLeaves: LeafObj[] = [];
+  const reachableLeaves: Array<{ hash: string; object: LeafObj }> = [];
+  const blobs = new BoundedBlobReader(db, budget);
   let complete = true;
+  let halted = false;
+
+  const reportSourceFailure = (error: unknown): boolean => {
+    if (!(error instanceof SourceEncodingError || error instanceof SourceLimitExceededError)) {
+      return false;
+    }
+    if (failureOutcome === 'fatal') throw error;
+    complete = false;
+    halted = true;
+    onDiagnostic?.(error);
+    return true;
+  };
+
   const walk = (blobId: string): void => {
-    if (visited.has(blobId)) return; // cycle guard
+    if (halted || visited.has(blobId)) return; // cycle / exhausted-budget guard
     visited.add(blobId);
-    const row = db.prepare('SELECT data FROM blobs WHERE id = ?').get(blobId) as
-      { data: Uint8Array } | undefined;
-    if (!row) {
+    let raw: unknown;
+    try {
+      raw = blobs.read(blobId);
+    } catch (error) {
+      if (reportSourceFailure(error)) return;
+      throw error;
+    }
+    if (!(raw instanceof Uint8Array)) {
       complete = false;
       debugLogStorage(`store.db: missing subtree blob ${blobId.slice(0, 12)}…`);
       return;
     }
-    const buf = Buffer.from(row.data);
+    const buf = Buffer.from(raw);
+    const references: Array<{ tag: number; childHash: string }> = [];
     let i = 0;
     while (i < buf.length - 1) {
       const tag = buf[i];
       const len = buf[i + 1];
       if ((tag === 0x0a || tag === 0x12) && len === 0x20 && i + 34 <= buf.length) {
         const childHash = buf.subarray(i + 2, i + 34).toString('hex');
-        if (tag === 0x0a) {
-          const leaf = readLeafObject(db, childHash);
-          if (leaf === null) {
-            complete = false; // missing blob
-            debugLogStorage(`store.db: missing leaf blob ${childHash.slice(0, 12)}…`);
-          } else if (leaf.kind === 'malformed') {
-            complete = false; // unparseable leaf
-            debugLogStorage(`store.db: malformed leaf ${childHash.slice(0, 12)}… → partial`);
-          } else {
-            reachableLeaves.push(leaf.object);
-          }
-        } else {
-          walk(childHash); // 0x12 subtree → recurse in order
-        }
+        references.push({ tag, childHash });
         i += 34;
       } else {
         i += 1;
+      }
+    }
+
+    try {
+      blobs.prefetch(references.map(({ childHash }) => childHash));
+    } catch (error) {
+      if (reportSourceFailure(error)) return;
+      throw error;
+    }
+    for (const { tag, childHash } of references) {
+      if (halted) return;
+      if (tag === 0x0a) {
+        let leaf: DecodedLeaf | null;
+        try {
+          leaf = readLeafObject(blobs, childHash, failureOutcome);
+        } catch (error) {
+          if (reportSourceFailure(error)) return;
+          throw error;
+        }
+        if (leaf === null) {
+          complete = false; // missing blob
+          debugLogStorage(`store.db: missing leaf blob ${childHash.slice(0, 12)}…`);
+        } else if (leaf.kind === 'malformed') {
+          complete = false; // unparseable leaf
+          debugLogStorage(`store.db: malformed leaf ${childHash.slice(0, 12)}… → partial`);
+        } else {
+          reachableLeaves.push({ hash: childHash, object: leaf.object });
+        }
+      } else {
+        walk(childHash); // 0x12 subtree → recurse in order
       }
     }
   };
@@ -159,7 +417,7 @@ function readMessages(db: Database, rootId: string): { messages: Message[]; comp
   // Index only tool results reachable from the active root. Historical or
   // abandoned blobs must not enrich the current conversation DAG.
   const toolResults: ToolResultIndex = { byId: new Map(), usedIds: new Set() };
-  for (const object of reachableLeaves) {
+  for (const { object } of reachableLeaves) {
     for (const [callId, stored] of extractToolResults(object)) {
       toolResults.byId.set(callId, stored);
     }
@@ -167,10 +425,12 @@ function readMessages(db: Database, rootId: string): { messages: Message[]; comp
 
   const encounteredToolResultIds: string[] = [];
   let encounteredUnkeyedToolResult = false;
-  for (const object of reachableLeaves) {
+  for (let traversalOrdinal = 0; traversalOrdinal < reachableLeaves.length; traversalOrdinal++) {
+    const { hash, object } = reachableLeaves[traversalOrdinal]!;
     const leaf = classifyLeaf(object, toolResults);
     if (leaf.kind === 'message') {
       messages.push(leaf.message);
+      messageIdentityEvidence.push({ representation: 'db', leafHash: hash, traversalOrdinal });
       if (!leaf.complete) {
         complete = false;
         debugLogStorage('store.db: unsupported message content block → partial');
@@ -189,7 +449,7 @@ function readMessages(db: Database, rootId: string): { messages: Message[]; comp
     complete = false;
     debugLogStorage('store.db: orphan tool result (no tool_call_id match) → partial');
   }
-  return { messages, complete };
+  return { messages, messageIdentityEvidence, complete };
 }
 
 type LeafResult =
@@ -200,14 +460,20 @@ type LeafResult =
 
 type DecodedLeaf = { kind: 'decoded'; object: LeafObj } | { kind: 'malformed' };
 
-function readLeafObject(db: Database, hash: string): DecodedLeaf | null {
-  const row = db.prepare('SELECT data FROM blobs WHERE id = ?').get(hash) as
-    { data: Uint8Array } | undefined;
-  if (!row) return null; // missing blob → caller marks partial
+function readLeafObject(
+  blobs: BoundedBlobReader,
+  hash: string,
+  outcome: SourceFailureOutcome
+): DecodedLeaf | null {
+  const raw = blobs.read(hash);
+  if (!(raw instanceof Uint8Array)) return null; // missing blob → caller marks partial
   try {
-    const obj = decodeMessageObject(Buffer.from(row.data));
+    const obj = decodeMessageObject(Buffer.from(raw), outcome);
     return obj ? { kind: 'decoded', object: obj } : { kind: 'malformed' };
-  } catch {
+  } catch (error) {
+    if (error instanceof SourceEncodingError || error instanceof SourceLimitExceededError) {
+      throw error;
+    }
     return { kind: 'malformed' };
   }
 }
@@ -393,8 +659,8 @@ function applyStoredResult(
  * Cursor stores current assistant turns inside protobuf DAG nodes. Field 4 is
  * the JSON message payload; older stores may still keep the leaf as plain JSON.
  */
-function decodeMessageObject(data: Buffer): LeafObj | null {
-  const direct = parseLeafJson(data);
+function decodeMessageObject(data: Buffer, outcome: SourceFailureOutcome): LeafObj | null {
+  const direct = parseLeafJson(data, outcome);
   if (direct) return direct;
 
   let offset = 0;
@@ -427,7 +693,7 @@ function decodeMessageObject(data: Buffer): LeafObj | null {
     const end = offset + length.value;
     if (end > data.length) return null;
     if (field === 4) {
-      const nested = parseLeafJson(data.subarray(offset, end));
+      const nested = parseLeafJson(data.subarray(offset, end), outcome);
       if (nested) return nested;
     }
     offset = end;
@@ -435,11 +701,16 @@ function decodeMessageObject(data: Buffer): LeafObj | null {
   return null;
 }
 
-function parseLeafJson(data: Uint8Array): LeafObj | null {
+function parseLeafJson(data: Uint8Array, outcome: SourceFailureOutcome): LeafObj | null {
+  const bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  const offset =
+    bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+  if (bytes[offset] !== 0x7b && bytes[offset] !== 0x5b) return null;
   try {
-    const parsed = JSON.parse(Buffer.from(data).toString('utf8')) as unknown;
+    const parsed = JSON.parse(decodeDeterministicUtf8(data, 'sqlite', outcome).text) as unknown;
     return parsed && typeof parsed === 'object' ? (parsed as LeafObj) : null;
-  } catch {
+  } catch (error) {
+    if (error instanceof SourceEncodingError) throw error;
     return null;
   }
 }

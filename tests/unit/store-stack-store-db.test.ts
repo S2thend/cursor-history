@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { existsSync, rmSync, statSync } from 'node:fs';
 import { parseStoreDb } from '../../src/core/store-stack/store-db.js';
 import * as database from '../../src/core/database/index.js';
+import type { Database } from '../../src/core/database/types.js';
 
 const DB_PATH = join(tmpdir(), `ch-store-test-${process.pid}.db`);
 const DB_PARTIAL = join(tmpdir(), `ch-store-partial-${process.pid}.db`);
@@ -258,7 +259,7 @@ describe('parseStoreDb (store.db primary source)', () => {
     }
   });
 
-  it('degrades safely and removes its private snapshot directory when backup fails', async () => {
+  it('propagates snapshot infrastructure failure and removes its private directory', async () => {
     let snapshotDir = '';
     let snapshotMode = 0;
     const backupSpy = vi
@@ -269,13 +270,55 @@ describe('parseStoreDb (store.db primary source)', () => {
         throw new Error('UNC snapshot failed');
       });
     try {
-      const data = await parseStoreDb(DB_MODERN_TOOLS);
-      expect(data).toBeNull();
+      await expect(parseStoreDb(DB_MODERN_TOOLS)).rejects.toThrow('UNC snapshot failed');
       expect(snapshotDir).not.toBe('');
       if (process.platform !== 'win32') expect(snapshotMode).toBe(0o700);
       expect(existsSync(snapshotDir)).toBe(false);
     } finally {
       backupSpy.mockRestore();
+    }
+  });
+
+  it('propagates generic driver open failures instead of classifying them as source corruption', async () => {
+    const failure = Object.assign(new Error('simulated database open I/O failure'), {
+      code: 'SQLITE_IOERR',
+    });
+    const openSpy = vi.spyOn(database, 'openDatabase').mockRejectedValueOnce(failure);
+    try {
+      await expect(parseStoreDb(DB_MODERN_TOOLS)).rejects.toBe(failure);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('propagates generic prepare/query failures and still closes the snapshot database', async () => {
+    for (const stage of ['prepare', 'query'] as const) {
+      const failure = Object.assign(new Error(`simulated ${stage} I/O failure`), {
+        code: 'SQLITE_IOERR',
+      });
+      const close = vi.fn();
+      const statement = {
+        get: vi.fn(() => {
+          throw failure;
+        }),
+        all: vi.fn(() => []),
+        run: vi.fn(() => ({ changes: 0, lastInsertRowid: 0 })),
+      };
+      const fakeDb: Database = {
+        prepare: vi.fn(() => {
+          if (stage === 'prepare') throw failure;
+          return statement;
+        }),
+        runSQL: vi.fn(),
+        close,
+      };
+      const openSpy = vi.spyOn(database, 'openDatabase').mockResolvedValueOnce(fakeDb);
+      try {
+        await expect(parseStoreDb(DB_MODERN_TOOLS)).rejects.toBe(failure);
+        expect(close).toHaveBeenCalledOnce();
+      } finally {
+        openSpy.mockRestore();
+      }
     }
   });
 

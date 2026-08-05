@@ -2,7 +2,13 @@
  * Internal types for the Cursor Store stack backend (src/core/store-stack/).
  * See specs/015-cursor-store-stack/data-model.md.
  */
-import type { Message, TranscriptState } from '../types.js';
+import type {
+  Message,
+  ResolvedSource,
+  SessionDiagnostic,
+  SessionResolution,
+  TranscriptState,
+} from '../types.js';
 export type { TranscriptState } from '../types.js';
 
 /**
@@ -76,6 +82,27 @@ export interface StoreMetaJson {
  */
 export type StoreDbState = 'missing' | 'failed' | 'empty' | 'partial' | 'complete';
 
+/** Metadata-only expectation fixed before any Store conversation payload read. */
+export type StoreDbExpectation = 'expected' | 'not-expected' | 'unknown';
+
+/** Source-native evidence retained before merge/output order can change. */
+export type StoreMessageIdentityEvidence =
+  | {
+      representation: 'db';
+      leafHash: string;
+      /** Zero-based order of the reachable message leaf in the active Merkle traversal. */
+      traversalOrdinal: number;
+    }
+  | {
+      representation: 'transcript';
+      /** One-based physical nonempty JSONL record number. */
+      sourceLine: number;
+      role: string;
+      content: string;
+      toolActivity: readonly unknown[];
+      sourceRelationships: Readonly<Record<string, unknown>>;
+    };
+
 /**
  * Internal role the transcript played in resolving a session's messages (P15).
  * Diagnostics-only — never serialized.
@@ -108,6 +135,8 @@ export interface StoreSession {
    */
   lastUpdatedAt: Date;
   messages: Message[];
+  /** Identity inputs aligned one-to-one with `messages` in source-native order. */
+  messageIdentityEvidence: StoreMessageIdentityEvidence[];
   /**
    * Backing data for `messages` (P15 — `store.db` is the primary source):
    * - `'store-complete'` / `'store-partial'`: `store.db` supplied the messages
@@ -118,7 +147,16 @@ export interface StoreSession {
    *   title/createdAt).
    * - `'store'`: metadata-only legacy alias (no `store.db` and no transcript).
    */
-  source: 'transcript' | 'store' | 'store-complete' | 'store-partial';
+  source:
+    'global' | 'workspace-fallback' | 'transcript' | 'store' | 'store-complete' | 'store-partial';
+  /** Actual selected Store representation; `source` remains fidelity-only. */
+  resolvedSource?: Exclude<ResolvedSource, 'composer' | 'merged'>;
+  /** Complete/partial selection state and stable reason codes. */
+  resolution?: SessionResolution;
+  /** Metadata-only DB expectation fixed before payload hydration. */
+  storeDbExpectation?: StoreDbExpectation;
+  /** Safe typed parser diagnostics retained for an operation-level observer. */
+  diagnostics?: SessionDiagnostic[];
   /** Explicit transcript parse state, retained even when store.db backs messages. */
   transcriptState: TranscriptState;
   /** Path to store.db if present (deep-parse target / fallback). */

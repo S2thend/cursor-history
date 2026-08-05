@@ -1,3 +1,7 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   MESSAGE_IDENTITY_VERSION,
@@ -10,6 +14,14 @@ import {
   rewriteRelationshipReferences,
   sha256CanonicalJsonV1,
 } from '../../src/core/session-identity.js';
+import { mergeCrossStackSessions } from '../../src/core/store-stack/merge.js';
+import { parseTranscriptFile } from '../../src/core/store-stack/transcript.js';
+import type { ChatSession } from '../../src/core/types.js';
+import type { Session } from '../../src/lib/types.js';
+import {
+  computeV016MessageDigest,
+  normalizeCursorSessionV016,
+} from '../helpers/v016-consumer.js';
 
 describe('canonical JSON and SHA-256 v1', () => {
   it('sorts keys by Unicode code point, preserves arrays, and applies JSON undefined rules', () => {
@@ -279,5 +291,137 @@ describe('relationship rewriting', () => {
       sidechainMessageIds: ['msg:0'],
       unresolvedSourceIds: ['unknown'],
     });
+  });
+});
+
+describe('unchanged-consumer attachment projection and fidelity', () => {
+  function compatibilityDigest(session: Session): string {
+    return computeV016MessageDigest(normalizeCursorSessionV016(session).messages);
+  }
+
+  function sourceSession(
+    source: ChatSession['source'],
+    messages: ChatSession['messages'],
+    transcriptState?: ChatSession['transcriptState']
+  ): ChatSession {
+    return {
+      id: '00000000-0017-4017-8017-000000000017',
+      index: 1,
+      title: 'Synthetic attachment contract',
+      createdAt: new Date('2024-01-17T00:00:00.000Z'),
+      lastUpdatedAt: new Date('2024-01-17T00:00:01.000Z'),
+      messageCount: messages.length,
+      messages,
+      workspaceId: 'synthetic-attachment-workspace',
+      workspacePath: '/fixture/attachments',
+      source,
+      ...(transcriptState ? { transcriptState } : {}),
+    };
+  }
+
+  it('changes replacement digest only when attachment evidence reaches consumed fields', () => {
+    const baseline: Session = {
+      id: '00000000-0016-4016-8016-000000000016',
+      workspace: '/fixture/attachments',
+      timestamp: '2024-01-16T00:00:00.000Z',
+      source: 'global',
+      messageCount: 1,
+      messages: [
+        {
+          id: 'native-attachment-message',
+          role: 'assistant',
+          content: 'Synthetic visible attachment summary.',
+          timestamp: '2024-01-16T00:00:01.000Z',
+          toolCalls: [
+            {
+              name: 'Read',
+              status: 'completed',
+              params: { path: '/fixture/attachments/synthetic.txt' },
+              result: 'Synthetic visible result.',
+            },
+          ],
+        },
+      ],
+    };
+    const baselineDigest = compatibilityDigest(baseline);
+
+    const ignoredStandalone = structuredClone(baseline) as Session & {
+      messages: Array<Session['messages'][number] & { codeBlocks?: unknown[] }>;
+    };
+    ignoredStandalone.messages[0]!.codeBlocks = [
+      { language: 'text', content: 'standalone-only evidence', startLine: 1 },
+    ];
+    ignoredStandalone.messages[0]!.toolCalls![0]!.files = [
+      '/fixture/attachments/standalone-only.txt',
+    ];
+    expect(compatibilityDigest(ignoredStandalone)).toBe(baselineDigest);
+
+    const contentProjected = structuredClone(baseline);
+    contentProjected.messages[0]!.content +=
+      '\n```text\nSynthetic lossless attachment content.\n```';
+    const projected = normalizeCursorSessionV016(contentProjected);
+    expect(projected.messages[0]!.codeBlocks).toEqual([
+      { language: 'text', content: 'Synthetic lossless attachment content.\n' },
+    ]);
+    expect(computeV016MessageDigest(projected.messages)).not.toBe(baselineDigest);
+
+    const toolProjected = structuredClone(baseline);
+    toolProjected.messages[0]!.toolCalls![0]!.result = 'Changed consumed attachment result.';
+    expect(compatibilityDigest(toolProjected)).not.toBe(baselineDigest);
+  });
+
+  it('keeps known content, marks unsupported raw attachment evidence partial, and never dereferences its URI', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cursor-history-attachment-poison-'));
+    const poisonPath = join(root, 'must-not-be-read.txt');
+    const transcriptPath = join(root, 'session.jsonl');
+    const poisonPayload = 'POISON_ATTACHMENT_PAYLOAD_MUST_NOT_APPEAR';
+    try {
+      writeFileSync(poisonPath, poisonPayload, { mode: 0o600 });
+      writeFileSync(
+        transcriptPath,
+        `${JSON.stringify({
+          role: 'assistant',
+          message: {
+            content: [
+              { type: 'text', text: 'Synthetic known transcript content.' },
+              {
+                type: 'future_attachment',
+                uri: pathToFileURL(poisonPath).href,
+                mediaType: 'application/x-synthetic',
+              },
+            ],
+          },
+        })}\n`,
+        { mode: 0o600 }
+      );
+      if (process.platform !== 'win32') chmodSync(poisonPath, 0o000);
+
+      const parsed = parseTranscriptFile(transcriptPath);
+      expect(parsed).toMatchObject({ state: 'partial' });
+      expect(parsed.messages.map(({ content }) => content)).toEqual([
+        'Synthetic known transcript content.',
+      ]);
+      expect(JSON.stringify(parsed)).not.toContain(poisonPayload);
+      expect(JSON.stringify(parsed)).not.toContain(pathToFileURL(poisonPath).href);
+
+      const composer = sourceSession('global', [
+        {
+          id: 'composer-attachment-message',
+          role: 'assistant',
+          content: 'Synthetic known transcript content.',
+          codeBlocks: [],
+        },
+      ]);
+      const store = sourceSession('transcript', parsed.messages, parsed.state);
+      const merged = mergeCrossStackSessions(composer, store, 'composer', 1);
+      expect(merged.source).toBe('workspace-fallback');
+      expect(merged.resolution).toMatchObject({
+        state: 'partial',
+        reasonCodes: ['source-partial'],
+      });
+    } finally {
+      if (process.platform !== 'win32') chmodSync(poisonPath, 0o600);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

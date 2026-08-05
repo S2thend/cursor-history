@@ -101,7 +101,7 @@ describe('Composer + Store stack integration', () => {
     expect(session).toMatchObject({
       id: SESSION_ID,
       title: 'Hybrid fixture session',
-      source: 'global',
+      source: 'workspace-fallback',
       resolvedSource: 'merged',
       sources: ['composer', 'store'],
       preferredSource: 'composer',
