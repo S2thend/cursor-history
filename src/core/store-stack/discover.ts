@@ -12,6 +12,7 @@ import { SourceEncodingError, SourceLimitExceededError } from '../errors.js';
 import { debugLogStorage } from '../database/debug.js';
 import type { DriverName } from '../database/index.js';
 import { decodeDeterministicUtf8, resolveSourceReadLimits } from '../source-read-limits.js';
+import { resolveSessionTimestamps } from '../timestamps.js';
 import type {
   ResolutionReasonCode,
   SessionDiagnostic,
@@ -121,17 +122,19 @@ export async function discoverStoreSessions(
         recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
 
         const meta = metaRead.meta;
-        const createdAt = isValidMs(meta?.createdAtMs)
-          ? new Date(meta.createdAtMs)
-          : (readMtime(sessionDir, signal) ?? new Date(0));
+        const storeMetadataTimestamps = timestampsFromStoreMeta(meta);
         const hasExplicitUpdatedAt = isValidMs(meta?.updatedAtMs);
-        const updatedAt = hasExplicitUpdatedAt ? new Date(meta!.updatedAtMs!) : createdAt;
+        const projectedTimestamps = resolveSessionTimestamps({
+          view: 'store-only',
+          storeMetadata: storeMetadataTimestamps,
+          directMessages: [],
+        });
         const candidate = emptyStoreSession({
           id: uuid,
           workspacePath: meta?.cwd,
           title: meta?.title ?? null,
-          createdAt,
-          lastUpdatedAt: updatedAt,
+          ...projectedTimestamps,
+          ...(storeMetadataTimestamps ? { storeMetadataTimestamps } : {}),
           storeDbPath: dbInventoried ? dbPath : undefined,
           chatDir: sessionDir,
         });
@@ -153,13 +156,18 @@ export async function discoverStoreSessions(
       const dbPath = join(sessionDir, 'store.db');
       const dbInventoried = pathExists(dbPath, signal);
       recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
-      const createdAt = readMtime(sessionDir, signal) ?? new Date(0);
+      const storeMetadataTimestamps = timestampsFromStoreMeta(metaRead.meta);
+      const projectedTimestamps = resolveSessionTimestamps({
+        view: 'store-only',
+        storeMetadata: storeMetadataTimestamps,
+        directMessages: [],
+      });
       const candidate = emptyStoreSession({
         id: uuid,
         workspacePath: metaRead.meta?.cwd,
         title: metaRead.meta?.title ?? null,
-        createdAt,
-        lastUpdatedAt: createdAt,
+        ...projectedTimestamps,
+        ...(storeMetadataTimestamps ? { storeMetadataTimestamps } : {}),
         storeDbPath: dbInventoried ? dbPath : undefined,
         chatDir: sessionDir,
       });
@@ -256,8 +264,12 @@ export async function discoverStoreSessions(
 
     if (deep?.title) ss.title = deep.title;
     if (deep?.createdAt) {
-      ss.createdAt = deep.createdAt;
-      if (!explicitUpdatedAt.has(ss.id)) ss.lastUpdatedAt = deep.createdAt;
+      ss.storeDbMetadataTimestamps = {
+        createdAt: deep.createdAt,
+        // store.db currently exposes one session time. Preserve the released
+        // last-update fallback only when meta.json did not store updatedAtMs.
+        ...(!explicitUpdatedAt.has(ss.id) ? { lastUpdatedAt: deep.createdAt } : {}),
+      };
     }
 
     const dbState: StoreDbState = !ss.storeDbPath
@@ -282,6 +294,7 @@ export async function discoverStoreSessions(
           ...(retainedSourceFailure ? (['source-read-failed'] as const) : []),
         ]);
       }
+      resolveStoreSessionTimestamps(ss);
       logStoreResolution(ss, dbState, 'unused');
       resolved.push(ss);
       continue;
@@ -295,6 +308,7 @@ export async function discoverStoreSessions(
       if (retainedSourceFailure) reasons.push('source-read-failed');
       ss.resolvedSource = 'store-transcript';
       setResolution(ss, reasons.length === 0 ? 'complete' : 'partial', reasons);
+      resolveStoreSessionTimestamps(ss);
       logStoreResolution(ss, dbState, ss.storeDbPath ? 'fallback' : 'only-source');
       resolved.push(ss);
       continue;
@@ -319,6 +333,7 @@ export async function discoverStoreSessions(
     ss.messageIdentityEvidence = [];
     ss.resolvedSource = 'store-metadata';
     setResolution(ss, 'partial', ['store-conversation-unavailable']);
+    resolveStoreSessionTimestamps(ss);
     logStoreResolution(ss, dbState, 'unused');
     resolved.push(ss);
   }
@@ -347,7 +362,17 @@ export function classifyStoreDbExpectation(
 function emptyStoreSession(
   fields: Pick<
     StoreSession,
-    'id' | 'workspacePath' | 'title' | 'createdAt' | 'lastUpdatedAt' | 'storeDbPath' | 'chatDir'
+    | 'id'
+    | 'workspacePath'
+    | 'title'
+    | 'createdAt'
+    | 'createdAtSource'
+    | 'lastUpdatedAt'
+    | 'lastUpdatedAtSource'
+    | 'storeDbMetadataTimestamps'
+    | 'storeMetadataTimestamps'
+    | 'storeDbPath'
+    | 'chatDir'
   >
 ): StoreSession {
   return {
@@ -509,20 +534,12 @@ function attachTranscript(
 ): void {
   throwIfAborted(signal);
   const parsed = parseTranscriptFile(file, limits, 'partial', signal);
-  const modifiedAt = readMtime(file, signal) ?? new Date(0);
   const existing = byId.get(uuid);
   const failures = parsed.diagnostic ? [parsed.diagnostic] : [];
 
   if (existing) {
     if (
-      !shouldReplaceTranscript(
-        existing,
-        parsed.state,
-        parsed.messages.length,
-        modifiedAt,
-        file,
-        signal
-      )
+      !shouldReplaceTranscript(existing, parsed.state, parsed.messages.length, file, signal)
     ) {
       return;
     }
@@ -532,19 +549,19 @@ function attachTranscript(
     existing.messageIdentityEvidence = parsed.messageIdentityEvidence;
     existing.rawContentBlockEvidence = parsed.rawContentBlockEvidence;
     selectedFailures.set(uuid, failures);
-    if (!existing.chatDir) {
-      existing.createdAt = modifiedAt;
-      existing.lastUpdatedAt = modifiedAt;
-    }
     return;
   }
+
+  const projectedTimestamps = resolveSessionTimestamps({
+    view: 'store-only',
+    directMessages: parsed.messages,
+  });
 
   byId.set(uuid, {
     id: uuid,
     workspacePath: undefined,
     title: null,
-    createdAt: modifiedAt,
-    lastUpdatedAt: modifiedAt,
+    ...projectedTimestamps,
     messages: parsed.messages,
     messageIdentityEvidence: parsed.messageIdentityEvidence,
     rawContentBlockEvidence: parsed.rawContentBlockEvidence,
@@ -555,12 +572,11 @@ function attachTranscript(
   selectedFailures.set(uuid, failures);
 }
 
-/** Prefer state, then message count, then recency; path is a stable tie-breaker. */
+/** Prefer state, then message count, then canonical path; never filesystem time. */
 function shouldReplaceTranscript(
   existing: StoreSession,
   candidateState: StoreSession['transcriptState'],
   candidateMessageCount: number,
-  candidateModifiedAt: Date,
   candidatePath: string,
   signal?: AbortSignal
 ): boolean {
@@ -580,10 +596,6 @@ function shouldReplaceTranscript(
   }
   if (candidateMessageCount !== existing.messages.length) {
     return candidateMessageCount > existing.messages.length;
-  }
-  const existingModifiedAt = readMtime(existing.transcriptPath, signal)?.getTime() ?? 0;
-  if (candidateModifiedAt.getTime() !== existingModifiedAt) {
-    return candidateModifiedAt.getTime() > existingModifiedAt;
   }
   return candidatePath < existing.transcriptPath;
 }
@@ -732,16 +744,6 @@ function pathExists(path: string, signal?: AbortSignal): boolean {
   }
 }
 
-function readMtime(path: string, signal?: AbortSignal): Date | undefined {
-  throwIfAborted(signal);
-  try {
-    return statSync(path).mtime ?? undefined;
-  } catch (error) {
-    if (isAbsentOrWrongType(error)) return undefined;
-    throw error;
-  }
-}
-
 function isAbsentOrWrongType(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException)?.code;
   return code === 'ENOENT' || code === 'ENOTDIR';
@@ -779,7 +781,40 @@ function replaceMetadata(target: StoreSession, source: StoreSession): void {
   target.workspacePath = source.workspacePath;
   target.title = source.title;
   target.createdAt = source.createdAt;
+  target.createdAtSource = source.createdAtSource;
   target.lastUpdatedAt = source.lastUpdatedAt;
+  target.lastUpdatedAtSource = source.lastUpdatedAtSource;
+  target.storeDbMetadataTimestamps = source.storeDbMetadataTimestamps;
+  target.storeMetadataTimestamps = source.storeMetadataTimestamps;
   target.storeDbPath = source.storeDbPath;
   target.chatDir = source.chatDir;
+}
+
+function timestampsFromStoreMeta(
+  meta: StoreMetaJson | undefined
+): StoreSession['storeMetadataTimestamps'] {
+  const createdAt = isValidMs(meta?.createdAtMs) ? new Date(meta.createdAtMs) : undefined;
+  const explicitUpdatedAt = isValidMs(meta?.updatedAtMs)
+    ? new Date(meta.updatedAtMs)
+    : undefined;
+  const lastUpdatedAt = explicitUpdatedAt ?? createdAt;
+  if (!createdAt && !lastUpdatedAt) return undefined;
+  return {
+    ...(createdAt ? { createdAt } : {}),
+    ...(lastUpdatedAt ? { lastUpdatedAt } : {}),
+  };
+}
+
+/** Resolve public Store session clocks without filesystem or discovery-time input. */
+function resolveStoreSessionTimestamps(session: StoreSession): void {
+  const projection = resolveSessionTimestamps({
+    view: 'store-only',
+    storeDbMetadata: session.storeDbMetadataTimestamps,
+    storeMetadata: session.storeMetadataTimestamps,
+    directMessages: session.messages,
+  });
+  session.createdAt = projection.createdAt;
+  session.createdAtSource = projection.createdAtSource;
+  session.lastUpdatedAt = projection.lastUpdatedAt;
+  session.lastUpdatedAtSource = projection.lastUpdatedAtSource;
 }

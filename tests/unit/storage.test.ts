@@ -291,8 +291,8 @@ function createMockDb(queryMap: Record<string, { get?: unknown; all?: unknown[] 
       for (const [key, result] of Object.entries(queryMap)) {
         if (sql.includes(key)) {
           return {
-            get: vi.fn((..._args: unknown[]) => result.get),
-            all: vi.fn((..._args: unknown[]) => result.all ?? []),
+            get: vi.fn(() => result.get),
+            all: vi.fn(() => result.all ?? []),
             run: vi.fn(),
           };
         }
@@ -1501,7 +1501,7 @@ describe('listSessions', () => {
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
       { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
     ]);
-    vi.mocked(readFileSync).mockImplementation((path: any) => {
+    vi.mocked(readFileSync).mockImplementation((path: Parameters<typeof readFileSync>[0]) => {
       if (path.includes('ws1')) return JSON.stringify({ folder: 'file:///folder' });
       if (path.includes('ws2'))
         return JSON.stringify({
@@ -1532,7 +1532,7 @@ describe('listSessions', () => {
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
       { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
     ]);
-    vi.mocked(readFileSync).mockImplementation((path: any) => {
+    vi.mocked(readFileSync).mockImplementation((path: Parameters<typeof readFileSync>[0]) => {
       if (path.includes('ws1')) return JSON.stringify({ folder: 'file:///folder' });
       if (path.includes('ws2'))
         return JSON.stringify({
@@ -1583,7 +1583,7 @@ describe('listSessions', () => {
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
       { name: 'ws2', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
     ]);
-    vi.mocked(readFileSync).mockImplementation((path: any) => {
+    vi.mocked(readFileSync).mockImplementation((path: Parameters<typeof readFileSync>[0]) => {
       if (path.includes('ws1')) return JSON.stringify({ folder: 'file:///folder' });
       if (path.includes('ws2'))
         return JSON.stringify({
@@ -4296,7 +4296,7 @@ describe('timestamp fallback - US1', () => {
     const result = await getSession(1, '/data');
     expect(result).not.toBeNull();
     expect(result!.messages[0]!.timestamp).toEqual(new Date(sessionCreatedAt));
-    expect(result!.messages[0]!.timestampSource).toBeUndefined();
+    expect(result!.messages[0]!.timestampSource).toBe('session-fallback');
   });
 
   it('mixed-format session keeps stored times and fills a trailing Composer gap', async () => {
@@ -4349,7 +4349,7 @@ describe('timestamp fallback - US1', () => {
     expect(result!.messages[1]!.timestamp).toEqual(new Date(rpcTime));
     // Trailing gap uses the preceding stored time.
     expect(result!.messages[2]!.timestamp).toEqual(new Date(rpcTime));
-    expect(result!.messages[2]!.timestampSource).toBeUndefined();
+    expect(result!.messages[2]!.timestampSource).toBe('inferred-previous');
   });
 });
 
@@ -4364,9 +4364,9 @@ describe('fillTimestampGaps', () => {
 
   it('does not change messages when all timestamps are present', () => {
     const messages = [
-      { timestamp: d1 as Date | null },
-      { timestamp: d2 as Date | null },
-      { timestamp: d3 as Date | null },
+      { timestamp: d1 as Date | null, timestampSource: 'composer-timing' as const },
+      { timestamp: d2 as Date | null, timestampSource: 'composer-timing' as const },
+      { timestamp: d3 as Date | null, timestampSource: 'composer-timing' as const },
     ];
     fillTimestampGaps(messages);
     expect(messages[0]!.timestamp).toBe(d1);
@@ -4375,77 +4375,90 @@ describe('fillTimestampGaps', () => {
   });
 
   it('first message null, second has timestamp: first gets second (prefer next)', () => {
-    const messages = [{ timestamp: null as Date | null }, { timestamp: d2 as Date | null }];
+    const messages = [
+      { timestamp: null as Date | null, timestampSource: undefined },
+      { timestamp: d2 as Date | null, timestampSource: 'composer-timing' as const },
+    ];
     fillTimestampGaps(messages);
-    expect(messages[0]!.timestamp).toBe(d2);
+    expect(messages[0]!.timestamp).toEqual(d2);
+    expect(messages[0]!.timestampSource).toBe('inferred-next');
     expect(messages[1]!.timestamp).toBe(d2);
   });
 
   it('last message null, previous has timestamp: last gets previous', () => {
-    const messages = [{ timestamp: d1 as Date | null }, { timestamp: null as Date | null }];
+    const messages = [
+      { timestamp: d1 as Date | null, timestampSource: 'composer-timing' as const },
+      { timestamp: null as Date | null, timestampSource: undefined },
+    ];
     fillTimestampGaps(messages);
     expect(messages[0]!.timestamp).toBe(d1);
-    expect(messages[1]!.timestamp).toBe(d1);
+    expect(messages[1]!.timestamp).toEqual(d1);
+    expect(messages[1]!.timestampSource).toBe('inferred-previous');
   });
 
   it('middle message null, both neighbors have timestamps: gets next (prefer next)', () => {
     const messages = [
-      { timestamp: d1 as Date | null },
-      { timestamp: null as Date | null },
-      { timestamp: d3 as Date | null },
+      { timestamp: d1 as Date | null, timestampSource: 'composer-timing' as const },
+      { timestamp: null as Date | null, timestampSource: undefined },
+      { timestamp: d3 as Date | null, timestampSource: 'composer-timing' as const },
     ];
     fillTimestampGaps(messages);
-    expect(messages[1]!.timestamp).toBe(d3);
+    expect(messages[1]!.timestamp).toEqual(d3);
+    expect(messages[1]!.timestampSource).toBe('inferred-next');
   });
 
   it('multiple consecutive nulls: all get next available timestamp', () => {
     const messages = [
-      { timestamp: null as Date | null },
-      { timestamp: null as Date | null },
-      { timestamp: null as Date | null },
-      { timestamp: d3 as Date | null },
+      { timestamp: null as Date | null, timestampSource: undefined },
+      { timestamp: null as Date | null, timestampSource: undefined },
+      { timestamp: null as Date | null, timestampSource: undefined },
+      { timestamp: d3 as Date | null, timestampSource: 'composer-timing' as const },
     ];
     fillTimestampGaps(messages);
-    expect(messages[0]!.timestamp).toBe(d3);
-    expect(messages[1]!.timestamp).toBe(d3);
-    expect(messages[2]!.timestamp).toBe(d3);
+    expect(messages[0]!.timestamp).toEqual(d3);
+    expect(messages[1]!.timestamp).toEqual(d3);
+    expect(messages[2]!.timestamp).toEqual(d3);
     expect(messages[3]!.timestamp).toBe(d3);
   });
 
   it('all messages null with sessionCreatedAt: all get session timestamp', () => {
     const messages = [{ timestamp: null as Date | null }, { timestamp: null as Date | null }];
     fillTimestampGaps(messages, sessionDate);
-    expect(messages[0]!.timestamp).toBe(sessionDate);
-    expect(messages[1]!.timestamp).toBe(sessionDate);
+    expect(messages[0]!.timestamp).toEqual(sessionDate);
+    expect(messages[1]!.timestamp).toEqual(sessionDate);
+    expect(messages.map((message) => message.timestampSource)).toEqual([
+      'session-fallback',
+      'session-fallback',
+    ]);
   });
 
-  it('all messages null without sessionCreatedAt: all get current time (last resort)', () => {
-    const before = Date.now();
+  it('all messages null without sessionCreatedAt: all get deterministic epoch/unknown', () => {
     const messages = [{ timestamp: null as Date | null }, { timestamp: null as Date | null }];
     fillTimestampGaps(messages);
-    const after = Date.now();
     for (const msg of messages) {
-      expect(msg.timestamp).toBeInstanceOf(Date);
-      expect((msg.timestamp as Date).getTime()).toBeGreaterThanOrEqual(before);
-      expect((msg.timestamp as Date).getTime()).toBeLessThanOrEqual(after);
+      expect(msg.timestamp).toEqual(new Date(0));
+      expect(msg.timestampSource).toBe('unknown');
     }
   });
 
   it('single message with null timestamp: gets session fallback', () => {
     const messages = [{ timestamp: null as Date | null }];
     fillTimestampGaps(messages, sessionDate);
-    expect(messages[0]!.timestamp).toBe(sessionDate);
+    expect(messages[0]!.timestamp).toEqual(sessionDate);
+    expect(messages[0]!.timestampSource).toBe('session-fallback');
   });
 
   it('trailing nulls after a resolved message: get previous timestamp', () => {
     const messages = [
-      { timestamp: d1 as Date | null },
-      { timestamp: null as Date | null },
-      { timestamp: null as Date | null },
+      { timestamp: d1 as Date | null, timestampSource: 'composer-timing' as const },
+      { timestamp: null as Date | null, timestampSource: undefined },
+      { timestamp: null as Date | null, timestampSource: undefined },
     ];
     fillTimestampGaps(messages);
-    expect(messages[1]!.timestamp).toBe(d1);
-    expect(messages[2]!.timestamp).toBe(d1);
+    expect(messages[1]!.timestamp).toEqual(d1);
+    expect(messages[2]!.timestamp).toEqual(d1);
+    expect(messages[1]!.timestampSource).toBe('inferred-previous');
+    expect(messages[2]!.timestampSource).toBe('inferred-previous');
   });
 });
 
@@ -4480,18 +4493,18 @@ describe('timestamp fallback - US3 session-level', () => {
     expect(result!.messages).toHaveLength(3);
     for (const m of result!.messages) {
       expect(m.timestamp).toEqual(new Date(sessionCreatedAt));
-      expect(m.timestampSource).toBeUndefined();
+      expect(m.timestampSource).toBe('session-fallback');
     }
   });
 
-  it('uses a valid runtime fallback when Composer sessionCreatedAt is unavailable', async () => {
+  it('uses deterministic epoch/unknown when Composer sessionCreatedAt is unavailable', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
     ]);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
 
-    // Session with no createdAt (will default to new Date() in listSessions)
+    // Session with no stored metadata or direct message timestamp.
     const composerData = JSON.stringify({
       allComposers: [{ composerId: 'c1', name: 'Test' }],
     });
@@ -4500,13 +4513,12 @@ describe('timestamp fallback - US3 session-level', () => {
 
     setupGetSessionMocks(composerData, [{ key: 'bubbleId:c1:b1', value: b1 }]);
 
-    const before = Date.now();
     const result = await getSession(1, '/data');
-    const after = Date.now();
     expect(result).not.toBeNull();
-    expect(result!.messages[0]!.timestamp).toBeInstanceOf(Date);
-    expect(result!.messages[0]!.timestamp!.getTime()).toBeGreaterThanOrEqual(before);
-    expect(result!.messages[0]!.timestamp!.getTime()).toBeLessThanOrEqual(after);
+    expect(result!.createdAt).toEqual(new Date(0));
+    expect(result!.createdAtSource).toBe('epoch-unknown');
+    expect(result!.messages[0]!.timestamp).toEqual(new Date(0));
+    expect(result!.messages[0]!.timestampSource).toBe('unknown');
   });
 
   it('keeps directly-stored Composer times and fills surrounding gaps from neighbors', async () => {

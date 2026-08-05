@@ -7,8 +7,10 @@ import type {
   ResolvedSource,
   SessionDiagnostic,
   SessionResolution,
+  SessionTimestampSource,
   TranscriptState,
 } from '../types.js';
+import type { SessionMetadataTimestamps } from '../timestamps.js';
 export type { TranscriptState } from '../types.js';
 
 /**
@@ -136,12 +138,20 @@ export interface StoreSession {
   /** Session title (store.db meta.name when available, else null). */
   title: string | null;
   createdAt: Date;
+  /** Deterministic provenance for the resolved public creation time. */
+  createdAtSource: SessionTimestampSource;
   /**
    * Session-level last-update time. From a valid `updatedAtMs` when
    * present, otherwise `createdAt`. Session metadata only — never copied onto
    * messages.
    */
   lastUpdatedAt: Date;
+  /** Deterministic provenance for the resolved public update time. */
+  lastUpdatedAtSource: SessionTimestampSource;
+  /** Selected source-native store.db metadata retained until projection. */
+  storeDbMetadataTimestamps?: SessionMetadataTimestamps;
+  /** Selected source-native meta.json metadata retained until projection. */
+  storeMetadataTimestamps?: SessionMetadataTimestamps;
   messages: Message[];
   /** Identity inputs aligned one-to-one with `messages` in source-native order. */
   messageIdentityEvidence: StoreMessageIdentityEvidence[];

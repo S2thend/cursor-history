@@ -168,9 +168,10 @@ describe('discoverStoreSessions — metadata before transcript attachment', () =
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('uses ACP metadata time for session createdAt but not for messages', async () => {
+  it('ignores ACP filesystem time for session createdAt and messages', async () => {
     const session = (await discoverStoreSessions(root)).find((s) => s.id === AUUID);
-    expect(session?.createdAt).toEqual(acpCreatedAt);
+    expect(session?.createdAt).toEqual(new Date(0));
+    expect(session?.createdAtSource).toBe('epoch-unknown');
     // Transcripts carry no per-message timestamp; session createdAt is not
     // copied onto messages.
     expect(session?.messages[0]?.timestamp).toBeUndefined();
@@ -521,12 +522,14 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     expect(session?.resolvedSource).toBe('store-transcript');
   });
 
-  it('prefers the newer equal-quality duplicate and keeps its transcript-only timestamp', async () => {
+  it('uses lexical order for equal-quality duplicates and never projects transcript mtime', async () => {
     const session = (await discoverStoreSessions(root)).find((item) => item.id === NEWER_UUID);
-    expect(session?.transcriptPath).toContain('z-new');
-    expect(session?.messages.map((message) => message.content)).toEqual(['new']);
-    expect(session?.createdAt).toEqual(new Date('2026-01-02T00:00:00Z'));
-    expect(session?.lastUpdatedAt).toEqual(new Date('2026-01-02T00:00:00Z'));
+    expect(session?.transcriptPath).toContain('a-old');
+    expect(session?.messages.map((message) => message.content)).toEqual(['old']);
+    expect(session?.createdAt).toEqual(new Date(0));
+    expect(session?.createdAtSource).toBe('epoch-unknown');
+    expect(session?.lastUpdatedAt).toEqual(new Date(0));
+    expect(session?.lastUpdatedAtSource).toBe('epoch-unknown');
   });
 
   it('retains partial transcript messages and provenance when no store.db exists', async () => {

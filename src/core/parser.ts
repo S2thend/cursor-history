@@ -278,12 +278,46 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     }
   }
 
+  const storeDbMetadata =
+    ss.storeDbMetadataTimestamps ??
+    (ss.createdAtSource === 'store-db-metadata' ||
+    ss.lastUpdatedAtSource === 'store-db-metadata'
+      ? {
+          ...(ss.createdAtSource === 'store-db-metadata' ? { createdAt: ss.createdAt } : {}),
+          ...(ss.lastUpdatedAtSource === 'store-db-metadata'
+            ? { lastUpdatedAt: ss.lastUpdatedAt }
+            : {}),
+        }
+      : undefined);
+  const storeMetadata =
+    ss.storeMetadataTimestamps ??
+    (ss.createdAtSource === 'store-meta' || ss.lastUpdatedAtSource === 'store-meta'
+      ? {
+          ...(ss.createdAtSource === 'store-meta' ? { createdAt: ss.createdAt } : {}),
+          ...(ss.lastUpdatedAtSource === 'store-meta'
+            ? { lastUpdatedAt: ss.lastUpdatedAt }
+            : {}),
+        }
+      : undefined);
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'store-only',
+    storeDbMetadata,
+    storeMetadata,
+    directMessages: messages,
+  });
+  resolveMessageTimestamps(messages, {
+    timestamp: sessionTimestamps.createdAt,
+    source: sessionTimestamps.createdAtSource,
+  });
+
   const result: ChatSession = {
     id: ss.id,
     index,
     title: ss.title,
-    createdAt: ss.createdAt,
-    lastUpdatedAt: ss.lastUpdatedAt,
+    createdAt: sessionTimestamps.createdAt,
+    createdAtSource: sessionTimestamps.createdAtSource,
+    lastUpdatedAt: sessionTimestamps.lastUpdatedAt,
+    lastUpdatedAtSource: sessionTimestamps.lastUpdatedAtSource,
     messageCount: messages.length,
     messages,
     workspaceId: 'store',
@@ -305,8 +339,6 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
     transcriptState: ss.transcriptState,
   };
-  result.createdAtSource = ss.resolvedSource === 'store-db' ? 'store-db-metadata' : 'store-meta';
-  result.lastUpdatedAtSource = result.createdAtSource;
   return result;
 }
 

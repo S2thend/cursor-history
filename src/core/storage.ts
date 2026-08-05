@@ -59,6 +59,13 @@ import type { StoreSession } from './store-stack/types.js';
 import { mergeCrossStackSessions, applyStoreMergeToSummary } from './store-stack/merge.js';
 import { resolveSourceReadLimits } from './source-read-limits.js';
 import { isSessionIntegrityError } from './errors.js';
+import {
+  isValidTimestamp,
+  resolveMessageTimestamps,
+  resolveSessionTimestamps,
+  type ResolvedSessionTimestamps,
+  type SessionMetadataTimestamps,
+} from './timestamps.js';
 
 interface StorageReadOperationOptions {
   readonly sqliteDriver?: DriverName;
@@ -227,7 +234,9 @@ interface GlobalComposerSummary {
   id: string;
   title: string | null;
   createdAt: Date;
+  createdAtSource: ResolvedSessionTimestamps['createdAtSource'];
   lastUpdatedAt: Date;
+  lastUpdatedAtSource: ResolvedSessionTimestamps['lastUpdatedAtSource'];
   messageCount: number;
   preview: string;
 }
@@ -316,6 +325,49 @@ function parseDateValue(value: unknown): Date | null {
     typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : value;
   const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function composerMetadataTimestamps(
+  data: Readonly<Record<string, unknown>>
+): SessionMetadataTimestamps {
+  return {
+    createdAt: parseDateValue(data['createdAt']),
+    lastUpdatedAt:
+      parseDateValue(data['lastUpdatedAt']) ?? parseDateValue(data['updatedAt']),
+  };
+}
+
+function composerMetadataTimestampsFromJson(
+  value: string | undefined
+): SessionMetadataTimestamps {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return composerMetadataTimestamps(parsed as Record<string, unknown>);
+  } catch {
+    return {};
+  }
+}
+
+function composerMetadataTimestampsForSummary(
+  value: string | undefined,
+  summary: Pick<
+    ChatSessionSummary,
+    'createdAt' | 'createdAtSource' | 'lastUpdatedAt' | 'lastUpdatedAtSource'
+  >
+): SessionMetadataTimestamps {
+  const stored = composerMetadataTimestampsFromJson(value);
+  return {
+    createdAt:
+      stored.createdAt ??
+      (summary.createdAtSource === 'composer-metadata' ? summary.createdAt : undefined),
+    lastUpdatedAt:
+      stored.lastUpdatedAt ??
+      (summary.lastUpdatedAtSource === 'composer-metadata'
+        ? summary.lastUpdatedAt
+        : undefined),
+  };
 }
 
 function uriToPath(uri: string): string {
@@ -643,10 +695,25 @@ export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
   }
 }
 
-function resolveBubbleMessages(bubbleRows: BubbleRow[], sessionCreatedAt: Date): Message[] {
-  const messages = bubbleRows.map((row) => mapBubbleToMessage(row));
-  fillTimestampGaps(messages, sessionCreatedAt);
-  return messages as Message[];
+interface ComposerBubbleProjection extends ResolvedSessionTimestamps {
+  messages: Message[];
+}
+
+function resolveBubbleMessages(
+  bubbleRows: BubbleRow[],
+  composerMetadata: SessionMetadataTimestamps = {}
+): ComposerBubbleProjection {
+  const messages = bubbleRows.map((row) => mapBubbleToMessage(row)) as Message[];
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'composer-backed',
+    composerMetadata,
+    directMessages: messages,
+  });
+  resolveMessageTimestamps(messages, {
+    timestamp: sessionTimestamps.createdAt,
+    source: sessionTimestamps.createdAtSource,
+  });
+  return { ...sessionTimestamps, messages };
 }
 
 function parseComposerSessionUsage(
@@ -1168,6 +1235,20 @@ function buildGlobalComposerSummary(
     return null;
   }
 
+  const composerMetadata = composerMetadataTimestamps(composerData);
+  let directMessages: Message[] = [];
+  if (!composerMetadata.createdAt || !composerMetadata.lastUpdatedAt) {
+    const timestampRows = db
+      .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC')
+      .all(`bubbleId:${composerId}:%`) as BubbleRow[];
+    directMessages = timestampRows.map((row) => mapBubbleToMessage(row)) as Message[];
+  }
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'composer-backed',
+    composerMetadata,
+    directMessages,
+  });
+
   let preview = '';
   if (options?.includePreview !== false) {
     const firstBubble = db
@@ -1183,12 +1264,6 @@ function buildGlobalComposerSummary(
     }
   }
 
-  const createdAt = parseDateValue(composerData['createdAt']) ?? new Date();
-  const lastUpdatedAt =
-    parseDateValue(composerData['lastUpdatedAt']) ??
-    parseDateValue(composerData['updatedAt']) ??
-    createdAt;
-
   return {
     id: composerId,
     title:
@@ -1197,8 +1272,7 @@ function buildGlobalComposerSummary(
         : typeof composerData['title'] === 'string'
           ? composerData['title']
           : null,
-    createdAt,
-    lastUpdatedAt,
+    ...sessionTimestamps,
     messageCount,
     preview,
   };
@@ -1632,7 +1706,9 @@ export async function listSessions(
           index: 0, // Will be assigned after sorting
           title: session.title,
           createdAt: session.createdAt,
+          createdAtSource: session.createdAtSource,
           lastUpdatedAt: session.lastUpdatedAt,
+          lastUpdatedAtSource: session.lastUpdatedAtSource,
           messageCount: session.messageCount,
           workspaceId: workspace.id,
           workspacePath: contractPath(workspace.path),
@@ -1706,7 +1782,9 @@ export async function listSessions(
                 index: 0,
                 title: summary.title,
                 createdAt: summary.createdAt,
+                createdAtSource: summary.createdAtSource,
                 lastUpdatedAt: summary.lastUpdatedAt,
+                lastUpdatedAtSource: summary.lastUpdatedAtSource,
                 messageCount: summary.messageCount,
                 workspaceId: candidate.workspace.id,
                 workspacePath: contractPath(candidate.workspace.path),
@@ -1733,7 +1811,9 @@ export async function listSessions(
                   index: 0,
                   title: summary.title,
                   createdAt: summary.createdAt,
+                  createdAtSource: summary.createdAtSource,
                   lastUpdatedAt: summary.lastUpdatedAt,
+                  lastUpdatedAtSource: summary.lastUpdatedAtSource,
                   messageCount: summary.messageCount,
                   workspaceId: candidate.workspace.id,
                   workspacePath: contractPath(candidate.workspace.path),
@@ -1768,7 +1848,9 @@ export async function listSessions(
                 index: 0,
                 title: summary.title,
                 createdAt: summary.createdAt,
+                createdAtSource: summary.createdAtSource,
                 lastUpdatedAt: summary.lastUpdatedAt,
+                lastUpdatedAtSource: summary.lastUpdatedAtSource,
                 messageCount: summary.messageCount,
                 workspaceId: 'global',
                 workspacePath: derivedPath ? contractPath(derivedPath) : '(global)',
@@ -1811,7 +1893,10 @@ export async function listSessions(
               id: ss.id,
               title: ss.title,
               createdAt: ss.createdAt,
+              createdAtSource: ss.createdAtSource,
               lastUpdatedAt: ss.lastUpdatedAt,
+              lastUpdatedAtSource: ss.lastUpdatedAtSource,
+              directMessages: ss.messages,
               workspacePath: ss.workspacePath,
               messageCount: ss.messages.length,
               source: ss.source,
@@ -1835,7 +1920,9 @@ export async function listSessions(
         index: 0,
         title: ss.title,
         createdAt: ss.createdAt,
+        createdAtSource: ss.createdAtSource,
         lastUpdatedAt: ss.lastUpdatedAt,
+        lastUpdatedAtSource: ss.lastUpdatedAtSource,
         messageCount: ss.messages.length,
         workspaceId: 'store',
         workspacePath: ss.workspacePath ? contractPath(ss.workspacePath) : '(unknown workspace)',
@@ -1845,8 +1932,6 @@ export async function listSessions(
         resolutionState: ss.resolution?.state,
         resolution: ss.resolution,
         messageIdentityVersion: 1,
-        createdAtSource: ss.resolvedSource === 'store-db' ? 'store-db-metadata' : 'store-meta',
-        lastUpdatedAtSource: ss.resolvedSource === 'store-db' ? 'store-db-metadata' : 'store-meta',
         transcriptState: ss.transcriptState,
       });
     }
@@ -2187,7 +2272,11 @@ async function loadComposerSession(
       if (globalQueryFailure !== undefined) throw globalQueryFailure;
 
       if (bubbleRows.length > 0) {
-        const resolvedMessages = resolveBubbleMessages(bubbleRows, summary.createdAt);
+        const projection = resolveBubbleMessages(
+          bubbleRows,
+          composerMetadataTimestampsForSummary(composerDataRow?.value, summary)
+        );
+        const resolvedMessages = projection.messages;
         const sessionUsage = parseComposerSessionUsage(composerDataRow?.value, resolvedMessages);
         const activeBranchBubbleIds = extractActiveBranchBubbleIds(composerDataRow?.value);
 
@@ -2195,8 +2284,10 @@ async function loadComposerSession(
           id: summary.id,
           index,
           title: summary.title,
-          createdAt: summary.createdAt,
-          lastUpdatedAt: summary.lastUpdatedAt,
+          createdAt: projection.createdAt,
+          createdAtSource: projection.createdAtSource,
+          lastUpdatedAt: projection.lastUpdatedAt,
+          lastUpdatedAtSource: projection.lastUpdatedAtSource,
           messageCount: resolvedMessages.length,
           messages: resolvedMessages,
           workspaceId: summary.workspaceId,
@@ -2251,6 +2342,8 @@ async function loadComposerSession(
       index,
       workspaceId: workspace.id,
       workspacePath: summary.workspacePath,
+      createdAtSource: session.createdAtSource,
+      lastUpdatedAtSource: session.lastUpdatedAtSource,
       source: globalLoadFailed ? 'workspace-fallback' : session.source,
       activeBranchBubbleIds: undefined,
     };
@@ -2438,7 +2531,21 @@ export async function listGlobalSessions(customDataPath?: string): Promise<ChatS
           }
         }
 
-        const createdAt = parseDateValue(data.createdAt) ?? new Date();
+        const composerMetadata = composerMetadataTimestamps(
+          data as unknown as Record<string, unknown>
+        );
+        let directMessages: Message[] = [];
+        if (!composerMetadata.createdAt || !composerMetadata.lastUpdatedAt) {
+          const timestampRows = db
+            .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC')
+            .all(`bubbleId:${composerId}:%`) as BubbleRow[];
+          directMessages = timestampRows.map((bubble) => mapBubbleToMessage(bubble)) as Message[];
+        }
+        const sessionTimestamps = resolveSessionTimestamps({
+          view: 'composer-backed',
+          composerMetadata,
+          directMessages,
+        });
         const workspacePath =
           data.workspaceIdentifier?.uri?.fsPath ??
           data.workspaceIdentifier?.uri?.path ??
@@ -2452,9 +2559,7 @@ export async function listGlobalSessions(customDataPath?: string): Promise<ChatS
           id: composerId,
           index: 0,
           title: data.name ?? data.title ?? null,
-          createdAt,
-          lastUpdatedAt:
-            parseDateValue(data.lastUpdatedAt) ?? parseDateValue(data.updatedAt) ?? createdAt,
+          ...sessionTimestamps,
           messageCount: bubbleCount.count,
           workspaceId: 'global',
           workspacePath: contractPath(workspacePath),
@@ -2511,11 +2616,14 @@ export async function getGlobalSession(
       return null;
     }
 
-    const resolvedMessages = resolveBubbleMessages(bubbleRows, summary.createdAt);
-
     const composerRow = db
       .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
       .get(`composerData:${summary.id}`) as { value: string } | undefined;
+    const projection = resolveBubbleMessages(
+      bubbleRows,
+      composerMetadataTimestampsForSummary(composerRow?.value, summary)
+    );
+    const resolvedMessages = projection.messages;
     const sessionUsage = parseComposerSessionUsage(composerRow?.value, resolvedMessages);
     const activeBranchBubbleIds = extractActiveBranchBubbleIds(composerRow?.value);
 
@@ -2523,8 +2631,10 @@ export async function getGlobalSession(
       id: summary.id,
       index,
       title: summary.title,
-      createdAt: summary.createdAt,
-      lastUpdatedAt: summary.lastUpdatedAt,
+      createdAt: projection.createdAt,
+      createdAtSource: projection.createdAtSource,
+      lastUpdatedAt: projection.lastUpdatedAt,
+      lastUpdatedAtSource: projection.lastUpdatedAtSource,
       messageCount: resolvedMessages.length,
       messages: resolvedMessages,
       workspaceId: 'global',
@@ -3253,15 +3363,9 @@ export function extractTimestampSource(
 }
 
 /**
- * Fill null timestamps in a message array by interpolating from neighbors.
- *
- * Pass 1: For each message with a null timestamp, prefer the next message's
- * timestamp (user messages typically precede assistant responses, so the next
- * assistant's time is the closest approximation). Falls back to the previous
- * message's timestamp if no subsequent message has one.
- *
- * Pass 2: Any remaining null timestamps are set to sessionCreatedAt (if provided)
- * or new Date() as an absolute last resort.
+ * Resolve message timestamp gaps through the shared deterministic projection.
+ * Direct source values remain anchors; inferred/unknown values never become
+ * anchors. The final fallback is Unix epoch rather than the read-time clock.
  *
  * Mutates the array in place.
  *
@@ -3269,41 +3373,19 @@ export function extractTimestampSource(
  * @param sessionCreatedAt - Session creation time for final fallback
  */
 export function fillTimestampGaps(
-  messages: Array<{ timestamp: Date | null; [key: string]: unknown }>,
+  messages: Array<{
+    timestamp: Date | null | undefined;
+    timestampSource?: MessageTimestampSource;
+    [key: string]: unknown;
+  }>,
   sessionCreatedAt?: Date
 ): void {
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i]!.timestamp !== null) continue;
-
-    // Scan forward for the next message with a timestamp
-    let found = false;
-    for (let j = i + 1; j < messages.length; j++) {
-      if (messages[j]!.timestamp !== null) {
-        messages[i]!.timestamp = messages[j]!.timestamp;
-        found = true;
-        break;
-      }
-    }
-    if (found) continue;
-
-    // Scan backward for the previous message with a timestamp
-    for (let j = i - 1; j >= 0; j--) {
-      if (messages[j]!.timestamp !== null) {
-        messages[i]!.timestamp = messages[j]!.timestamp;
-        found = true;
-        break;
-      }
-    }
-    if (found) continue;
-  }
-
-  // Final fallback: session creation time or current time
-  const fallback = sessionCreatedAt ?? new Date();
-  for (const msg of messages) {
-    if (msg.timestamp === null) {
-      msg.timestamp = fallback;
-    }
-  }
+  resolveMessageTimestamps(
+    messages,
+    isValidTimestamp(sessionCreatedAt)
+      ? { timestamp: sessionCreatedAt, source: 'composer-metadata' }
+      : undefined
+  );
 }
 
 /**

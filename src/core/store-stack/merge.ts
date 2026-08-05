@@ -44,6 +44,11 @@
 import type { ChatSession, ChatSessionSummary, Message, ToolCall } from '../types.js';
 import { findEmbeddedToolCallIndex } from '../parser.js';
 import {
+  isValidTimestamp,
+  resolveMessageTimestamps,
+  resolveSessionTimestamps,
+} from '../timestamps.js';
+import {
   renderInlineAttachmentProjections,
   splitInlineAttachmentProjections,
 } from './content-evidence.js';
@@ -587,12 +592,21 @@ function mergeMessage(
     delete merged.toolCalls;
   }
 
-  // Timestamp: keep the backbone's directly-stored time when present; otherwise
-  // adopt the other side's directly-stored time (with its provenance). Never
-  // fabricate.
-  if (merged.timestamp === undefined && other.timestamp !== undefined) {
-    merged.timestamp = other.timestamp;
-    merged.timestampSource = other.timestampSource;
+  // Timestamp selection is permanently Composer-to-Store oriented. Preserve a
+  // legacy Composer value byte-for-byte even when its provenance is unknown;
+  // otherwise enrich from Store. Inferred values are recomputed after the full
+  // semantic order is rendered and therefore cannot become merge anchors.
+  const selectedTimestamp = isValidTimestamp(composer.timestamp)
+    ? composer
+    : isValidTimestamp(store.timestamp)
+      ? store
+      : undefined;
+  if (selectedTimestamp) {
+    merged.timestamp = selectedTimestamp.timestamp;
+    merged.timestampSource = selectedTimestamp.timestampSource;
+  } else {
+    delete merged.timestamp;
+    delete merged.timestampSource;
   }
 
   // Metadata: merge, backbone values take precedence.
@@ -722,14 +736,6 @@ function pickScalar<T>(preferred: T | null | undefined, other: T | null | undefi
   }
   if (other !== null && other !== undefined) return other;
   return null;
-}
-
-/**
- * Scalar conflict resolution: preferred source wins a true conflict; when the
- * preferred side is missing a value, the other side fills it.
- */
-function pickPreferredDate(preferred: Date, other: Date): Date {
-  return preferred ?? other;
 }
 
 /** Freeze the exact Composer-only array before Store messages can affect it. */
@@ -1054,13 +1060,29 @@ export function mergeCrossStackSessions(
   const messages = rendered.map(({ message }) => message);
   const resolution = mergedResolution(composer, store);
 
+  // A merged session is Composer-backed regardless of the rendering backbone.
+  // Resolve clocks from source-native inputs in fixed Composer-then-Store order
+  // so changing preferredSource cannot rewrite incremental-backup watermarks.
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'composer-backed',
+    composerMetadata: {
+      ...(composer.createdAtSource === 'composer-metadata'
+        ? { createdAt: composer.createdAt }
+        : {}),
+      ...(composer.lastUpdatedAtSource === 'composer-metadata'
+        ? { lastUpdatedAt: composer.lastUpdatedAt }
+        : {}),
+    },
+    directMessages: [...composer.messages, ...store.messages],
+  });
+  resolveMessageTimestamps(messages, {
+    timestamp: sessionTimestamps.createdAt,
+    source: sessionTimestamps.createdAtSource,
+  });
+
   // Scalar metadata: preferred wins conflicts, fill gaps from the other.
   const title = pickScalar(backbone.title, other.title);
   const workspacePath = backbone.workspacePath ?? other.workspacePath ?? composer.workspacePath;
-  const createdAt = pickPreferredDate(backbone.createdAt, other.createdAt);
-  // lastUpdatedAt: preferred source wins (e.g. WSL -> Store's value), not the
-  // later of the two.
-  const lastUpdatedAt = pickPreferredDate(backbone.lastUpdatedAt, other.lastUpdatedAt);
 
   // Source-specific structured data is additive: keep whichever side provides it
   // (Composer typically provides usage + activeBranchBubbleIds; Store may extend).
@@ -1069,8 +1091,7 @@ export function mergeCrossStackSessions(
     id: composer.id,
     index,
     title,
-    createdAt,
-    lastUpdatedAt,
+    ...sessionTimestamps,
     messageCount: messages.length,
     messages,
     workspaceId: backbone.workspaceId,
@@ -1107,8 +1128,12 @@ export interface StoreSummaryInput {
   id: string;
   title: string | null;
   createdAt: Date;
+  createdAtSource?: ChatSessionSummary['createdAtSource'];
   /** Store session-level update time (`updatedAtMs` or `createdAt`). */
   lastUpdatedAt: Date;
+  lastUpdatedAtSource?: ChatSessionSummary['lastUpdatedAtSource'];
+  /** Source-native Store messages used only for direct-time extrema. */
+  directMessages?: readonly Message[];
   workspacePath?: string;
   messageCount: number;
   source?: ChatSession['source'];
@@ -1137,12 +1162,46 @@ export function applyStoreMergeToSummary(
   const otherPath = preferStore ? existing.workspacePath : store.workspacePath;
   existing.workspacePath = prefPath ?? otherPath ?? existing.workspacePath;
 
-  // createdAt: preferred source wins.
-  existing.createdAt = preferStore ? store.createdAt : existing.createdAt;
-
-  // lastUpdatedAt: preferred source wins. Store keeps its own update time
-  // (`updatedAtMs` or `createdAt`) instead of reusing another source's value.
-  existing.lastUpdatedAt = preferStore ? store.lastUpdatedAt : existing.lastUpdatedAt;
+  const composerDirectExtrema: Message[] = [];
+  if (existing.createdAtSource === 'direct-message') {
+    composerDirectExtrema.push({
+      id: null,
+      role: 'user',
+      content: '',
+      codeBlocks: [],
+      timestamp: existing.createdAt,
+      timestampSource: 'composer-timing',
+    });
+  }
+  if (
+    existing.lastUpdatedAtSource === 'direct-message' &&
+    existing.lastUpdatedAt.getTime() !== existing.createdAt.getTime()
+  ) {
+    composerDirectExtrema.push({
+      id: null,
+      role: 'user',
+      content: '',
+      codeBlocks: [],
+      timestamp: existing.lastUpdatedAt,
+      timestampSource: 'composer-timing',
+    });
+  }
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'composer-backed',
+    composerMetadata: {
+      ...(existing.createdAtSource === 'composer-metadata'
+        ? { createdAt: existing.createdAt }
+        : {}),
+      ...(existing.lastUpdatedAtSource === 'composer-metadata'
+        ? { lastUpdatedAt: existing.lastUpdatedAt }
+        : {}),
+    },
+    directMessages: [...composerDirectExtrema, ...(store.directMessages ?? [])],
+  });
+  existing.createdAt = sessionTimestamps.createdAt;
+  existing.createdAtSource = sessionTimestamps.createdAtSource;
+  existing.lastUpdatedAt = sessionTimestamps.lastUpdatedAt;
+  existing.lastUpdatedAtSource = sessionTimestamps.lastUpdatedAtSource;
 
   // messageCount: approximate (preferred source's count); recomputed on get.
   existing.messageCount = preferStore ? store.messageCount : existing.messageCount;

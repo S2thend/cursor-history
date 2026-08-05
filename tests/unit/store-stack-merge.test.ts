@@ -14,7 +14,9 @@ function makeSession(overrides: Partial<ChatSession> & { messages: Message[] }):
     index: 0,
     title: null,
     createdAt: now,
+    createdAtSource: 'composer-metadata',
     lastUpdatedAt: now,
+    lastUpdatedAtSource: 'composer-metadata',
     messageCount: overrides.messages.length,
     workspaceId: 'ws',
     ...overrides,
@@ -560,7 +562,7 @@ describe('mergeCrossStackSessions', () => {
     expect(merged.messages).toHaveLength(2);
   });
 
-  it('on WSL, lastUpdatedAt follows the Store (preferred) value, not the later Composer time', () => {
+  it('keeps Composer metadata time when Store is the preferred rendering backbone', () => {
     const composer = makeSession({
       createdAt: new Date('2026-01-01T00:00:00Z'),
       lastUpdatedAt: new Date('2026-01-10T00:00:00Z'), // later, but Composer is NOT preferred
@@ -572,7 +574,8 @@ describe('mergeCrossStackSessions', () => {
       messages: [msg({ role: 'user', content: 'A' })],
     });
     const merged = mergeCrossStackSessions(composer, store, 'store', 0);
-    expect(merged.lastUpdatedAt.toISOString()).toBe('2026-01-03T00:00:00.000Z');
+    expect(merged.lastUpdatedAt.toISOString()).toBe('2026-01-10T00:00:00.000Z');
+    expect(merged.lastUpdatedAtSource).toBe('composer-metadata');
   });
 
   it('merges Read(no params) with Read(params) into one, filling params', () => {
