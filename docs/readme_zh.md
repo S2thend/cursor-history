@@ -10,15 +10,24 @@
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
 
+> **兼容性契约：**英文版
+> [Compatibility and Data-Integrity Contract](./compatibility.md) 是规范来源，定义稳定 ID、
+> 索引基数与作用域、工作区 I/O 边界、完整性/来源、推断时间、读取上限、备份权限，以及经过
+> 验证的 CLI/库示例。如其他说明与其不一致，以该契约为准。
+>
+> 增量存储库输出的使用方应固定在 v0.16，或等待并验证修正版后再从 v0.17 升级。无需修改
+> 消费方的升级保证仅覆盖 v0.16 Composer-only 档案；它不承诺保留 v0.17 不稳定的 Store
+> 合成 ID。
+
 **终极开源工具，用于浏览、搜索、导出和备份您的 Cursor AI 聊天历史。**
 
 遵循 Unix 哲学的 POSIX 风格 CLI 工具：专注于一件事并做到极致——访问您的 Cursor AI 聊天历史。简单、可组合、专注。
 
 ```bash
 # 管道友好：可与其他工具组合使用
-cursor-history list --json | jq '.[] | select(.messageCount > 10)'
+cursor-history list --json | jq '.sessions[] | select(.messageCount > 10)'
 cursor-history export 1 | grep -i "api" | head -20
-cursor-history search "bug" --json | jq -r '.[].sessionId' | xargs -I {} cursor-history export {}
+cursor-history search "bug" --json | jq -r '.results[].sessionId' | xargs -I {} cursor-history export {}
 ```
 
 再也不会丢失任何对话。无论您需要查找上周的完美代码片段、将历史记录迁移到新机器，还是为所有 AI 辅助开发会话创建可靠备份——cursor-history 都能满足您的需求。免费、开源，由社区为社区打造。
@@ -32,7 +41,7 @@ cursor-history search "bug" --json | jq -r '.[].sessionId' | xargs -I {} cursor-
   - **文件编辑的完整 diff 显示**，带语法高亮
   - **详细的工具调用**，显示所有参数（文件路径、搜索模式、命令等）
   - AI 推理和思考过程
-  - 消息时间戳（所有会话均准确，包括 2025 年 9 月之前的会话）
+  - 带明确来源标记的消息时间戳（直接存储或推断）
 - **搜索** - 按关键词查找对话，带高亮匹配
 - **导出** - 将会话保存为 Markdown 或 JSON 文件
 - **迁移** - 在工作区之间移动或复制会话（例如重命名项目时）
@@ -77,17 +86,19 @@ cursor-history list
 
 cursor-history 支持两种 SQLite 驱动，以获得最大兼容性：
 
-| 驱动 | 描述 | Node.js 版本 |
-|------|------|--------------|
-| `node:sqlite` | Node.js 内置 SQLite 模块（无需原生绑定） | 22.5+ |
-| `better-sqlite3` | 通过 better-sqlite3 的原生绑定 | 20+ |
+| 驱动 | 描述 | Node.js 能力边界 |
+|------|------|------------------|
+| `node:sqlite` | 内置模块；仅在具备当前操作所需全部 API 时选择 | 22.5 起可读取；22.16.0 和 23.8.0 起支持在线备份 |
+| `better-sqlite3` | 原生绑定；具备能力时作为自动回退 | Node.js 20+ |
 
 ### 自动驱动选择
 
-默认情况下，cursor-history 会自动选择最佳可用驱动：
+cursor-history 按操作检查实际能力，而不是只检查模块能否导入：
 
-1. **node:sqlite**（首选）- 适用于 Node.js 22.5+，无需原生编译
-2. **better-sqlite3**（备选）- 适用于较旧的 Node.js 版本
+1. 当前操作所需 API 齐全时优先使用 **node:sqlite**；
+2. 否则回退到已安装且具备能力的 **better-sqlite3**。
+
+强制指定的驱动不会自动回退；缺少能力时会返回带修复建议的类型化错误。
 
 ### 手动驱动选择
 
@@ -97,7 +108,7 @@ cursor-history 支持两种 SQLite 驱动，以获得最大兼容性：
 # 强制使用 better-sqlite3
 CURSOR_HISTORY_SQLITE_DRIVER=better-sqlite3 cursor-history list
 
-# 强制使用 node:sqlite（需要 Node.js 22.5+）
+# 强制使用 node:sqlite（必须具备当前操作所需的全部 API）
 CURSOR_HISTORY_SQLITE_DRIVER=node:sqlite cursor-history list
 ```
 

@@ -18,9 +18,9 @@ A POSIX-style CLI tool that does one thing well: access your Cursor AI chat hist
 
 ```bash
 # Pipe-friendly: combine with other tools
-cursor-history list --json | jq '.[] | select(.messageCount > 10)'
+cursor-history list --json | jq '.sessions[] | select(.messageCount > 10)'
 cursor-history export 1 | grep -i "api" | head -20
-cursor-history search "bug" --json | jq -r '.[].sessionId' | xargs -I {} cursor-history export {}
+cursor-history search "bug" --json | jq -r '.results[].sessionId' | xargs -I {} cursor-history export {}
 ```
 
 Never lose a conversation again. Whether you need to find that perfect code snippet from last week, migrate your history to a new machine, or create reliable backups of all your AI-assisted development sessions—cursor-history has you covered. Free, open-source, and built by the community for the community.
@@ -122,12 +122,101 @@ update all file paths when moving sessions between workspaces.
   - **Full diff display** for file edits and writes with syntax highlighting
   - **Detailed tool calls** showing all parameters (file paths, search patterns, commands, etc.)
   - AI reasoning and thinking blocks
-  - Message timestamps (accurate for all sessions, including pre-September 2025)
+  - Message timestamps with explicit stored/inferred provenance
 - **Search** - Find conversations by keyword with highlighted matches
 - **Export** - Save sessions as Markdown or JSON files
 - **Migrate** - Move or copy sessions between workspaces (e.g., when renaming projects)
 - **Backup & Restore** - Create full backups of all chat history and restore when needed
 - **Cross-platform** - Works on macOS, Windows, and Linux
+
+## Compatibility and safe upgrades
+
+The authoritative identity, scoped-index, workspace-I/O, source-fidelity, timestamp, input-limit,
+backup-permission, and upgrade rules are in the shipped
+[Compatibility and Data-Integrity Contract](./docs/compatibility.md). Library consumers that persist
+cursor-history output should read that contract before changing versions.
+
+### Warning for v0.17 incremental-library consumers
+
+v0.17 introduced transitional Store/merged behavior that can change positional message keys,
+replacement signals, and timestamp-watermark assumptions. If your application incrementally stores
+library output—such as a vibe-history archive—pin cursor-history v0.16 or validate and wait for the
+corrective release before upgrading. Back up the downstream archive first.
+
+The confirmed no-consumer-change upgrade path is deliberately narrower: an archive populated from
+v0.16 Composer-only data can become a complete Composer-backed merged view while retaining every
+old session, Composer-message, and existing ordinal-derived tool key byte-for-byte. A changed
+complete view still reports `source: "global"`, so the unchanged consumer performs its existing
+whole-session atomic replacement; a second identical sync performs no writes. Store-only turns may
+be interleaved without renumbering old Composer identities. Do not use a maximum timestamp as the
+incremental boundary, and never replace complete archived data with
+`source: "workspace-fallback"`.
+
+Complete affected v0.17 Store/merged data instead has a documented one-time whole-session
+replacement path. Unstable v0.17 Store positional/cross-format synthetic IDs are not preserved. A
+degraded v0.17 result must be pinned, retried from complete sources, or migrated manually.
+
+### Identity, addressing, and source meaning
+
+- `Session.id` remains the native Cursor UUID. Physical source instances and locators are separate
+  and are never encoded into the public ID.
+- CLI/core indices are one-based, public-library read indices are zero-based, and public-library
+  migration selectors are one-based. All are ephemeral within the exact data source, workspace,
+  catalog snapshot, and invocation that produced them; persist the native UUID instead.
+- Structured numeric output declares `indexScope: "global" | "workspace"`; workspace rows also
+  carry the full `indexWorkspacePath`.
+- Workspace matching uses normalized exact matching first, then one unambiguous complete-component
+  suffix. Ambiguity fails before conversation payload is read.
+- A workspace is a payload-I/O boundary by default. `--include-cross-workspace-sources` or
+  `includeCrossWorkspaceSources: true` can load complementary sources only for UUIDs already
+  selected in scope; omitted contributors make the default view explicitly partial.
+- Legacy `source` reports fidelity: `global` is complete/replacement-safe and
+  `workspace-fallback` is partial/unsafe to overwrite complete data. `resolvedSource`, `sources`,
+  and `resolution` report actual Composer/Store provenance additively.
+- Every resolved message includes deterministic timestamp provenance. Human output marks inferred
+  times as approximate; JSON/library consumers receive `timestampSource`. A legacy timestamp of
+  unprovable origin is retained as `unknown`, not presented as directly stored.
+
+Round-trip a CLI index only inside the same workspace scope:
+
+```bash
+cursor-history --json --workspace /work/a list --all
+cursor-history --json --workspace /work/a show 1
+cursor-history --json --workspace /work/a search needle-a
+cursor-history --workspace /work/a migrate-session 1 /work/destination --dry-run
+```
+
+Use a stable UUID for reusable library addressing (read indices are zero-based):
+
+```typescript
+import { getSession, listSessions } from 'cursor-history';
+
+const workspace = '/work/a';
+const page = await listSessions({ workspace, limit: 20 });
+const first = page.data[0];
+
+if (first) {
+  const session = await getSession(first.id, { workspace });
+  console.log(session.id, session.source, session.resolvedSource);
+}
+```
+
+Fatal JSON migration note: some v0.17 command-owned failures wrote JSON to stdout. The corrective
+release writes every fatal JSON object to stderr and leaves stdout empty; successful output remains
+on stdout. Existing error fields/types/values and exit-category meanings are preserved for the same
+fixture, with only documented safe additive fields allowed. Scripts that parsed fatal JSON from
+stdout must read stderr after a nonzero exit.
+
+### Backup permissions
+
+Temporary plaintext snapshot workspaces are owner-only (`0700` directories and `0600` files on
+POSIX) and cleaned on success and failure. New final archives default to `0600`; force-overwrite
+preserves an existing mode. `backup --shared` explicitly requests `0666 & ~currentUmask` without
+broadening temporary files, changing the process umask, or modifying parent permissions. Windows
+uses its system per-user temporary directory, inherited ACLs, exclusive paths, and the same cleanup
+contract; this release does not claim independently verified cross-user ACL isolation on Windows.
+New manifests record the actual running package version as diagnostic `producer` metadata; it never
+changes session/message identity, replica equivalence, deduplication, or incremental sync.
 
 ## Installation
 
@@ -191,17 +280,22 @@ node dist/cli/index.js show 1 --json
 
 cursor-history supports two SQLite drivers for maximum compatibility:
 
-| Driver | Description | Node.js Version |
-|--------|-------------|-----------------|
-| `node:sqlite` | Built-in Node.js SQLite module (no native bindings) | 22.5+ |
-| `better-sqlite3` | Native bindings via better-sqlite3 | 20+ |
+| Driver | Description | Node.js capability boundary |
+|--------|-------------|----------------------------|
+| `node:sqlite` | Built-in module; selected only when it provides every API required by the operation | Import/read support starts in 22.5; online backup starts in 22.16.0 and 23.8.0 |
+| `better-sqlite3` | Native binding and automatic fallback when capable | Supported project floor: Node 20+ |
 
 ### Automatic Driver Selection
 
-By default, cursor-history automatically selects the best available driver:
+Driver selection is per operation and probes capabilities, not only whether a module imports. In
+automatic mode cursor-history:
 
-1. **node:sqlite** (preferred) - Works on Node.js 22.5+ without native compilation
-2. **better-sqlite3** (fallback) - Works on older Node.js versions
+1. prefers **node:sqlite** when it implements all APIs required by that operation; then
+2. falls back to an installed, capable **better-sqlite3**.
+
+If neither provider is capable, the operation returns an actionable typed error. Store snapshot
+capability failures are fatal and are not silently converted into an empty/partial session or a
+transcript fallback.
 
 ### Manual Driver Selection
 
@@ -211,9 +305,12 @@ You can force a specific driver using the environment variable:
 # Force better-sqlite3
 CURSOR_HISTORY_SQLITE_DRIVER=better-sqlite3 cursor-history list
 
-# Force node:sqlite (requires Node.js 22.5+)
+# Force node:sqlite (the runtime must support every API needed by this operation)
 CURSOR_HISTORY_SQLITE_DRIVER=node:sqlite cursor-history list
 ```
+
+A forced driver never falls back. If it lacks a required capability, cursor-history reports the
+driver, operation, missing capability, available alternative, and remedy.
 
 ### Debug Driver Selection
 
@@ -460,7 +557,7 @@ import {
 } from 'cursor-history';
 
 // List all sessions with pagination
-const result = listSessions({ limit: 10 });
+const result = await listSessions({ limit: 10 });
 console.log(`Found ${result.pagination.total} sessions`);
 
 for (const session of result.data) {
@@ -468,17 +565,17 @@ for (const session of result.data) {
 }
 
 // Get a specific session (zero-based index)
-const session = getSession(0);
+const session = await getSession(0);
 console.log(session.messages);
 
 // Search across all sessions
-const results = searchSessions('authentication', { context: 2 });
+const results = await searchSessions('authentication', { context: 2 });
 for (const match of results) {
   console.log(match.match);
 }
 
 // Export to Markdown
-const markdown = exportSessionToMarkdown(0);
+const markdown = await exportSessionToMarkdown(0);
 ```
 
 ### Migration API
@@ -487,24 +584,26 @@ const markdown = exportSessionToMarkdown(0);
 import { migrateSession, migrateWorkspace } from 'cursor-history';
 
 // Move a session to another workspace
-const results = migrateSession({
+const moveResults = await migrateSession({
   sessions: 3,  // index or ID
   destination: '/path/to/new/project'
 });
+console.log(moveResults);
 
 // Copy multiple sessions (keeps originals)
-const results = migrateSession({
+const copyResults = await migrateSession({
   sessions: [1, 3, 5],
   destination: '/path/to/project',
   mode: 'copy'
 });
+console.log(copyResults);
 
 // Migrate all sessions between workspaces
-const result = migrateWorkspace({
+const workspaceResult = await migrateWorkspace({
   source: '/old/project',
   destination: '/new/project'
 });
-console.log(`Migrated ${result.successCount} sessions`);
+console.log(`Migrated ${workspaceResult.successCount} sessions`);
 ```
 
 ### Backup API
@@ -530,7 +629,7 @@ console.log(`Backup created: ${result.backupPath}`);
 console.log(`Sessions: ${result.manifest.stats.sessionCount}`);
 
 // Validate a backup
-const validation = validateBackup('~/backup.zip');
+const validation = await validateBackup('~/backup.zip');
 if (validation.status === 'valid') {
   console.log('Backup is valid');
 } else if (validation.status === 'warnings') {
@@ -538,20 +637,20 @@ if (validation.status === 'valid') {
 }
 
 // Restore from backup
-const restoreResult = restoreBackup({
+const restoreResult = await restoreBackup({
   backupPath: '~/backup.zip',
   force: true
 });
 console.log(`Restored ${restoreResult.filesRestored} files`);
 
 // List available backups
-const backups = listBackups();  // Scans ~/cursor-history-backups/
+const backups = await listBackups();  // Scans ~/cursor-history-backups/
 for (const backup of backups) {
   console.log(`${backup.filename}: ${backup.manifest?.stats.sessionCount} sessions`);
 }
 
 // Read sessions from backup without restoring
-const sessions = listSessions({ backupPath: '~/backup.zip' });
+const sessions = await listSessions({ backupPath: '~/backup.zip' });
 ```
 
 ### Available Functions
@@ -609,7 +708,7 @@ import {
 } from 'cursor-history';
 
 try {
-  const result = listSessions();
+  const result = await listSessions();
 } catch (err) {
   if (isDatabaseLockedError(err)) {
     console.error('Database locked - close Cursor and retry');
@@ -624,7 +723,7 @@ try {
 
 // Filter error handling
 try {
-  const session = getSession(0, { messageFilter: ['invalid'] });
+  const session = await getSession(0, { messageFilter: ['invalid'] });
 } catch (err) {
   if (isInvalidFilterError(err)) {
     console.error('Invalid filter types:', err.invalidTypes);

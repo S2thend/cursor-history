@@ -10,15 +10,26 @@
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
 
+> **Contrat de compatibilité :** le document canonique en anglais
+> [Compatibility and Data-Integrity Contract](./compatibility.md) définit l'identité stable, la
+> portée et la base des indices, la frontière d'E/S par espace de travail, la fidélité/provenance,
+> les horodatages inférés, les limites de lecture, les permissions de sauvegarde et les exemples
+> CLI/bibliothèque vérifiés. En cas de divergence, ce contrat fait autorité.
+>
+> Les consommateurs incrémentaux de la bibliothèque doivent épingler v0.16 ou attendre/valider la
+> version corrective avant une mise à niveau depuis v0.17. Le chemin sans modification du
+> consommateur est garanti pour les archives v0.16 Composer uniquement ; il ne promet pas de
+> conserver les ID Store synthétiques instables de v0.17.
+
 **L'outil open-source ultime pour parcourir, rechercher, exporter et sauvegarder votre historique de chat Cursor AI.**
 
 Un outil CLI de style POSIX qui fait une chose bien : accéder à votre historique de chat Cursor AI. Construit sur la philosophie Unix — simple, composable et ciblé.
 
 ```bash
 # Compatible avec les pipes : combinez avec d'autres outils
-cursor-history list --json | jq '.[] | select(.messageCount > 10)'
+cursor-history list --json | jq '.sessions[] | select(.messageCount > 10)'
 cursor-history export 1 | grep -i "api" | head -20
-cursor-history search "bug" --json | jq -r '.[].sessionId' | xargs -I {} cursor-history export {}
+cursor-history search "bug" --json | jq -r '.results[].sessionId' | xargs -I {} cursor-history export {}
 ```
 
 Ne perdez plus jamais une conversation. Que vous ayez besoin de retrouver ce snippet de code parfait de la semaine dernière, de migrer votre historique vers une nouvelle machine, ou de créer des sauvegardes fiables de toutes vos sessions de développement assisté par IA — cursor-history est là pour vous. Gratuit, open-source, et construit par la communauté pour la communauté.
@@ -32,7 +43,7 @@ Ne perdez plus jamais une conversation. Que vous ayez besoin de retrouver ce sni
   - **Affichage complet des diff** pour les modifications de fichiers avec coloration syntaxique
   - **Appels d'outils détaillés** montrant tous les paramètres (chemins de fichiers, motifs de recherche, commandes, etc.)
   - Raisonnement et réflexion de l'IA
-  - Horodatages des messages (précis pour toutes les sessions, y compris avant septembre 2025)
+  - Horodatages avec provenance explicite (stockée ou inférée)
 - **Recherche** - Trouver des conversations par mot-clé avec mise en évidence des correspondances
 - **Export** - Sauvegarder les sessions en fichiers Markdown ou JSON
 - **Migration** - Déplacer ou copier des sessions entre espaces de travail (ex. lors du renommage de projets)
@@ -77,17 +88,21 @@ cursor-history list
 
 cursor-history supporte deux pilotes SQLite pour une compatibilité maximale :
 
-| Pilote | Description | Version Node.js |
-|--------|-------------|-----------------|
-| `node:sqlite` | Module SQLite intégré à Node.js (pas de bindings natifs) | 22.5+ |
-| `better-sqlite3` | Bindings natifs via better-sqlite3 | 20+ |
+| Pilote | Description | Limite de capacité Node.js |
+|--------|-------------|----------------------------|
+| `node:sqlite` | Module intégré ; sélectionné uniquement s'il fournit toutes les API requises | Lecture dès 22.5 ; sauvegarde en ligne dès 22.16.0 et 23.8.0 |
+| `better-sqlite3` | Binding natif et repli automatique lorsqu'il est capable | Node.js 20+ |
 
 ### Sélection automatique du pilote
 
-Par défaut, cursor-history sélectionne automatiquement le meilleur pilote disponible :
+cursor-history sélectionne par opération et vérifie les capacités réelles, pas seulement si le
+module s'importe :
 
-1. **node:sqlite** (préféré) - Fonctionne sur Node.js 22.5+ sans compilation native
-2. **better-sqlite3** (repli) - Fonctionne sur les versions plus anciennes de Node.js
+1. il préfère **node:sqlite** lorsque toutes les API requises sont disponibles ;
+2. sinon il utilise un **better-sqlite3** installé et capable.
+
+Un pilote forcé ne se replie jamais sur l'autre : une capacité manquante produit une erreur typée
+et une solution exploitable.
 
 ### Sélection manuelle du pilote
 
@@ -97,7 +112,7 @@ Vous pouvez forcer un pilote spécifique en utilisant la variable d'environnemen
 # Forcer better-sqlite3
 CURSOR_HISTORY_SQLITE_DRIVER=better-sqlite3 cursor-history list
 
-# Forcer node:sqlite (nécessite Node.js 22.5+)
+# Forcer node:sqlite (doit fournir toutes les API requises par l'opération)
 CURSOR_HISTORY_SQLITE_DRIVER=node:sqlite cursor-history list
 ```
 
