@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "oracle": {
+    "tag": "v0.16.0",
+    "commit": "e8a7abf8cea3419a9dda911e174a05f82a9b260e",
+    "manifest": "projector-manifest.json"
+  },
+  "globalSession": {
+    "id": "00000000-0016-4016-8016-000000000016",
+    "index": 0,
+    "title": "Synthetic v0.16 Composer session",
+    "createdAt": "2024-01-16T00:00:00.000Z",
+    "lastUpdatedAt": "2024-01-16T00:01:00.000Z",
+    "messageCount": 6,
+    "messages": [
+      {
+        "id": "native-user-016",
+        "role": "user",
+        "content": "Synthetic question alpha.",
+        "timestamp": "2024-01-16T00:00:01.000Z",
+        "codeBlocks": [],
+        "metadata": {
+          "bubbleType": 1
+        }
+      },
+      {
+        "id": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
+        "role": "assistant",
+        "content": "Composer owns the synthetic collision identity.",
+        "timestamp": "2024-01-16T00:00:02.000Z",
+        "codeBlocks": [],
+        "metadata": {
+          "bubbleType": 2
+        }
+      },
+      {
+        "id": "fallback-assistant-016",
+        "role": "assistant",
+        "content": "Synthetic answer beta.\n```ts\nconst fixtureValue = 16;\n```",
+        "timestamp": "2024-01-16T00:00:03.000Z",
+        "codeBlocks": [],
+        "metadata": {
+          "bubbleType": 2
+        }
+      },
+      {
+        "id": "native-tool-read-016",
+        "role": "assistant",
+        "content": "[Tool: read_file]\nParams: {\"path\":\"/fixture/v016/project/synthetic.ts\"}\nsynthetic read result",
+        "timestamp": "2024-01-16T00:00:04.000Z",
+        "codeBlocks": [],
+        "metadata": {
+          "bubbleType": 2
+        },
+        "toolCalls": [
+          {
+            "name": "read_file",
+            "status": "completed",
+            "params": {
+              "path": "/fixture/v016/project/synthetic.ts"
+            },
+            "result": "synthetic read result",
+            "files": [
+              "/fixture/v016/project/synthetic.ts"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "native-tool-search-016",
+        "role": "assistant",
+        "content": "[Tool: search]\nParams: {\"query\":\"synthetic-token\",\"path\":\"/fixture/v016/project\"}\nsynthetic search result",
+        "timestamp": "2024-01-16T00:00:05.000Z",
+        "codeBlocks": [],
+        "metadata": {
+          "bubbleType": 2
+        },
+        "toolCalls": [
+          {
+            "name": "search",
+            "status": "completed",
+            "params": {
+              "query": "synthetic-token",
+              "path": "/fixture/v016/project"
+            },
+            "result": "synthetic search result",
+            "files": [
+              "/fixture/v016/project"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "",
+        "role": "user",
+        "content": "Synthetic empty-ID compatibility turn.",
+        "timestamp": "2024-01-16T00:00:06.000Z",
+        "codeBlocks": [],
+        "metadata": {
+          "bubbleType": 1
+        }
+      }
+    ],
+    "workspaceId": "synthetic-workspace-global-016",
+    "source": "global",
+    "activeBranchBubbleIds": [
+      "native-user-016",
+      "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
+      "fallback-assistant-016",
+      "native-tool-read-016",
+      "native-tool-search-016"
+    ]
+  },
+  "workspaceFallbackSessions": [
+    {
+      "id": "00000000-0016-4016-8016-000000000016",
+      "index": 0,
+      "title": "Synthetic workspace fallback",
+      "createdAt": "2024-01-16T00:00:00.000Z",
+      "lastUpdatedAt": "2024-01-16T00:01:00.000Z",
+      "messageCount": 3,
+      "messages": [
+        {
+          "id": "workspace-native-016",
+          "role": "user",
+          "content": "Synthetic workspace-native message.",
+          "timestamp": "2024-01-16T00:00:01.000Z",
+          "codeBlocks": []
+        },
+        {
+          "id": null,
+          "role": "assistant",
+          "content": "Synthetic workspace missing-ID answer.",
+          "timestamp": "2024-01-16T00:00:02.000Z",
+          "codeBlocks": []
+        },
+        {
+          "id": "",
+          "role": "assistant",
+          "content": "Synthetic workspace empty-ID answer.",
+          "timestamp": "2024-01-16T00:00:03.000Z",
+          "codeBlocks": []
+        }
+      ],
+      "workspaceId": "",
+      "source": "workspace-fallback"
+    }
+  ]
+}

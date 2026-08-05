@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "fixtureKind": "v0.16-workspace-fallback-raw-json",
+  "tabs": [
+    {
+      "id": "00000000-0016-4016-8016-000000000016",
+      "title": "Synthetic workspace fallback",
+      "createdAt": 1705363200000,
+      "lastUpdatedAt": 1705363260000,
+      "messages": [
+        {
+          "id": "workspace-native-016",
+          "role": "user",
+          "content": "Synthetic workspace-native message.",
+          "timestamp": 1705363201000
+        },
+        {
+          "role": "assistant",
+          "content": "Synthetic workspace missing-ID answer.",
+          "timestamp": 1705363202000
+        },
+        {
+          "id": "",
+          "type": "ai",
+          "content": "Synthetic workspace empty-ID answer.",
+          "timestamp": 1705363203000
+        }
+      ]
+    }
+  ]
+}

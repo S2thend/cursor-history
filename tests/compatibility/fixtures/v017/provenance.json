@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "repository": "S2thend/cursor-history",
+  "release": {
+    "tag": "v0.17.0",
+    "commit": "5e6ac2bebd041607d7e8b57e3f364aeb9440c2db",
+    "tree": "5f5f7c6c336f64db27934301e1a47e4acf51529f",
+    "committedAt": "2026-08-03T08:16:19Z",
+    "packageVersion": "0.17.0"
+  },
+  "sources": [
+    {
+      "path": "src/core/storage.ts",
+      "gitBlob": "3273a27a46e3c2c1977ab65ddda28c2fa14bb848",
+      "lockedBehavior": ["Composer and Store discovery", "workspace-filtered resolution"]
+    },
+    {
+      "path": "src/core/parser.ts",
+      "gitBlob": "b694368c1088ef413d035020df30c39281326700",
+      "lockedBehavior": ["public session/message projection", "timestamp fallback"]
+    },
+    {
+      "path": "src/core/store-stack/discover.ts",
+      "gitBlob": "7668e734dcd6f50ec0427162e25209316d305034",
+      "lockedBehavior": ["Store representation selection", "Store completeness literals"]
+    },
+    {
+      "path": "src/core/store-stack/merge.ts",
+      "gitBlob": "30dc6faf1c732e56142eafdf4090c5f527e7e511",
+      "lockedBehavior": ["v0.17 merged ordering", "preferred-source projection"]
+    },
+    {
+      "path": "src/core/store-stack/store-db.ts",
+      "gitBlob": "a4371f64da4d7d03e2a347f65df6db361b4cf783",
+      "lockedBehavior": ["Store DB message extraction"]
+    },
+    {
+      "path": "src/core/store-stack/transcript.ts",
+      "gitBlob": "9d8522678b77e97d9c8c0065fb0acc1506d2221b",
+      "lockedBehavior": ["transcript message extraction"]
+    },
+    {
+      "path": "src/lib/types.ts",
+      "gitBlob": "709f8bc12d1a90d2470b3fe0a2df5a48b0cc36fe",
+      "lockedBehavior": ["released source literals", "released Session and Message shapes"]
+    },
+    {
+      "path": "src/cli/errors.ts",
+      "gitBlob": "82c02af4edf72915fa6b93d5679113500aed07b1",
+      "lockedBehavior": ["exit categories", "human-readable fatal stderr"]
+    },
+    {
+      "path": "src/cli/index.ts",
+      "gitBlob": "753d87eb1b44a7ab65cf0eb89177d5bec54a22ff",
+      "lockedBehavior": ["global JSON option", "top-level fatal handling"]
+    },
+    {
+      "path": "src/cli/commands/list.ts",
+      "gitBlob": "3b4e24f6e776184cedb4d32ad6ee2e0af7768e2b",
+      "lockedBehavior": ["legacy fatal JSON stdout", "not-found exit category"]
+    },
+    {
+      "path": "src/cli/commands/restore.ts",
+      "gitBlob": "c6fd4b382b2a0bed38f3fc734b99aa2ce48af196",
+      "lockedBehavior": ["legacy restore fatal JSON bytes", "usage/not-found exit categories"]
+    },
+    {
+      "path": "src/cli/commands/migrate-session.ts",
+      "gitBlob": "9e5f2bfa580b6da912ca894c01fb99049a8f5ffe",
+      "lockedBehavior": ["legacy pretty fatal JSON stdout", "general-error exit category"]
+    }
+  ],
+  "fixtures": {
+    "complete-merged.json": "Complete Composer-backed v0.17 merged public session",
+    "degraded-store.json": "Degraded v0.17 Store view that must be pinned rather than replace",
+    "transcript-complete.json": "Complete transcript-side transition input",
+    "store-db-complete.json": "Complete Store-DB-side replacement input",
+    "cli-fatal-output.json": "Exact tagged fatal stdout/stderr byte baselines and exit categories"
+  },
+  "transitionContract": {
+    "preserveNativeComposerIds": true,
+    "preserveUnstableStorePositionalIds": false,
+    "preserveCrossFormatStoreIds": false,
+    "completeInput": "one whole-session replacement followed by an unchanged no-op",
+    "degradedInput": "pin complete data and emit retry/manual guidance",
+    "fatalJsonMigration": "preserve fields and exit category while moving fatal JSON from stdout to stderr"
+  }
+}

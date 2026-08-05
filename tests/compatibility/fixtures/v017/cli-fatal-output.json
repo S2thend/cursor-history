@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "taggedRelease": {
+    "tag": "v0.17.0",
+    "commit": "5e6ac2bebd041607d7e8b57e3f364aeb9440c2db"
+  },
+  "encoding": "base64",
+  "streamContract": {
+    "legacyFatalJsonStream": "stdout",
+    "legacyHumanFatalStream": "stderr",
+    "correctiveFatalJsonStream": "stderr",
+    "preserveExitCategory": true,
+    "preserveExistingJsonFields": true
+  },
+  "cases": [
+    {
+      "id": "list-workspaces-data-not-found",
+      "source": "src/cli/commands/list.ts",
+      "exitCategory": "NOT_FOUND",
+      "exitCode": 3,
+      "stdoutBase64": "eyJlcnJvciI6IkN1cnNvciBkYXRhIG5vdCBmb3VuZCIsInBhdGgiOiIvZml4dHVyZS92MDE3L21pc3NpbmctZGF0YSJ9Cg==",
+      "stderrBase64": "",
+      "json": {
+        "error": "Cursor data not found",
+        "path": "/fixture/v017/missing-data"
+      }
+    },
+    {
+      "id": "restore-backup-file-not-found",
+      "source": "src/cli/commands/restore.ts",
+      "exitCategory": "USAGE_ERROR",
+      "exitCode": 2,
+      "stdoutBase64": "eyJlcnJvciI6IkJhY2t1cCBmaWxlIG5vdCBmb3VuZCIsInBhdGgiOiIvZml4dHVyZS92MDE3L21pc3NpbmcuYmFja3VwIn0K",
+      "stderrBase64": "",
+      "json": {
+        "error": "Backup file not found",
+        "path": "/fixture/v017/missing.backup"
+      }
+    },
+    {
+      "id": "migrate-session-command-error",
+      "source": "src/cli/commands/migrate-session.ts",
+      "exitCategory": "GENERAL_ERROR",
+      "exitCode": 1,
+      "stdoutBase64": "ewogICJlcnJvciI6ICJTeW50aGV0aWMgbWlncmF0aW9uIGZhaWx1cmUiCn0K",
+      "stderrBase64": "",
+      "json": { "error": "Synthetic migration failure" }
+    }
+  ]
+}

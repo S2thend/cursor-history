@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "taggedRelease": "v0.17.0",
+  "fixtureKind": "complete-store-db-transition-input",
+  "representation": "store-db",
+  "session": {
+    "id": "00000000-0017-4017-8017-000000000017",
+    "workspace": "/fixture/v017/store-project",
+    "timestamp": "2024-01-17T01:00:00.000Z",
+    "source": "store-complete",
+    "transcriptState": "parsed",
+    "messageCount": 2,
+    "messages": [
+      {
+        "id": "store-db-leaf-user-017",
+        "role": "user",
+        "content": "Synthetic representation-transition question.",
+        "timestamp": "2024-01-17T01:00:01.000Z",
+        "source": "store"
+      },
+      {
+        "id": "store-db-leaf-assistant-017",
+        "role": "assistant",
+        "content": "Synthetic representation-transition answer with DB enrichment.",
+        "timestamp": "2024-01-17T01:00:02.000Z",
+        "source": "store",
+        "toolCalls": [
+          {
+            "name": "synthetic_store_db_tool",
+            "status": "completed",
+            "params": { "fixture": 17 },
+            "result": "synthetic Store DB enrichment"
+          }
+        ]
+      }
+    ],
+    "metadata": { "lastModified": "2024-01-17T01:00:02.000Z" }
+  },
+  "identityBoundary": {
+    "namespace": "store-db-leaf-v0.17",
+    "preserveTranscriptIds": false,
+    "transition": "whole-session-replacement",
+    "expectedReplacementCount": 1,
+    "nextUnchangedWriteCount": 0
+  }
+}
