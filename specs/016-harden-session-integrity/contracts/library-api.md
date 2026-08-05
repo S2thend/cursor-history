@@ -1,5 +1,7 @@
 # Public Library Contract
 
+<!-- source-read-limits/v1 policy-sha256: b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108 -->
+
 **Package**: `cursor-history`<br>
 **Feature**: `016-harden-session-integrity`<br>
 **Kind**: Direct TypeScript/JavaScript import; this is not a network API.

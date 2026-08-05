@@ -1,5 +1,7 @@
 # Phase 0 Research: Session Integrity and Compatibility Hardening
 
+<!-- source-read-limits/v1 policy-sha256: b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108 -->
+
 **Branch**: `016-harden-session-integrity`<br>
 **Date**: 2026-08-05<br>
 **Scope**: Resolve the implementation choices required by

@@ -1,0 +1,227 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import Database from 'better-sqlite3';
+import JSZip from 'jszip';
+
+import {
+  POLICY_ARTIFACTS,
+  POLICY_FINGERPRINT,
+  REPOSITORY_ROOT,
+  checkPolicyArtifacts,
+  preflightBackupArchive,
+  preflightComposerDatabase,
+  readSourcePolicy,
+  runPreflight,
+} from '../../scripts/preflight-source-limits.mjs';
+
+const roots: string[] = [];
+
+function privateRoot(prefix: string): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  if (process.platform !== 'win32') chmodSync(root, 0o700);
+  roots.push(root);
+  return root;
+}
+
+function createComposerDatabase(path: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const db = new Database(path);
+  try {
+    db.exec('CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
+    db.exec('CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
+    const item = db.prepare('INSERT INTO ItemTable(key, value) VALUES (?, ?)');
+    db.prepare('INSERT INTO ItemTable(rowid, key, value) VALUES (?, ?, ?)').run(
+      -7,
+      'negative-rowid-fixture',
+      Buffer.alloc(5, 0x40)
+    );
+    item.run('composer.composerData', Buffer.alloc(11, 0x41));
+    item.run('workbench.panel.aichat.view.aichat.chatdata', '测试!');
+    const global = db.prepare('INSERT INTO cursorDiskKV(key, value) VALUES (?, ?)');
+    global.run('composerData:00000000-0000-4000-8000-000000000001', Buffer.alloc(13, 0x43));
+    global.run('bubbleId:00000000-0000-4000-8000-000000000001:b1', Buffer.alloc(17, 0x44));
+  } finally {
+    db.close();
+  }
+}
+
+async function createBackup(
+  path: string,
+  databaseBytes = Buffer.from('synthetic-db')
+): Promise<void> {
+  const zip = new JSZip();
+  zip.file(
+    'manifest.json',
+    JSON.stringify({ version: '1.0.0', createdAt: '2024-01-01T00:00:00.000Z', files: [] })
+  );
+  zip.file('globalStorage/state.vscdb', databaseBytes);
+  writeFileSync(path, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }), {
+    mode: 0o600,
+  });
+}
+
+function copyPolicyRepository(): string {
+  const root = privateRoot('cursor-history-policy-copy-');
+  const source = join(REPOSITORY_ROOT, 'src/core/source-read-limits.ts');
+  const target = join(root, 'src/core/source-read-limits.ts');
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  copyFileSync(source, target);
+  for (const artifact of POLICY_ARTIFACTS) {
+    const destination = join(root, artifact);
+    mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+    copyFileSync(join(REPOSITORY_ROOT, artifact), destination);
+  }
+  return root;
+}
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe('Source Read Limits v1 policy lock', () => {
+  it('matches the implementation and every required normative or shipped artifact', () => {
+    const result = checkPolicyArtifacts();
+    expect(result.fingerprint).toBe(POLICY_FINGERPRINT);
+    expect(result.policy).toEqual(readSourcePolicy());
+    expect(result.artifacts).toEqual(POLICY_ARTIFACTS);
+  });
+
+  it('fails when either an implementation default or one artifact marker drifts', () => {
+    const implementationMutation = copyPolicyRepository();
+    const sourcePath = join(implementationMutation, 'src/core/source-read-limits.ts');
+    writeFileSync(
+      sourcePath,
+      readFileSync(sourcePath, 'utf8').replace(
+        'jsonlRecordBytes: 67_108_864',
+        'jsonlRecordBytes: 67_108_865'
+      )
+    );
+    expect(() => checkPolicyArtifacts(implementationMutation)).toThrow(/implementation=.*locked=/u);
+
+    const artifactMutation = copyPolicyRepository();
+    const artifactPath = join(artifactMutation, POLICY_ARTIFACTS[0]!);
+    writeFileSync(
+      artifactPath,
+      readFileSync(artifactPath, 'utf8').replace(POLICY_FINGERPRINT, '0'.repeat(64))
+    );
+    expect(() => checkPolicyArtifacts(artifactMutation)).toThrow(/marker drift/u);
+  });
+});
+
+describe('metadata-only carrier measurements', () => {
+  it('measures SQLite row/value/page aggregates without returning keys or payload bytes', async () => {
+    const root = privateRoot('cursor-history-preflight-sqlite-');
+    const databasePath = join(root, 'state.vscdb');
+    createComposerDatabase(databasePath);
+
+    const result = await preflightComposerDatabase(databasePath, 2);
+
+    expect(result).toEqual({
+      sqlitePageRows: 2,
+      sqlitePageBytes: 30,
+      sqliteValueBytes: 17,
+      sqliteRowCount: 5,
+      sqliteDecodedBytes: 53,
+    });
+    expect(JSON.stringify(result)).not.toContain('composerData');
+    expect(JSON.stringify(result)).not.toContain('00000000');
+  });
+
+  it('rejects a downstream-shaped SQLite database instead of treating it as Composer input', async () => {
+    const root = privateRoot('cursor-history-preflight-downstream-');
+    const databasePath = join(root, 'vibe-history.sqlite');
+    const db = new Database(databasePath);
+    db.exec('CREATE TABLE sessions (id TEXT); CREATE TABLE messages (id TEXT, content TEXT)');
+    db.close();
+
+    await expect(preflightComposerDatabase(databasePath, 256)).rejects.toThrow(
+      /not a recognized Cursor Composer database/u
+    );
+  });
+
+  it('reads only central metadata from a cursor-history backup and rejects unrelated ZIPs', async () => {
+    const root = privateRoot('cursor-history-preflight-zip-');
+    const backupPath = join(root, 'backup.zip');
+    await createBackup(backupPath, Buffer.alloc(1_024, 0x61));
+
+    const result = preflightBackupArchive(backupPath);
+    // JSZip records the globalStorage directory as an explicit central entry.
+    expect(result.zipEntryCount).toBe(3);
+    expect(result.zipEntryBytes).toBe(1_024);
+    expect(result.zipAggregateBytes).toBeGreaterThan(1_024);
+    expect(result.zipCompressedBytes).toBe(statSync(backupPath).size);
+    expect(result.zipCompressionRatio).toBeGreaterThan(1);
+
+    const unrelated = join(root, 'unrelated.zip');
+    const zip = new JSZip();
+    zip.file('messages.sqlite', 'downstream');
+    writeFileSync(unrelated, await zip.generateAsync({ type: 'nodebuffer' }));
+    expect(() => preflightBackupArchive(unrelated)).toThrow(
+      /not a cursor-history Composer backup/u
+    );
+  });
+});
+
+describe('aggregate evidence boundary', () => {
+  it('writes only aggregate maxima to a new owner-private file outside the repository', async () => {
+    const root = privateRoot('cursor-history-preflight-run-');
+    const cursorRoot = join(root, 'Cursor', 'User');
+    const databasePath = join(cursorRoot, 'globalStorage', 'state.vscdb');
+    createComposerDatabase(databasePath);
+    const backupPath = join(root, 'backup.zip');
+    await createBackup(backupPath);
+    const evidencePath = join(root, 'evidence', 'aggregate.json');
+
+    const { evidence, outputPath } = await runPreflight({
+      composerRoots: [cursorRoot, cursorRoot],
+      backups: [backupPath, backupPath],
+      output: evidencePath,
+    });
+
+    expect(outputPath).toBe(evidencePath);
+    expect(evidence).toMatchObject({
+      schemaVersion: 1,
+      policyFingerprint: POLICY_FINGERPRINT,
+      carrierCounts: { composerDatabases: 1, backupArchives: 1 },
+      withinDefaults: true,
+      exceeded: [],
+    });
+    const bytes = readFileSync(evidencePath, 'utf8');
+    expect(bytes).not.toContain(cursorRoot);
+    expect(bytes).not.toContain(backupPath);
+    expect(bytes).not.toContain('composerData:');
+    if (process.platform !== 'win32') expect(statSync(evidencePath).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects repository evidence paths and symlinked Composer inputs before scanning', async () => {
+    const root = privateRoot('cursor-history-preflight-reject-');
+    const databasePath = join(root, 'state.vscdb');
+    createComposerDatabase(databasePath);
+    const link = join(root, 'linked.vscdb');
+    symlinkSync(databasePath, link, 'file');
+
+    await expect(
+      runPreflight({ composerRoots: [link], output: join(root, 'symlink-evidence.json') })
+    ).rejects.toThrow(/must not be a symlink/u);
+    await expect(
+      runPreflight({
+        composerRoots: [databasePath],
+        output: join(REPOSITORY_ROOT, '.source-limit-evidence-forbidden.json'),
+      })
+    ).rejects.toThrow(/outside the repository/u);
+    expect(existsSync(join(REPOSITORY_ROOT, '.source-limit-evidence-forbidden.json'))).toBe(false);
+  });
+});

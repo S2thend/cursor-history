@@ -1,5 +1,7 @@
 # Compatibility and Data-Integrity Contract
 
+<!-- source-read-limits/v1 policy-sha256: b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108 -->
+
 This document is the canonical shipped compatibility contract for cursor-history. It applies to
 the CLI, the public library, live and custom Cursor data roots, and supported cursor-history backup
 archives. It describes values that archive and incremental-sync consumers may persist or compare.
