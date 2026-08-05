@@ -6,11 +6,49 @@
  * `import { Session, Message } from 'cursor-history'`
  */
 
+import type {
+  IndexScope,
+  MessageIdentityOrigin,
+  MessageTimestampSource,
+  ResolvedSource,
+  ResolutionState,
+  SessionDiagnostic,
+  SessionResolution,
+  SessionSourceInstance,
+  SessionTimestampSource,
+  SourceReadLimitsOverride,
+  SourceRole,
+  ToolIdentityOrigin,
+  WorkspaceMatchKind,
+  WorkspaceMembership,
+} from '../core/types.js';
+
+export type {
+  IndexScope,
+  MessageIdentityOrigin,
+  MessageTimestampSource,
+  ResolvedSource,
+  ResolutionReasonCode,
+  ResolutionState,
+  SessionDiagnostic,
+  SessionResolution,
+  SessionSourceInstance,
+  SessionTimestampSource,
+  SourceBoundKind,
+  SourceReadLimitsOverride,
+  SourceReadLimitsV1,
+  SourceRepresentation,
+  SourceRole,
+  ToolIdentityOrigin,
+  WorkspaceMatchKind,
+  WorkspaceMembership,
+} from '../core/types.js';
+
 /**
  * Represents a complete chat conversation with metadata and messages.
  */
 export interface Session {
-  /** Unique identifier (database row ID or composite key) */
+  /** Native Cursor UUID; workspace, source, and presentation indices never alter it. */
   id: string;
 
   /** Absolute path to workspace directory */
@@ -24,6 +62,15 @@ export interface Session {
 
   /** Total number of messages in session */
   messageCount: number;
+
+  /** Zero-based presentation index for public read APIs. */
+  index?: number;
+
+  /** Scope in which `index` is reusable. */
+  indexScope?: IndexScope;
+
+  /** Full matched workspace path when `indexScope` is `workspace`. */
+  indexWorkspacePath?: string;
 
   /**
    * Source data completeness:
@@ -53,6 +100,36 @@ export interface Session {
   sources?: Array<'composer' | 'store'>;
   preferredSource?: 'composer' | 'store';
 
+  /** Actual selected representation, separate from the compatibility fidelity signal. */
+  resolvedSource?: ResolvedSource;
+
+  /** Replacement-safety and contributor state. */
+  resolution?: SessionResolution;
+
+  /** Stable canonical workspace path, absent for pathless sessions. */
+  canonicalWorkspacePath?: string;
+
+  /** Full workspace path selected by the active filter. */
+  matchedWorkspacePath?: string;
+
+  /** Exact or unique component-suffix workspace match. */
+  workspaceMatchKind?: WorkspaceMatchKind;
+
+  /** Deterministically ordered historical workspace memberships. */
+  workspaceMemberships?: WorkspaceMembership[];
+
+  /** Safe source-instance provenance without physical locators. */
+  sourceInstances?: SessionSourceInstance[];
+
+  /** Version of stable message identity allocation. */
+  messageIdentityVersion?: 1;
+
+  /** Provenance for the existing `timestamp` creation time. */
+  createdAtSource?: SessionTimestampSource;
+
+  /** Provenance for the existing `metadata.lastModified` value. */
+  lastUpdatedAtSource?: SessionTimestampSource;
+
   /** Parse state of the Store transcript when the Store stack contributed. */
   transcriptState?:
     'missing' | 'parsed' | 'partial' | 'empty' | 'error-only' | 'unsupported' | 'unreadable';
@@ -62,6 +139,9 @@ export interface Session {
 
   /** Ordered bubble UUIDs of the active conversation branch */
   activeBranchBubbleIds?: string[];
+
+  /** Active branch rewritten through resolved stable message identities. */
+  activeBranchMessageIds?: string[];
 
   /** Metadata about session origin (optional) */
   metadata?: {
@@ -111,6 +191,16 @@ export interface Message {
   /** Stable bubble UUID from cursorDiskKV when available */
   id?: string;
 
+  /** Version and origin of the resolved stable identity. */
+  messageIdentityVersion?: 1;
+  identityOrigin?: MessageIdentityOrigin;
+
+  /** Parent reference rewritten through resolved stable identities. */
+  parentMessageId?: string;
+
+  /** Whether the message belongs to a sidechain. */
+  isSidechain?: boolean;
+
   /** Message role: 'user' or 'assistant' */
   role: 'user' | 'assistant';
 
@@ -125,7 +215,7 @@ export interface Message {
   timestamp: string;
 
   /** Provenance of `timestamp` when it is directly stored (not inferred). */
-  timestampSource?: 'composer-created-at' | 'composer-timing' | 'store-turn-timing';
+  timestampSource?: MessageTimestampSource;
 
   /**
    * Which stack supplied this resolved message ('composer' | 'store'), or
@@ -162,6 +252,11 @@ export interface Message {
  * Represents a tool/function call executed by the assistant.
  */
 export interface ToolCall {
+  /** Stable modern identity; legacy consumers may retain array ordinals. */
+  id?: string;
+
+  /** Origin of the stable tool identity. */
+  identityOrigin?: ToolIdentityOrigin;
   /** Tool/function name (e.g., 'read_file', 'write', 'grep') */
   name: string;
 
@@ -262,6 +357,66 @@ export interface LibraryConfig {
    * { messageFilter: ['user', 'tool'] }
    */
   messageFilter?: import('../core/types.js').MessageType[];
+
+  /** Load related contributors outside scope only for UUIDs already selected in scope. */
+  includeCrossWorkspaceSources?: boolean;
+
+  /** Receive safe continuation diagnostics such as skipped ambiguity groups. */
+  onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
+
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+
+  /** Reuse an explicitly bound opaque read context. */
+  readContext?: SessionReadContext;
+
+  /** Cooperatively cancel this operation and nested parsing/snapshot work. */
+  signal?: AbortSignal;
+}
+
+/** Options for constructing an immutable public read context. */
+export interface SessionReadContextOptions {
+  dataPath?: string;
+  backupPath?: string;
+  workspace?: string;
+  includeCrossWorkspaceSources?: boolean;
+  resolvedSessionCapacity?: number;
+  onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
+  sqliteDriver?: SqliteDriverName;
+  sourceReadLimits?: SourceReadLimitsOverride;
+  signal?: AbortSignal;
+}
+
+/** Opaque lifecycle for scope-bound, bounded session reads. */
+export interface SessionReadContext {
+  readonly resolvedSessionCapacity: number;
+  readonly disposed: boolean;
+  releaseSession(sessionId: string): void;
+  dispose(): Promise<void>;
+}
+
+/** Message-free public logical catalog row. */
+export interface SessionSummary {
+  id: string;
+  index: number;
+  indexScope: IndexScope;
+  indexWorkspacePath?: string;
+  resolutionState: ResolutionState | 'ambiguous';
+  title?: string | null;
+  preview?: string;
+  messageCount?: number;
+  source?: 'global' | 'workspace-fallback';
+  resolvedSource?: ResolvedSource;
+  sources?: SourceRole[];
+  resolution?: SessionResolution;
+  canonicalWorkspacePath?: string;
+  matchedWorkspacePath?: string;
+  workspaceMatchKind?: WorkspaceMatchKind;
+  workspaceMemberships?: WorkspaceMembership[];
+  sourceInstances?: SessionSourceInstance[];
+  sourceRoles?: SourceRole[];
+  occurrenceCount?: number;
+  diagnosticOccurrenceRefs?: string[];
 }
 
 /**

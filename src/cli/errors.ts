@@ -2,6 +2,8 @@
  * Error handling utilities and exit codes
  */
 
+import { SessionIntegrityError, type SafeErrorDetails } from '../core/errors.js';
+
 /**
  * CLI exit codes following Unix conventions
  */
@@ -21,11 +23,31 @@ export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
 export class CliError extends Error {
   constructor(
     message: string,
-    public readonly exitCode: ExitCode = ExitCode.GENERAL_ERROR
+    public readonly exitCode: ExitCode = ExitCode.GENERAL_ERROR,
+    public readonly code?: string,
+    public readonly details?: SafeErrorDetails
   ) {
     super(message);
     this.name = 'CliError';
   }
+}
+
+/** Map a typed core failure to the stable CLI exit category without adding unsafe details. */
+export function mapSessionIntegrityError(error: SessionIntegrityError): CliError {
+  const exitCode =
+    error.code === 'SOURCE_LIMIT_CONFIGURATION_INVALID' ||
+    error.code === 'READ_CONTEXT_OPTIONS_MISMATCH'
+      ? ExitCode.USAGE_ERROR
+      : error.code === 'SOURCE_ENCODING_INVALID' ||
+          error.code === 'SOURCE_LIMIT_EXCEEDED' ||
+          error.code === 'TEMPORARY_ARTIFACT_CLEANUP_FAILED' ||
+          error.code === 'DATABASE_CAPABILITY_MISSING' ||
+          error.code === 'NO_CAPABLE_DATABASE_DRIVER'
+        ? ExitCode.IO_ERROR
+        : error.code === 'SESSION_SCOPE_MISMATCH'
+          ? ExitCode.NOT_FOUND
+          : ExitCode.GENERAL_ERROR;
+  return new CliError(error.message, exitCode, error.code, error.details);
 }
 
 /**
@@ -98,6 +120,9 @@ export class NoSearchResultsError extends CliError {
  * Handle an error and exit with appropriate code
  */
 export function handleError(error: unknown): never {
+  if (error instanceof SessionIntegrityError) {
+    return handleError(mapSessionIntegrityError(error));
+  }
   if (error instanceof CliError) {
     console.error(error.message);
     process.exit(error.exitCode);

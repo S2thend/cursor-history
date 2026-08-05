@@ -38,6 +38,11 @@ import {
   isTargetExistsError,
   IntegrityError,
   isIntegrityError,
+  SessionAmbiguityError,
+  WorkspaceAmbiguityError,
+  ReadContextDisposedError,
+  SourceLimitExceededError,
+  isSessionIntegrityError,
 } from '../../src/lib/errors.js';
 
 // =============================================================================
@@ -220,6 +225,31 @@ describe('IntegrityError', () => {
     expect(err.name).toBe('IntegrityError');
     expect(err.failedFiles).toEqual(['file1.db', 'file2.db']);
     expect(err).toBeInstanceOf(RestoreError);
+  });
+});
+
+describe('feature-016 public typed errors', () => {
+  it('exports stable codes and safe deterministic details', () => {
+    const workspace = new WorkspaceAmbiguityError('project', ['/work/b/project', '/work/a/project']);
+    expect(workspace.code).toBe('WORKSPACE_AMBIGUOUS');
+    expect(workspace.details.candidates).toEqual(['/work/a/project', '/work/b/project']);
+
+    const session = new SessionAmbiguityError('uuid', ['occurrence:z', 'occurrence:a']);
+    expect(session.details.occurrenceRefs).toEqual(['occurrence:a', 'occurrence:z']);
+    expect(isSessionIntegrityError(session)).toBe(true);
+    expect(new ReadContextDisposedError().code).toBe('READ_CONTEXT_DISPOSED');
+  });
+
+  it('preserves fractional ratio observations', () => {
+    const error = new SourceLimitExceededError({
+      sourceKind: 'zip',
+      bound: 'zip-compression-ratio',
+      unit: 'ratio',
+      limit: 200,
+      observedAtLeast: 200.25,
+      outcome: 'fatal',
+    });
+    expect(error.details.observedAtLeast).toBe(200.25);
   });
 });
 

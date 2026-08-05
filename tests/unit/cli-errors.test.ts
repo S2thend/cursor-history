@@ -8,7 +8,13 @@ import {
   FileExistsError,
   NoSearchResultsError,
   handleError,
+  mapSessionIntegrityError,
 } from '../../src/cli/errors.js';
+import {
+  SessionAmbiguityError,
+  SourceLimitConfigurationError,
+  SourceLimitExceededError,
+} from '../../src/core/errors.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -112,5 +118,37 @@ describe('handleError', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     handleError('string error');
     expect(mockExit).toHaveBeenCalledWith(ExitCode.GENERAL_ERROR);
+  });
+});
+
+describe('feature-016 typed error mapping', () => {
+  it('maps configuration and fatal source failures to stable exit categories', () => {
+    const configuration = mapSessionIntegrityError(
+      new SourceLimitConfigurationError('jsonlRecordBytes', 0, 'must be positive')
+    );
+    expect(configuration.code).toBe('SOURCE_LIMIT_CONFIGURATION_INVALID');
+    expect(configuration.exitCode).toBe(ExitCode.USAGE_ERROR);
+
+    const exceeded = mapSessionIntegrityError(
+      new SourceLimitExceededError({
+        sourceKind: 'zip',
+        bound: 'zip-compression-ratio',
+        unit: 'ratio',
+        limit: 200,
+        observedAtLeast: 200.5,
+        outcome: 'fatal',
+      })
+    );
+    expect(exceeded.exitCode).toBe(ExitCode.IO_ERROR);
+    expect(exceeded.details?.['observedAtLeast']).toBe(200.5);
+  });
+
+  it('keeps ambiguity details opaque and content-free', () => {
+    const mapped = mapSessionIntegrityError(
+      new SessionAmbiguityError('session-1', ['occurrence:b', 'occurrence:a'])
+    );
+    expect(mapped.code).toBe('SESSION_AMBIGUOUS');
+    expect(mapped.details?.['occurrenceRefs']).toEqual(['occurrence:a', 'occurrence:b']);
+    expect(JSON.stringify(mapped.details)).not.toContain('/private/source');
   });
 });

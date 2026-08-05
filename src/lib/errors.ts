@@ -558,3 +558,26 @@ export function isTargetExistsError(error: unknown): error is TargetExistsError 
 export function isIntegrityError(error: unknown): error is IntegrityError {
   return error instanceof IntegrityError;
 }
+
+// Additive feature-016 typed errors share one core implementation so CLI and
+// library consumers observe identical stable codes and safe details.
+export {
+  SessionIntegrityError,
+  WorkspaceAmbiguityError,
+  SessionAmbiguityError,
+  SessionScopeMismatchError,
+  UnsupportedSessionMigrationError,
+  MigrationTargetChangedError,
+  DatabaseCapabilityMissingError,
+  NoCapableDatabaseDriverError,
+  TemporaryArtifactCleanupError,
+  ReadContextError,
+  ReadContextSourceMismatchError,
+  ReadContextScopeMismatchError,
+  ReadContextOptionsMismatchError,
+  ReadContextDisposedError,
+  SourceEncodingError,
+  SourceLimitExceededError,
+  SourceLimitConfigurationError,
+  isSessionIntegrityError,
+} from '../core/errors.js';
