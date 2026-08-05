@@ -16,7 +16,9 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
     "lint": "eslint src/",
