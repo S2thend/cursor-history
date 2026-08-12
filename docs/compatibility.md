@@ -58,6 +58,11 @@ rewritten to the resolved stable message IDs.
 Resolved sessions and messages expose `messageIdentityVersion: 1`. Identity never depends on
 timestamps, workspace paths, read limits, filesystem metadata, or current wall-clock time.
 
+The public-library converter also preserves the released v0.16 runtime shape of every pre-existing
+optional `Message` member: `toolCalls`, `thinking`, `tokenUsage`, `model`, `durationMs`, and
+`metadata` remain own properties even when their value is `undefined`. Identity and provenance
+members are additive.
+
 ## Numeric indices and scope
 
 Numeric indices are ephemeral presentation addresses, not identities:
@@ -117,13 +122,14 @@ The CLI `--include-cross-workspace-sources` and library
 selected in the workspace. They do not scan unrelated conversation payload, and every broadened
 source is disclosed.
 
-`workspacePath` in core/JSON and `workspace` in the library remain compatibility aliases of
-`canonicalWorkspacePath`. A Composer-backed session retains its deterministic Composer
-attribution; selecting Store as the merge backbone cannot overwrite it. `matchedWorkspacePath`
-reports the full membership selected by the filter. `workspaceMemberships` and `sourceInstances`
-report the normalized, deterministically ordered memberships and source roles without exposing raw
-locators. A pathless core/CLI value is `null`; the public-library compatibility alias is exactly
-`"unknown"`.
+`canonicalWorkspacePath` is the additive normalized full path. The public library's existing
+`workspace` field preserves the released `coreSession.workspacePath` spelling, including v0.16's
+`~/...` home contraction, so it can differ textually from `canonicalWorkspacePath` while identifying
+the same Composer workspace. Selecting Store as the merge backbone cannot overwrite either Composer
+attribution. `matchedWorkspacePath` reports the full membership selected by the filter.
+`workspaceMemberships` and `sourceInstances` report normalized, deterministically ordered
+memberships and source roles without exposing raw locators. A pathless core/CLI value is `null`; the
+public-library compatibility alias is exactly `"unknown"`.
 
 ## Fidelity, provenance, and replacement safety
 

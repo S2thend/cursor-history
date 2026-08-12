@@ -62,7 +62,11 @@ export interface Session {
   /** Native Cursor UUID; workspace, source, and presentation indices never alter it. */
   id: string;
 
-  /** Absolute path to workspace directory */
+  /**
+   * Released v0.16-compatible workspace spelling. Composer paths below the
+   * process home directory may be contracted as `~/...`; use the additive
+   * `canonicalWorkspacePath` when a normalized full path is required.
+   */
   workspace: string;
 
   /** ISO 8601 timestamp of session creation */

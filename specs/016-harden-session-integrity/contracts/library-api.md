@@ -267,7 +267,7 @@ Existing fields remain. The following fields are additive:
 ```ts
 export interface Session {
   id: string;                           // unchanged native Cursor UUID
-  workspace: string;                   // compatibility alias of canonical path
+  workspace: string;                   // released v0.16 spelling; may be ~/...
   timestamp: string;
   /** Provenance for `timestamp`, which remains the compatibility creation-time field. */
   createdAtSource?: SessionTimestampSource;
@@ -317,8 +317,10 @@ export interface Session {
 Rules:
 
 - `id` never receives a source/workspace/index suffix.
-- `workspace` equals `canonicalWorkspacePath` when known. For every pathless result it is exactly
-  `"unknown"`; `canonicalWorkspacePath` remains absent.
+- `workspace` preserves the released v0.16 `coreSession.workspacePath` spelling, including `~/...`
+  home contraction. `canonicalWorkspacePath` is the additive normalized full path, so the two may
+  differ textually while identifying the same workspace. For every pathless result `workspace` is
+  exactly `"unknown"`; `canonicalWorkspacePath` remains absent.
 - `matchedWorkspacePath` is the full normalized path chosen by the active workspace filter and may
   differ from canonical path on a multi-membership session.
 - `indexWorkspacePath` is required exactly when `indexScope === 'workspace'`.
@@ -400,6 +402,10 @@ and cannot anchor neighboring inference.
 Although `ToolCall.id` and `identityOrigin` remain optional in TypeScript declarations for source
 compatibility, every resolved runtime/library/JSON tool call contains a nonempty ID and identity
 origin.
+
+Library projection preserves the released v0.16 own-property shape of the pre-existing optional
+`Message` members `toolCalls`, `thinking`, `tokenUsage`, `model`, `durationMs`, and `metadata`, even
+when their value is `undefined`. Additive identity/provenance members do not replace those keys.
 
 The unchanged consumer has no attachment member, derives code blocks from message `content`, and
 does not consume standalone cursor-history `codeBlocks` or `ToolCall.files`. Supported source

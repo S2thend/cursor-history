@@ -666,8 +666,10 @@ Compatibility aliases:
 
 - Core/CLI `workspacePath` equals `canonicalWorkspacePath` when known; structured output uses `null`
   when unknown.
-- Library `workspace` equals the canonical path when known and is exactly the string `"unknown"`
-  when pathless; `canonicalWorkspacePath` remains absent rather than inventing a path.
+- Library `workspace` preserves the released v0.16 `coreSession.workspacePath` spelling (including
+  `~/...` home contraction), while additive `canonicalWorkspacePath` carries the normalized full
+  path. The two may differ textually while identifying the same workspace. For pathless sessions,
+  `workspace` is exactly `"unknown"` and `canonicalWorkspacePath` remains absent.
 - Library `timestamp` serializes `createdAt`, and existing `metadata.lastModified` serializes
   `lastUpdatedAt`; their additive source fields carry the provenance above.
 - Complete/replacement-safe maps to `source: 'global'`; any degraded/unsafe view maps to

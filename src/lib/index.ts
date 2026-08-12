@@ -546,6 +546,20 @@ function firstPublicWorkspacePath(...candidates: Array<string | undefined>): str
     .find((candidate) => candidate !== undefined);
 }
 
+/**
+ * Preserve the released v0.16 spelling of the library `workspace` alias.
+ *
+ * Composer summaries historically passed their path through `contractPath()`,
+ * so a workspace below the process home directory was exposed as `~/...`.
+ * `canonicalWorkspacePath` is the additive normalized/full spelling; using it
+ * to replace this existing alias would change a value persisted by incremental
+ * library consumers.
+ */
+function releasedWorkspaceAlias(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return normalizePublicWorkspacePath(value) === undefined ? undefined : value;
+}
+
 /** Remove display-only workspace labels from public source-instance metadata. */
 function publicSourceInstances(
   instances: readonly SessionSourceInstance[] | undefined
@@ -580,13 +594,15 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     coreSession.canonicalWorkspacePath,
     coreSession.workspacePath
   );
+  const compatibilityWorkspacePath =
+    releasedWorkspaceAlias(coreSession.workspacePath) ?? canonicalWorkspacePath;
   const indexWorkspacePath = normalizePublicWorkspacePath(coreSession.indexWorkspacePath);
   const matchedWorkspacePath = normalizePublicWorkspacePath(coreSession.matchedWorkspacePath);
   const compatibilitySource = compatibilitySourceOf(coreSession);
 
   return {
     id: coreSession.id,
-    workspace: canonicalWorkspacePath ?? 'unknown',
+    workspace: compatibilityWorkspacePath ?? 'unknown',
     timestamp: coreSession.createdAt.toISOString(),
     messages: coreSession.messages.map((msg) => {
       const hasMessageTimestamp =
@@ -608,6 +624,21 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
         // without a turn timestamp use the session creation time and expose
         // that fallback as additive provenance.
         timestamp: timestamp.toISOString(),
+        // v0.16 created every optional Message member as an own property even
+        // when its value was undefined. Preserve that observable runtime shape
+        // while detaching defined arrays/objects from the core result.
+        toolCalls: msg.toolCalls
+          ? msg.toolCalls.map((call) => ({
+              ...call,
+              ...(call.params !== undefined ? { params: structuredClone(call.params) } : {}),
+              ...(call.files !== undefined ? { files: [...call.files] } : {}),
+            }))
+          : undefined,
+        thinking: msg.thinking,
+        tokenUsage: msg.tokenUsage ? { ...msg.tokenUsage } : undefined,
+        model: msg.model,
+        durationMs: msg.durationMs,
+        metadata: msg.metadata ? { ...msg.metadata } : undefined,
         timestampSource,
       };
       if (msg.messageIdentityVersion) m['messageIdentityVersion'] = msg.messageIdentityVersion;
@@ -615,18 +646,6 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
       if (msg.parentMessageId) m['parentMessageId'] = msg.parentMessageId;
       if (msg.isSidechain !== undefined) m['isSidechain'] = msg.isSidechain;
       if (msg.source) m['source'] = msg.source;
-      if (msg.toolCalls) {
-        m['toolCalls'] = msg.toolCalls.map((call) => ({
-          ...call,
-          ...(call.params !== undefined ? { params: structuredClone(call.params) } : {}),
-          ...(call.files !== undefined ? { files: [...call.files] } : {}),
-        }));
-      }
-      if (msg.thinking) m['thinking'] = msg.thinking;
-      if (msg.tokenUsage) m['tokenUsage'] = { ...msg.tokenUsage };
-      if (msg.model) m['model'] = msg.model;
-      if (msg.durationMs !== undefined) m['durationMs'] = msg.durationMs;
-      if (msg.metadata) m['metadata'] = { ...msg.metadata };
       return m as unknown as import('./types.js').Message;
     }),
     messageCount: coreSession.messageCount,
@@ -710,6 +729,8 @@ function convertToLibrarySummary(summary: CoreLogicalSessionSummary): SessionSum
     summary.canonicalWorkspacePath,
     summary.workspacePath
   );
+  const compatibilityWorkspacePath =
+    releasedWorkspaceAlias(summary.workspacePath) ?? canonicalWorkspacePath;
   const indexWorkspacePath = normalizePublicWorkspacePath(summary.indexWorkspacePath);
   const matchedWorkspacePath = normalizePublicWorkspacePath(summary.matchedWorkspacePath);
   const source = compatibilitySourceOf(summary);
@@ -739,7 +760,7 @@ function convertToLibrarySummary(summary: CoreLogicalSessionSummary): SessionSum
     index: summary.index - 1,
     indexScope: summary.indexScope ?? 'global',
     ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
-    workspace: canonicalWorkspacePath ?? 'unknown',
+    workspace: compatibilityWorkspacePath ?? 'unknown',
     timestamp: summary.createdAt.toISOString(),
     title: summary.title,
     preview: summary.preview,

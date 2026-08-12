@@ -303,8 +303,10 @@ only if absent, accept exactly one candidate whose complete trailing components 
 suffix candidates throw `WorkspaceAmbiguityError` before payload I/O; no candidate returns an
 actionable empty result.
 
-Keep `workspacePath` (core/JSON) and `workspace` (library) as compatibility aliases for
-`canonicalWorkspacePath`. A Composer-backed session freezes the deterministic unfiltered Composer
+Keep the public library's existing `workspace` value as the released v0.16
+`coreSession.workspacePath` spelling, including `~/...` home contraction. Expose the normalized full
+path separately as additive `canonicalWorkspacePath`; the two spellings may differ without changing
+workspace identity. A Composer-backed session freezes the deterministic unfiltered Composer
 attribution verified by the v0.16 fixture (configuration workspace before folder, then normalized
 lexicographic ordering); Store cwd never overwrites it. A Store-only session may use a reliable cwd.
 Add `matchedWorkspacePath`, `workspaceMemberships`, and per-source paths.

@@ -364,6 +364,23 @@ describe('listSessions', () => {
     expect(result.data[0]!.sourceInstances[0]!.workspacePaths).toEqual([]);
   });
 
+  it('keeps the released summary workspace spelling separate from its canonical path', async () => {
+    mockListSessions.mockResolvedValue([
+      {
+        ...makeCoreSummary('contracted-summary', 1),
+        workspacePath: '~/legacy-project',
+        canonicalWorkspacePath: '/home/example/legacy-project',
+      },
+    ]);
+
+    const result = await listSessionSummaries();
+
+    expect(result.data[0]).toMatchObject({
+      workspace: '~/legacy-project',
+      canonicalWorkspacePath: '/home/example/legacy-project',
+    });
+  });
+
   it('returns PaginatedResult with sessions', async () => {
     mockListSessions.mockResolvedValue([makeCoreSummary()]);
     mockGetSession.mockResolvedValue(makeCoreSession());
@@ -566,6 +583,44 @@ describe('getSession', () => {
     expect(session.messages[0]!.id).toBe('m1');
     expect(session.messages[0]!.role).toBe('user');
     expect(session.timestamp).toBe('2024-01-15T10:00:00.000Z');
+  });
+
+  it('preserves the v0.16 contracted workspace alias beside the additive canonical path', async () => {
+    mockGetSession.mockResolvedValue({
+      ...makeCoreSession(),
+      workspacePath: '~/legacy-project',
+      canonicalWorkspacePath: '/home/example/legacy-project',
+    });
+
+    const session = await getSession(0);
+
+    expect(session.workspace).toBe('~/legacy-project');
+    expect(session.canonicalWorkspacePath).toBe('/home/example/legacy-project');
+  });
+
+  it('preserves every v0.16 optional Message member as an own property when undefined', async () => {
+    mockGetSession.mockResolvedValue(makeCoreSession());
+
+    const session = await getSession(0);
+    const message = session.messages[0]!;
+    const legacyOptionalKeys = [
+      'toolCalls',
+      'thinking',
+      'tokenUsage',
+      'model',
+      'durationMs',
+      'metadata',
+    ] as const;
+
+    for (const key of legacyOptionalKeys) {
+      expect(Object.hasOwn(message, key)).toBe(true);
+      expect(message[key]).toBeUndefined();
+    }
+    expect(
+      Object.keys(message).filter((key) =>
+        legacyOptionalKeys.includes(key as (typeof legacyOptionalKeys)[number])
+      )
+    ).toEqual(legacyOptionalKeys);
   });
 
   it('projects pathless session sentinels to library workspace unknown', async () => {
