@@ -120,7 +120,7 @@ export function getBoundedComposerMetadataByKey(
   throwIfAborted(signal);
   const raw = db
     .prepare(
-      `SELECT CAST(rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key = ?`
+      `SELECT CAST(rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key = ? AND value IS NOT NULL`
     )
     .get(key) as Record<string, unknown> | undefined;
   if (!raw) return undefined;
@@ -148,7 +148,7 @@ export function forEachBoundedComposerMetadata(
     throwIfAborted(signal);
     const rawPage = db
       .prepare(
-        `SELECT CAST(${table}.rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key LIKE ? ESCAPE '\\' AND (? IS NULL OR ${table}.rowid > ?) ORDER BY ${table}.rowid ASC LIMIT ?`
+        `SELECT CAST(${table}.rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key LIKE ? ESCAPE '\\' AND value IS NOT NULL AND (? IS NULL OR ${table}.rowid > ?) ORDER BY ${table}.rowid ASC LIMIT ?`
       )
       .all(keyPattern, afterRowId, afterRowId, fixedPageRows) as Array<Record<string, unknown>>;
     if (rawPage.length === 0) break;
@@ -240,7 +240,7 @@ export function readFirstBoundedComposerValue(
   throwIfAborted(signal);
   const raw = db
     .prepare(
-      `SELECT CAST(${table}.rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key LIKE ? ESCAPE '\\' ORDER BY ${table}.rowid ASC LIMIT 1`
+      `SELECT CAST(${table}.rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key LIKE ? ESCAPE '\\' AND value IS NOT NULL ORDER BY ${table}.rowid ASC LIMIT 1`
     )
     .get(keyPattern) as Record<string, unknown> | undefined;
   if (!raw) return undefined;
