@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { dirname } from 'node:path';
 
 import * as library from '../../src/lib/index.js';
+import { resolveCommandSession } from '../../src/cli/commands/session-lookup.js';
 import {
   fingerprintConsumedPayloadV1,
   type ReplicaConsumedMessage,
@@ -203,6 +204,35 @@ describe('FR-042 consumed-field integration gate', () => {
 });
 
 describe.sequential('logical replica reconciliation through public reads', () => {
+  it('keeps Composer canonical attribution stable across workspace filters', async () => {
+    const root = fixture();
+    const session = composerSession(root, 'canonical-filter-independent');
+    const folderPath = `${root.root}/z-folder`;
+    const configurationPath = `${root.root}/a-project.code-workspace`;
+    writeComposerWorkspaceSummary(root, 'workspace-folder', folderPath, [session]);
+    writeComposerWorkspaceSummary(root, 'workspace-configuration', configurationPath, [session]);
+
+    const unfiltered = await library.listSessions({ dataPath: root.workspaceStorage });
+    const scoped = await library.listSessions({
+      dataPath: root.workspaceStorage,
+      workspace: folderPath,
+    });
+
+    expect(unfiltered.data).toHaveLength(1);
+    expect(scoped.data).toHaveLength(1);
+    expect(unfiltered.data[0]).toMatchObject({
+      id: session.id,
+      workspace: configurationPath,
+      canonicalWorkspacePath: configurationPath,
+    });
+    expect(scoped.data[0]).toMatchObject({
+      id: session.id,
+      workspace: configurationPath,
+      canonicalWorkspacePath: configurationPath,
+      matchedWorkspacePath: folderPath,
+    });
+  });
+
   it('collapses equivalent Composer replicas once across list, lookup, search, and bulk export', async () => {
     const root = fixture();
     const session = composerSession(root, 'equivalent-replica-needle');
@@ -323,6 +353,12 @@ describe.sequential('logical replica reconciliation through public reads', () =>
     await expect(library.exportSessionToMarkdown(row.index, config)).rejects.toMatchObject(
       expectedAmbiguity
     );
+    await expect(
+      resolveCommandSession(row.index + 1, root.projectA, root.workspaceStorage)
+    ).rejects.toMatchObject(expectedAmbiguity);
+    await expect(
+      resolveCommandSession(left.id, root.projectA, root.workspaceStorage)
+    ).rejects.toMatchObject(expectedAmbiguity);
 
     diagnostics.length = 0;
     await expect(library.searchSessions('divergent-left-needle', config)).resolves.toEqual([]);

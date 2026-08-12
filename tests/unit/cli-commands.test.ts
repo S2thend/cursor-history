@@ -5,7 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Command } from 'commander';
-import { SessionNotFoundError } from '../../src/lib/errors.js';
+import { SessionAmbiguityError, SessionNotFoundError } from '../../src/lib/errors.js';
 
 // --- Mock functions ---
 const mockListSessions = vi.fn();
@@ -441,6 +441,27 @@ describe('show command', () => {
     );
     const context = mockListSessions.mock.calls[0]![3];
     expect(mockGetSession).toHaveBeenCalledWith('session-1', undefined, undefined, context, 1);
+    expect(mockFindWorkspaces).not.toHaveBeenCalled();
+  });
+
+  it('reuses an ambiguous scoped index through the bound logical catalog', async () => {
+    mockListSessions.mockResolvedValue([]);
+    mockGetSession.mockRejectedValue(
+      new SessionAmbiguityError('ambiguous-session', ['occurrence:v1:b', 'occurrence:v1:a'])
+    );
+
+    const program = createProgram();
+    registerShowCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'test', '--workspace', '/workspace/a', 'show', '1'])
+    ).rejects.toThrow('process.exit');
+
+    const context = mockListSessions.mock.calls[0]![3];
+    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, context);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('divergent source replicas')
+    );
   });
 
   it('passes composer ID string to getSession when argument is not all digits', async () => {
@@ -1179,6 +1200,41 @@ describe('export command', () => {
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce();
   });
 
+  it('skips a session that becomes ambiguous after listing and reports it once', async () => {
+    const resolved = makeSessions(1)[0]!;
+    mockListSessionSummaries.mockResolvedValue([resolved]);
+    mockGetSession.mockRejectedValue(
+      new SessionAmbiguityError(resolved.id, ['occurrence:v1:late-a', 'occurrence:v1:late-b'])
+    );
+    mockFindWorkspaces.mockResolvedValue([]);
+    mockExistsSync.mockReturnValue(true);
+
+    const program = createProgram();
+    registerExportCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--json',
+      'export',
+      '--all',
+      '--force',
+      '--output',
+      '/tmp/exports',
+    ]);
+
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
+    expect(mockReleaseSession).toHaveBeenCalledWith(resolved.id);
+    expect(mockFormatExportResultJson).toHaveBeenCalledWith([], {
+      diagnostics: [
+        expect.objectContaining({
+          code: 'SESSION_AMBIGUOUS',
+          sessionId: resolved.id,
+          occurrenceCount: 2,
+        }),
+      ],
+    });
+  });
+
   it('releases the active export payload and disposes before handling failures', async () => {
     mockListSessions.mockResolvedValue([makeSessions(1)[0]]);
     mockGetSession.mockRejectedValue(new Error('synthetic export failure'));
@@ -1224,6 +1280,7 @@ describe('export command', () => {
       undefined,
       expect.any(Object)
     );
+    expect(mockFindWorkspaces).not.toHaveBeenCalled();
   });
 
   it('exports all sessions exits when no sessions', async () => {

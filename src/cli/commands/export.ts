@@ -6,12 +6,7 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import {
-  getSession,
-  listSessionSummaries,
-  findWorkspaces,
-  createSessionReadContext,
-} from '../../core/storage.js';
+import { getSession, listSessionSummaries, createSessionReadContext } from '../../core/storage.js';
 import { validateBackup } from '../../core/backup.js';
 import { exportToMarkdown, exportToJson } from '../../core/parser.js';
 import {
@@ -25,7 +20,12 @@ import { expandPath, contractPath } from '../../lib/platform.js';
 import { resolveCommandSession } from './session-lookup.js';
 import type { ChatSessionSummary, SourceReadLimitsOverride } from '../../core/types.js';
 import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
-import { createAmbiguousSessionDiagnostic, createCliDiagnosticCollector } from '../diagnostics.js';
+import {
+  createAmbiguousSessionDiagnostic,
+  createCliDiagnosticCollector,
+  createSessionAmbiguityDiagnostic,
+} from '../diagnostics.js';
+import { SessionAmbiguityError } from '../../core/errors.js';
 
 interface ExportCommandOptions {
   output?: string;
@@ -155,8 +155,6 @@ export function registerExportCommand(program: Command): void {
                 mkdirSync(outputDir, { recursive: true });
               }
 
-              const workspaces = await findWorkspaces(expanded, backupPath, { sourceReadLimits });
-
               // Show backup source indicator if exporting from backup
               if (backupPath && !useJson) {
                 console.log(pc.dim(`Exporting from backup: ${contractPath(backupPath)}\n`));
@@ -174,11 +172,6 @@ export function registerExportCommand(program: Command): void {
                   );
                   if (!session) continue;
 
-                  // Prefer the resolved session's workspacePath when Composer
-                  // workspace metadata is unavailable (Store-only sessions).
-                  const workspace = workspaces.find((w) => w.id === session.workspaceId);
-                  const workspacePath = workspace?.path ?? session.workspacePath;
-
                   // Generate filename
                   const dateStr = session.createdAt.toISOString().split('T')[0];
                   const safeTitle = (session.title ?? 'untitled')
@@ -194,9 +187,7 @@ export function registerExportCommand(program: Command): void {
 
                   // Export
                   const content =
-                    format === 'json'
-                      ? exportToJson(session, workspacePath)
-                      : exportToMarkdown(session, workspacePath);
+                    format === 'json' ? exportToJson(session) : exportToMarkdown(session);
 
                   writeFileSync(filePath, content, 'utf-8');
                   const indexScope =
@@ -214,6 +205,14 @@ export function registerExportCommand(program: Command): void {
                     sessionId: session.id,
                     path: contractPath(filePath),
                   });
+                } catch (error) {
+                  if (!(error instanceof SessionAmbiguityError)) throw error;
+                  diagnosticCollector.onDiagnostic(
+                    createSessionAmbiguityDiagnostic(
+                      error.details.sessionId,
+                      error.details.occurrenceRefs
+                    )
+                  );
                 } finally {
                   context.releaseSession(summary.id);
                 }
@@ -246,15 +245,6 @@ export function registerExportCommand(program: Command): void {
               { includeCrossWorkspaceSources, sourceReadLimits }
             );
 
-            const workspaces = await findWorkspaces(
-              customPath ? expandPath(customPath) : undefined,
-              backupPath,
-              { sourceReadLimits }
-            );
-            const workspace = workspaces.find((w) => w.id === session.workspaceId);
-            // Fall back to the resolved session's workspacePath for Store sessions.
-            const workspacePath = workspace?.path ?? session.workspacePath;
-
             // Determine output path
             let outputPath: string;
             if (options.output) {
@@ -284,10 +274,7 @@ export function registerExportCommand(program: Command): void {
             }
 
             // Export
-            const content =
-              format === 'json'
-                ? exportToJson(session, workspacePath)
-                : exportToMarkdown(session, workspacePath);
+            const content = format === 'json' ? exportToJson(session) : exportToMarkdown(session);
 
             writeFileSync(outputPath, content, 'utf-8');
             const indexScope = session.indexScope ?? (workspaceFilter ? 'workspace' : 'global');

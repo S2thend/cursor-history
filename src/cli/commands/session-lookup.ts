@@ -1,4 +1,9 @@
-import { createSessionReadContext, getSession, listSessions } from '../../core/storage.js';
+import {
+  createSessionReadContext,
+  getSession,
+  listSessions,
+  listSessionSummaries,
+} from '../../core/storage.js';
 import { SessionScopeMismatchError } from '../../core/errors.js';
 import type {
   ChatSession,
@@ -71,7 +76,7 @@ export async function resolveCommandSession(
               context,
               boundScopedSummary.index
             )
-          : null
+          : await getSession(identifier, customDataPath, backupPath, context)
         : await getSession(identifier, customDataPath, backupPath, context)
       : await getSession(identifier, customDataPath, backupPath);
 
@@ -84,7 +89,7 @@ export async function resolveCommandSession(
     if (typeof identifier === 'number') {
       const sessions =
         scopedSessions ??
-        (await listSessions(
+        (await listSessionSummaries(
           {
             limit: 0,
             all: true,
@@ -99,7 +104,8 @@ export async function resolveCommandSession(
           backupPath,
           context
         ));
-      throw new SessionNotFoundError({ index: identifier, maxIndex: sessions.length });
+      const logicalCount = context?.logicalSummaries?.length ?? sessions.length;
+      throw new SessionNotFoundError({ index: identifier, maxIndex: logicalCount });
     }
     throw new SessionNotFoundError({ composerId: identifier });
   } finally {
