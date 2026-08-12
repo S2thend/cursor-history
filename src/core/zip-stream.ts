@@ -19,6 +19,11 @@ import {
   type SourceReadLimitField,
 } from './source-read-limits.js';
 import type { SourceReadLimitsOverride, SourceReadLimitsV1, ZipSourceBoundKind } from './types.js';
+import {
+  observeAdapterIo,
+  type AdapterIoEventInput,
+  type OperationIoContext,
+} from './io-observer.js';
 
 const EOCD_SIGNATURE = 0x06054b50;
 const ZIP64_EOCD_SIGNATURE = 0x06064b50;
@@ -35,6 +40,31 @@ const STORE_METHOD = 0;
 const DEFLATE_METHOD = 8;
 const MANIFEST_MEMORY_LIMIT = 16 * 1024 * 1024;
 const STREAM_CHUNK_BYTES = 64 * 1024;
+
+function zipEntryIoIdentity(
+  name: string
+): Pick<AdapterIoEventInput, 'resourceClass' | 'sourceRole' | 'representation'> {
+  if (name === 'manifest.json') return { resourceClass: 'backup-manifest' };
+  if (/^workspaceStorage\/[^/]+\/workspace\.json$/u.test(name)) {
+    return {
+      resourceClass: 'workspace-membership-json',
+      sourceRole: 'composer',
+      representation: 'composer-workspace',
+    };
+  }
+  if (name === 'globalStorage/state.vscdb') {
+    return {
+      resourceClass: 'backup-entry',
+      sourceRole: 'composer',
+      representation: 'composer-global',
+    };
+  }
+  return {
+    resourceClass: 'backup-entry',
+    sourceRole: 'composer',
+    representation: 'composer-workspace',
+  };
+}
 
 const ZIP_LIMIT_FIELDS: Readonly<Record<ZipSourceBoundKind, SourceReadLimitField>> = {
   'zip-compressed-bytes': 'zipCompressedBytes',
@@ -64,6 +94,8 @@ export interface ZipEntryMetadata {
 export interface BoundedZipArchiveOptions {
   readonly sourceReadLimits?: SourceReadLimitsOverride;
   readonly signal?: AbortSignal;
+  /** Internal operation-bound low-level observer. */
+  readonly io?: OperationIoContext;
 }
 
 /** One private filesystem input prepared for streamed ZIP creation. */
@@ -801,7 +833,8 @@ export class BoundedZipArchive {
     private readonly centralOffset: number,
     private readonly handle: FileHandle,
     private readonly limits: Readonly<SourceReadLimitsV1>,
-    private readonly signal?: AbortSignal
+    private readonly signal?: AbortSignal,
+    private readonly io?: OperationIoContext
   ) {
     this.byName = new Map(entries.map((entry) => [entry.name, entry]));
     const offsets = entries.map((entry) => entry.localHeaderOffset).sort((a, b) => a - b);
@@ -816,8 +849,22 @@ export class BoundedZipArchive {
   ): Promise<BoundedZipArchive> {
     const limits = resolveSourceReadLimits(options.sourceReadLimits);
     throwIfAborted(options.signal);
+    if (options.io) {
+      observeAdapterIo(options.io, {
+        adapter: 'filesystem',
+        operation: 'open',
+        resourceClass: 'backup-central-directory',
+      });
+    }
     const handle = await open(path, 'r');
     try {
+      if (options.io) {
+        observeAdapterIo(options.io, {
+          adapter: 'filesystem',
+          operation: 'read',
+          resourceClass: 'backup-central-directory',
+        });
+      }
       const metadata = await handle.stat({ bigint: true });
       if (!metadata.isFile()) throw formatError('ZIP source must be a regular file.');
       enforceIntegerLimit('zip-compressed-bytes', metadata.size, limits);
@@ -837,7 +884,8 @@ export class BoundedZipArchive {
         central.offset,
         handle,
         limits,
-        options.signal
+        options.signal,
+        options.io
       );
     } catch (error) {
       await handle.close();
@@ -1000,6 +1048,14 @@ export class BoundedZipArchive {
   private async pipeEntry(entry: ZipEntryMetadata, destination: Writable): Promise<string> {
     this.assertOpen();
     if (entry.isDirectory) throw formatError('A directory entry cannot be materialized as a file.');
+    if (this.io) {
+      const identity = zipEntryIoIdentity(entry.name);
+      observeAdapterIo(this.io, {
+        adapter: 'filesystem',
+        operation: 'read',
+        ...identity,
+      });
+    }
     const offset = await this.dataOffset(entry);
     const source = readHandleRange(this.handle, offset, entry.compressedSize, this.signal);
     const compressed = new CompressedVerifier(entry.compressedSize, this.signal);

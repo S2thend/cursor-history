@@ -48,6 +48,7 @@ import {
   type PreparedZipFileInput,
 } from './zip-stream.js';
 import { resolveSourceReadLimits } from './source-read-limits.js';
+import { IoObserverError, type OperationIoContext } from './io-observer.js';
 import {
   SourceLimitConfigurationError,
   SourceLimitExceededError,
@@ -75,7 +76,14 @@ const BACKUP_DATABASE_READ_CAPABILITIES = new Set<DatabaseCapability>(['read']);
 export interface BackupDatabaseReadOptions extends SourceReadOptions {
   /** Strict provider preference for the extracted database open. */
   sqliteDriver?: DriverName;
+  /** Internal operation-bound I/O audit context. */
+  io?: OperationIoContext;
+  /** Stable logical identity only; never an archive path. */
+  logicalSessionId?: string;
 }
+
+/** Runtime-only extension used by core readers without expanding public read options. */
+type InternalSourceReadOptions = SourceReadOptions & { readonly io?: OperationIoContext };
 
 /** Internal signal that an optional or manifest-referenced archive entry is absent. */
 export class BackupEntryNotFoundError extends Error {
@@ -86,11 +94,24 @@ export class BackupEntryNotFoundError extends Error {
   }
 }
 
-function backupDatabaseReadRequest(sqliteDriver?: DriverName): DatabaseOperationRequest {
+function backupDatabaseReadRequest(
+  sqliteDriver: DriverName | undefined,
+  io: OperationIoContext | undefined,
+  dbPath: string,
+  logicalSessionId?: string
+): DatabaseOperationRequest {
+  const global = dbPath === 'globalStorage/state.vscdb';
   return {
     operation: 'read-session',
     required: BACKUP_DATABASE_READ_CAPABILITIES,
     ...(sqliteDriver ? { forcedDriver: sqliteDriver } : {}),
+    ...(io ? { io } : {}),
+    ioResource: {
+      resourceClass: 'sqlite-snapshot',
+      sourceRole: 'composer',
+      representation: global ? 'composer-global' : 'composer-workspace',
+      ...(logicalSessionId ? { logicalSessionId } : {}),
+    },
   };
 }
 
@@ -107,11 +128,15 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError(signal);
 }
 
-function freezeSourceReadOptions(options: SourceReadOptions = {}): Readonly<SourceReadOptions> {
+function freezeSourceReadOptions(
+  options: SourceReadOptions = {}
+): Readonly<InternalSourceReadOptions> {
+  const internal = options as InternalSourceReadOptions;
   const sourceReadLimits = resolveSourceReadLimits(options.sourceReadLimits);
   return Object.freeze({
     sourceReadLimits,
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(internal.io ? { io: internal.io } : {}),
   });
 }
 
@@ -647,13 +672,14 @@ function shouldPropagateBoundedReadError(error: unknown): boolean {
     error instanceof SourceLimitExceededError ||
     error instanceof SourceLimitConfigurationError ||
     error instanceof TemporaryArtifactCleanupError ||
+    error instanceof IoObserverError ||
     (error instanceof Error && error.name === 'AbortError')
   );
 }
 
 async function withBoundedArchive<T>(
   backupPath: string,
-  options: SourceReadOptions,
+  options: InternalSourceReadOptions,
   operation: (archive: BoundedZipArchive) => Promise<T>
 ): Promise<T> {
   let archive: BoundedZipArchive | undefined;
@@ -913,7 +939,6 @@ export async function openBackupDatabase(
       }
       workspace = createPrivateTempWorkspace({
         prefix: 'cursor-history-backup-read-',
-        signal: readOptions.signal,
       });
       const snapshotPath = workspace.createFile('state.vscdb');
       await archive.extractEntryToFile(entry.name, snapshotPath);
@@ -921,7 +946,10 @@ export async function openBackupDatabase(
     });
 
     throwIfAborted(readOptions.signal);
-    db = await openDatabase(tempFile, backupDatabaseReadRequest(sqliteDriver));
+    db = await openDatabase(
+      tempFile,
+      backupDatabaseReadRequest(sqliteDriver, readOptions.io, dbPath, options.logicalSessionId)
+    );
     throwIfAborted(readOptions.signal);
     return new TempFileCleanupWrapper(db, workspace!);
   } catch (error) {

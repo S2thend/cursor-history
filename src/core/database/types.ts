@@ -99,6 +99,13 @@ export interface DatabaseOperationRequest {
   readonly operation: DatabaseOperation;
   readonly required: ReadonlySet<DatabaseCapability>;
   readonly forcedDriver?: DriverName;
+  /** Internal operation-bound observer; never contains a raw locator. */
+  readonly io?: import('../io-observer.js').OperationIoContext;
+  /** Reviewed safe classification for this database and its default statements. */
+  readonly ioResource?: Pick<
+    import('../io-observer.js').AdapterIoEventInput,
+    'logicalSessionId' | 'sourceRole' | 'representation' | 'resourceClass'
+  >;
 }
 
 /**

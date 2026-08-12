@@ -20,6 +20,7 @@ import {
   NoDriverAvailableError,
 } from './errors.js';
 import { debugLog } from './debug.js';
+import { observeDatabaseBackup, openObservedDatabase } from './observed.js';
 
 const AUTO_DRIVER_ORDER = ['node:sqlite', 'better-sqlite3'] as const;
 
@@ -241,7 +242,7 @@ class DriverRegistry {
     request: DatabaseOperationRequest = READ_SESSION_REQUEST
   ): Promise<Database> {
     const driver = await this.ensureDriver(request);
-    return driver.open(path, { readonly: true });
+    return openObservedDatabase(request.io, request, () => driver.open(path, { readonly: true }));
   }
 
   /** Open a database in read-write mode. */
@@ -250,7 +251,7 @@ class DriverRegistry {
     request: DatabaseOperationRequest = MIGRATION_REQUEST
   ): Promise<Database> {
     const driver = await this.ensureDriver(request);
-    return driver.open(path, { readonly: false });
+    return openObservedDatabase(request.io, request, () => driver.open(path, { readonly: false }));
   }
 
   /**
@@ -275,6 +276,7 @@ class DriverRegistry {
     request: DatabaseOperationRequest = BACKUP_REQUEST
   ): Promise<void> {
     const driver = await this.ensureDriver(request);
+    observeDatabaseBackup(request);
     return driver.backup(sourcePath, destPath);
   }
 
