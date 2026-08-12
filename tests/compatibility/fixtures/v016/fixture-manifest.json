@@ -25,8 +25,8 @@
         "Synthetic question alpha.",
         "Composer owns the synthetic collision identity.",
         "Synthetic answer beta.\n```ts\nconst fixtureValue = 16;\n```",
-        "[Tool: read_file]\nParams: {\"path\":\"/fixture/v016/project/synthetic.ts\"}\nsynthetic read result",
-        "[Tool: search]\nParams: {\"query\":\"synthetic-token\",\"path\":\"/fixture/v016/project\"}\nsynthetic search result",
+        "[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed",
+        "[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed",
         "Synthetic empty-ID compatibility turn.",
         "Synthetic workspace-native message.",
         "Synthetic workspace missing-ID answer.",
@@ -140,8 +140,8 @@
       "Synthetic workspace empty-ID answer.",
       "Synthetic workspace missing-ID answer.",
       "Synthetic workspace-native message.",
-      "[Tool: read_file]\nParams: {\"path\":\"/fixture/v016/project/synthetic.ts\"}\nsynthetic read result",
-      "[Tool: search]\nParams: {\"query\":\"synthetic-token\",\"path\":\"/fixture/v016/project\"}\nsynthetic search result",
+      "[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed",
+      "[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed",
       "synthetic enrichment result",
       "synthetic read result",
       "synthetic search result"
@@ -157,16 +157,16 @@
       "bytes": 805
     },
     "tagged-output.json": {
-      "sha256": "b5d109ca7268033cee777914b43d7e151378e08ab23e130a5db46eef0ae13ac9",
-      "bytes": 4399
+      "sha256": "330bc8cd88dc5f781e553e288ffab20e945bb79bb07f752df2261423a2479079",
+      "bytes": 4359
     },
     "legacy-consumer-archive.sqlite": {
-      "sha256": "31698a99cdea3dc58e7f051d9a5f91c6e31a4286f90392f0b6ab62e3d6cb0172",
+      "sha256": "500905793c03b61c82596594738bee263781016bd6ef2981c8a2996c84641dc0",
       "bytes": 45056
     },
     "merged-store-source.json": {
-      "sha256": "0329c19dc2cd7f0fd5b34b4e66e6930ac173305bd868f9e15a82daab8441d0c3",
-      "bytes": 2359
+      "sha256": "5760ccb99854273351d55f54de691a989685996f8b4a03b250e0b7184cd62526",
+      "bytes": 2342
     }
   },
   "safety": {

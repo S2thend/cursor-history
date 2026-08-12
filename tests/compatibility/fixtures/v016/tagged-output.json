@@ -46,7 +46,7 @@
       {
         "id": "native-tool-read-016",
         "role": "assistant",
-        "content": "[Tool: read_file]\nParams: {\"path\":\"/fixture/v016/project/synthetic.ts\"}\nsynthetic read result",
+        "content": "[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed",
         "timestamp": "2024-01-16T00:00:04.000Z",
         "codeBlocks": [],
         "metadata": {
@@ -69,7 +69,7 @@
       {
         "id": "native-tool-search-016",
         "role": "assistant",
-        "content": "[Tool: search]\nParams: {\"query\":\"synthetic-token\",\"path\":\"/fixture/v016/project\"}\nsynthetic search result",
+        "content": "[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed",
         "timestamp": "2024-01-16T00:00:05.000Z",
         "codeBlocks": [],
         "metadata": {

@@ -253,8 +253,7 @@ const TAGGED_GLOBAL_MESSAGES: TaggedMessage[] = [
   {
     id: 'native-tool-read-016',
     role: 'assistant',
-    content:
-      '[Tool: read_file]\nParams: {"path":"/fixture/v016/project/synthetic.ts"}\nsynthetic read result',
+    content: '[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed',
     timestamp: '2024-01-16T00:00:04.000Z',
     codeBlocks: [],
     metadata: { bubbleType: 2 },
@@ -272,7 +271,7 @@ const TAGGED_GLOBAL_MESSAGES: TaggedMessage[] = [
     id: 'native-tool-search-016',
     role: 'assistant',
     content:
-      '[Tool: search]\nParams: {"query":"synthetic-token","path":"/fixture/v016/project"}\nsynthetic search result',
+      '[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed',
     timestamp: '2024-01-16T00:00:05.000Z',
     codeBlocks: [],
     metadata: { bubbleType: 2 },
@@ -429,8 +428,8 @@ export const V016_ALLOWED_PAYLOAD_STRINGS = Object.freeze([
   'Synthetic question alpha.',
   'Composer owns the synthetic collision identity.',
   'Synthetic answer beta.\n```ts\nconst fixtureValue = 16;\n```',
-  '[Tool: read_file]\nParams: {"path":"/fixture/v016/project/synthetic.ts"}\nsynthetic read result',
-  '[Tool: search]\nParams: {"query":"synthetic-token","path":"/fixture/v016/project"}\nsynthetic search result',
+  '[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed',
+  '[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed',
   'Synthetic empty-ID compatibility turn.',
   'Synthetic workspace-native message.',
   'Synthetic workspace missing-ID answer.',

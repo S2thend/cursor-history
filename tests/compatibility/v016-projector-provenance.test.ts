@@ -40,6 +40,18 @@ describe('v0.16 projector provenance', () => {
       ['src/core/types.ts', 'ed6352d26831e0744aa9da5ff1be7a58f8e9ced4'],
     ]);
     expect(manifest.sources.every((source) => source.projectedSymbols.length > 0)).toBe(true);
+    expect(manifest.sources[0]?.projectedSymbols).toEqual(
+      expect.arrayContaining([
+        'formatToolCall',
+        'formatDiffBlock',
+        'formatToolCallWithResult',
+        'extractThinkingText',
+        'extractBubbleText',
+      ])
+    );
+    expect(manifest.invariants['toolMessageDisplay']).toBe(
+      'v0.16 specialized formatToolCall/formatToolCallWithResult projection'
+    );
   });
 
   it('reproduces rowid order, bubble-ID selection, placeholders, and branch filtering', () => {
@@ -85,6 +97,79 @@ describe('v0.16 projector provenance', () => {
     ]);
     expect(projected.activeBranchBubbleIds).toEqual(['native-first', ' branch-with-spaces ']);
     expect(projected.source).toBe('global');
+  });
+
+  it('reproduces the tagged v0.16 specialized display for supported tool bubbles', () => {
+    const projected = projectV016GlobalSession({
+      id: 'composer-tools',
+      title: 'Locked tool display',
+      createdAt: new Date('2024-01-01T00:00:00.000Z'),
+      lastUpdatedAt: new Date('2024-01-01T00:01:00.000Z'),
+      bubbleRows: [
+        {
+          rowid: 20,
+          key: 'bubbleId:composer-tools:search',
+          value: JSON.stringify({
+            type: 2,
+            bubbleId: 'search',
+            createdAt: '2024-01-01T00:00:02.000Z',
+            toolFormerData: {
+              name: 'search',
+              params: '{"query":"synthetic-token","path":"/fixture/v016/project"}',
+              result: 'synthetic search result',
+              status: 'completed',
+            },
+          }),
+        },
+        {
+          rowid: 10,
+          key: 'bubbleId:composer-tools:read',
+          value: JSON.stringify({
+            type: 2,
+            bubbleId: 'read',
+            createdAt: '2024-01-01T00:00:01.000Z',
+            toolFormerData: {
+              name: 'read_file',
+              params: '{"path":"/fixture/v016/project/synthetic.ts"}',
+              result: 'synthetic read result',
+              status: 'completed',
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(projected.messages.map(({ id, content }) => ({ id, content }))).toEqual([
+      {
+        id: 'read',
+        content: '[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed',
+      },
+      {
+        id: 'search',
+        content:
+          '[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed',
+      },
+    ]);
+    expect(projected.messages.map(({ toolCalls }) => toolCalls)).toEqual([
+      [
+        {
+          name: 'read_file',
+          status: 'completed',
+          params: { path: '/fixture/v016/project/synthetic.ts' },
+          result: 'synthetic read result',
+          files: ['/fixture/v016/project/synthetic.ts'],
+        },
+      ],
+      [
+        {
+          name: 'search',
+          status: 'completed',
+          params: { query: 'synthetic-token', path: '/fixture/v016/project' },
+          result: 'synthetic search result',
+          files: ['/fixture/v016/project'],
+        },
+      ],
+    ]);
   });
 
   it('reproduces legacy workspace filtering, native/null IDs, roles, and branch selection', () => {

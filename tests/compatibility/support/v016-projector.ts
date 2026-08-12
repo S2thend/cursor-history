@@ -193,8 +193,254 @@ function extractToolError(result: string): string {
   return result;
 }
 
+/** Exact v0.16 display projection for one structured Composer tool bubble. */
+function formatToolCall(
+  toolData: ToolFormerData,
+  codeBlocks?: Array<{ content?: unknown }>
+): string {
+  const lines: string[] = [];
+  const toolName = toolData.name ?? 'unknown';
+  const parsedParams = parseToolParams(toolData.params, toolData.rawArgs);
+  const params = parsedParams ?? {};
+  const firstCodeBlockContent = codeBlocks?.[0]?.content;
+  const pickContent = (candidates: Array<{ value: unknown }>): string | null => {
+    let stringifyCandidate: unknown;
+
+    for (const { value } of candidates) {
+      if (typeof value === 'string') {
+        if (value.trim().length > 0) return value;
+        continue;
+      }
+      if (value !== undefined && value !== null && stringifyCandidate === undefined) {
+        stringifyCandidate = value;
+      }
+    }
+
+    if (stringifyCandidate === undefined) return null;
+    const stringified = JSON.stringify(stringifyCandidate);
+    return typeof stringified === 'string' && stringified.length > 0 ? stringified : null;
+  };
+
+  if (toolName === 'read_file') {
+    lines.push('[Tool: Read File]');
+    const file = getParam(params, 'targetFile', 'path', 'file');
+    if (file) lines.push(`File: ${file}`);
+    try {
+      const result = JSON.parse(toolData.result ?? '{}') as { contents?: unknown };
+      if (result.contents) lines.push(`Content: ${String(result.contents)}`);
+    } catch {
+      // v0.16 ignored a non-JSON read result in the display projection.
+    }
+  } else if (toolName === 'read_file_v2') {
+    lines.push('[Tool: Read File v2]');
+    const file = getParam(params, 'targetFile', 'path', 'file', 'effectiveUri');
+    if (file) lines.push(`File: ${file}`);
+
+    let diffText: string | null = null;
+    let resultContents: unknown;
+    try {
+      const result = JSON.parse(toolData.result ?? '{}') as Record<string, unknown>;
+      resultContents = result['contents'];
+      if (result['diff'] && typeof result['diff'] === 'object') {
+        diffText = formatDiffBlock(result['diff'] as { chunks?: Array<{ diffString?: string }> });
+      }
+    } catch {
+      // v0.16 logged the parse failure and otherwise retained the display fallback.
+    }
+
+    const primaryContent = pickContent([
+      { value: resultContents },
+      { value: firstCodeBlockContent },
+    ]);
+    if (primaryContent) lines.push(`Content: ${primaryContent}`);
+    if (diffText) {
+      if (primaryContent) lines.push('');
+      lines.push(diffText);
+    }
+  } else if (toolName === 'list_dir') {
+    lines.push('[Tool: List Directory]');
+    const directory = getParam(params, 'targetDirectory', 'path', 'directory');
+    if (directory) lines.push(`Directory: ${directory}`);
+  } else if (toolName === 'grep' || toolName === 'search' || toolName === 'codebase_search') {
+    lines.push(`[Tool: ${toolName === 'grep' ? 'Grep' : 'Search'}]`);
+    const pattern = getParam(params, 'pattern', 'query', 'searchQuery', 'regex');
+    const path = getParam(params, 'path', 'directory', 'targetDirectory');
+    if (pattern) lines.push(`Pattern: ${pattern}`);
+    if (path) lines.push(`Path: ${path}`);
+  } else if (
+    toolName === 'run_terminal_command' ||
+    toolName === 'run_terminal_cmd' ||
+    toolName === 'execute_command'
+  ) {
+    lines.push('[Tool: Terminal Command]');
+    const command = getParam(params, 'command', 'cmd');
+    if (command) lines.push(`Command: ${command}`);
+    if (toolData.result) {
+      try {
+        const result = JSON.parse(toolData.result) as { output?: unknown };
+        if (typeof result.output === 'string' && result.output.trim()) {
+          lines.push(`Output: ${result.output}`);
+        }
+      } catch {
+        // v0.16 ignored non-JSON terminal results in the display projection.
+      }
+    }
+  } else if (toolName === 'edit_file' || toolName === 'search_replace') {
+    lines.push(`[Tool: ${toolName === 'search_replace' ? 'Search & Replace' : 'Edit File'}]`);
+    const file = getParam(
+      params,
+      'targetFile',
+      'path',
+      'file',
+      'filePath',
+      'relativeWorkspacePath'
+    );
+    if (file) lines.push(`File: ${file}`);
+    const oldString = getParam(params, 'oldString', 'old_string', 'search', 'searchString');
+    const newString = getParam(params, 'newString', 'new_string', 'replace', 'replaceString');
+    if (oldString || newString) {
+      if (oldString) {
+        lines.push(`Old: ${oldString.slice(0, 100)}${oldString.length > 100 ? '...' : ''}`);
+      }
+      if (newString) {
+        lines.push(`New: ${newString.slice(0, 100)}${newString.length > 100 ? '...' : ''}`);
+      }
+    }
+  } else if (toolName === 'edit_file_v2') {
+    lines.push('[Tool: Edit File v2]');
+    const file = getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath');
+    if (file) lines.push(`File: ${file}`);
+    const content = pickContent([
+      { value: params['streamingContent'] },
+      { value: firstCodeBlockContent },
+      { value: params['content'] },
+      { value: params['fileContent'] },
+    ]);
+    if (content) lines.push(`Content: ${content}`);
+  } else if (toolName === 'create_file' || toolName === 'write_file' || toolName === 'write') {
+    lines.push(`[Tool: ${toolName === 'create_file' ? 'Create File' : 'Write File'}]`);
+    const file = getParam(params, 'targetFile', 'path', 'file', 'relativeWorkspacePath');
+    if (file) lines.push(`File: ${file}`);
+  } else {
+    lines.push(`[Tool: ${toolName}]`);
+    for (const [key, value] of Object.entries(params)) {
+      if (typeof value === 'string' && value.trim()) {
+        const label = key.charAt(0).toUpperCase() + key.slice(1);
+        lines.push(`${label}: ${value}`);
+      }
+    }
+    if (toolData.result) {
+      try {
+        const result = JSON.parse(toolData.result) as Record<string, unknown>;
+        const resultText =
+          result['output'] || result['result'] || result['content'] || result['text'];
+        if (typeof resultText === 'string' && resultText.trim()) {
+          lines.push(`Result: ${resultText}`);
+        }
+      } catch {
+        if (toolData.result.length > 0 && toolData.result.length < 1000) {
+          lines.push(`Result: ${toolData.result}`);
+        }
+      }
+    }
+  }
+
+  if (toolData.status) {
+    const statusEmoji = toolData.status === 'completed' ? '✓' : '❌';
+    lines.push(`Status: ${statusEmoji} ${toolData.status}`);
+  }
+  const userDecision = toolData.additionalData?.userDecision;
+  if (typeof userDecision === 'string' && userDecision) {
+    const decisionEmoji =
+      userDecision === 'accepted' ? '✓' : userDecision === 'rejected' ? '✗' : '⏳';
+    lines.push(`User Decision: ${decisionEmoji} ${userDecision}`);
+  }
+  return lines.join('\n');
+}
+
+function formatDiffBlock(diffData: { chunks?: Array<{ diffString?: string }> }): string | null {
+  if (!diffData.chunks || !Array.isArray(diffData.chunks)) return null;
+  const lines: string[] = [];
+  for (const chunk of diffData.chunks) {
+    if (chunk.diffString && typeof chunk.diffString === 'string') {
+      lines.push('```diff');
+      lines.push(chunk.diffString);
+      lines.push('```');
+    }
+  }
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
+function formatToolCallWithResult(toolData: ToolFormerData): string | null {
+  const lines: string[] = [];
+  const params = parseToolParams(toolData.params, toolData.rawArgs);
+  const filePath = getParam(params, 'relativeWorkspacePath', 'file_path');
+  try {
+    const result = JSON.parse(toolData.result ?? '{}') as Record<string, unknown>;
+    if (!(result['diff'] && typeof result['diff'] === 'object')) return null;
+    const toolName = toolData.name ?? 'write';
+    lines.push(
+      `[Tool: ${toolName === 'write' || toolName === 'write_file' ? 'Write File' : 'Edit File'}]`
+    );
+    if (filePath) lines.push(`File: ${filePath}`);
+    const diffText = formatDiffBlock(result['diff'] as { chunks?: Array<{ diffString?: string }> });
+    if (diffText) {
+      lines.push('');
+      lines.push(diffText);
+    }
+    if (result['resultForModel'] && typeof result['resultForModel'] === 'string') {
+      lines.push('');
+      lines.push(`Result: ${result['resultForModel']}`);
+    }
+  } catch {
+    return null;
+  }
+
+  if (toolData.status) {
+    const statusEmoji = toolData.status === 'completed' ? '✓' : '❌';
+    lines.push('');
+    lines.push(`Status: ${statusEmoji} ${toolData.status}`);
+  }
+  const userDecision = toolData.additionalData?.userDecision;
+  if (typeof userDecision === 'string' && userDecision) {
+    const decisionEmoji =
+      userDecision === 'accepted' ? '✓' : userDecision === 'rejected' ? '✗' : '⏳';
+    lines.push(`User Decision: ${decisionEmoji} ${userDecision}`);
+  }
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
+function extractThinkingText(data: RawBubbleData): string | null {
+  const text = data.thinking?.text;
+  return typeof text === 'string' && text.trim() ? text : null;
+}
+
 function extractBubbleText(data: RawBubbleData): string {
+  const isAssistant = data.type === 2;
+  const toolData = data.toolFormerData;
+  const toolName = toolData?.name;
   const blocks = Array.isArray(data.codeBlocks) ? data.codeBlocks : [];
+  const isError = toolData?.additionalData?.status === 'error';
+
+  if (toolData?.result && toolName !== 'read_file_v2') {
+    const toolResult = formatToolCallWithResult(toolData);
+    if (toolResult) return toolResult;
+  }
+  if (toolData?.name) {
+    const toolInfo = formatToolCall(toolData, blocks);
+    if (
+      toolName !== 'read_file_v2' &&
+      toolName !== 'edit_file_v2' &&
+      blocks.length > 0 &&
+      typeof blocks[0]?.content === 'string'
+    ) {
+      const content = blocks[0].content;
+      const preview = content.slice(0, 200).replace(/\n/g, '\\n');
+      return `${toolInfo}\nContent: ${preview}${content.length > 200 ? '...' : ''}`;
+    }
+    return toolInfo;
+  }
+
   const codeBlockParts = blocks.flatMap((block) => {
     if (typeof block.content !== 'string' || block.content.trim().length === 0) return [];
     return block.languageId
@@ -202,30 +448,73 @@ function extractBubbleText(data: RawBubbleData): string {
       : [block.content];
   });
 
-  const tool = data.toolFormerData;
-  if (tool?.name) {
-    const params = parseToolParams(tool.params, tool.rawArgs);
-    const detail = params === undefined ? '' : `\nParams: ${JSON.stringify(params)}`;
-    const result =
-      typeof tool.result === 'string' && tool.result.length > 0 ? `\n${tool.result}` : '';
-    return `[Tool: ${tool.name}]${detail}${result}`;
+  if (isAssistant && typeof data.text === 'string' && data.text.trim().length > 0) {
+    const text = data.text;
+    if (text.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        if (parsed['diff'] && typeof parsed['diff'] === 'object') {
+          const diffText = formatDiffBlock(
+            parsed['diff'] as { chunks?: Array<{ diffString?: string }> }
+          );
+          if (diffText) {
+            return parsed['resultForModel']
+              ? `${diffText}\n\nResult: ${String(parsed['resultForModel'])}`
+              : diffText;
+          }
+        }
+      } catch {
+        // v0.16 treated malformed JSON-shaped text as regular text.
+      }
+    }
+    return codeBlockParts.length > 0 ? `${text}\n\n${codeBlockParts.join('\n\n')}` : text;
   }
 
-  if (data.type === 2 && typeof data.text === 'string' && data.text.trim().length > 0) {
-    return codeBlockParts.length > 0 ? `${data.text}\n\n${codeBlockParts.join('\n\n')}` : data.text;
+  if (isAssistant) {
+    const thinkingText = extractThinkingText(data);
+    if (thinkingText) {
+      return codeBlockParts.length > 0
+        ? `[Thinking]\n${thinkingText}\n\n${codeBlockParts.join('\n\n')}`
+        : `[Thinking]\n${thinkingText}`;
+    }
+    if (toolData?.result) {
+      try {
+        const result = JSON.parse(toolData.result) as Record<string, unknown>;
+        for (const key of ['contents', 'content', 'text']) {
+          if (result[key] && typeof result[key] === 'string') return result[key] as string;
+        }
+      } catch {
+        if (toolData.result.length > 50 && !toolData.result.startsWith('{')) {
+          return toolData.result;
+        }
+      }
+    }
+    if (codeBlockParts.length > 0) return codeBlockParts.join('\n\n');
   }
-  if (data.type === 2 && typeof data.thinking?.text === 'string' && data.thinking.text.trim()) {
-    return `[Thinking]\n${data.thinking.text}`;
-  }
+
   if (codeBlockParts.length > 0) return codeBlockParts.join('\n\n');
   for (const key of ['text', 'content', 'finalText', 'message', 'markdown', 'textDescription']) {
     const value = data[key];
     if (typeof value === 'string' && value.trim().length > 0) return value;
   }
-  if (typeof data.thinking?.text === 'string' && data.thinking.text.trim()) {
-    return `[Thinking]\n${data.thinking.text}`;
-  }
-  return '';
+  const thinkingText = extractThinkingText(data);
+  if (thinkingText) return `[Thinking]\n${thinkingText}`;
+
+  let best = '';
+  const walk = (value: unknown): void => {
+    if (typeof value === 'object' && value !== null) {
+      if (Array.isArray(value)) value.forEach(walk);
+      else Object.values(value as Record<string, unknown>).forEach(walk);
+    } else if (
+      typeof value === 'string' &&
+      value.length > best.length &&
+      (value.includes('\n') || value.includes('```') || value.includes('# '))
+    ) {
+      best = value;
+    }
+  };
+  walk(data);
+  return isError && best ? `[Error]\n${best}` : best;
 }
 
 function extractTimestamp(data: RawBubbleData): Date | null {

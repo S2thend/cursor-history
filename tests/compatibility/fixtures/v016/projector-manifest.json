@@ -8,10 +8,19 @@
       "path": "src/core/storage.ts",
       "gitBlob": "9b593c764e3ffb2f2c597bacff731a51009e5179",
       "projectedSymbols": [
+        "parseToolParams",
+        "getParam",
+        "extractToolCalls",
+        "extractToolError",
         "mapBubbleToMessage",
         "resolveBubbleMessages",
         "extractActiveBranchBubbleIds",
-        "fillTimestampGaps"
+        "fillTimestampGaps",
+        "formatToolCall",
+        "formatDiffBlock",
+        "formatToolCallWithResult",
+        "extractThinkingText",
+        "extractBubbleText"
       ]
     },
     {
@@ -30,6 +39,7 @@
     "globalBubbleId": "data.bubbleId ?? final row-key segment",
     "corruptPlaceholder": "[corrupted message]",
     "emptyPlaceholder": "[empty message]",
+    "toolMessageDisplay": "v0.16 specialized formatToolCall/formatToolCallWithResult projection",
     "workspaceMissingId": null,
     "workspaceMessageFilter": "drop only messages with no content/text and no role/type"
   }

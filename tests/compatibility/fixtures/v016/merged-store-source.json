@@ -40,7 +40,7 @@
       "placement": "matched",
       "matchesComposerId": "native-tool-read-016",
       "role": "assistant",
-      "content": "[Tool: read_file]\nParams: {\"path\":\"/fixture/v016/project/synthetic.ts\"}\nsynthetic read result",
+      "content": "[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed",
       "appendToolCalls": [
         {
           "name": "synthetic_store_enrichment",
