@@ -57,6 +57,38 @@ Rerun T020, T022, T057, T060, T063, T069, T085, T088, T092, T099, T105, and T110
 preliminary full validation. Any later failure returns to the owning task and restarts the preflight
 through release-candidate sequence.
 
+## Private v0.16 full-corpus differential
+
+Before repository freeze, compare the official `v0.16.0` tag and the candidate against the same
+maintainer-owned Composer-only source in an owner-private directory outside this repository. This is
+a one-time manual release certification, not a CI dependency on vibe-history or another checkout.
+The repository's recurring CI remains self-contained and uses only deterministic synthetic fixtures.
+
+The private differential must cover every discovered session, not a sample. Compare every
+pre-existing public library field, optional own-property, ordering rule, null/omission shape, message
+binding, and tool binding separately from allowlisted additive fields and individually documented
+versioned exceptions. Then pass every normalized session through the pinned unchanged vibe-history
+adapter and its real sync policy/SQLite transaction: import the v0.16 view, apply the candidate view,
+and apply it again. All old keys must retain their original message/tool bindings, no row may be lost
+or duplicated, and the final repeated synchronization must write nothing.
+
+Do not introduce sampling, record caps, time budgets, or early success exits for this certification.
+It is an infrequent manual release gate, so exhaustive validation takes precedence over runtime: use
+an independent all-candidate association pass when needed to prove one-to-one session, message, and
+tool bindings, even when the straightforward validation is quadratic in corpus size.
+
+Never retain or print raw errors or diffs that can contain IDs, paths, titles, content, timestamps,
+or stable hashes. Raw source, full outputs, comparison intermediates, and the downstream database
+remain `0700`/`0600` private temporary artifacts and are deleted after certification. The retained
+external record may contain only aggregate counts and named compatibility categories.
+
+Real data is discovery evidence only. It must never be copied, transformed, redacted, hashed, or
+used as generator input for a committed regression fixture. When it reveals a missing structural
+case, hand-author the analogous case with fixed fictional values in the no-input synthetic fixture
+generator, run deterministic regeneration/hash/sensitive-scan/poison checks, and rerun the focused
+regression. Any resulting repository change invalidates the previous preflight/differential and
+restarts T112–T113.
+
 ## External aggregate attestation template
 
 Keep this record outside the repository. Replace every bracketed item with aggregate or abstract

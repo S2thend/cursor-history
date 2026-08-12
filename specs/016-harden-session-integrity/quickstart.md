@@ -590,13 +590,20 @@ revision and the packed bytes never change afterward:
    authorized source carriers below before freezing the repository.
 2. If a legitimate source exceeds a default, update every normative/projection artifact, constant,
    test, and document, then restart the affected implementation and preflight work.
-3. Run the preliminary full validation. Any failure or unplanned tracked edit returns to its owning
-   task and restarts at the preflight. After a clean pass, write the one planned implementation
-   checklist and make no other repository change.
-4. Freeze that revision and run the unconditional final install/typecheck/lint/format/test/build
+3. Before freezing, run the documented owner-private full-corpus differential between the official
+   v0.16.0 tag and the candidate over the same Composer-only source, including every released
+   library value/shape and the pinned unchanged-consumer SQLite transition. Real input may reveal a
+   structural class, but no real value, redaction, hash, ordering, or derived artifact may enter a
+   committed fixture; reproduce the class manually with fixed fictional values, rerun its regression
+   and fixture safety gates, and restart the preflight. Do not sample, cap, time-limit, or stop after
+   an early success; use exhaustive all-candidate association even if that manual pass is quadratic.
+4. Run the preliminary full validation. Any failure or unplanned tracked edit returns to its owning
+   task and restarts at the preflight and private differential. After a clean pass, write the one
+   planned implementation checklist and make no other repository change.
+5. Freeze that revision and run the unconditional final install/typecheck/lint/format/test/build
    gates. Pack once only after they pass, retain the checksum-addressed tarball, and smoke only those
    bytes.
-5. Run the maintainer-owned content checks and protected approval against that same tarball. Any
+6. Run the maintainer-owned content checks and protected approval against that same tarball. Any
    validation, pack/checksum, clean-install, smoke, approval, or manual-stage failure blocks
    publication, discards the candidate, and restarts at the preflight; success authorizes publication
    of the preserved tarball without rebuild, repack, or tracked-file changes.

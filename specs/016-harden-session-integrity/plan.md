@@ -279,6 +279,10 @@ priority or permit publication without it.
   legacy Composer position before replica reconciliation, keep it for merged or ambiguous
   Composer-backed rows, place new-only rows after that legacy tie group, and use UUID ordering only
   among rows that have no v0.16 Composer position.
+- Treat the owner-private v0.16 full-corpus differential as an exhaustive manual certification, not
+  a performance-sensitive recurring test. It may use an independent quadratic all-candidate pass
+  to prove one-to-one session/message/tool associations; sampling, record caps, time budgets, and
+  early-success exits are forbidden.
 - Lock representative v0.17 complete Store/merged output separately. Its test promises one
   replacement and convergence, not preservation of unstable Store positional IDs.
 - Make both suites part of the ordinary `npm test` command and prove they fail under identity,
