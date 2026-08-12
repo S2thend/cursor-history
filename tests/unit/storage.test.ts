@@ -286,7 +286,7 @@ function createGlobalDbForComposerMap(
  * Create a global storage mock DB with cursorDiskKV table and bubble data.
  */
 function createGlobalDb(
-  bubbleRows: { key: string; value: string }[],
+  bubbleRows: { key: string; value: string | null }[],
   composerDataValue?: string
 ): Database {
   return {
@@ -318,9 +318,12 @@ function createGlobalDb(
         };
       }
       if (sql.includes('cursorDiskKV')) {
+        const visibleBubbleRows = sql.includes('value IS NOT NULL')
+          ? bubbleRows.filter(({ value }) => value !== null)
+          : bubbleRows;
         return {
           get: vi.fn(),
-          all: vi.fn(() => bubbleRows),
+          all: vi.fn(() => visibleBubbleRows),
           run: vi.fn(),
         };
       }
@@ -337,7 +340,7 @@ function createGlobalDb(
  */
 function setupGetSessionMocks(
   composerData: string,
-  bubbleRows: { key: string; value: string }[],
+  bubbleRows: { key: string; value: string | null }[],
   globalComposerData?: string
 ) {
   const wsDb = createWorkspaceDb(composerData);
@@ -1128,6 +1131,102 @@ describe('listSessions', () => {
     // Indexes assigned after sorting
     expect(result[0]!.index).toBe(1);
     expect(result[1]!.index).toBe(2);
+  });
+
+  it('preserves v0.16 discovery order for equal-createdAt Composer sessions', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    // Deliberately reverse UUID order. v0.16 sorted by createdAt alone, so its
+    // stable sort retained this Composer array order for the timestamp tie.
+    const composerData = JSON.stringify({
+      allComposers: [
+        {
+          composerId: 'bbbbbbbb-0000-0000-0000-000000000001',
+          name: 'Discovered first',
+          createdAt: 1000000,
+        },
+        {
+          composerId: 'aaaaaaaa-0000-0000-0000-000000000002',
+          name: 'Discovered second',
+          createdAt: 1000000,
+        },
+      ],
+    });
+    mockOpenDatabase.mockResolvedValue(createWorkspaceDb(composerData));
+
+    const first = await listSessions({ limit: 0, all: true }, '/data');
+    const second = await listSessions({ limit: 0, all: true }, '/data');
+
+    const expectedIds = [
+      'bbbbbbbb-0000-0000-0000-000000000001',
+      'aaaaaaaa-0000-0000-0000-000000000002',
+    ];
+    expect(first.map(({ id }) => id)).toEqual(expectedIds);
+    expect(second.map(({ id }) => id)).toEqual(expectedIds);
+    expect(first.map(({ index }) => index)).toEqual([1, 2]);
+  });
+
+  it('places new Store-only timestamp ties after v0.16 Composer rows deterministically', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+
+    const timestamp = 1000000;
+    mockOpenDatabase.mockResolvedValue(
+      createWorkspaceDb(
+        JSON.stringify({
+          allComposers: [
+            {
+              composerId: 'bbbbbbbb-0000-0000-0000-000000000001',
+              name: 'Composer first',
+              createdAt: timestamp,
+            },
+            {
+              composerId: 'aaaaaaaa-0000-0000-0000-000000000002',
+              name: 'Composer second',
+              createdAt: timestamp,
+            },
+          ],
+        })
+      )
+    );
+    vi.mocked(discoverStoreSessions).mockResolvedValue([
+      {
+        id: 'dddddddd-0000-0000-0000-000000000003',
+        workspacePath: '/store/d',
+        title: 'Store D',
+        createdAt: new Date(timestamp),
+        lastUpdatedAt: new Date(timestamp),
+        messages: [],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+      {
+        id: 'cccccccc-0000-0000-0000-000000000004',
+        workspacePath: '/store/c',
+        title: 'Store C',
+        createdAt: new Date(timestamp),
+        lastUpdatedAt: new Date(timestamp),
+        messages: [],
+        source: 'transcript',
+        transcriptState: 'parsed',
+      },
+    ]);
+
+    const result = await listSessions({ limit: 0, all: true }, '/data');
+
+    expect(result.map(({ id }) => id)).toEqual([
+      'bbbbbbbb-0000-0000-0000-000000000001',
+      'aaaaaaaa-0000-0000-0000-000000000002',
+      'cccccccc-0000-0000-0000-000000000004',
+      'dddddddd-0000-0000-0000-000000000003',
+    ]);
   });
 
   it('applies limit', async () => {
@@ -2295,6 +2394,39 @@ describe('getSession', () => {
     expect(result!.messages[1]!.content).toBe('Here is my response');
   });
 
+  it('preserves interleaved NULL global bubbles as v0.16-compatible corrupted messages', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Nullable Chat', createdAt: 1000 }],
+    });
+
+    setupGetSessionMocks(composerData, [
+      {
+        key: 'bubbleId:c1:native-user',
+        value: JSON.stringify({ type: 1, text: 'before', bubbleId: 'native-user' }),
+      },
+      { key: 'bubbleId:c1:null-bubble', value: null },
+      {
+        key: 'bubbleId:c1:native-assistant',
+        value: JSON.stringify({ type: 2, text: 'after', bubbleId: 'native-assistant' }),
+      },
+    ]);
+
+    const result = await getSession(1, '/data');
+
+    expect(result?.messages.map(({ id, role, content }) => ({ id, role, content }))).toEqual([
+      { id: 'native-user', role: 'user', content: 'before' },
+      { id: 'null-bubble', role: 'assistant', content: '[corrupted message]' },
+      { id: 'native-assistant', role: 'assistant', content: 'after' },
+    ]);
+    expect(result?.messages[1]?.metadata?.corrupted).toBe(true);
+    expect(result?.messageCount).toBe(3);
+  });
+
   it('loads global bubbles from the sibling globalStorage for a custom dataPath', async () => {
     const customDataPath = join(parse(process.cwd()).root, 'custom', 'workspaceStorage');
     const expectedGlobalDbPath = join(dirname(customDataPath), 'globalStorage', 'state.vscdb');
@@ -3086,6 +3218,7 @@ describe('getGlobalSession', () => {
       updatedAt: '2024-01-15T10:05:00Z',
       fullConversationHeadersOnly: [
         { bubbleId: 'b1', type: 2 },
+        { bubbleId: 'b-null', type: 2 },
         { bubbleId: 'b2', type: 2 },
       ],
     });
@@ -3115,6 +3248,7 @@ describe('getGlobalSession', () => {
               ? [{ key: 'composerData:g1', value: composerValue }]
               : [
                   { key: 'bubbleId:g1:b1', value: goodBubble },
+                  { key: 'bubbleId:g1:b-null', value: null },
                   { key: 'bubbleId:g1:b2', value: '{"type":2,' },
                 ];
           return {
@@ -3138,7 +3272,7 @@ describe('getGlobalSession', () => {
           };
         }
         if (sql.includes('COUNT(*)')) {
-          return { get: vi.fn(() => ({ count: 2 })), all: vi.fn(() => []), run: vi.fn() };
+          return { get: vi.fn(() => ({ count: 3 })), all: vi.fn(() => []), run: vi.fn() };
         }
         if (sql.includes('LIMIT 1')) {
           return {
@@ -3152,6 +3286,7 @@ describe('getGlobalSession', () => {
             get: vi.fn(),
             all: vi.fn(() => [
               { key: 'bubbleId:g1:b1', value: goodBubble },
+              { key: 'bubbleId:g1:b-null', value: null },
               { key: 'bubbleId:g1:b2', value: '{"type":2,' },
             ]),
             run: vi.fn(),
@@ -3174,11 +3309,20 @@ describe('getGlobalSession', () => {
 
     expect(result).not.toBeNull();
     expect(result!.source).toBe('global');
-    expect(result!.activeBranchBubbleIds).toEqual(['b1', 'b2']);
-    expect(result!.messages).toHaveLength(2);
+    expect(result!.activeBranchBubbleIds).toEqual(['b1', 'b-null', 'b2']);
+    expect(result!.messages).toHaveLength(3);
     expect(result!.messages[0]!.metadata?.bubbleType).toBe(2);
     expect(result!.messages[0]!.toolCalls?.[0]?.params).toEqual({ _raw: '{"bad"' });
-    expect(result!.messages[1]!.content).toBe('[corrupted message]');
+    expect(result!.messages[1]).toEqual(
+      expect.objectContaining({
+        id: 'b-null',
+        role: 'assistant',
+        content: '[corrupted message]',
+        metadata: { corrupted: true },
+      })
+    );
+    expect(result!.messages[2]!.content).toBe('[corrupted message]');
+    expect(result!.messages[2]!.metadata?.corrupted).toBe(true);
     expect(result!.messages[1]!.metadata?.corrupted).toBe(true);
   });
 

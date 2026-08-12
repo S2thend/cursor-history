@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { dirname } from 'node:path';
-import type { DatabaseOperationRequest } from '../../src/core/database/types.js';
+import type { Database, DatabaseOperationRequest } from '../../src/core/database/types.js';
 import { openObservedDatabase } from '../../src/core/database/observed.js';
 import {
   createOperationIoContext,
@@ -67,6 +67,53 @@ afterEach(() => {
 });
 
 describe('operation-bound low-level I/O observation', () => {
+  it('classifies nullable bubble length/null-state projections as catalog metadata', () => {
+    const recorder = createIoEventRecorder();
+    const inner: Database = {
+      prepare: () => ({
+        get: () => undefined,
+        all: () => [],
+        run: () => ({ changes: 0, lastInsertRowid: 0 }),
+      }),
+      close: () => undefined,
+      runSQL: () => undefined,
+    };
+    const observed = openObservedDatabase(
+      ioContext(recorder.observer, 'nullable-bubble-metadata'),
+      {
+        operation: 'read-session',
+        required: new Set(['read']),
+        ioResource: {
+          resourceClass: 'global-composer',
+          sourceRole: 'composer',
+          representation: 'composer-global',
+        },
+      },
+      () => inner
+    );
+
+    observed
+      .prepare(
+        `SELECT key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength,
+          value IS NULL AS valueIsNull
+        FROM cursorDiskKV WHERE key LIKE ?`
+      )
+      .all('bubbleId:session-nullable:%');
+
+    expect(
+      recorder.count({
+        operation: 'query',
+        resourceClass: 'global-bubble-index',
+        classification: 'catalog-metadata',
+        logicalSessionId: 'session-nullable',
+      })
+    ).toBe(1);
+    recorder.assertNone(
+      { operation: 'query', classification: 'conversation-payload' },
+      'nullable bubble metadata projection must not be classified as raw payload'
+    );
+  });
+
   it.each(['prepare', 'query', 'get'] as const)(
     'fails closed when the global Composer metadata %s boundary rejects during hydration',
     async (operation) => {

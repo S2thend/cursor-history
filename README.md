@@ -163,6 +163,9 @@ degraded v0.17 result must be pinned, retried from complete sources, or migrated
 - CLI/core indices are one-based, public-library read indices are zero-based, and public-library
   migration selectors are one-based. All are ephemeral within the exact data source, workspace,
   catalog snapshot, and invocation that produced them; persist the native UUID instead.
+- For unchanged Composer input, sessions tied on `createdAt` retain v0.16's stable discovery
+  order. Composer-backed merged or ambiguous rows keep that tie position; new-only rows follow the
+  legacy tie group in deterministic UUID order.
 - Structured numeric output declares `indexScope: "global" | "workspace"`; workspace rows also
   carry the full `indexWorkspacePath`.
 - Workspace matching uses normalized exact matching first, then one unambiguous complete-component

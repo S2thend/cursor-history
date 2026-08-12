@@ -212,8 +212,10 @@ export function bindSessionAddress(
 Listing rules:
 
 - Exactly one row per native UUID in the bound scope.
-- Sort logical rows by the existing deterministic session ordering; use native UUID as the final
-  stable tie-breaker.
+- Sort logical rows by descending `createdAt`. For an equal-time tie, preserve the stable v0.16
+  discovery order of every Composer-backed UUID, including merged and ambiguous Composer rows.
+  Place rows with no v0.16 Composer position after those legacy rows, then use native UUID as the
+  deterministic tie-break only among those new-only rows.
 - Assign presentation indices only after grouping/filtering/sorting.
 - A bound address stores logical ID, permitted occurrence keys, data-source identity, scope, and
   index base. Follow-up resolution does not list globally or reinterpret the number.

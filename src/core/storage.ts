@@ -71,11 +71,13 @@ import {
 } from './source-read-limits.js';
 import {
   createComposerSqliteBudget,
+  forEachBoundedComposerBubbleMetadata,
+  forEachBoundedComposerBubbleValue,
   forEachBoundedComposerMetadata,
   forEachBoundedComposerValue,
   getBoundedComposerMetadataByKey,
   readBoundedComposerValueByKey,
-  readFirstBoundedComposerValue,
+  readFirstBoundedComposerBubbleValue,
   sqliteLikeLiteralPrefix,
   type ComposerSqliteMetadata,
 } from './composer-sqlite.js';
@@ -351,7 +353,7 @@ interface ToolFormerData {
 
 interface BubbleRow {
   key: string;
-  value: string;
+  value: string | null;
 }
 
 interface GlobalComposerSummary {
@@ -784,21 +786,28 @@ export function extractToolCalls(data: Record<string, unknown>): ToolCall[] | un
 }
 
 export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
+  const corruptedMessage = (): BubbleMessage => ({
+    id: getBubbleRowId(row.key),
+    role: 'assistant',
+    content: '[corrupted message]',
+    timestamp: null,
+    codeBlocks: [],
+    metadata: { corrupted: true },
+    source: 'composer',
+  });
+
+  if (row.value === null) {
+    debugLogStorage(`Malformed bubble row ${row.key}: NULL payload`);
+    return corruptedMessage();
+  }
+
   let rawData: Record<string, unknown>;
 
   try {
     rawData = JSON.parse(row.value) as Record<string, unknown>;
   } catch (error) {
     debugLogStorage(`Malformed bubble row ${row.key}: ${getErrorMessage(error)}`);
-    return {
-      id: getBubbleRowId(row.key),
-      role: 'assistant',
-      content: '[corrupted message]',
-      timestamp: null,
-      codeBlocks: [],
-      metadata: { corrupted: true },
-      source: 'composer',
-    };
+    return corruptedMessage();
   }
 
   try {
@@ -832,15 +841,7 @@ export function mapBubbleToMessage(row: BubbleRow): BubbleMessage {
     };
   } catch (error) {
     debugLogStorage(`Failed to map bubble row ${row.key}: ${getErrorMessage(error)}`);
-    return {
-      id: getBubbleRowId(row.key),
-      role: 'assistant',
-      content: '[corrupted message]',
-      timestamp: null,
-      codeBlocks: [],
-      metadata: { corrupted: true },
-      source: 'composer',
-    };
+    return corruptedMessage();
   }
 }
 
@@ -1747,9 +1748,8 @@ function loadGlobalBubbleCounts(
 ): Map<string, number> {
   const counts = new Map<string, number>();
   try {
-    forEachBoundedComposerMetadata(
+    forEachBoundedComposerBubbleMetadata(
       db,
-      'cursorDiskKV',
       'bubbleId:%',
       budget,
       ({ key }) => {
@@ -1776,9 +1776,8 @@ function countGlobalComposerBubbles(
 ): number {
   try {
     let count = 0;
-    forEachBoundedComposerMetadata(
+    forEachBoundedComposerBubbleMetadata(
       db,
-      'cursorDiskKV',
       `bubbleId:${sqliteLikeLiteralPrefix(composerId)}:%`,
       budget,
       () => {
@@ -1808,16 +1807,15 @@ function buildGlobalComposerSummary(
 
   const composerMetadata = composerMetadataTimestamps(composerData);
   let directMessages: Message[] = [];
-  let firstBubbleValue: string | undefined;
+  let firstBubbleValue: string | null | undefined;
   if (!composerMetadata.createdAt || !composerMetadata.lastUpdatedAt) {
     const timestampRows: BubbleRow[] = [];
-    forEachBoundedComposerValue(
+    forEachBoundedComposerBubbleValue(
       db,
-      'cursorDiskKV',
       `bubbleId:${sqliteLikeLiteralPrefix(composerId)}:%`,
       budget,
       (row) => {
-        firstBubbleValue ??= row.value;
+        if (firstBubbleValue === undefined) firstBubbleValue = row.value;
         timestampRows.push({ key: row.key, value: row.value });
       },
       signal
@@ -1832,14 +1830,13 @@ function buildGlobalComposerSummary(
 
   let preview = '';
   if (options?.includePreview !== false) {
-    firstBubbleValue ??= readFirstBoundedComposerValue(
+    firstBubbleValue ??= readFirstBoundedComposerBubbleValue(
       db,
-      'cursorDiskKV',
       `bubbleId:${sqliteLikeLiteralPrefix(composerId)}:%`,
       budget,
       signal
     )?.value;
-    if (firstBubbleValue) {
+    if (typeof firstBubbleValue === 'string' && firstBubbleValue.length > 0) {
       try {
         const bubbleData = JSON.parse(firstBubbleValue) as Record<string, unknown>;
         preview = extractBubbleText(bubbleData).slice(0, 100);
@@ -3980,6 +3977,18 @@ export async function listSessions(
     }
   }
 
+  // v0.16 sorted sessions by createdAt alone and relied on the stable Array.sort
+  // contract to retain Composer discovery order for equal timestamps. Capture
+  // that order before replica reconciliation reshapes the physical rows. This
+  // keeps existing Composer numeric addresses compatible without making the
+  // order of newly introduced Store-only rows depend on physical discovery.
+  const v016ComposerDiscoveryOrder = new Map<string, number>();
+  for (const summary of allSessions) {
+    if (!v016ComposerDiscoveryOrder.has(summary.id)) {
+      v016ComposerDiscoveryOrder.set(summary.id, v016ComposerDiscoveryOrder.size);
+    }
+  }
+
   const composerReplicaIds = new Set(composerCandidatesById.keys());
   const nonReplicaComposerRows = allSessions.filter(({ id }) => !composerReplicaIds.has(id));
   const composerRows = await reconcileComposerRows(
@@ -4203,10 +4212,22 @@ export async function listSessions(
       timestamp: storeCatalogSessions.find(({ id }) => id === row.id)?.createdAt.getTime() ?? 0,
     })),
   ];
-  logicalRows.sort(
-    (left, right) =>
-      right.timestamp - left.timestamp || compareCodePoints(left.row.id, right.row.id)
-  );
+  logicalRows.sort((left, right) => {
+    const byTimestamp = right.timestamp - left.timestamp;
+    if (byTimestamp !== 0) return byTimestamp;
+
+    const leftComposerOrder = v016ComposerDiscoveryOrder.get(left.row.id);
+    const rightComposerOrder = v016ComposerDiscoveryOrder.get(right.row.id);
+    if (leftComposerOrder !== undefined && rightComposerOrder !== undefined) {
+      return leftComposerOrder - rightComposerOrder;
+    }
+    if (leftComposerOrder !== undefined) return -1;
+    if (rightComposerOrder !== undefined) return 1;
+
+    // Rows that did not exist in the v0.16 Composer catalog still need a
+    // canonical tie-break independent of Store/diagnostic discovery order.
+    return compareCodePoints(left.row.id, right.row.id);
+  });
   const indexedLogicalRows = logicalRows.map(({ row, timestamp }, index) => ({
     row: { ...row, index: index + 1 } as LogicalSessionSummary,
     timestamp,
@@ -4792,9 +4813,8 @@ async function loadComposerSession(
           globalLoadFailed = true;
           debugLogStorage('cursorDiskKV table not found');
         } else {
-          forEachBoundedComposerValue(
+          forEachBoundedComposerBubbleValue(
             globalDb,
-            'cursorDiskKV',
             `bubbleId:${sqliteLikeLiteralPrefix(summary.id)}:%`,
             composerSessionBudget,
             (row) => bubbleRows.push({ key: row.key, value: row.value }),
@@ -5168,9 +5188,8 @@ export async function getGlobalSession(
 
     const sessionBudget = createComposerSqliteBudget();
     const bubbleRows: BubbleRow[] = [];
-    forEachBoundedComposerValue(
+    forEachBoundedComposerBubbleValue(
       db,
-      'cursorDiskKV',
       `bubbleId:${sqliteLikeLiteralPrefix(summary.id)}:%`,
       sessionBudget,
       (row) => bubbleRows.push({ key: row.key, value: row.value })

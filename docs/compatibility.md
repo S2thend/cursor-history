@@ -78,6 +78,12 @@ backup data, a custom data path, or a later catalog snapshot. Persist and reuse 
 UUID instead. Unfiltered direct-ID behavior remains unchanged; a direct ID used with a workspace
 must belong to that bound workspace or it fails without loading the off-scope conversation.
 
+For unchanged Composer input, equal-`createdAt` rows retain the stable discovery order used by
+v0.16. A Composer-backed merged or ambiguous row keeps that legacy tie position. Store-only and
+other new rows without a v0.16 Composer position follow the legacy tie group and use native UUID as
+their deterministic tie-break. This protects existing unfiltered numeric addresses for the tie
+case without making numeric indices durable across later catalog changes.
+
 Every reusable structured index declares either:
 
 ```json

@@ -327,6 +327,13 @@ published one-based selectors. A bound row contains UUID plus the permitted occu
 follow-up never reinterprets its number. Scoped direct IDs verify membership; unfiltered direct-ID
 behavior remains unchanged.
 
+Logical catalogs remain sorted by descending `createdAt`. When timestamps tie, a Composer-backed
+UUID uses the stable Composer discovery ordinal that v0.16's timestamp-only stable sort preserved;
+replica reconciliation, merging, or ambiguity classification cannot replace that ordinal with an
+ID sort. Rows that have no v0.16 Composer ordinal follow the Composer-backed tie group and sort by
+native UUID. Thus repeated reads remain deterministic while existing Composer numeric positions do
+not change solely because the new resolver introduced an ID tie-break.
+
 Existing CLI JSON envelopes gain additive scope/diagnostic members. Library functions keep their
 released array/string return shapes and use `LibraryConfig.onDiagnostic` for safe continuation;
 without a diagnostic handler, an ambiguity that would otherwise be skipped throws a typed error.
@@ -353,7 +360,9 @@ serialized value.
 and it prevents silent library skips while preserving return types.
 
 **Alternatives considered**: Stable/global numeric indices (impossible across changing lists);
-return new library envelopes (breaking); expose raw DB paths (security and abstraction leak).
+native-UUID tie-breaking for every equal-time row (deterministic but breaks v0.16 Composer numeric
+positions); return new library envelopes (breaking); expose raw DB paths (security and abstraction
+leak).
 
 ## 11. Migration target binding
 

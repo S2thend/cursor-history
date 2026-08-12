@@ -275,6 +275,10 @@ priority or permit publication without it.
   vendored-consumer drift without consulting a live adjacent repository. Execute the pinned
   replacement statements against a real deterministic SQLite archive, inject a failure between
   deletion and insertion, reopen it, and accept only complete old-or-new state.
+- Preserve v0.16's stable Composer discovery order when session `createdAt` values tie. Capture the
+  legacy Composer position before replica reconciliation, keep it for merged or ambiguous
+  Composer-backed rows, place new-only rows after that legacy tie group, and use UUID ordering only
+  among rows that have no v0.16 Composer position.
 - Lock representative v0.17 complete Store/merged output separately. Its test promises one
   replacement and convergence, not preservation of unstable Store positional IDs.
 - Make both suites part of the ordinary `npm test` command and prove they fail under identity,

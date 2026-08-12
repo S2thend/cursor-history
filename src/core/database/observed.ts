@@ -19,11 +19,10 @@ function selectsRawPayload(sql: string): boolean {
   if (!projection) return false;
   // Declared byte lengths are catalog metadata: the engine evaluates value
   // length without returning the raw bytes across the adapter boundary.
-  const withoutLengthPreflights = projection.replace(
-    /\blength\s*\(\s*cast\s*\(\s*(?:value|data)\s+as\s+blob\s*\)\s*\)/giu,
-    ''
-  );
-  return /\b(?:value|data)\b/iu.test(withoutLengthPreflights);
+  const withoutMetadataPreflights = projection
+    .replace(/\blength\s*\(\s*cast\s*\(\s*(?:value|data)\s+as\s+blob\s*\)\s*\)/giu, '')
+    .replace(/\b(?:value|data)\s+is\s+(?:not\s+)?null(?:\s+as\s+\w+)?/giu, '');
+  return /\b(?:value|data)\b/iu.test(withoutMetadataPreflights);
 }
 
 function eventIdentity(sql: string, params: readonly unknown[], fallback: IoIdentity): IoIdentity {

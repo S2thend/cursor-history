@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   createComposerSqliteBudget,
+  forEachBoundedComposerBubbleValue,
   forEachBoundedComposerValue,
   readBoundedComposerValueByKey,
+  readFirstBoundedComposerBubbleValue,
   readFirstBoundedComposerValue,
   sqliteLikeLiteralPrefix,
 } from '../../src/core/composer-sqlite.js';
@@ -333,6 +335,113 @@ describe('bounded Composer SQLite reads', () => {
         'cursorDiskKV',
         'composerData:%',
         createComposerSqliteBudget()
+      )
+    ).toThrowError('Composer SQLite payload changed after metadata admission.');
+    expect(mutated).toBe(true);
+  });
+
+  it('preserves interleaved NULL bubbles in signed row-ID order and charges their rows', () => {
+    const { raw, adapter } = database({ nullableValue: true });
+    const insert = raw.prepare('INSERT INTO cursorDiskKV (rowid, key, value) VALUES (?, ?, ?)');
+    insert.run(-4, 'bubbleId:nullable:null-first', null);
+    insert.run(-1, 'bubbleId:nullable:text-a', 'a');
+    insert.run(2, 'bubbleId:nullable:null-middle', null);
+    insert.run(9_007_199_254_740_993n, 'bubbleId:nullable:text-b', 'é');
+    const budget = createComposerSqliteBudget();
+    const seen: Array<{ rowId: number | bigint; value: string | null }> = [];
+
+    forEachBoundedComposerBubbleValue(adapter, 'bubbleId:nullable:%', budget, ({ rowId, value }) =>
+      seen.push({ rowId, value })
+    );
+
+    expect(seen).toEqual([
+      { rowId: -4, value: null },
+      { rowId: -1, value: 'a' },
+      { rowId: 2, value: null },
+      { rowId: 9_007_199_254_740_993n, value: 'é' },
+    ]);
+    expect(budget.rowCount).toBe(4);
+    expect(budget.decodedBytes).toBe(3);
+  });
+
+  it('counts NULL bubbles against SQLite page and aggregate row limits before visiting', () => {
+    const { raw, adapter } = database({ nullableValue: true });
+    const insert = raw.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, NULL)');
+    insert.run('bubbleId:nullable:a');
+    insert.run('bubbleId:nullable:b');
+    insert.run('bubbleId:nullable:c');
+    const visited: Array<string | null> = [];
+
+    expect(() =>
+      forEachBoundedComposerBubbleValue(
+        adapter,
+        'bubbleId:nullable:%',
+        createComposerSqliteBudget(
+          resolveSourceReadLimits({ sqlitePageRows: 2, sqliteRowCount: 2 })
+        ),
+        ({ value }) => visited.push(value)
+      )
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'SOURCE_LIMIT_EXCEEDED',
+        details: expect.objectContaining({
+          bound: 'sqlite-page-rows',
+          limit: 2,
+          observedAtLeast: 3,
+        }),
+      })
+    );
+    expect(visited).toEqual([]);
+  });
+
+  it('returns a NULL first bubble instead of skipping to a later value', () => {
+    const { raw, adapter } = database({ nullableValue: true });
+    const insert = raw.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)');
+    insert.run('bubbleId:nullable:first', null);
+    insert.run('bubbleId:nullable:second', 'second');
+
+    expect(
+      readFirstBoundedComposerBubbleValue(
+        adapter,
+        'bubbleId:nullable:%',
+        createComposerSqliteBudget()
+      )
+    ).toEqual(expect.objectContaining({ rowId: 1, value: null, valueIsNull: true }));
+  });
+
+  it('rejects a NULL bubble that mutates to text after metadata admission', () => {
+    const { raw, adapter } = database({ nullableValue: true });
+    raw
+      .prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, NULL)')
+      .run('bubbleId:nullable:mutable');
+    let mutated = false;
+    const observed: Database = {
+      ...adapter,
+      prepare(sql) {
+        const statement = adapter.prepare(sql);
+        if (sql.includes('value IS NULL AS valueIsNull') && sql.includes('WHERE key LIKE ?')) {
+          return {
+            ...statement,
+            all(...params: unknown[]) {
+              const rows = statement.all(...params);
+              raw
+                .prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ?')
+                .run('now-text', 'bubbleId:nullable:mutable');
+              mutated = true;
+              return rows;
+            },
+          };
+        }
+        return statement;
+      },
+    };
+
+    expect(() =>
+      forEachBoundedComposerBubbleValue(
+        observed,
+        'bubbleId:nullable:%',
+        createComposerSqliteBudget(),
+        () => undefined
       )
     ).toThrowError('Composer SQLite payload changed after metadata admission.');
     expect(mutated).toBe(true);

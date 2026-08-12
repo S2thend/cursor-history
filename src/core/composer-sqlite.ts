@@ -20,12 +20,30 @@ export interface ComposerSqliteValue extends ComposerSqliteMetadata {
   readonly value: string;
 }
 
+/**
+ * One global Composer bubble row. Unlike ordinary Composer key/value reads,
+ * historical bubble streams treat a stored SQL NULL as a visible corrupted
+ * message, so the null state is part of the admitted payload identity.
+ */
+export interface ComposerSqliteBubbleMetadata extends ComposerSqliteMetadata {
+  readonly valueIsNull: boolean;
+}
+
+export interface ComposerSqliteBubbleValue extends ComposerSqliteBubbleMetadata {
+  readonly value: string | null;
+}
+
 /** Escape caller-controlled text for a SQLite LIKE prefix using `\` as ESCAPE. */
 export function sqliteLikeLiteralPrefix(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 }
 
 interface InternalComposerSqliteMetadata extends ComposerSqliteMetadata {
+  /** Compatibility for historical in-repo database test doubles only. */
+  readonly inlineValue?: unknown;
+}
+
+interface InternalComposerSqliteBubbleMetadata extends ComposerSqliteBubbleMetadata {
   /** Compatibility for historical in-repo database test doubles only. */
   readonly inlineValue?: unknown;
 }
@@ -97,6 +115,50 @@ function normalizeMetadata(
     rowId,
     key,
     byteLength,
+    ...(hasInlineValue ? { inlineValue } : {}),
+  };
+}
+
+function sqliteBoolean(value: unknown): boolean | undefined {
+  if (value === true || value === 1 || value === 1n || value === '1') return true;
+  if (value === false || value === 0 || value === 0n || value === '0') return false;
+  return undefined;
+}
+
+function normalizeBubbleMetadata(
+  row: Record<string, unknown>,
+  fallbackKey?: string,
+  fallbackRowId = 0
+): InternalComposerSqliteBubbleMetadata {
+  const key = typeof row['key'] === 'string' ? row['key'] : fallbackKey;
+  if (!key) throw new TypeError('SQLite returned Composer bubble metadata without a key');
+
+  const hasInlineValue = Object.prototype.hasOwnProperty.call(row, 'value');
+  const inlineValue = hasInlineValue ? row['value'] : undefined;
+  const projectedNullState = sqliteBoolean(row['valueIsNull']);
+  const valueIsNull = projectedNullState ?? (hasInlineValue && inlineValue === null);
+  if (projectedNullState === undefined && !hasInlineValue) {
+    throw new TypeError('SQLite returned Composer bubble metadata without a null-state projection');
+  }
+  if (hasInlineValue && (inlineValue === null) !== valueIsNull) {
+    throw new TypeError('SQLite returned inconsistent Composer bubble null-state metadata');
+  }
+
+  const byteLength =
+    row['byteLength'] === undefined
+      ? valueIsNull
+        ? 0
+        : payloadBytes(inlineValue).byteLength
+      : declaredLength(row['byteLength']);
+  if (valueIsNull && byteLength !== 0) {
+    throw new TypeError('SQLite returned a nonzero length for a NULL Composer bubble payload');
+  }
+
+  return {
+    rowId: normalizedRowId(row['rowId'], fallbackRowId),
+    key,
+    byteLength,
+    valueIsNull,
     ...(hasInlineValue ? { inlineValue } : {}),
   };
 }
@@ -175,6 +237,48 @@ export function forEachBoundedComposerMetadata(
   }
 }
 
+/**
+ * Iterate global bubble metadata including stored SQL NULL rows. NULL rows are
+ * charged as one SQLite row and zero declared payload bytes. This API is kept
+ * bubble-specific so ordinary Composer metadata continues to exclude NULL.
+ */
+export function forEachBoundedComposerBubbleMetadata(
+  db: Database,
+  keyPattern: string,
+  budget: SqliteSourceReadBudget,
+  visit: (metadata: ComposerSqliteBubbleMetadata) => void,
+  signal?: AbortSignal
+): void {
+  const fixedPageRows = SOURCE_READ_LIMITS_V1_DEFAULTS.sqlitePageRows;
+  let afterRowId: number | bigint | null = null;
+  while (true) {
+    throwIfAborted(signal);
+    const rawPage = db
+      .prepare(
+        `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE key LIKE ? ESCAPE '\\' AND (? IS NULL OR cursorDiskKV.rowid > ?) ORDER BY cursorDiskKV.rowid ASC LIMIT ?`
+      )
+      .all(keyPattern, afterRowId, afterRowId, fixedPageRows) as Array<Record<string, unknown>>;
+    if (rawPage.length === 0) break;
+
+    const fallbackBase: number =
+      typeof afterRowId === 'number' && Number.isSafeInteger(afterRowId) ? afterRowId : -1;
+    const page = rawPage.map((row, index) =>
+      normalizeBubbleMetadata(row, undefined, fallbackBase + index + 1)
+    );
+    budget.admitMetadataPage(page.map(({ byteLength }) => byteLength));
+    for (const metadata of page) {
+      throwIfAborted(signal);
+      visit(metadata);
+    }
+
+    const legacyInlinePage = rawPage.some(
+      (row) => row['rowId'] === undefined && row['byteLength'] === undefined
+    );
+    if (legacyInlinePage || rawPage.length < fixedPageRows) break;
+    afterRowId = page[page.length - 1]!.rowId;
+  }
+}
+
 function readAdmittedComposerValue(
   db: Database,
   table: ComposerKeyValueTable,
@@ -205,6 +309,64 @@ function readAdmittedComposerValue(
   }
   if (returnedKey !== metadata.key) {
     throw new Error('Composer SQLite row identity changed after metadata admission.');
+  }
+
+  const bytes = payloadBytes(rawValue);
+  if (bytes.byteLength !== metadata.byteLength) {
+    throw new Error('Composer SQLite payload length changed after metadata admission.');
+  }
+  budget.admitDecodedValue(bytes.byteLength);
+  const value = decodeDeterministicUtf8(bytes, 'sqlite', budget.outcome).text;
+  return { ...metadata, value };
+}
+
+function readAdmittedComposerBubbleValue(
+  db: Database,
+  metadata: ComposerSqliteBubbleMetadata,
+  budget: SqliteSourceReadBudget,
+  signal?: AbortSignal
+): ComposerSqliteBubbleValue {
+  throwIfAborted(signal);
+  const internal = metadata as InternalComposerSqliteBubbleMetadata;
+  let rawValue: unknown;
+  let returnedKey = metadata.key;
+  let returnedValueIsNull: boolean;
+  if (Object.prototype.hasOwnProperty.call(internal, 'inlineValue')) {
+    rawValue = internal.inlineValue;
+    returnedValueIsNull = rawValue === null;
+  } else {
+    const row = db
+      .prepare(
+        `SELECT key, CAST(value AS BLOB) AS value, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE cursorDiskKV.rowid = ? AND key = ?`
+      )
+      .get(metadata.rowId, metadata.key) as
+      { key?: unknown; value?: unknown; valueIsNull?: unknown } | undefined;
+    if (!row || row.value === undefined) {
+      throw new Error('Composer SQLite payload changed after metadata admission.');
+    }
+    if (typeof row.key !== 'string') {
+      throw new TypeError('SQLite returned a Composer bubble payload without a key');
+    }
+    const projectedNullState = sqliteBoolean(row.valueIsNull);
+    if (projectedNullState === undefined) {
+      throw new TypeError(
+        'SQLite returned a Composer bubble payload without a null-state projection'
+      );
+    }
+    returnedKey = row.key;
+    rawValue = row.value;
+    returnedValueIsNull = projectedNullState;
+  }
+
+  if (returnedKey !== metadata.key) {
+    throw new Error('Composer SQLite row identity changed after metadata admission.');
+  }
+  if (returnedValueIsNull !== metadata.valueIsNull || (rawValue === null) !== returnedValueIsNull) {
+    throw new Error('Composer SQLite payload changed after metadata admission.');
+  }
+  if (returnedValueIsNull) {
+    budget.admitDecodedValue(0);
+    return { ...metadata, value: null };
   }
 
   const bytes = payloadBytes(rawValue);
@@ -249,6 +411,25 @@ export function readFirstBoundedComposerValue(
   return readAdmittedComposerValue(db, table, metadata, budget, signal);
 }
 
+/** Read the first global bubble row in row-ID order, including a stored SQL NULL. */
+export function readFirstBoundedComposerBubbleValue(
+  db: Database,
+  keyPattern: string,
+  budget: SqliteSourceReadBudget,
+  signal?: AbortSignal
+): ComposerSqliteBubbleValue | undefined {
+  throwIfAborted(signal);
+  const raw = db
+    .prepare(
+      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE key LIKE ? ESCAPE '\\' ORDER BY cursorDiskKV.rowid ASC LIMIT 1`
+    )
+    .get(keyPattern) as Record<string, unknown> | undefined;
+  if (!raw) return undefined;
+  const metadata = normalizeBubbleMetadata(raw, keyPattern);
+  budget.admitMetadataPage([metadata.byteLength]);
+  return readAdmittedComposerBubbleValue(db, metadata, budget, signal);
+}
+
 /** Admit full metadata pages, then fetch and release each matching payload sequentially. */
 export function forEachBoundedComposerValue(
   db: Database,
@@ -264,6 +445,26 @@ export function forEachBoundedComposerValue(
     keyPattern,
     budget,
     (metadata) => visit(readAdmittedComposerValue(db, table, metadata, budget, signal)),
+    signal
+  );
+}
+
+/**
+ * Admit full global-bubble metadata pages, then fetch each nullable payload
+ * sequentially. Physical row-ID order is preserved, including SQL NULL rows.
+ */
+export function forEachBoundedComposerBubbleValue(
+  db: Database,
+  keyPattern: string,
+  budget: SqliteSourceReadBudget,
+  visit: (row: ComposerSqliteBubbleValue) => void,
+  signal?: AbortSignal
+): void {
+  forEachBoundedComposerBubbleMetadata(
+    db,
+    keyPattern,
+    budget,
+    (metadata) => visit(readAdmittedComposerBubbleValue(db, metadata, budget, signal)),
     signal
   );
 }
