@@ -11,7 +11,7 @@
     "title": "Synthetic v0.16 Composer session",
     "createdAt": "2024-01-16T00:00:00.000Z",
     "lastUpdatedAt": "2024-01-16T00:01:00.000Z",
-    "messageCount": 6,
+    "messageCount": 7,
     "messages": [
       {
         "id": "native-user-016",
@@ -41,6 +41,16 @@
         "codeBlocks": [],
         "metadata": {
           "bubbleType": 2
+        }
+      },
+      {
+        "id": "synthetic-null-payload-016",
+        "role": "assistant",
+        "content": "[corrupted message]",
+        "timestamp": "2024-01-16T00:00:04.000Z",
+        "codeBlocks": [],
+        "metadata": {
+          "corrupted": true
         }
       },
       {
@@ -107,6 +117,7 @@
       "native-user-016",
       "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
       "fallback-assistant-016",
+      "synthetic-null-payload-016",
       "native-tool-read-016",
       "native-tool-search-016"
     ]

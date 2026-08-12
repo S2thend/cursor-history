@@ -121,6 +121,11 @@ const RAW_BUBBLES = Object.freeze([
     },
   },
   {
+    rowid: 25,
+    key: `bubbleId:${V016_SYNTHETIC_SESSION_ID}:synthetic-null-payload-016`,
+    value: null,
+  },
+  {
     rowid: 30,
     key: `bubbleId:${V016_SYNTHETIC_SESSION_ID}:native-tool-read-016`,
     value: {
@@ -171,6 +176,7 @@ const COMPOSER_DATA = Object.freeze({
     { bubbleId: 'native-user-016' },
     { bubbleId: V016_SYNTHETIC_COLLISION_ID },
     { bubbleId: 'fallback-assistant-016' },
+    { bubbleId: 'synthetic-null-payload-016' },
     { bubbleId: 'native-tool-read-016' },
     { bubbleId: 'native-tool-search-016' },
     { bubbleId: '' },
@@ -215,7 +221,7 @@ interface TaggedMessage {
   content: string;
   timestamp: string;
   codeBlocks: unknown[];
-  metadata?: { bubbleType: number };
+  metadata?: { bubbleType?: number; corrupted?: boolean };
   toolCalls?: Array<{
     name: string;
     status: 'completed' | 'cancelled' | 'error';
@@ -249,6 +255,14 @@ const TAGGED_GLOBAL_MESSAGES: TaggedMessage[] = [
     timestamp: '2024-01-16T00:00:03.000Z',
     codeBlocks: [],
     metadata: { bubbleType: 2 },
+  },
+  {
+    id: 'synthetic-null-payload-016',
+    role: 'assistant',
+    content: '[corrupted message]',
+    timestamp: '2024-01-16T00:00:04.000Z',
+    codeBlocks: [],
+    metadata: { corrupted: true },
   },
   {
     id: 'native-tool-read-016',
@@ -340,6 +354,7 @@ const TAGGED_OUTPUT = Object.freeze({
       'native-user-016',
       V016_SYNTHETIC_COLLISION_ID,
       'fallback-assistant-016',
+      'synthetic-null-payload-016',
       'native-tool-read-016',
       'native-tool-search-016',
     ],
@@ -396,7 +411,7 @@ const MERGED_STORE_SOURCE = Object.freeze({
       placement: 'matched',
       matchesComposerId: 'native-tool-read-016',
       role: 'assistant',
-      content: TAGGED_GLOBAL_MESSAGES[3]!.content,
+      content: TAGGED_GLOBAL_MESSAGES[4]!.content,
       appendToolCalls: [
         {
           name: 'synthetic_store_enrichment',
@@ -428,6 +443,7 @@ export const V016_ALLOWED_PAYLOAD_STRINGS = Object.freeze([
   'Synthetic question alpha.',
   'Composer owns the synthetic collision identity.',
   'Synthetic answer beta.\n```ts\nconst fixtureValue = 16;\n```',
+  '[corrupted message]',
   '[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed',
   '[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed',
   'Synthetic empty-ID compatibility turn.',
@@ -484,12 +500,16 @@ function createFreshDatabase(
 
 function writeComposerDatabase(path: string): void {
   createFreshDatabase(path, (database) => {
-    database.exec('CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)');
+    database.exec('CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY NOT NULL, value TEXT)');
     const insert = database.prepare(
       'INSERT INTO cursorDiskKV (rowid, key, value) VALUES (?, ?, ?)'
     );
     for (const bubble of RAW_BUBBLES) {
-      insert.run(bubble.rowid, bubble.key, JSON.stringify(bubble.value));
+      insert.run(
+        bubble.rowid,
+        bubble.key,
+        bubble.value === null ? null : JSON.stringify(bubble.value)
+      );
     }
     insert.run(100, `composerData:${V016_SYNTHETIC_SESSION_ID}`, JSON.stringify(COMPOSER_DATA));
   });
@@ -772,17 +792,19 @@ export function inspectV016FixtureSet(root: string): V016FixtureLogicalInventory
   const payloadStrings = new Set<string>();
   const composerPath = pathInside(root, 'composer-global-state.vscdb');
   const composer = new BetterSqlite3(composerPath, { readonly: true });
-  let composerRows: Array<{ rowid: number; key: string; value: string }>;
+  let composerRows: Array<{ rowid: number; key: string; value: string | null }>;
   try {
     composerRows = composer
       .prepare('SELECT rowid, key, value FROM cursorDiskKV ORDER BY rowid ASC')
-      .all() as Array<{ rowid: number; key: string; value: string }>;
+      .all() as Array<{ rowid: number; key: string; value: string | null }>;
   } finally {
     composer.close();
   }
   const bubbleRows = composerRows.filter(({ key }) => key.startsWith('bubbleId:'));
   for (const row of bubbleRows) {
-    collectStrings(JSON.parse(row.value), new Set(['text', 'content', 'result']), payloadStrings);
+    if (row.value !== null) {
+      collectStrings(JSON.parse(row.value), new Set(['text', 'content', 'result']), payloadStrings);
+    }
   }
 
   const workspace = JSON.parse(
@@ -843,6 +865,7 @@ export function inspectV016FixtureSet(root: string): V016FixtureLogicalInventory
       rowids: composerRows.map(({ rowid }) => rowid),
       keys: composerRows.map(({ key }) => key),
       bubbleIds: bubbleRows.map(({ value }) => {
+        if (value === null) return null;
         const parsed = JSON.parse(value) as { bubbleId?: string };
         return parsed.bubbleId ?? null;
       }),
@@ -1051,6 +1074,7 @@ export function generateV016Fixtures(outputDirectory: string): V016FixtureManife
           composerGlobalTable: 'cursorDiskKV',
           composerGlobalKeys: ['composerData:<session-id>', 'bubbleId:<session-id>:<bubble-id>'],
           bubbleOrder: 'rowid ASC',
+          nullBubblePayload: 'preserved as a row-key-ID [corrupted message] entry',
           workspaceFallbackContainer: 'tabs[].messages[]',
         },
       },

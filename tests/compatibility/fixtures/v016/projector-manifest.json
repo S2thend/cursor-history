@@ -37,6 +37,7 @@
   "invariants": {
     "globalBubbleQueryOrder": "rowid ASC",
     "globalBubbleId": "data.bubbleId ?? final row-key segment",
+    "globalNullBubblePayload": "row-key ID plus [corrupted message] placeholder",
     "corruptPlaceholder": "[corrupted message]",
     "emptyPlaceholder": "[empty message]",
     "toolMessageDisplay": "v0.16 specialized formatToolCall/formatToolCallWithResult projection",

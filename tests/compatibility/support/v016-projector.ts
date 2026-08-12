@@ -70,7 +70,7 @@ export interface V016ProjectedSession {
 export interface V016BubbleRow {
   rowid: number;
   key: string;
-  value: string;
+  value: string | null;
 }
 
 export interface V016GlobalProjectionInput {
@@ -549,9 +549,13 @@ function extractTokenUsage(
 function mapBubbleToMessage(row: V016BubbleRow): Omit<V016Message, 'timestamp'> & {
   timestamp: Date | null;
 } {
-  let data: RawBubbleData;
+  let data: RawBubbleData | null;
   try {
-    data = JSON.parse(row.value) as RawBubbleData;
+    // SQLite may return a stored SQL NULL even though the tagged v0.16
+    // implementation annotated this field as a string. JSON.parse(null)
+    // yields null at runtime; the subsequent mapper then emits the same
+    // corrupted-message projection as any other structurally invalid bubble.
+    data = JSON.parse(row.value as string) as RawBubbleData | null;
   } catch {
     return {
       id: getBubbleRowId(row.key),
@@ -564,6 +568,7 @@ function mapBubbleToMessage(row: V016BubbleRow): Omit<V016Message, 'timestamp'> 
   }
 
   try {
+    if (data === null) throw new TypeError('NULL Composer bubble payload');
     const content = extractBubbleText(data);
     const message: Omit<V016Message, 'timestamp'> & { timestamp: Date | null } = {
       id: data.bubbleId ?? getBubbleRowId(row.key),

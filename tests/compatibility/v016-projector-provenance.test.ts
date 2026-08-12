@@ -52,6 +52,9 @@ describe('v0.16 projector provenance', () => {
     expect(manifest.invariants['toolMessageDisplay']).toBe(
       'v0.16 specialized formatToolCall/formatToolCallWithResult projection'
     );
+    expect(manifest.invariants['globalNullBubblePayload']).toBe(
+      'row-key ID plus [corrupted message] placeholder'
+    );
   });
 
   it('reproduces rowid order, bubble-ID selection, placeholders, and branch filtering', () => {
@@ -76,6 +79,7 @@ describe('v0.16 projector provenance', () => {
             createdAt: '2024-01-01T10:00:00.000Z',
           }),
         },
+        { rowid: 15, key: 'bubbleId:composer-1:null-bubble', value: null },
         { rowid: 20, key: 'bubbleId:composer-1:broken', value: '{not-json' },
       ],
       composerDataValue: JSON.stringify({
@@ -92,6 +96,7 @@ describe('v0.16 projector provenance', () => {
 
     expect(projected.messages.map(({ id, content, role }) => ({ id, content, role }))).toEqual([
       { id: 'native-first', content: 'first', role: 'user' },
+      { id: 'null-bubble', content: '[corrupted message]', role: 'assistant' },
       { id: 'broken', content: '[corrupted message]', role: 'assistant' },
       { id: '', content: '[empty message]', role: 'user' },
     ]);

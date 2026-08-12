@@ -110,9 +110,7 @@ function storeSession(sessionId: string, fixture: StoreFixture): ChatSession {
         }
       : {}),
     ...(message.parentLabel ? { parentMessageId: message.parentLabel } : {}),
-    ...(message.appendToolCalls
-      ? { toolCalls: structuredClone(message.appendToolCalls) }
-      : {}),
+    ...(message.appendToolCalls ? { toolCalls: structuredClone(message.appendToolCalls) } : {}),
   }));
   return {
     id: sessionId,
@@ -221,9 +219,13 @@ function assertArchiveMatchesCompleteView(path: string, incoming: Session): void
   expect(snapshot.toolCalls).toHaveLength(expectedTools.length);
   expect(snapshot.codeBlocks).toHaveLength(expectedBlocks.length);
   expect(
-    (snapshot.messages as Array<{ id: string; content: string; parent_message_id: string | null }>).map(
-      ({ id, content, parent_message_id: parentMessageId }) => ({ id, content, parentMessageId })
-    )
+    (
+      snapshot.messages as Array<{ id: string; content: string; parent_message_id: string | null }>
+    ).map(({ id, content, parent_message_id: parentMessageId }) => ({
+      id,
+      content,
+      parentMessageId,
+    }))
   ).toEqual(
     [...expected.messages]
       .sort((left, right) => left.id.localeCompare(right.id))
@@ -263,14 +265,13 @@ describe('v0.16 Composer-only archive upgrade through the pinned unchanged consu
       'native-user-016',
       storeFixture.collision.frozenComposerMessageId,
       'fallback-assistant-016',
+      'synthetic-null-payload-016',
       'native-tool-read-016',
       'native-tool-search-016',
-      'msg:5',
+      'msg:6',
     ]);
     expect(
-      projectV016ComposerMessages(tagged.workspaceFallbackSessions[0]!.messages).map(
-        ({ id }) => id
-      )
+      projectV016ComposerMessages(tagged.workspaceFallbackSessions[0]!.messages).map(({ id }) => id)
     ).toEqual(['workspace-native-016', 'msg:1', 'msg:2']);
 
     for (const preferred of storeFixture.preferredSourceCases) {
@@ -280,15 +281,24 @@ describe('v0.16 Composer-only archive upgrade through the pinned unchanged consu
       expect(merged.source).toBe('global');
       expect(merged.resolvedSource).toBe('merged');
       expect(merged.resolution?.state).toBe('complete');
-      expect(merged.messages.find(({ content }) => content === 'Synthetic question alpha.')).toMatchObject({
+      expect(
+        merged.messages.find(({ content }) => content === 'Synthetic question alpha.')
+      ).toMatchObject({
         id: 'native-user-016',
         source: 'both',
       });
       expect(
+        merged.messages.find(({ content }) => content === '[corrupted message]')
+      ).toMatchObject({
+        id: 'synthetic-null-payload-016',
+        identityOrigin: 'composer-native',
+      });
+      expect(
         merged.messages.find(({ content }) => content === 'Synthetic empty-ID compatibility turn.')
-      ).toMatchObject({ id: 'msg:5', identityOrigin: 'composer-v0.16-index' });
-      expect(merged.messages.find(({ content }) => content === 'Synthetic Store collision payload.'))
-        .toMatchObject({ id: storeFixture.collision.expectedAllocatedStoreId });
+      ).toMatchObject({ id: 'msg:6', identityOrigin: 'composer-v0.16-index' });
+      expect(
+        merged.messages.find(({ content }) => content === 'Synthetic Store collision payload.')
+      ).toMatchObject({ id: storeFixture.collision.expectedAllocatedStoreId });
 
       const readMessage = merged.messages.find(({ id }) => id === 'native-tool-read-016')!;
       expect(readMessage.toolCalls?.map(({ name }) => name)).toEqual([
@@ -401,7 +411,7 @@ describe('v0.16 Composer-only archive upgrade through the pinned unchanged consu
     });
 
     const identityFault = structuredClone(complete);
-    const fallback = identityFault.messages.find(({ id }) => id === 'msg:5')!;
+    const fallback = identityFault.messages.find(({ id }) => id === 'msg:6')!;
     delete fallback.id;
     expect(() => expectEveryOldKeyPreserved(oldProjection.messages, identityFault)).toThrow();
 

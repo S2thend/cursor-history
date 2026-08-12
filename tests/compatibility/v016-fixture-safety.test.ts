@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
+  copyFileSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -35,6 +37,7 @@ import {
   syncV016Session,
 } from '../helpers/v016-consumer.js';
 import type { Session } from '../../src/lib/types.js';
+import { listSessions as listLibrarySessions } from '../../src/lib/index.js';
 
 const FIXTURE_ROOT = join(process.cwd(), 'tests', 'compatibility', 'fixtures', 'v016');
 const GENERATOR_PATH = join(
@@ -138,7 +141,7 @@ describe('locked wholly synthetic v0.16 fixture generation', () => {
       workspacePath: '/fixture/v016/project',
       hostname: 'fixture-host',
       sqliteHeaderVersion: 3_051_001,
-      bubbleRowids: [10, 15, 20, 30, 40, 50],
+      bubbleRowids: [10, 15, 20, 25, 30, 40, 50],
     });
     expect(manifest.provenance.cursorHistory).toMatchObject({
       tag: 'v0.16.0',
@@ -147,6 +150,7 @@ describe('locked wholly synthetic v0.16 fixture generation', () => {
       sourceFormat: {
         composerGlobalTable: 'cursorDiskKV',
         bubbleOrder: 'rowid ASC',
+        nullBubblePayload: 'preserved as a row-key-ID [corrupted message] entry',
       },
     });
     expect(manifest.provenance.vibeHistoryConsumer).toEqual({
@@ -256,14 +260,14 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
     const database = new BetterSqlite3(join(FIXTURE_ROOT, 'composer-global-state.vscdb'), {
       readonly: true,
     });
-    let bubbleRows: Array<{ rowid: number; key: string; value: string }>;
+    let bubbleRows: Array<{ rowid: number; key: string; value: string | null }>;
     let composerDataValue: string;
     try {
       bubbleRows = database
         .prepare(
           "SELECT rowid, key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%' ORDER BY rowid ASC"
         )
-        .all() as Array<{ rowid: number; key: string; value: string }>;
+        .all() as Array<{ rowid: number; key: string; value: string | null }>;
       composerDataValue = (
         database
           .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
@@ -288,6 +292,11 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
     const workspaceRaw = readFileSync(join(FIXTURE_ROOT, 'workspace-fallback.json'), 'utf8');
     const projectedWorkspace = projectV016WorkspaceSessions(workspaceRaw);
 
+    expect(bubbleRows.find(({ rowid }) => rowid === 25)).toEqual({
+      rowid: 25,
+      key: `bubbleId:${V016_SYNTHETIC_SESSION_ID}:synthetic-null-payload-016`,
+      value: null,
+    });
     expect(JSON.parse(JSON.stringify(projectedGlobal))).toEqual(tagged.globalSession);
     expect(JSON.parse(JSON.stringify(projectedWorkspace))).toEqual(
       tagged.workspaceFallbackSessions
@@ -303,7 +312,14 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
 
     expect(committedState.exists).toBe(true);
     expect(committedState.messageDigest).toBe(computeV016MessageDigest(normalized.messages));
-    expect(committedState.messageIds).toEqual(normalized.messages.map(({ id }) => id));
+    expect(committedState.messageIds).toEqual(
+      [...normalized.messages]
+        .sort((left, right) => {
+          const timestampOrder = left.timestamp.getTime() - right.timestamp.getTime();
+          return timestampOrder !== 0 ? timestampOrder : left.id.localeCompare(right.id);
+        })
+        .map(({ id }) => id)
+    );
     expect(archiveInventory(committedPath)).toEqual({
       messageIds: manifest.logicalInventory.consumerArchive.messageIds,
       toolCallIds: manifest.logicalInventory.consumerArchive.toolCallIds,
@@ -321,6 +337,56 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
       expect(generatedState).toEqual(committedState);
       expect(archiveInventory(generatedArchive)).toEqual(archiveInventory(committedPath));
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('round-trips the raw Composer database through the current public library without changing v0.16 consumer output', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cursor-history-v016-current-library-'));
+    const userRoot = join(root, 'User');
+    const workspaceStorage = join(userRoot, 'workspaceStorage');
+    const globalStorage = join(userRoot, 'globalStorage');
+    const emptyStoreRoot = join(root, 'empty-store');
+    const archivePath = join(root, 'legacy-consumer-archive.sqlite');
+    const previousStoreRoot = process.env['CURSOR_STORE_ROOT'];
+    try {
+      mkdirSync(workspaceStorage, { recursive: true });
+      mkdirSync(globalStorage, { recursive: true });
+      mkdirSync(emptyStoreRoot, { recursive: true });
+      copyFileSync(
+        join(FIXTURE_ROOT, 'composer-global-state.vscdb'),
+        join(globalStorage, 'state.vscdb')
+      );
+      copyFileSync(join(FIXTURE_ROOT, 'legacy-consumer-archive.sqlite'), archivePath);
+      process.env['CURSOR_STORE_ROOT'] = emptyStoreRoot;
+
+      const result = await listLibrarySessions({ dataPath: workspaceStorage, limit: 100 });
+      const current = result.data.find(({ id }) => id === V016_SYNTHETIC_SESSION_ID);
+      expect(current).toBeDefined();
+
+      const tagged = taggedCursorSession();
+      const expectedProjection = normalizeCursorSessionV016(tagged);
+      const currentProjection = normalizeCursorSessionV016(current!);
+      expect(currentProjection).toEqual(expectedProjection);
+      expect(current!.messages.map(({ id }) => id)).toEqual(
+        tagged.messages.map((message, index) => message.id || `msg:${index}`)
+      );
+      expect(current!.messages[3]).toMatchObject({
+        id: 'synthetic-null-payload-016',
+        content: '[corrupted message]',
+      });
+
+      const beforeState = readV016ArchiveState(archivePath, expectedProjection.id);
+      const beforeInventory = archiveInventory(archivePath);
+      expect(syncV016Session(archivePath, current!)).toEqual({
+        action: 'skipped',
+        messagesAppended: 0,
+      });
+      expect(readV016ArchiveState(archivePath, expectedProjection.id)).toEqual(beforeState);
+      expect(archiveInventory(archivePath)).toEqual(beforeInventory);
+    } finally {
+      if (previousStoreRoot === undefined) delete process.env['CURSOR_STORE_ROOT'];
+      else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
       rmSync(root, { recursive: true, force: true });
     }
   });
