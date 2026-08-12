@@ -1321,7 +1321,9 @@ export async function bindMigrationTargets(
   // Never reuse a caller context whose cache/options may have been created
   // under a different operation. Capture one provider, signal, and branded
   // effective limits map for every nested catalog read performed by binding.
-  const operationContext = createSessionReadContext(dataPath, undefined, {
+  const operationContext = createSessionReadContext({
+    dataPath,
+    workspacePath,
     sqliteDriver,
     sourceReadLimits,
     signal,
@@ -1339,122 +1341,126 @@ export async function bindMigrationTargets(
   const numericBase = options.numericBase ?? 1;
   const targets: BoundMigrationTarget[] = [];
 
-  for (const selector of selectors) {
-    throwIfMigrationAborted(signal);
-    if (typeof selector === 'string' && selector.startsWith('occurrence:')) {
-      throw new UnsupportedSessionMigrationError(selector, 'diagnostic-occurrence-reference');
-    }
-    const numeric =
-      typeof selector === 'number' ||
-      (!options.treatStringSelectorsAsIds && /^\d+$/.test(String(selector)))
-        ? Number(selector)
-        : undefined;
-    let sessionId: string;
-    if (numeric === undefined) {
-      sessionId = String(selector);
-    } else {
-      const summary = (await scopedSummaries()).find(
-        (candidate) => candidate.index === numeric + (numericBase === 0 ? 1 : 0)
-      );
-      if (!summary) throw new SessionNotFoundError(selector);
-      sessionId = summary.id;
-    }
-
-    const composerInventory = await collectComposerOccurrences(sessionId, dataPath, readGuard);
-    if (!composerInventory.complete) {
-      throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-composer-inventory');
-    }
-    const occurrences = [...composerInventory.occurrences];
-    const globalRows = await readGlobalSessionRows(sessionId, dataPath, readGuard);
-    const membershipPaths = new Set([
-      ...occurrences.map((occurrence) => normalizedPathKey(occurrence.workspacePath)),
-      ...composerInventory.pointerMembershipPaths.map(normalizedPathKey),
-      ...globalWorkspaceMembershipPaths(sessionId, globalRows),
-    ]);
-
-    const fallbackSource =
-      membershipPaths.size === 1
-        ? await findMigrationWorkspaceByPath([...membershipPaths][0]!, dataPath, readGuard)
-        : undefined;
-
-    const storeInventory = inspectStoreSessionIdMetadataOnly(sessionId, storeRootPath, signal);
-    if (!storeInventory.complete) {
-      throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-store-inventory');
-    }
-    if (storeInventory.exists && (occurrences.length > 0 || globalRows.length > 0)) {
-      throw new UnsupportedSessionMigrationError(sessionId, 'merged');
-    }
-    if (storeInventory.exists) {
-      throw new UnsupportedSessionMigrationError(sessionId, 'store-only');
-    }
-
-    if (membershipPaths.size > 1) {
-      throw new UnsupportedSessionMigrationError(sessionId, 'shared-membership');
-    }
-    if (occurrences.length > 1) {
-      const fingerprints = new Set(occurrences.map((occurrence) => occurrence.fingerprint));
-      if (fingerprints.size > 1) {
-        throw new SessionAmbiguityError(sessionId, opaqueOccurrenceRefs(occurrences));
+  try {
+    for (const selector of selectors) {
+      throwIfMigrationAborted(signal);
+      if (typeof selector === 'string' && selector.startsWith('occurrence:')) {
+        throw new UnsupportedSessionMigrationError(selector, 'diagnostic-occurrence-reference');
       }
-      throw new UnsupportedSessionMigrationError(sessionId, 'multiple-composer-occurrences');
-    }
-
-    let occurrence = occurrences[0];
-    if (!occurrence) {
-      if (globalRows.length === 0) {
-        throw new SessionNotFoundError(sessionId);
+      const numeric =
+        typeof selector === 'number' ||
+        (!options.treatStringSelectorsAsIds && /^\d+$/.test(String(selector)))
+          ? Number(selector)
+          : undefined;
+      let sessionId: string;
+      if (numeric === undefined) {
+        sessionId = String(selector);
+      } else {
+        const summary = (await scopedSummaries()).find(
+          (candidate) => candidate.index === numeric + (numericBase === 0 ? 1 : 0)
+        );
+        if (!summary) throw new SessionNotFoundError(selector);
+        sessionId = summary.id;
       }
-      if (!fallbackSource) {
-        throw new UnsupportedSessionMigrationError(sessionId, 'unbound-global-occurrence');
+
+      const composerInventory = await collectComposerOccurrences(sessionId, dataPath, readGuard);
+      if (!composerInventory.complete) {
+        throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-composer-inventory');
       }
-      membershipPaths.add(normalizedPathKey(fallbackSource.workspace.path));
-      occurrence = {
-        workspaceId: fallbackSource.workspace.id,
-        workspacePath: normalizePath(fallbackSource.workspace.path),
-        databasePath: fallbackSource.dbPath,
-        composerIndex: -1,
-        composer: { composerId: sessionId },
-        fingerprint: migrationFingerprint({ composerId: sessionId, globalOnly: true }),
-      };
-    }
+      const occurrences = [...composerInventory.occurrences];
+      const globalRows = await readGlobalSessionRows(sessionId, dataPath, readGuard);
+      const membershipPaths = new Set([
+        ...occurrences.map((occurrence) => normalizedPathKey(occurrence.workspacePath)),
+        ...composerInventory.pointerMembershipPaths.map(normalizedPathKey),
+        ...globalWorkspaceMembershipPaths(sessionId, globalRows),
+      ]);
 
-    if (workspacePath && !pathsEqual(occurrence.workspacePath, workspacePath)) {
-      throw new SessionScopeMismatchError(sessionId, workspacePath);
-    }
+      const fallbackSource =
+        membershipPaths.size === 1
+          ? await findMigrationWorkspaceByPath([...membershipPaths][0]!, dataPath, readGuard)
+          : undefined;
 
-    const composerLocator = Object.freeze({
-      workspaceId: occurrence.workspaceId,
-      databasePath: occurrence.databasePath,
-      dbPath: occurrence.databasePath,
-      sessionId,
-      composerIndex: occurrence.composerIndex,
-      recordFingerprint: occurrence.fingerprint,
-    });
+      const storeInventory = inspectStoreSessionIdMetadataOnly(sessionId, storeRootPath, signal);
+      if (!storeInventory.complete) {
+        throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-store-inventory');
+      }
+      if (storeInventory.exists && (occurrences.length > 0 || globalRows.length > 0)) {
+        throw new UnsupportedSessionMigrationError(sessionId, 'merged');
+      }
+      if (storeInventory.exists) {
+        throw new UnsupportedSessionMigrationError(sessionId, 'store-only');
+      }
 
-    const target: BoundMigrationTarget = {
-      logicalSessionId: sessionId,
-      composerLocator,
-      sourceWorkspacePath: normalizePath(occurrence.workspacePath),
-      sqliteDriver,
-      storeRootPath,
-      dataSourceIdentity: currentDataSourceIdentity(
+      if (membershipPaths.size > 1) {
+        throw new UnsupportedSessionMigrationError(sessionId, 'shared-membership');
+      }
+      if (occurrences.length > 1) {
+        const fingerprints = new Set(occurrences.map((occurrence) => occurrence.fingerprint));
+        if (fingerprints.size > 1) {
+          throw new SessionAmbiguityError(sessionId, opaqueOccurrenceRefs(occurrences));
+        }
+        throw new UnsupportedSessionMigrationError(sessionId, 'multiple-composer-occurrences');
+      }
+
+      let occurrence = occurrences[0];
+      if (!occurrence) {
+        if (globalRows.length === 0) {
+          throw new SessionNotFoundError(sessionId);
+        }
+        if (!fallbackSource) {
+          throw new UnsupportedSessionMigrationError(sessionId, 'unbound-global-occurrence');
+        }
+        membershipPaths.add(normalizedPathKey(fallbackSource.workspace.path));
+        occurrence = {
+          workspaceId: fallbackSource.workspace.id,
+          workspacePath: normalizePath(fallbackSource.workspace.path),
+          databasePath: fallbackSource.dbPath,
+          composerIndex: -1,
+          composer: { composerId: sessionId },
+          fingerprint: migrationFingerprint({ composerId: sessionId, globalOnly: true }),
+        };
+      }
+
+      if (workspacePath && !pathsEqual(occurrence.workspacePath, workspacePath)) {
+        throw new SessionScopeMismatchError(sessionId, workspacePath);
+      }
+
+      const composerLocator = Object.freeze({
+        workspaceId: occurrence.workspaceId,
+        databasePath: occurrence.databasePath,
+        dbPath: occurrence.databasePath,
+        sessionId,
+        composerIndex: occurrence.composerIndex,
+        recordFingerprint: occurrence.fingerprint,
+      });
+
+      const target: BoundMigrationTarget = {
+        logicalSessionId: sessionId,
+        composerLocator,
+        sourceWorkspacePath: normalizePath(occurrence.workspacePath),
+        sqliteDriver,
+        storeRootPath,
+        dataSourceIdentity: currentDataSourceIdentity(
+          dataPath,
+          occurrence.databasePath,
+          storeRootPath
+        ),
+        occurrenceFingerprint: migrationFingerprint({
+          occurrence: occurrence.fingerprint,
+          globalRows,
+        }),
+        eligibility: 'eligible-composer',
         dataPath,
-        occurrence.databasePath,
-        storeRootPath
-      ),
-      occurrenceFingerprint: migrationFingerprint({
-        occurrence: occurrence.fingerprint,
-        globalRows,
-      }),
-      eligibility: 'eligible-composer',
-      dataPath,
-      sourceReadLimits,
-      signal,
-    };
-    targets.push(freezeBoundMigrationTarget(target));
-  }
+        sourceReadLimits,
+        signal,
+      };
+      targets.push(freezeBoundMigrationTarget(target));
+    }
 
-  return targets;
+    return targets;
+  } finally {
+    await operationContext.dispose();
+  }
 }
 
 /** Resolve destination/capability/source state and freeze it before preview or application. */
@@ -3003,21 +3009,28 @@ export async function migrateWorkspace(
   // unique UUID before applying any target prevents a workspace command from
   // moving only the Composer half of a multi-source session.
   if (existsSync(sourceInfo.dbPath)) {
-    const context = createSessionReadContext(dataPath, undefined, {
+    const context = createSessionReadContext({
+      dataPath,
+      workspacePath: normalizedSource,
       sqliteDriver,
       sourceReadLimits,
       signal,
     });
-    const summaries = await listSessions(
-      {
-        limit: 0,
-        all: true,
-        workspacePath: normalizedSource,
-      },
-      dataPath,
-      undefined,
-      context
-    );
+    let summaries: ChatSessionSummary[];
+    try {
+      summaries = await listSessions(
+        {
+          limit: 0,
+          all: true,
+          workspacePath: normalizedSource,
+        },
+        dataPath,
+        undefined,
+        context
+      );
+    } finally {
+      await context.dispose();
+    }
     const sessionIds = [...new Set(summaries.map((summary) => summary.id))];
     if (sessionIds.length === 0) throw new NoSessionsFoundError(normalizedSource);
 
@@ -3033,19 +3046,16 @@ export async function migrateWorkspace(
       }
     }
 
-    const targets = await bindMigrationTargets(
-      sessionIds,
-      {
-        numericBase: 1,
-        treatStringSelectorsAsIds: true,
-        storeRootPath,
-        workspacePath: normalizedSource,
-        dataPath,
-        sourceReadLimits,
-        signal,
-      },
-      context
-    );
+    const targets = await bindMigrationTargets(sessionIds, {
+      numericBase: 1,
+      treatStringSelectorsAsIds: true,
+      sqliteDriver,
+      storeRootPath,
+      workspacePath: normalizedSource,
+      dataPath,
+      sourceReadLimits,
+      signal,
+    });
     const prepared: PreparedSessionMigration[] = [];
     for (const target of targets) {
       prepared.push(
