@@ -137,6 +137,7 @@ describe('locked wholly synthetic v0.16 fixture generation', () => {
       sessionId: V016_SYNTHETIC_SESSION_ID,
       workspacePath: '/fixture/v016/project',
       hostname: 'fixture-host',
+      sqliteHeaderVersion: 3_051_001,
       bubbleRowids: [10, 15, 20, 30, 40, 50],
     });
     expect(manifest.provenance.cursorHistory).toMatchObject({

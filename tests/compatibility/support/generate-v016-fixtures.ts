@@ -24,6 +24,10 @@ const UPDATED_AT = '2024-01-16T00:01:00.000Z';
 const PROJECTOR_TAG = 'v0.16.0';
 const PROJECTOR_COMMIT = 'e8a7abf8cea3419a9dda911e174a05f82a9b260e';
 const CONSUMER_REVISION = '698701775144f7d8875330e1f8caec9ddfc27744';
+// SQLite writes its library version into header bytes 96..99. That value is
+// not logical database content and otherwise makes byte hashes drift whenever
+// the lockfile upgrades better-sqlite3's bundled SQLite patch release.
+const PINNED_SQLITE_HEADER_VERSION = 3_051_001;
 
 const ARTIFACT_NAMES = [
   'composer-global-state.vscdb',
@@ -470,6 +474,12 @@ function createFreshDatabase(
   } finally {
     database.close();
   }
+  const bytes = readFileSync(path);
+  if (bytes.length < 100 || bytes.subarray(0, 16).toString('binary') !== 'SQLite format 3\0') {
+    throw new Error('Synthetic fixture generator did not produce a SQLite 3 database.');
+  }
+  bytes.writeUInt32BE(PINNED_SQLITE_HEADER_VERSION, 96);
+  writeFileSync(path, bytes, { mode: 0o600 });
   chmodSync(path, 0o600);
 }
 
@@ -955,6 +965,7 @@ export interface V016FixtureManifest {
       hostname: string;
       createdAt: string;
       updatedAt: string;
+      sqliteHeaderVersion: number;
       bubbleRowids: number[];
       allowedPayloadStrings: readonly string[];
     };
@@ -1027,6 +1038,7 @@ export function generateV016Fixtures(outputDirectory: string): V016FixtureManife
         hostname: V016_SYNTHETIC_HOSTNAME,
         createdAt: CREATED_AT,
         updatedAt: UPDATED_AT,
+        sqliteHeaderVersion: PINNED_SQLITE_HEADER_VERSION,
         bubbleRowids: RAW_BUBBLES.map(({ rowid }) => rowid),
         allowedPayloadStrings: V016_ALLOWED_PAYLOAD_STRINGS,
       },

@@ -19,14 +19,8 @@
       "hostname": "fixture-host",
       "createdAt": "2024-01-16T00:00:00.000Z",
       "updatedAt": "2024-01-16T00:01:00.000Z",
-      "bubbleRowids": [
-        10,
-        15,
-        20,
-        30,
-        40,
-        50
-      ],
+      "sqliteHeaderVersion": 3051001,
+      "bubbleRowids": [10, 15, 20, 30, 40, 50],
       "allowedPayloadStrings": [
         "Synthetic question alpha.",
         "Composer owns the synthetic collision identity.",
@@ -53,10 +47,7 @@
       "projectorManifest": "tests/compatibility/fixtures/v016/projector-manifest.json",
       "sourceFormat": {
         "composerGlobalTable": "cursorDiskKV",
-        "composerGlobalKeys": [
-          "composerData:<session-id>",
-          "bubbleId:<session-id>:<bubble-id>"
-        ],
+        "composerGlobalKeys": ["composerData:<session-id>", "bubbleId:<session-id>:<bubble-id>"],
         "bubbleOrder": "rowid ASC",
         "workspaceFallbackContainer": "tabs[].messages[]"
       }
@@ -68,24 +59,14 @@
     }
   },
   "syntheticIdentities": {
-    "allowedCursorShapedIds": [
-      "00000000-0016-4016-8016-000000000016"
-    ],
+    "allowedCursorShapedIds": ["00000000-0016-4016-8016-000000000016"],
     "collisionId": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1"
   },
   "logicalInventory": {
     "composerGlobal": {
       "table": "cursorDiskKV",
       "sessionId": "00000000-0016-4016-8016-000000000016",
-      "rowids": [
-        10,
-        15,
-        20,
-        30,
-        40,
-        50,
-        100
-      ],
+      "rowids": [10, 15, 20, 30, 40, 50, 100],
       "keys": [
         "bubbleId:00000000-0016-4016-8016-000000000016:native-user-016",
         "bubbleId:00000000-0016-4016-8016-000000000016:synthetic-collision-row",
@@ -105,14 +86,8 @@
       ]
     },
     "workspaceFallback": {
-      "sessionIds": [
-        "00000000-0016-4016-8016-000000000016"
-      ],
-      "messageIds": [
-        "workspace-native-016",
-        null,
-        ""
-      ]
+      "sessionIds": ["00000000-0016-4016-8016-000000000016"],
+      "messageIds": ["workspace-native-016", null, ""]
     },
     "taggedProjection": {
       "globalMessageIds": [
@@ -123,21 +98,12 @@
         "native-tool-search-016",
         ""
       ],
-      "workspaceMessageIds": [
-        "workspace-native-016",
-        null,
-        ""
-      ],
-      "sources": [
-        "global",
-        "workspace-fallback"
-      ]
+      "workspaceMessageIds": ["workspace-native-016", null, ""],
+      "sources": ["global", "workspace-fallback"]
     },
     "consumerArchive": {
       "schemaVersion": "2",
-      "sessionIds": [
-        "cursor:00000000-0016-4016-8016-000000000016"
-      ],
+      "sessionIds": ["cursor:00000000-0016-4016-8016-000000000016"],
       "messageIds": [
         "cursor:00000000-0016-4016-8016-000000000016:fallback-assistant-016",
         "cursor:00000000-0016-4016-8016-000000000016:msg:5",
@@ -205,9 +171,7 @@
   },
   "safety": {
     "syntheticOnly": true,
-    "allowedPathPrefixes": [
-      "/fixture/v016/"
-    ],
+    "allowedPathPrefixes": ["/fixture/v016/"],
     "requiredScans": [
       "byte-sensitive-patterns",
       "declared-Cursor-shaped-identities",
