@@ -195,6 +195,22 @@ try {
     fail(`CLI version ${cli.stdout.trim()} does not match package ${installedPackage.version}`);
   }
 
+  // Exercise the package-manager-created executable, not only the resolved JS
+  // target. POSIX installs it as a symlink and Windows as a command shim; both
+  // must trigger the CLI's direct-entry guard.
+  const installedBin = join(
+    workspace,
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'cursor-history.cmd' : 'cursor-history'
+  );
+  const binCli = run(installedBin, ['--version'], { cwd: workspace, timeout: 30_000 });
+  if (binCli.stdout.trim() !== installedPackage.version) {
+    fail(
+      `installed CLI version ${binCli.stdout.trim()} does not match package ${installedPackage.version}`
+    );
+  }
+
   const storeRoot = join(workspace, 'synthetic-store');
   cpSync(join(repositoryRoot, 'tests/fixtures/store-root'), storeRoot, { recursive: true });
   const scopedMetaPath = join(

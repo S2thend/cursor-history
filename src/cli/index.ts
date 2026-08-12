@@ -5,7 +5,7 @@
  */
 
 import { Command, CommanderError } from 'commander';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { CliError, handleError, ExitCode } from './errors.js';
@@ -186,8 +186,17 @@ export async function main(argv: readonly string[] = process.argv): Promise<void
   }
 }
 
-const entryPath = process.argv[1] ? resolve(process.argv[1]) : undefined;
-if (entryPath === resolve(fileURLToPath(import.meta.url))) {
+function executableIdentity(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+const entryPath = process.argv[1] ? executableIdentity(process.argv[1]) : undefined;
+if (entryPath === executableIdentity(fileURLToPath(import.meta.url))) {
   main().catch((error) => {
     handleError(error, { json: jsonRequested(process.argv) });
   });
