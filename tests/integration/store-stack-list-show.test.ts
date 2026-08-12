@@ -50,7 +50,9 @@ describe('Store-stack list (integration)', () => {
     expect(
       result.every((session) => ['global', 'workspace-fallback'].includes(session.source ?? ''))
     ).toBe(true);
-    expect(result.every((session) => session.resolvedSource === 'store-transcript')).toBe(true);
+    expect(result.every((session) => session.source === 'workspace-fallback')).toBe(true);
+    expect(result.every((session) => session.resolvedSource === 'store-metadata')).toBe(true);
+    expect(result.every((session) => session.resolutionState === 'partial')).toBe(true);
   });
 
   it('reads workspacePath from chats meta.json.cwd', async () => {

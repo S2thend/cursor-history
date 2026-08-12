@@ -264,6 +264,93 @@ describe('mergeCrossStackSessions', () => {
     expect(merged.index).toBe(7);
   });
 
+  it('keeps complementary payloads and canonicalizes provenance independently of backbone order', () => {
+    const composer = makeSession({
+      source: 'global',
+      workspacePath: '/composer/project',
+      canonicalWorkspacePath: '/composer/project',
+      matchedWorkspacePath: '/composer/project',
+      sourceInstances: [
+        {
+          sourceRole: 'composer',
+          representation: 'composer-workspace',
+          workspacePaths: ['/composer/membership'],
+          state: 'superseded',
+        },
+        {
+          sourceRole: 'composer',
+          representation: 'composer-global',
+          workspacePaths: ['/composer/project'],
+          state: 'contributed',
+        },
+      ],
+      messages: [msg({ id: 'composer-only', role: 'user', content: 'Composer-only fact' })],
+    });
+    const store = makeSession({
+      source: 'store-complete',
+      workspacePath: '/store/project',
+      sourceInstances: [
+        {
+          sourceRole: 'store',
+          representation: 'store-transcript',
+          workspacePaths: ['/store/project'],
+          state: 'superseded',
+        },
+        {
+          sourceRole: 'store',
+          representation: 'store-db',
+          workspacePaths: ['/store/project'],
+          state: 'contributed',
+        },
+      ],
+      messages: [msg({ id: 'store-only', role: 'assistant', content: 'Store-only fact' })],
+    });
+
+    for (const preferred of ['composer', 'store'] as const) {
+      const merged = mergeCrossStackSessions(composer, store, preferred, 4);
+      expect(merged).toMatchObject({
+        id: composer.id,
+        workspacePath: '/composer/project',
+        canonicalWorkspacePath: '/composer/project',
+        matchedWorkspacePath: '/composer/project',
+        resolvedSource: 'merged',
+        sources: ['composer', 'store'],
+        resolution: { state: 'complete' },
+        sourceInstances: [
+          {
+            sourceRole: 'composer',
+            representation: 'composer-global',
+            workspacePaths: ['/composer/project'],
+            state: 'contributed',
+          },
+          {
+            sourceRole: 'composer',
+            representation: 'composer-workspace',
+            workspacePaths: ['/composer/membership'],
+            state: 'superseded',
+          },
+          {
+            sourceRole: 'store',
+            representation: 'store-db',
+            workspacePaths: ['/store/project'],
+            state: 'contributed',
+          },
+          {
+            sourceRole: 'store',
+            representation: 'store-transcript',
+            workspacePaths: ['/store/project'],
+            state: 'superseded',
+          },
+        ],
+      });
+      expect(merged.messages.map(({ content }) => content)).toEqual(
+        preferred === 'composer'
+          ? ['Composer-only fact', 'Store-only fact']
+          : ['Store-only fact', 'Composer-only fact']
+      );
+    }
+  });
+
   it('uses the preferred source as the backbone order (never timestamp-sorted)', () => {
     const t1 = new Date('2026-01-01T09:00:00Z');
     const t2 = new Date('2026-01-01T10:00:00Z');

@@ -7,6 +7,13 @@ import { join } from 'node:path';
 import { DatabaseCapabilityError } from '../../src/core/database/errors.js';
 import * as database from '../../src/core/database/index.js';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
+import {
+  buildSessionCatalog,
+  reconcileReplicaGroup,
+  type PhysicalSessionInstance,
+  type ReplicaConsumedPayload,
+} from '../../src/core/session-catalog.js';
+import { writeStoreDbAtPath, writeStoreMeta } from '../helpers/session-integrity-fixtures.js';
 
 type DbShape =
   'complete' | 'partial' | 'empty' | 'source-corrupt' | 'invalid-encoding' | 'invalid-after-prefix';
@@ -57,6 +64,39 @@ function transcript(
               ])
             : '';
   writeFileSync(join(dir, `${id}.jsonl`), content);
+}
+
+function transcriptCandidate(base: string, project: string, id: string, content: string): string {
+  const dir = join(base, 'projects', project, 'agent-transcripts');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${id}.jsonl`);
+  writeFileSync(
+    path,
+    `${JSON.stringify({
+      role: 'user',
+      message: { content: [{ type: 'text', text: content }] },
+    })}\n`,
+    { encoding: 'utf8', mode: 0o600 }
+  );
+  return path;
+}
+
+function storeDbCandidate(
+  base: string,
+  lane: string,
+  id: string,
+  content: string,
+  cwd = `/work/${id}`
+): string {
+  const dir = join(base, 'chats', lane, id);
+  writeStoreMeta(dir, {
+    cwd,
+    title: `Store ${id}`,
+    hasConversation: true,
+    createdAtMs: 1_783_000_000_000,
+    updatedAtMs: 1_783_000_001_000,
+  });
+  return writeStoreDbAtPath(join(dir, 'store.db'), id, [{ role: 'user', content }], `Store ${id}`);
 }
 
 function storeDb(dir: string, shape: DbShape): void {
@@ -347,5 +387,166 @@ describe('StoreDbExpectation and representation selection', () => {
     mkdirSync(nested, { recursive: true });
 
     await expect(discoverStoreSessions(base)).rejects.toMatchObject({ code: 'EISDIR' });
+  });
+});
+
+describe('same-tier Store replica groups', () => {
+  const basePayload: ReplicaConsumedPayload = {
+    messages: [{ id: 'store-message', role: 'user', content: 'same-tier-content' }],
+  };
+
+  function instance(
+    key: string,
+    representation: 'store-db' | 'store-transcript',
+    payload: ReplicaConsumedPayload,
+    sourceOrder: number
+  ): PhysicalSessionInstance<string> {
+    return {
+      instanceKey: key,
+      logicalSessionId: 'ffffffff-0000-0000-0000-000000000070',
+      sourceRole: 'store',
+      representation,
+      fidelityTier: 'complete',
+      locator: `/private/${key}`,
+      workspacePaths: ['/work/same-tier'],
+      sourceOrder,
+      loadConsumedPayload: async () => payload,
+    };
+  }
+
+  it.each(['store-db', 'store-transcript'] as const)(
+    'reconciles equivalent %s candidates independently of discovery permutation',
+    async (representation) => {
+      const candidates = [
+        instance('candidate-z', representation, basePayload, 9),
+        instance(
+          'candidate-a',
+          representation,
+          {
+            ...basePayload,
+            messages: [
+              {
+                ...basePayload.messages[0]!,
+                timestampSource: 'epoch-unknown',
+                files: ['/ignored/standalone-evidence'],
+              },
+            ],
+          },
+          1
+        ),
+      ];
+      const forwardGroup = buildSessionCatalog(candidates)[0]!.replicaGroups[0]!;
+      const reverseGroup = buildSessionCatalog([...candidates].reverse())[0]!.replicaGroups[0]!;
+      const forward = await reconcileReplicaGroup(forwardGroup);
+      const reverse = await reconcileReplicaGroup(reverseGroup);
+
+      expect(forward.state).toBe('equivalent');
+      expect(reverse.state).toBe('equivalent');
+      if (forward.state !== 'equivalent' || reverse.state !== 'equivalent') {
+        throw new Error('Expected equivalent same-tier Store candidates');
+      }
+      expect(forward.selected.instanceKey).toBe('candidate-a');
+      expect(reverse.selected.instanceKey).toBe('candidate-a');
+      expect(reverse.sourceInstances).toEqual(forward.sourceInstances);
+    }
+  );
+
+  it.each([
+    [
+      'message identity',
+      { messages: [{ id: 'other', role: 'user', content: 'same-tier-content' }] },
+    ],
+    [
+      'role',
+      { messages: [{ id: 'store-message', role: 'assistant', content: 'same-tier-content' }] },
+    ],
+    ['content', { messages: [{ id: 'store-message', role: 'user', content: 'changed' }] }],
+    [
+      'stored timestamp',
+      {
+        messages: [
+          {
+            id: 'store-message',
+            role: 'user',
+            content: 'same-tier-content',
+            directTimestamp: 1_783_000_000_000,
+          },
+        ],
+      },
+    ],
+  ] satisfies Array<[string, ReplicaConsumedPayload]>)(
+    'classifies a changed consumed %s as divergent in both Store tiers',
+    async (_field, changed) => {
+      for (const representation of ['store-db', 'store-transcript'] as const) {
+        const group = buildSessionCatalog([
+          instance('left', representation, basePayload, 1),
+          instance('right', representation, changed, 2),
+        ])[0]!.replicaGroups[0]!;
+        await expect(
+          reconcileReplicaGroup(group, { diagnosticContextId: 'store-matrix' })
+        ).resolves.toMatchObject({ state: 'divergent' });
+      }
+    }
+  );
+
+  it('retains both equivalent DB occurrences while returning one Store contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000071';
+    storeDbCandidate(base, 'candidate-z', id, 'equivalent-db-content');
+    storeDbCandidate(base, 'candidate-a', id, 'equivalent-db-content');
+
+    const matches = (await discoverStoreSessions(base)).filter((session) => session.id === id);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]).toMatchObject({
+      resolvedSource: 'store-db',
+      messages: [expect.objectContaining({ content: 'equivalent-db-content' })],
+      sourceInstances: [
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-db', state: 'equivalent-replica' }),
+      ],
+    });
+  });
+
+  it('retains both equivalent transcript occurrences when no DB is expected', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000072';
+    transcriptCandidate(base, 'candidate-z', id, 'equivalent-transcript-content');
+    transcriptCandidate(base, 'candidate-a', id, 'equivalent-transcript-content');
+
+    const matches = (await discoverStoreSessions(base)).filter((session) => session.id === id);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]).toMatchObject({
+      storeDbExpectation: 'not-expected',
+      resolvedSource: 'store-transcript',
+      messages: [expect.objectContaining({ content: 'equivalent-transcript-content' })],
+      sourceInstances: [
+        expect.objectContaining({ representation: 'store-transcript', state: 'contributed' }),
+        expect.objectContaining({
+          representation: 'store-transcript',
+          state: 'equivalent-replica',
+        }),
+      ],
+    });
+  });
+
+  it('does not compare divergent transcript fallbacks against a usable DB tier', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000073';
+    storeDbCandidate(base, 'db-primary', id, 'selected-db-content');
+    transcriptCandidate(base, 'transcript-a', id, 'divergent-transcript-a');
+    transcriptCandidate(base, 'transcript-z', id, 'divergent-transcript-z');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      resolvedSource: 'store-db',
+      resolution: { state: 'complete' },
+      messages: [expect.objectContaining({ content: 'selected-db-content' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-transcript', state: 'superseded' }),
+      ]),
+    });
+    expect(session.messages.map(({ content }) => content)).not.toContain('divergent-transcript-a');
+    expect(session.messages.map(({ content }) => content)).not.toContain('divergent-transcript-z');
   });
 });

@@ -522,14 +522,68 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     expect(session?.resolvedSource).toBe('store-transcript');
   });
 
-  it('uses lexical order for equal-quality duplicates and never projects transcript mtime', async () => {
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === NEWER_UUID);
-    expect(session?.transcriptPath).toContain('a-old');
-    expect(session?.messages.map((message) => message.content)).toEqual(['old']);
-    expect(session?.createdAt).toEqual(new Date(0));
-    expect(session?.createdAtSource).toBe('epoch-unknown');
-    expect(session?.lastUpdatedAt).toEqual(new Date(0));
-    expect(session?.lastUpdatedAtSource).toBe('epoch-unknown');
+  it('reports equal-quality divergent transcripts as one locator-free ambiguity', async () => {
+    const matches = (await discoverStoreSessions(root)).filter((item) => item.id === NEWER_UUID);
+    const row = matches[0] as unknown;
+
+    expect(matches).toHaveLength(1);
+    expect(row).toMatchObject({
+      id: NEWER_UUID,
+      resolutionState: 'ambiguous',
+      sourceRoles: ['store'],
+      occurrenceCount: 2,
+      diagnosticOccurrenceRefs: [
+        expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+        expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+      ],
+    });
+    expect(row).not.toHaveProperty('messages');
+    expect(row).not.toHaveProperty('transcriptPath');
+    expect(row).not.toHaveProperty('storeDbPath');
+    expect(JSON.stringify(row)).not.toContain(root);
+  });
+
+  it('collapses equivalent transcripts once and retains deterministic occurrence provenance', async () => {
+    const equivalentRoot = mkdtempSync(join(tmpdir(), 'ch-equivalent-transcripts-'));
+    const equivalentUuid = 'ffffffff-0000-0000-0000-000000000015';
+    try {
+      // Deliberately create z before a so filesystem creation order cannot be
+      // mistaken for the canonical replica ordering.
+      for (const project of ['z-copy', 'a-copy']) {
+        const directory = join(equivalentRoot, 'projects', project, 'agent-transcripts');
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(
+          join(directory, `${equivalentUuid}.jsonl`),
+          `${JSON.stringify({
+            role: 'user',
+            message: { content: [{ type: 'text', text: 'equivalent payload' }] },
+          })}\n`
+        );
+      }
+
+      const matches = (await discoverStoreSessions(equivalentRoot)).filter(
+        (item) => item.id === equivalentUuid
+      );
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).toMatchObject({
+        id: equivalentUuid,
+        messages: [expect.objectContaining({ content: 'equivalent payload' })],
+        sourceInstances: [
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-transcript',
+            state: 'contributed',
+          }),
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-transcript',
+            state: 'equivalent-replica',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(equivalentRoot, { recursive: true, force: true });
+    }
   });
 
   it('retains partial transcript messages and provenance when no store.db exists', async () => {
@@ -561,7 +615,7 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
 });
 
 describe('discoverStoreSessions — metadata candidate integrity', () => {
-  it('selects one duplicate UUID metadata candidate atomically', async () => {
+  it('selects equivalent metadata deterministically and retains both occurrences', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ch-metadata-selection-'));
     const uuid = 'ffffffff-0000-0000-0000-000000000011';
     try {
@@ -588,11 +642,27 @@ describe('discoverStoreSessions — metadata candidate integrity', () => {
         })
       );
 
-      const session = (await discoverStoreSessions(root)).find((item) => item.id === uuid);
+      const matches = (await discoverStoreSessions(root)).filter((item) => item.id === uuid);
+      const session = matches[0];
+      expect(matches).toHaveLength(1);
       expect(session).toMatchObject({
+        // Replica reconciliation is additive to the established atomic
+        // metadata-winner policy; it must not rewrite stable scalar output.
         workspacePath: '/workspace/new',
         title: 'New copy',
         chatDir: newDir,
+        sourceInstances: [
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-metadata',
+            state: 'contributed',
+          }),
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-metadata',
+            state: 'equivalent-replica',
+          }),
+        ],
       });
       expect(session?.createdAt).toEqual(new Date(1784000000000));
       expect(session?.lastUpdatedAt).toEqual(new Date(1784000001000));

@@ -38,8 +38,9 @@ export interface ComposerFixtureSession {
   messages: ComposerFixtureMessage[];
 }
 
-export function createSessionIntegrityFixtureRoot(prefix = 'cursor-history-integrity-'):
-  SessionIntegrityFixtureRoot {
+export function createSessionIntegrityFixtureRoot(
+  prefix = 'cursor-history-integrity-'
+): SessionIntegrityFixtureRoot {
   const root = mkdtempSync(join(tmpdir(), prefix));
   const workspaceStorage = join(root, 'User', 'workspaceStorage');
   const globalStorage = join(root, 'User', 'globalStorage');
@@ -112,11 +113,13 @@ export function writeComposerGlobalSessions(
     for (const session of sessions) {
       const headers: Array<{ bubbleId?: string; type: number }> = [];
       session.messages.forEach((message, index) => {
-        const nativeId = typeof message.id === 'string' && message.id.length > 0
-          ? message.id
-          : undefined;
+        const nativeId =
+          typeof message.id === 'string' && message.id.length > 0 ? message.id : undefined;
         const rowId = nativeId ?? `compat-row-${index}`;
-        headers.push({ ...(nativeId ? { bubbleId: nativeId } : {}), type: message.role === 'user' ? 1 : 2 });
+        headers.push({
+          ...(nativeId ? { bubbleId: nativeId } : {}),
+          type: message.role === 'user' ? 1 : 2,
+        });
         insert.run(
           `bubbleId:${session.id}:${rowId}`,
           JSON.stringify({
@@ -161,6 +164,18 @@ export function writeStoreDb(
   const sessionDir = join(fixture.storeRoot, 'chats', sessionId.replaceAll('-', ''));
   mkdirSync(sessionDir, { recursive: true });
   const dbPath = join(sessionDir, 'store.db');
+  writeStoreDbAtPath(dbPath, sessionId, messages, title);
+  return dbPath;
+}
+
+/** Write one Store database occurrence at an explicitly selected test-only physical path. */
+export function writeStoreDbAtPath(
+  dbPath: string,
+  sessionId: string,
+  messages: readonly Array<{ role: 'user' | 'assistant'; content: string }>,
+  title = 'Synthetic Store session'
+): string {
+  mkdirSync(dirname(dbPath), { recursive: true });
   const db = new BetterSqlite3(dbPath);
   db.exec('CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)');
   db.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
@@ -178,13 +193,35 @@ export function writeStoreDb(
     db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(
       '0',
       Buffer.from(
-        JSON.stringify({ agentId: sessionId, latestRootBlobId: rootHash, name: title, createdAt: 1_700_000_000_000 })
+        JSON.stringify({
+          agentId: sessionId,
+          latestRootBlobId: rootHash,
+          name: title,
+          createdAt: 1_700_000_000_000,
+        })
       ).toString('hex')
     );
   } finally {
     db.close();
   }
   return dbPath;
+}
+
+/** Write deterministic Store metadata beside one test-only physical occurrence. */
+export function writeStoreMeta(
+  sessionDir: string,
+  values: {
+    cwd?: string;
+    title?: string;
+    hasConversation?: boolean;
+    createdAtMs?: number;
+    updatedAtMs?: number;
+  }
+): string {
+  mkdirSync(sessionDir, { recursive: true });
+  const path = join(sessionDir, 'meta.json');
+  writeFileSync(path, JSON.stringify(values), { encoding: 'utf8', mode: 0o600 });
+  return path;
 }
 
 export function writeStoreTranscript(
@@ -209,9 +246,10 @@ export function writeStoreTranscript(
   return path;
 }
 
-export function seedConflictingWorkspaceCorpus(
-  fixture: SessionIntegrityFixtureRoot
-): { sessionA: ComposerFixtureSession; sessionB: ComposerFixtureSession } {
+export function seedConflictingWorkspaceCorpus(fixture: SessionIntegrityFixtureRoot): {
+  sessionA: ComposerFixtureSession;
+  sessionB: ComposerFixtureSession;
+} {
   const sessionA: ComposerFixtureSession = {
     id: SESSION_INTEGRITY_IDS.workspaceA,
     title: 'Workspace A older session',

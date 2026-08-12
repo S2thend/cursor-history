@@ -31,6 +31,7 @@ import {
   type DriverName,
 } from '../database/index.js';
 import { debugLogStorage } from '../database/debug.js';
+import { observeAdapterIo, type OperationIoContext } from '../io-observer.js';
 import {
   SourceEncodingError,
   SourceLimitExceededError,
@@ -66,6 +67,10 @@ export interface StoreDbParseOptions {
   sqliteDriver?: DriverName;
   /** Cooperatively cancel snapshot creation and bounded payload reads. */
   signal?: AbortSignal;
+  /** Internal operation-bound I/O audit context. */
+  io?: OperationIoContext;
+  /** Stable logical identity only; never a physical locator. */
+  logicalSessionId?: string;
 }
 
 const STORE_SNAPSHOT_CAPABILITIES = new Set<DatabaseCapability>(['read', 'onlineBackup']);
@@ -74,12 +79,21 @@ const STORE_READ_CAPABILITIES = new Set<DatabaseCapability>(['read']);
 function databaseRequest(
   operation: DatabaseOperationRequest['operation'],
   required: ReadonlySet<DatabaseCapability>,
-  forcedDriver?: DriverName
+  forcedDriver?: DriverName,
+  options?: Pick<StoreDbParseOptions, 'io' | 'logicalSessionId'>,
+  resourceClass: 'store-database' | 'sqlite-snapshot' = 'store-database'
 ): DatabaseOperationRequest {
   return {
     operation,
     required,
     ...(forcedDriver ? { forcedDriver } : {}),
+    ...(options?.io ? { io: options.io } : {}),
+    ioResource: {
+      resourceClass,
+      sourceRole: 'store',
+      representation: 'store-db',
+      ...(options?.logicalSessionId ? { logicalSessionId: options.logicalSessionId } : {}),
+    },
   };
 }
 
@@ -144,7 +158,7 @@ export async function parseStoreDb(
   // Operation policy and cancellation are checked before even the source
   // presence probe, keeping invalid/pre-aborted requests I/O-free.
   throwIfAborted(options.signal);
-  if (!pathExists(path, options.signal)) return null;
+  if (!pathExists(path, options.signal, options.io, options.logicalSessionId)) return null;
   const budget = new SqliteSourceReadBudget(limits, failureOutcome);
   let workspace: PrivateTempWorkspace | null = null;
   let db: Database | null = null;
@@ -161,7 +175,13 @@ export async function parseStoreDb(
     await backupDatabase(
       path,
       tmpPath,
-      databaseRequest('store-snapshot', STORE_SNAPSHOT_CAPABILITIES, options.sqliteDriver)
+      databaseRequest(
+        'store-snapshot',
+        STORE_SNAPSHOT_CAPABILITIES,
+        options.sqliteDriver,
+        options,
+        'store-database'
+      )
     );
     snapshotComplete = true;
     throwIfAborted(options.signal);
@@ -171,7 +191,13 @@ export async function parseStoreDb(
     throwIfAborted(options.signal);
     db = await openDatabase(
       tmpPath,
-      databaseRequest('read-session', STORE_READ_CAPABILITIES, options.sqliteDriver)
+      databaseRequest(
+        'read-session',
+        STORE_READ_CAPABILITIES,
+        options.sqliteDriver,
+        options,
+        'sqlite-snapshot'
+      )
     );
     throwIfAborted(options.signal);
 
@@ -258,9 +284,24 @@ export async function parseStoreDb(
 class StoreSourceCorruptError extends Error {}
 
 /** Missing paths are normal inventory races; all other filesystem failures propagate. */
-function pathExists(path: string, signal?: AbortSignal): boolean {
+function pathExists(
+  path: string,
+  signal?: AbortSignal,
+  io?: OperationIoContext,
+  logicalSessionId?: string
+): boolean {
   throwIfAborted(signal);
   try {
+    if (io) {
+      observeAdapterIo(io, {
+        adapter: 'filesystem',
+        operation: 'open',
+        resourceClass: 'store-session-metadata',
+        sourceRole: 'store',
+        representation: 'store-db',
+        ...(logicalSessionId ? { logicalSessionId } : {}),
+      });
+    }
     statSync(path);
     return true;
   } catch (error) {

@@ -698,7 +698,8 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
         })
       )
     );
-    expect(parsed.source).toBe('merged');
+    expect(parsed.source).toBe('workspace-fallback');
+    expect(parsed.resolvedSource).toBe('merged');
     expect(parsed.sources).toEqual(['composer', 'store']);
     expect(parsed.preferredSource).toBe('store');
   });

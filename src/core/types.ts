@@ -316,6 +316,8 @@ export interface ChatSession {
   preferredSource?: SessionStackSource;
   /** Replacement-safety and contributor diagnostics. */
   resolution?: SessionResolution;
+  /** Convenience mirror of `resolution.state` for structured consumers. */
+  resolutionState?: ResolutionState;
   /** Scope of this one-based core/CLI presentation index. */
   indexScope?: IndexScope;
   /** Full matched path when `indexScope` is `workspace`. */

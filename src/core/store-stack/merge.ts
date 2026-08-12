@@ -41,7 +41,14 @@
  * Signature keys use JSON tuple stringification (no bespoke separator) so the
  * source file contains no control bytes and matching is unambiguous.
  */
-import type { ChatSession, ChatSessionSummary, Message, ToolCall } from '../types.js';
+import type {
+  ChatSession,
+  ChatSessionSummary,
+  Message,
+  SessionSourceInstance,
+  ToolCall,
+  WorkspaceMembership,
+} from '../types.js';
 import { findEmbeddedToolCallIndex } from '../parser.js';
 import {
   isValidTimestamp,
@@ -738,6 +745,115 @@ function pickScalar<T>(preferred: T | null | undefined, other: T | null | undefi
   return null;
 }
 
+const SOURCE_ROLE_ORDER = ['composer', 'store'] as const;
+const SOURCE_REPRESENTATION_ORDER = [
+  'composer-global',
+  'composer-workspace',
+  'store-db',
+  'store-transcript',
+  'store-metadata',
+] as const;
+const SOURCE_INSTANCE_STATE_ORDER = [
+  'contributed',
+  'equivalent-replica',
+  'omitted-by-scope',
+  'failed',
+  'superseded',
+] as const;
+
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0)!);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0)!);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function compareStringArrays(left: readonly string[], right: readonly string[]): number {
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const comparison = compareCodePoints(left[index]!, right[index]!);
+    if (comparison !== 0) return comparison;
+  }
+  return left.length - right.length;
+}
+
+/** Canonicalize safe occurrence provenance without exposing private locators. */
+function mergeSourceInstances(
+  composer: ChatSession | ChatSessionSummary,
+  store: ChatSession | StoreSummaryInput
+): SessionSourceInstance[] | undefined {
+  const instances = [...(composer.sourceInstances ?? []), ...(store.sourceInstances ?? [])].map(
+    (instance) => ({
+      ...instance,
+      workspacePaths: [...instance.workspacePaths].sort(compareCodePoints),
+    })
+  );
+  if (instances.length === 0) return undefined;
+  return instances.sort((left, right) => {
+    const byRole =
+      SOURCE_ROLE_ORDER.indexOf(left.sourceRole) - SOURCE_ROLE_ORDER.indexOf(right.sourceRole);
+    if (byRole !== 0) return byRole;
+    const byRepresentation =
+      SOURCE_REPRESENTATION_ORDER.indexOf(left.representation) -
+      SOURCE_REPRESENTATION_ORDER.indexOf(right.representation);
+    if (byRepresentation !== 0) return byRepresentation;
+    const byPaths = compareStringArrays(left.workspacePaths, right.workspacePaths);
+    if (byPaths !== 0) return byPaths;
+    return (
+      SOURCE_INSTANCE_STATE_ORDER.indexOf(left.state) -
+      SOURCE_INSTANCE_STATE_ORDER.indexOf(right.state)
+    );
+  });
+}
+
+/** Merge public membership metadata by normalized path and declared role order. */
+function mergeWorkspaceMemberships(
+  composer: ChatSession | ChatSessionSummary,
+  store: ChatSession | StoreSummaryInput,
+  sourceInstances: readonly SessionSourceInstance[] | undefined
+): WorkspaceMembership[] | undefined {
+  const memberships = new Map<string, { roles: Set<'composer' | 'store'>; count: number }>();
+  const add = (membership: WorkspaceMembership): void => {
+    const current = memberships.get(membership.workspacePath) ?? {
+      roles: new Set<'composer' | 'store'>(),
+      count: 0,
+    };
+    for (const role of membership.sourceRoles) current.roles.add(role);
+    current.count += membership.contributingInstanceCount;
+    memberships.set(membership.workspacePath, current);
+  };
+  for (const membership of composer.workspaceMemberships ?? []) add(membership);
+  for (const membership of store.workspaceMemberships ?? []) add(membership);
+
+  if (memberships.size === 0) {
+    for (const instance of sourceInstances ?? []) {
+      for (const workspacePath of instance.workspacePaths) {
+        const current = memberships.get(workspacePath) ?? {
+          roles: new Set<'composer' | 'store'>(),
+          count: 0,
+        };
+        current.roles.add(instance.sourceRole);
+        current.count++;
+        memberships.set(workspacePath, current);
+      }
+    }
+  }
+  if (memberships.size === 0) return undefined;
+  return [...memberships.entries()]
+    .sort(([left], [right]) => compareCodePoints(left, right))
+    .map(([workspacePath, value]) => ({
+      workspacePath,
+      sourceRoles: [...value.roles].sort(
+        (left, right) => SOURCE_ROLE_ORDER.indexOf(left) - SOURCE_ROLE_ORDER.indexOf(right)
+      ),
+      contributingInstanceCount: value.count,
+    }));
+}
+
 /** Freeze the exact Composer-only array before Store messages can affect it. */
 function freezeComposerMessages(messages: Message[]): Message[] {
   return projectV016ComposerMessages(messages).map((projected) => {
@@ -1080,9 +1196,16 @@ export function mergeCrossStackSessions(
     source: sessionTimestamps.createdAtSource,
   });
 
-  // Scalar metadata: preferred wins conflicts, fill gaps from the other.
+  // Scalar presentation metadata may follow the preferred backbone, but
+  // logical addressing never does: a Composer-backed session keeps its
+  // Composer canonical path and workspace identity across both orientations.
   const title = pickScalar(backbone.title, other.title);
-  const workspacePath = backbone.workspacePath ?? other.workspacePath ?? composer.workspacePath;
+  const canonicalWorkspacePath =
+    composer.canonicalWorkspacePath ?? composer.workspacePath ?? store.canonicalWorkspacePath;
+  const workspacePath = canonicalWorkspacePath ?? store.workspacePath;
+  const matchedWorkspacePath = composer.matchedWorkspacePath ?? store.matchedWorkspacePath;
+  const sourceInstances = mergeSourceInstances(composer, store);
+  const workspaceMemberships = mergeWorkspaceMemberships(composer, store, sourceInstances);
 
   // Source-specific structured data is additive: keep whichever side provides it
   // (Composer typically provides usage + activeBranchBubbleIds; Store may extend).
@@ -1094,7 +1217,7 @@ export function mergeCrossStackSessions(
     ...sessionTimestamps,
     messageCount: messages.length,
     messages,
-    workspaceId: backbone.workspaceId,
+    workspaceId: composer.workspaceId,
     workspacePath,
     // `source` remains the v0.16 replacement-safety signal. Actual provenance
     // is additive so unchanged incremental consumers can replace complete data.
@@ -1111,6 +1234,13 @@ export function mergeCrossStackSessions(
     },
     messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
     transcriptState: store.transcriptState,
+    ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
+    ...(matchedWorkspacePath ? { matchedWorkspacePath } : {}),
+    ...((composer.workspaceMatchKind ?? store.workspaceMatchKind)
+      ? { workspaceMatchKind: composer.workspaceMatchKind ?? store.workspaceMatchKind }
+      : {}),
+    ...(workspaceMemberships ? { workspaceMemberships } : {}),
+    ...(sourceInstances ? { sourceInstances } : {}),
   };
   if (usage) session.usage = usage;
   if (activeBranchMessageIds !== undefined) {
@@ -1139,6 +1269,11 @@ export interface StoreSummaryInput {
   source?: ChatSession['source'];
   resolution?: ChatSession['resolution'];
   transcriptState: ChatSessionSummary['transcriptState'];
+  canonicalWorkspacePath?: string;
+  matchedWorkspacePath?: string;
+  workspaceMatchKind?: ChatSessionSummary['workspaceMatchKind'];
+  workspaceMemberships?: ChatSessionSummary['workspaceMemberships'];
+  sourceInstances?: ChatSessionSummary['sourceInstances'];
 }
 
 /**
@@ -1158,9 +1293,16 @@ export function applyStoreMergeToSummary(
   const otherTitle = preferStore ? existing.title : store.title;
   existing.title = pickScalar(prefTitle, otherTitle);
 
-  const prefPath = preferStore ? store.workspacePath : existing.workspacePath;
-  const otherPath = preferStore ? existing.workspacePath : store.workspacePath;
-  existing.workspacePath = prefPath ?? otherPath ?? existing.workspacePath;
+  const canonicalWorkspacePath =
+    existing.canonicalWorkspacePath ?? existing.workspacePath ?? store.canonicalWorkspacePath;
+  existing.workspacePath = canonicalWorkspacePath ?? store.workspacePath ?? existing.workspacePath;
+  if (canonicalWorkspacePath) existing.canonicalWorkspacePath = canonicalWorkspacePath;
+  existing.matchedWorkspacePath ??= store.matchedWorkspacePath;
+  existing.workspaceMatchKind ??= store.workspaceMatchKind;
+  const sourceInstances = mergeSourceInstances(existing, store);
+  if (sourceInstances) existing.sourceInstances = sourceInstances;
+  const workspaceMemberships = mergeWorkspaceMemberships(existing, store, sourceInstances);
+  if (workspaceMemberships) existing.workspaceMemberships = workspaceMemberships;
 
   const composerDirectExtrema: Message[] = [];
   if (existing.createdAtSource === 'direct-message') {

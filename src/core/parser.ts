@@ -16,6 +16,7 @@ import {
   allocateStoreMessageIdentities,
   allocateToolCallIdentities,
   prepareStoreIdentityCandidates,
+  projectV016ComposerMessages,
   type StoreIdentityRecord,
 } from './session-identity.js';
 import {
@@ -280,8 +281,7 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
 
   const storeDbMetadata =
     ss.storeDbMetadataTimestamps ??
-    (ss.createdAtSource === 'store-db-metadata' ||
-    ss.lastUpdatedAtSource === 'store-db-metadata'
+    (ss.createdAtSource === 'store-db-metadata' || ss.lastUpdatedAtSource === 'store-db-metadata'
       ? {
           ...(ss.createdAtSource === 'store-db-metadata' ? { createdAt: ss.createdAt } : {}),
           ...(ss.lastUpdatedAtSource === 'store-db-metadata'
@@ -294,9 +294,7 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     (ss.createdAtSource === 'store-meta' || ss.lastUpdatedAtSource === 'store-meta'
       ? {
           ...(ss.createdAtSource === 'store-meta' ? { createdAt: ss.createdAt } : {}),
-          ...(ss.lastUpdatedAtSource === 'store-meta'
-            ? { lastUpdatedAt: ss.lastUpdatedAt }
-            : {}),
+          ...(ss.lastUpdatedAtSource === 'store-meta' ? { lastUpdatedAt: ss.lastUpdatedAt } : {}),
         }
       : undefined);
   const sessionTimestamps = resolveSessionTimestamps({
@@ -336,6 +334,15 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
             reasonCodes: ['source-partial'],
           }
         : undefined),
+    resolutionState: resolution?.state ?? (hasUnsupportedSelectedEvidence ? 'partial' : undefined),
+    ...(ss.sourceInstances
+      ? {
+          sourceInstances: ss.sourceInstances.map((instance) => ({
+            ...instance,
+            workspacePaths: [...instance.workspacePaths],
+          })),
+        }
+      : {}),
     messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
     transcriptState: ss.transcriptState,
   };
@@ -545,15 +552,16 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
       });
     }
 
+    const resolvedMessages = resolveComposerMessageIdentities(sessionMessages);
     const sessionTimestamps = resolveSessionTimestamps({
       view: 'composer-backed',
       composerMetadata: {
         createdAt: composerCreatedAt,
         lastUpdatedAt: composerLastUpdatedAt,
       },
-      directMessages: sessionMessages,
+      directMessages: resolvedMessages,
     });
-    resolveMessageTimestamps(sessionMessages, {
+    resolveMessageTimestamps(resolvedMessages, {
       timestamp: sessionTimestamps.createdAt,
       source: sessionTimestamps.createdAtSource,
     });
@@ -566,9 +574,10 @@ function parseComposerFormat(data: ComposerData, bundle?: CursorChatBundle): Cha
       createdAtSource: sessionTimestamps.createdAtSource,
       lastUpdatedAt: sessionTimestamps.lastUpdatedAt,
       lastUpdatedAtSource: sessionTimestamps.lastUpdatedAtSource,
-      messageCount: sessionMessages.length,
-      messages: sessionMessages,
+      messageCount: resolvedMessages.length,
+      messages: resolvedMessages,
       workspaceId: '',
+      messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
     });
   }
 
@@ -584,7 +593,9 @@ function parseSession(raw: RawChatSession): ChatSession | null {
   }
 
   const rawMessages = raw.messages ?? raw.bubbles ?? [];
-  const messages = rawMessages.map(parseMessage).filter((m): m is Message => m !== null);
+  const messages = resolveComposerMessageIdentities(
+    rawMessages.map(parseMessage).filter((m): m is Message => m !== null)
+  );
 
   if (messages.length === 0) {
     return null;
@@ -617,7 +628,27 @@ function parseSession(raw: RawChatSession): ChatSession | null {
     messageCount: messages.length,
     messages,
     workspaceId: '', // Assigned by caller
+    messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
   };
+}
+
+/**
+ * Apply the frozen v0.16 Composer identity projection before any Store merge.
+ * Existing native IDs remain byte-for-byte unchanged; null IDs use their
+ * Composer-only ordinal, and tool identities are derived from that frozen ID.
+ */
+export function resolveComposerMessageIdentities(messages: readonly Message[]): Message[] {
+  return projectV016ComposerMessages(messages).map(
+    ({ sourceOrdinal: _sourceOrdinal, ...message }) => {
+      const resolved: Message = { ...message };
+      if (message.toolCalls?.length) {
+        resolved.toolCalls = allocateToolCallIdentities(message.id, message.toolCalls).map(
+          ({ call, id, identityOrigin }) => ({ ...call, id, identityOrigin })
+        );
+      }
+      return resolved;
+    }
+  );
 }
 
 function parseStoredDate(value: unknown): Date | undefined {
@@ -935,34 +966,59 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
   // Fall back to the resolved session's own workspacePath when no explicit
   // path is supplied (Store-only sessions have no Composer workspace metadata).
   const ws = workspacePath ?? session.workspacePath ?? null;
+  const sources: Array<'composer' | 'store'> =
+    session.sources ?? (session.workspaceId === 'store' ? ['store'] : ['composer']);
+  const source = session.source === 'global' ? 'global' : 'workspace-fallback';
+  const resolution =
+    session.resolution ??
+    ({
+      state: source === 'global' ? 'complete' : 'partial',
+      expectedSourceRoles: [...sources],
+      loadedSourceRoles: [...sources],
+      omittedSourceRoles: [],
+      failedSourceRoles: [],
+      reasonCodes: source === 'global' ? [] : ['source-unavailable'],
+    } as const);
   const exportData: Record<string, unknown> = {
+    index: session.index,
+    indexScope: session.indexScope ?? 'global',
     id: session.id,
     title: session.title,
     createdAt: session.createdAt.toISOString(),
     lastUpdatedAt: session.lastUpdatedAt.toISOString(),
     messageCount: session.messageCount,
     workspacePath: ws,
+    sources,
+    resolution,
+    workspaceMemberships: session.workspaceMemberships ?? [],
+    sourceInstances: session.sourceInstances ?? [],
+    messageIdentityVersion: session.messageIdentityVersion ?? MESSAGE_IDENTITY_VERSION,
   };
-  if (session.source !== undefined) {
-    exportData['source'] = session.source;
+  exportData['source'] = source;
+  exportData['resolvedSource'] =
+    session.resolvedSource ??
+    (session.source === 'merged' || (sources.includes('composer') && sources.includes('store'))
+      ? 'merged'
+      : session.workspaceId === 'store'
+        ? 'store-metadata'
+        : 'composer');
+  if (session.indexWorkspacePath !== undefined) {
+    exportData['indexWorkspacePath'] = session.indexWorkspacePath;
   }
-  if (session.resolvedSource !== undefined) {
-    exportData['resolvedSource'] = session.resolvedSource;
+  if (session.canonicalWorkspacePath !== undefined) {
+    exportData['canonicalWorkspacePath'] = session.canonicalWorkspacePath;
   }
-  if (session.sources) {
-    exportData['sources'] = session.sources;
+  if (session.matchedWorkspacePath !== undefined) {
+    exportData['matchedWorkspacePath'] = session.matchedWorkspacePath;
+  }
+  if (session.workspaceMatchKind !== undefined) {
+    exportData['workspaceMatchKind'] = session.workspaceMatchKind;
   }
   if (session.preferredSource) {
     exportData['preferredSource'] = session.preferredSource;
   }
   if (session.transcriptState) {
     exportData['transcriptState'] = session.transcriptState;
-  }
-  if (session.resolution !== undefined) {
-    exportData['resolution'] = session.resolution;
-  }
-  if (session.messageIdentityVersion !== undefined) {
-    exportData['messageIdentityVersion'] = session.messageIdentityVersion;
   }
   if (session.createdAtSource !== undefined) {
     exportData['createdAtSource'] = session.createdAtSource;

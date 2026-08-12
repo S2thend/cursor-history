@@ -8,6 +8,7 @@
  */
 import { closeSync, openSync, readSync } from 'node:fs';
 import { SourceEncodingError, SourceLimitExceededError } from '../errors.js';
+import { observeAdapterIo, type OperationIoContext } from '../io-observer.js';
 import {
   decodeDeterministicUtf8,
   JsonlSourceReadBudget,
@@ -48,13 +49,25 @@ export function parseTranscriptFile(
   filePath: string,
   limits: Readonly<SourceReadLimitsV1> = SOURCE_READ_LIMITS_V1_DEFAULTS,
   failureOutcome: SourceFailureOutcome = 'fatal',
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  io?: OperationIoContext,
+  logicalSessionId?: string
 ): TranscriptParseResult {
   throwIfAborted(signal);
   let fd: number;
   let operationFailure: unknown;
   let retainedFailure: unknown;
   try {
+    if (io) {
+      observeAdapterIo(io, {
+        adapter: 'filesystem',
+        operation: 'open',
+        resourceClass: 'store-transcript',
+        sourceRole: 'store',
+        representation: 'store-transcript',
+        ...(logicalSessionId ? { logicalSessionId } : {}),
+      });
+    }
     fd = openSync(filePath, 'r');
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
@@ -152,6 +165,16 @@ export function parseTranscriptFile(
       const remaining = Math.max(0, limits.jsonlSourceBytes - budget.sourceBytes);
       const requested = Math.min(READ_CHUNK_BYTES, remaining + 1);
       const chunk = Buffer.allocUnsafe(Math.max(1, requested));
+      if (io) {
+        observeAdapterIo(io, {
+          adapter: 'filesystem',
+          operation: 'read',
+          resourceClass: 'store-transcript',
+          sourceRole: 'store',
+          representation: 'store-transcript',
+          ...(logicalSessionId ? { logicalSessionId } : {}),
+        });
+      }
       const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
       if (bytesRead === 0) {
         eof = true;

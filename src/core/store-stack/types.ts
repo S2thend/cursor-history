@@ -7,7 +7,9 @@ import type {
   ResolvedSource,
   SessionDiagnostic,
   SessionResolution,
+  SessionSourceInstance,
   SessionTimestampSource,
+  SourceRole,
   TranscriptState,
 } from '../types.js';
 import type { SessionMetadataTimestamps } from '../timestamps.js';
@@ -177,6 +179,16 @@ export interface StoreSession {
   storeDbExpectation?: StoreDbExpectation;
   /** Safe typed parser diagnostics retained for an operation-level observer. */
   diagnostics?: SessionDiagnostic[];
+  /** Locator-free physical occurrence provenance after same-tier reconciliation. */
+  sourceInstances?: SessionSourceInstance[];
+  /** Present only on a message-free divergent-replica projection. */
+  resolutionState?: 'ambiguous';
+  /** Present only on a message-free divergent-replica projection. */
+  sourceRoles?: SourceRole[];
+  /** Present only on a message-free divergent-replica projection. */
+  occurrenceCount?: number;
+  /** Opaque operation-scoped references; never physical locators. */
+  diagnosticOccurrenceRefs?: string[];
   /** Explicit transcript parse state, retained even when store.db backs messages. */
   transcriptState: TranscriptState;
   /** Path to store.db if present (deep-parse target / fallback). */
