@@ -204,6 +204,90 @@ describe('FR-042 consumed-field integration gate', () => {
 });
 
 describe.sequential('logical replica reconciliation through public reads', () => {
+  it('retains equal-time v0.16 Composer discovery order after one row becomes merged', async () => {
+    const root = fixture();
+    const discoveredFirst = composerSession(
+      root,
+      'Composer row discovered first',
+      'bbbbbbbb-0000-0000-0000-000000000041'
+    );
+    const discoveredSecond = composerSession(
+      root,
+      'Composer row discovered second',
+      'aaaaaaaa-0000-0000-0000-000000000042'
+    );
+    writeComposerWorkspaceSummary(root, 'workspace-order', root.projectA, [
+      discoveredFirst,
+      discoveredSecond,
+    ]);
+    const dbPath = writeStoreDb(
+      root,
+      discoveredFirst.id,
+      [{ role: 'assistant', content: 'Complementary Store turn' }],
+      'Store complement'
+    );
+    writeStoreMeta(dirname(dbPath), {
+      cwd: root.projectB,
+      title: 'Store complement',
+      hasConversation: true,
+      createdAtMs: discoveredFirst.createdAt,
+      updatedAtMs: discoveredFirst.createdAt,
+    });
+
+    const config: LibraryConfig = {
+      dataPath: root.workspaceStorage,
+      includeCrossWorkspaceSources: true,
+    };
+    const summaries = await listSummaryRows(config);
+    const sessions = await library.listSessions(config);
+
+    const expectedOrder = [discoveredFirst.id, discoveredSecond.id];
+    expect(summaries.data.map(({ id }) => id)).toEqual(expectedOrder);
+    expect(sessions.data.map(({ id }) => id)).toEqual(expectedOrder);
+    expect(sessions.data[0]).toMatchObject({
+      id: discoveredFirst.id,
+      resolvedSource: 'merged',
+    });
+  });
+
+  it('retains an ambiguous equal-time row at its v0.16 Composer discovery ordinal', async () => {
+    const root = fixture();
+    const ambiguousFirst = composerSession(
+      root,
+      'First physical payload',
+      'bbbbbbbb-0000-0000-0000-000000000043'
+    );
+    const tiedSecond = composerSession(
+      root,
+      'Uncontested row discovered second',
+      'aaaaaaaa-0000-0000-0000-000000000044'
+    );
+    const divergentCopy = {
+      ...ambiguousFirst,
+      title: 'Divergent physical payload',
+      messages: [{ ...ambiguousFirst.messages[0]!, content: 'Divergent physical payload' }],
+    };
+    writeComposerWorkspaceSummary(root, 'workspace-order-first', root.projectA, [
+      ambiguousFirst,
+      tiedSecond,
+    ]);
+    writeComposerWorkspaceSummary(root, 'workspace-order-replica', root.projectA, [divergentCopy]);
+
+    const rows = await listSummaryRows({
+      dataPath: root.workspaceStorage,
+      workspace: root.projectA,
+    });
+
+    expect(rows.data.map(({ id }) => id)).toEqual([ambiguousFirst.id, tiedSecond.id]);
+    expect(rows.data[0]).toMatchObject({
+      id: ambiguousFirst.id,
+      index: 0,
+      resolutionState: 'ambiguous',
+      occurrenceCount: 2,
+    });
+    expect(rows.data[1]).toMatchObject({ id: tiedSecond.id, index: 1 });
+  });
+
   it('keeps Composer canonical attribution stable across workspace filters', async () => {
     const root = fixture();
     const session = composerSession(root, 'canonical-filter-independent');

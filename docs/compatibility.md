@@ -181,6 +181,25 @@ Session creation/update provenance is one of `composer-metadata`, `store-db-meta
 the library always return the timestamp with its provenance. Merge preference and workspace scope
 do not change canonical session times.
 
+### Explicitly versioned v0.16 fallback corrections
+
+The corrective release preserves every v0.16 session/message/tool identity and every identity-to-
+content, relationship, and tool binding. Three scalar fallback values may intentionally differ,
+but only when the corresponding source value was absent:
+
+- A message with no directly stored timestamp may replace v0.16's historical session-time fallback
+  with the deterministic next/previous/session/epoch policy above and an explicit inferred source.
+- When Composer stores neither `lastUpdatedAt` nor `updatedAt`, `metadata.lastModified` no longer
+  uses v0.16's read-time-dependent value. It uses the deterministic session policy and exposes
+  `lastUpdatedAtSource` as `direct-message` or `epoch-unknown`.
+- A pathless Composer workspace no longer exposes v0.16's internal
+  `(workspace: <directory-id>)` placeholder as a path. The public library returns `"unknown"`;
+  core/CLI structured output returns `workspacePath: null` and omits canonical path metadata.
+
+Compatibility certification permits only those three predicate-guarded scalar changes. A changed
+native or compatibility ID, message order/content binding, parent/branch relationship, tool binding,
+direct source timestamp, stored Composer update time, or real workspace path is a regression.
+
 ## Defensive text decoding
 
 Supported text is deterministic UTF-8 with at most one optional leading UTF-8 BOM. Unknown fields

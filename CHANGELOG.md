@@ -40,6 +40,12 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
   envelopes. For the same locked v0.17 failure fixture, existing error field names, types, values,
   and exit-category meaning are preserved; documented safe fields may be added. Scripts that parsed
   fatal JSON from stdout must parse stderr after a nonzero exit.
+- **Versioned v0.16 fallback corrections**: Three source-absent scalar fallbacks are intentionally
+  corrected: inferred message timestamps become deterministic with provenance, missing Composer
+  update times no longer use read time, and pathless `(workspace: <directory-id>)` placeholders
+  become public `"unknown"`/structured `null`. Session, message, and tool identities and their
+  content/relationship bindings remain exact; stored timestamps and real workspace paths do not
+  change under this exception.
 
 ### Fixed
 

@@ -311,6 +311,10 @@ attribution verified by the v0.16 fixture (configuration workspace before folder
 lexicographic ordering); Store cwd never overwrites it. A Store-only session may use a reliable cwd.
 Add `matchedWorkspacePath`, `workspaceMemberships`, and per-source paths.
 
+Treat v0.16's `(workspace: <directory-id>)` fallback as an internal placeholder, not stored path
+fidelity. When no path exists, the versioned corrective result is public `"unknown"` and core/CLI
+`null`; this exception cannot authorize a change to any real Composer path.
+
 **Rationale**: Exact-only matching broke suffix workflows, arbitrary `endsWith` is ambiguous, and
 using the selected Store backbone for `workspacePath` recreates AC5. Historical/foreign paths may
 not exist locally.
@@ -424,6 +428,12 @@ timestamp, or the Unix epoch with `epoch-unknown`. Preferred merge backbone, wor
 read time cannot change the canonical session timestamps. A session time labeled `epoch-unknown`
 cannot be used as a `session-fallback` anchor. Human output marks non-direct values approximate;
 JSON/library always provide timestamp and provenance.
+
+The v0.16 differential may therefore accept a changed message timestamp only when the candidate
+proves an inferred/unknown source, and a changed `metadata.lastModified` only when Composer stored
+no update value and the candidate source is `direct-message` or `epoch-unknown`. These are versioned
+scalar fallback corrections: all identities, order, content, relationships, tools, direct source
+timestamps, and stored session metadata remain exact.
 
 **Rationale**: This preserves the required public shape while making repeated reads deterministic
 and honest. Synchronization compares the complete stable resolved view, so middle insertion cannot
