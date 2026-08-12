@@ -22,6 +22,18 @@ export type SafeErrorDetailValue = string | number | boolean | null | string[] |
 /** Safe details never contain conversation content or physical source locators. */
 export type SafeErrorDetails = Readonly<Record<string, SafeErrorDetailValue | undefined>>;
 
+/** Stable Unicode code-point ordering for new set-like public arrays. */
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0)!);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0)!);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
 /**
  * Base class for typed failures exposed by core, CLI, and library adapters.
  *
@@ -58,7 +70,7 @@ export class WorkspaceAmbiguityError extends SessionIntegrityError<
   override readonly name = 'WorkspaceAmbiguityError';
 
   constructor(requestedWorkspace: string, candidates: string[]) {
-    const ordered = [...new Set(candidates)].sort();
+    const ordered = [...new Set(candidates)].sort(compareCodePoints);
     super('WORKSPACE_AMBIGUOUS', `Workspace suffix is ambiguous: ${requestedWorkspace}`, {
       requestedWorkspace,
       candidateCount: ordered.length,
@@ -81,7 +93,7 @@ export class SessionAmbiguityError extends SessionIntegrityError<
   override readonly name = 'SessionAmbiguityError';
 
   constructor(sessionId: string, occurrenceRefs: string[]) {
-    const ordered = [...new Set(occurrenceRefs)];
+    const ordered = [...new Set(occurrenceRefs)].sort(compareCodePoints);
     super('SESSION_AMBIGUOUS', 'The logical session has divergent source replicas.', {
       sessionId,
       occurrenceCount: ordered.length,
@@ -200,7 +212,9 @@ export class DatabaseCapabilityError extends SessionIntegrityError<
     alternatives: Iterable<string> = []
   ) {
     const missing = orderedDatabaseCapabilities(missingCapabilities);
-    const capableAlternatives = [...new Set(alternatives)].filter((name) => name !== driver).sort();
+    const capableAlternatives = [...new Set(alternatives)]
+      .filter((name) => name !== driver)
+      .sort(compareCodePoints);
     const remedy =
       capableAlternatives.length > 0
         ? `Use automatic selection or select a capable driver: ${capableAlternatives.join(', ')}.`
@@ -269,7 +283,7 @@ export class TemporaryArtifactCleanupError extends SessionIntegrityError<
   override readonly name = 'TemporaryArtifactCleanupError';
 
   constructor(residuePaths: string[]) {
-    const ordered = [...new Set(residuePaths)].sort();
+    const ordered = [...new Set(residuePaths)].sort(compareCodePoints);
     super(
       'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
       'Private temporary artifacts could not be removed.',

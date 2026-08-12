@@ -238,7 +238,13 @@ describe('feature-016 public typed errors', () => {
     expect(workspace.details.candidates).toEqual(['/work/a/project', '/work/b/project']);
 
     const session = new SessionAmbiguityError('uuid', ['occurrence:z', 'occurrence:a']);
-    expect(session.details.occurrenceRefs).toEqual(['occurrence:z', 'occurrence:a']);
+    expect(session.details.occurrenceRefs).toEqual(['occurrence:a', 'occurrence:z']);
+
+    const unicode = new SessionAmbiguityError('uuid', [
+      'occurrence:\u{1f600}',
+      'occurrence:\ue000',
+    ]);
+    expect(unicode.details.occurrenceRefs).toEqual(['occurrence:\ue000', 'occurrence:\u{1f600}']);
     expect(isSessionIntegrityError(session)).toBe(true);
     expect(new ReadContextDisposedError().code).toBe('READ_CONTEXT_DISPOSED');
   });

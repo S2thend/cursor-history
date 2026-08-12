@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  isPublicWorkspacePath,
+  normalizePublicWorkspacePath,
   normalizeWorkspacePath,
   resolveWorkspaceScope,
   WorkspaceAmbiguityError,
@@ -13,6 +15,18 @@ describe('workspace scope lexical matching', () => {
     expect(normalizeWorkspacePath('file:///history/team/a%20project/')).toBe(
       '/history/team/a project'
     );
+  });
+
+  it('keeps display-only workspace labels out of public canonical paths', () => {
+    for (const label of ['unknown', '(global)', '(unknown workspace)', '(workspace: legacy-id)']) {
+      expect(normalizePublicWorkspacePath(label)).toBeUndefined();
+      expect(isPublicWorkspacePath(label)).toBe(false);
+    }
+
+    expect(normalizePublicWorkspacePath('file:///history/team/../project/')).toBe(
+      '/history/project'
+    );
+    expect(isPublicWorkspacePath('/history/project')).toBe(true);
   });
 
   it('matches historical paths without requiring them to exist', () => {

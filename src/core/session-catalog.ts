@@ -826,9 +826,12 @@ export function projectAmbiguousSessionSummary<TLocator>(
   const sourceRoles = [...new Set(divergences.map(({ group }) => group.sourceRole))].sort(
     (left, right) => compareByDeclaration(SOURCE_ROLE_ORDER, left, right)
   );
-  // Public opaque references retain the reconciliation contract's stable
-  // payload-fingerprint order across summaries, diagnostics, and failures.
-  const diagnosticOccurrenceRefs = diagnosticOccurrences.map(({ occurrenceRef }) => occurrenceRef);
+  // Public set-like arrays use one canonical code-point order across summary,
+  // diagnostic, and typed-error surfaces. Payload-fingerprint ordering remains
+  // an internal reconciliation detail and must not leak into one adapter only.
+  const diagnosticOccurrenceRefs = [
+    ...new Set(diagnosticOccurrences.map(({ occurrenceRef }) => occurrenceRef)),
+  ].sort(compareCodePoints);
   Object.freeze(sourceRoles);
   Object.freeze(diagnosticOccurrenceRefs);
   return Object.freeze({

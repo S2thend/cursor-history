@@ -31,8 +31,14 @@ interface NormalizedWorkspacePath {
 
 /** Unicode code-point ordering, independent of the process locale. */
 function compareCodePoints(left: string, right: string): number {
-  if (left === right) return 0;
-  return left < right ? -1 : 1;
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0)!);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0)!);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
 }
 
 /** Decode supported file URIs without consulting the host filesystem. */
@@ -161,6 +167,47 @@ function normalizeWorkspacePathDetails(input: string): NormalizedWorkspacePath {
  */
 export function normalizeWorkspacePath(input: string): string {
   return normalizeWorkspacePathDetails(input).path;
+}
+
+/**
+ * Return whether a value is one of the display-only workspace labels used by
+ * legacy discovery code. These labels are useful in human-readable tables,
+ * but they are not filesystem paths and must never escape as canonical path
+ * metadata.
+ */
+function isInternalWorkspaceLabel(value: string): boolean {
+  const label = value.trim();
+  return (
+    /^(?:global|unknown)$/iu.test(label) ||
+    /^\((?:global|unknown workspace|workspace:\s*[^)]*)\)$/iu.test(label)
+  );
+}
+
+/**
+ * Normalize a verified public workspace path, or return `undefined` for an
+ * absent, malformed, or display-only value.
+ *
+ * "Verified" is intentionally lexical: historical paths may refer to an
+ * unmounted filesystem, so this helper never performs filesystem I/O. It
+ * verifies only that the value is a path rather than an internal presentation
+ * sentinel, then applies the same stable normalization as scope matching.
+ */
+export function normalizePublicWorkspacePath(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0 || isInternalWorkspaceLabel(value)) {
+    return undefined;
+  }
+
+  try {
+    const normalized = normalizeWorkspacePath(value);
+    return isInternalWorkspaceLabel(normalized) ? undefined : normalized;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when a value can be exposed as public canonical workspace metadata. */
+export function isPublicWorkspacePath(value: unknown): value is string {
+  return normalizePublicWorkspacePath(value) !== undefined;
 }
 
 function exactComparisonKey(path: NormalizedWorkspacePath): string {
