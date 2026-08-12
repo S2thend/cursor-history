@@ -45,7 +45,10 @@ import type {
   ChatSession,
   ChatSessionSummary,
   Message,
+  ResolutionReasonCode,
+  SessionResolution,
   SessionSourceInstance,
+  SourceRole,
   ToolCall,
   WorkspaceMembership,
 } from '../types.js';
@@ -816,30 +819,42 @@ function mergeWorkspaceMemberships(
   store: ChatSession | StoreSummaryInput,
   sourceInstances: readonly SessionSourceInstance[] | undefined
 ): WorkspaceMembership[] | undefined {
-  const memberships = new Map<string, { roles: Set<'composer' | 'store'>; count: number }>();
+  const memberships = new Map<
+    string,
+    {
+      roles: Set<'composer' | 'store'>;
+      explicitCount: number;
+      instanceCount: number;
+    }
+  >();
   const add = (membership: WorkspaceMembership): void => {
     const current = memberships.get(membership.workspacePath) ?? {
       roles: new Set<'composer' | 'store'>(),
-      count: 0,
+      explicitCount: 0,
+      instanceCount: 0,
     };
     for (const role of membership.sourceRoles) current.roles.add(role);
-    current.count += membership.contributingInstanceCount;
+    current.explicitCount += membership.contributingInstanceCount;
     memberships.set(membership.workspacePath, current);
   };
   for (const membership of composer.workspaceMemberships ?? []) add(membership);
   for (const membership of store.workspaceMemberships ?? []) add(membership);
 
-  if (memberships.size === 0) {
-    for (const instance of sourceInstances ?? []) {
-      for (const workspacePath of instance.workspacePaths) {
-        const current = memberships.get(workspacePath) ?? {
-          roles: new Set<'composer' | 'store'>(),
-          count: 0,
-        };
-        current.roles.add(instance.sourceRole);
-        current.count++;
-        memberships.set(workspacePath, current);
-      }
+  // Source instances can disclose a path absent from one side's explicit
+  // membership projection. Always union their roles and paths, but an explicit
+  // membership count is authoritative: one physical Store occurrence may have
+  // metadata, DB, and transcript provenance entries, which must not inflate
+  // the occurrence count merely because several representations describe it.
+  for (const instance of sourceInstances ?? []) {
+    for (const workspacePath of instance.workspacePaths) {
+      const current = memberships.get(workspacePath) ?? {
+        roles: new Set<'composer' | 'store'>(),
+        explicitCount: 0,
+        instanceCount: 0,
+      };
+      current.roles.add(instance.sourceRole);
+      current.instanceCount++;
+      memberships.set(workspacePath, current);
     }
   }
   if (memberships.size === 0) return undefined;
@@ -850,7 +865,8 @@ function mergeWorkspaceMemberships(
       sourceRoles: [...value.roles].sort(
         (left, right) => SOURCE_ROLE_ORDER.indexOf(left) - SOURCE_ROLE_ORDER.indexOf(right)
       ),
-      contributingInstanceCount: value.count,
+      contributingInstanceCount:
+        value.explicitCount > 0 ? value.explicitCount : value.instanceCount,
     }));
 }
 
@@ -1092,6 +1108,21 @@ function rebuildActiveBranchParents(
 
 type FidelityInput = Pick<ChatSession, 'source' | 'resolution' | 'transcriptState'>;
 
+const RESOLUTION_REASON_ORDER = [
+  'workspace-scope-omitted',
+  'source-unavailable',
+  'source-read-failed',
+  'source-partial',
+  'expected-store-db-unavailable',
+  'store-db-expectation-unknown',
+  'store-conversation-unavailable',
+] as const satisfies readonly ResolutionReasonCode[];
+
+function orderedResolutionReasons(reasons: Iterable<ResolutionReasonCode>): ResolutionReasonCode[] {
+  const values = new Set(reasons);
+  return RESOLUTION_REASON_ORDER.filter((reason) => values.has(reason));
+}
+
 function isCompleteContribution(session: FidelityInput, unknownIsComplete: boolean): boolean {
   if (session.resolution !== undefined) return session.resolution.state === 'complete';
   switch (session.source) {
@@ -1111,18 +1142,45 @@ function mergedResolution(composer: FidelityInput, store: FidelityInput, unknown
   const complete =
     isCompleteContribution(composer, unknownIsComplete) &&
     isCompleteContribution(store, unknownIsComplete);
-  const reasonCodes = new Set([
+  const reasonCodes = new Set<ResolutionReasonCode>([
     ...(composer.resolution?.reasonCodes ?? []),
     ...(store.resolution?.reasonCodes ?? []),
   ]);
   if (!complete && reasonCodes.size === 0) reasonCodes.add('source-partial' as const);
+  const orderedRoles = (roles: Iterable<SourceRole>): SourceRole[] => {
+    const values = new Set(roles);
+    return (['composer', 'store'] as const).filter((role) => values.has(role));
+  };
+  const rolesFrom = (
+    session: FidelityInput,
+    field: keyof Pick<
+      SessionResolution,
+      'expectedSourceRoles' | 'loadedSourceRoles' | 'omittedSourceRoles' | 'failedSourceRoles'
+    >,
+    fallback: SourceRole
+  ): readonly SourceRole[] =>
+    session.resolution?.[field] ?? (field === 'loadedSourceRoles' ? [fallback] : []);
   return {
     state: complete ? ('complete' as const) : ('partial' as const),
-    expectedSourceRoles: ['composer', 'store'] as const,
-    loadedSourceRoles: ['composer', 'store'] as const,
-    omittedSourceRoles: [] as const,
-    failedSourceRoles: [] as const,
-    reasonCodes: [...reasonCodes],
+    expectedSourceRoles: orderedRoles([
+      'composer',
+      'store',
+      ...rolesFrom(composer, 'expectedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'expectedSourceRoles', 'store'),
+    ]),
+    loadedSourceRoles: orderedRoles([
+      ...rolesFrom(composer, 'loadedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'loadedSourceRoles', 'store'),
+    ]),
+    omittedSourceRoles: orderedRoles([
+      ...rolesFrom(composer, 'omittedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'omittedSourceRoles', 'store'),
+    ]),
+    failedSourceRoles: orderedRoles([
+      ...rolesFrom(composer, 'failedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'failedSourceRoles', 'store'),
+    ]),
+    reasonCodes: orderedResolutionReasons(reasonCodes),
   };
 }
 

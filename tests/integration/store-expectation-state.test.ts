@@ -99,6 +99,36 @@ function storeDbCandidate(
   return writeStoreDbAtPath(join(dir, 'store.db'), id, [{ role: 'user', content }], `Store ${id}`);
 }
 
+function shapedStoreDbCandidate(base: string, lane: string, id: string, shape: DbShape): void {
+  const dir = join(base, 'chats', lane, id);
+  writeStoreMeta(dir, {
+    cwd: `/work/${id}`,
+    title: `Store ${id}`,
+    hasConversation: true,
+    createdAtMs: 1_783_000_000_000,
+  });
+  storeDb(dir, shape);
+}
+
+function shapedTranscriptCandidate(
+  base: string,
+  project: string,
+  id: string,
+  state: 'complete' | 'invalid-encoding'
+): void {
+  const dir = join(base, 'projects', project, 'agent-transcripts');
+  mkdirSync(dir, { recursive: true });
+  const valid = JSON.stringify({
+    role: 'user',
+    message: { content: [{ type: 'text', text: `transcript:${id}` }] },
+  });
+  const content =
+    state === 'complete'
+      ? `${valid}\n`
+      : Buffer.concat([Buffer.from('{"role":"user","message":"'), Buffer.from([0xff])]);
+  writeFileSync(join(dir, `${id}.jsonl`), content);
+}
+
 function storeDb(dir: string, shape: DbShape): void {
   const db = new BetterSqlite3(join(dir, 'store.db'));
   if (shape === 'source-corrupt') {
@@ -227,8 +257,8 @@ describe('StoreDbExpectation and representation selection', () => {
       });
     }
     expect(byId(sessions, expectedPartialTranscript).resolution?.reasonCodes).toEqual([
-      'expected-store-db-unavailable',
       'source-partial',
+      'expected-store-db-unavailable',
     ]);
 
     expect(byId(sessions, notExpectedComplete)).toMatchObject({
@@ -334,7 +364,8 @@ describe('StoreDbExpectation and representation selection', () => {
       resolvedSource: 'store-transcript',
       resolution: {
         state: 'partial',
-        reasonCodes: ['expected-store-db-unavailable', 'source-read-failed'],
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed', 'expected-store-db-unavailable'],
       },
       diagnostics: [
         expect.objectContaining({
@@ -356,7 +387,11 @@ describe('StoreDbExpectation and representation selection', () => {
     );
     expect(dbFallback).toMatchObject({
       resolvedSource: 'store-db',
-      resolution: { state: 'partial', reasonCodes: ['source-read-failed'] },
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
       diagnostics: [
         expect.objectContaining({
           code: 'SOURCE_ENCODING_INVALID',
@@ -526,6 +561,74 @@ describe('same-tier Store replica groups', () => {
           state: 'equivalent-replica',
         }),
       ],
+    });
+  });
+
+  it('retains a failed DB replica beside a complete same-tier contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000074';
+    storeDbCandidate(base, 'complete-db', id, 'complete-db-content');
+    shapedStoreDbCandidate(base, 'failed-db', id, 'invalid-encoding');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      resolvedSource: 'store-db',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+      messages: [expect.objectContaining({ content: 'complete-db-content' })],
+      diagnostics: [expect.objectContaining({ code: 'SOURCE_ENCODING_INVALID' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-db', state: 'failed' }),
+      ]),
+    });
+  });
+
+  it('does not hide a source-corrupt DB replica behind a complete same-tier contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000076';
+    storeDbCandidate(base, 'complete-db', id, 'complete-db-content');
+    shapedStoreDbCandidate(base, 'corrupt-db', id, 'source-corrupt');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      resolvedSource: 'store-db',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+      messages: [expect.objectContaining({ content: 'complete-db-content' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-db', state: 'failed' }),
+      ]),
+    });
+  });
+
+  it('retains a failed transcript replica beside a complete same-tier contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000075';
+    shapedTranscriptCandidate(base, 'complete-transcript', id, 'complete');
+    shapedTranscriptCandidate(base, 'failed-transcript', id, 'invalid-encoding');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      storeDbExpectation: 'not-expected',
+      resolvedSource: 'store-transcript',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+      diagnostics: [expect.objectContaining({ code: 'SOURCE_ENCODING_INVALID' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-transcript', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-transcript', state: 'failed' }),
+      ]),
     });
   });
 

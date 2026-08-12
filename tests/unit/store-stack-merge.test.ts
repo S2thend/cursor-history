@@ -249,6 +249,43 @@ describe('mergeCrossStackSessions', () => {
     });
   });
 
+  it('unions omitted and failed contributor roles instead of discarding fidelity evidence', () => {
+    const composer = makeSession({
+      source: 'workspace-fallback',
+      messages: [msg({ role: 'user', content: 'A' })],
+      resolution: {
+        state: 'partial',
+        expectedSourceRoles: ['composer'],
+        loadedSourceRoles: [],
+        omittedSourceRoles: ['composer'],
+        failedSourceRoles: [],
+        reasonCodes: ['workspace-scope-omitted'],
+      },
+    });
+    const store = makeSession({
+      source: 'store-partial',
+      messages: [msg({ role: 'user', content: 'A' })],
+      resolution: {
+        state: 'partial',
+        expectedSourceRoles: ['store'],
+        loadedSourceRoles: ['store'],
+        omittedSourceRoles: [],
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+    });
+
+    const merged = mergeCrossStackSessions(composer, store, 'store', 1);
+    expect(merged.resolution).toEqual({
+      state: 'partial',
+      expectedSourceRoles: ['composer', 'store'],
+      loadedSourceRoles: ['store'],
+      omittedSourceRoles: ['composer'],
+      failedSourceRoles: ['store'],
+      reasonCodes: ['workspace-scope-omitted', 'source-read-failed'],
+    });
+  });
+
   it('marks the result merged with both stacks + preferred source', () => {
     const composer = makeSession({ messages: [msg({ role: 'user', content: 'hi' })] });
     const store = makeSession({
@@ -349,6 +386,69 @@ describe('mergeCrossStackSessions', () => {
           : ['Store-only fact', 'Composer-only fact']
       );
     }
+  });
+
+  it('does not inflate explicit workspace membership counts with representation provenance', () => {
+    const composer = makeSession({
+      source: 'global',
+      workspacePath: '/shared/project',
+      workspaceMemberships: [
+        {
+          workspacePath: '/shared/project',
+          sourceRoles: ['composer'],
+          contributingInstanceCount: 1,
+        },
+      ],
+      sourceInstances: [
+        {
+          sourceRole: 'composer',
+          representation: 'composer-global',
+          workspacePaths: ['/shared/project'],
+          state: 'contributed',
+        },
+        {
+          sourceRole: 'composer',
+          representation: 'composer-workspace',
+          workspacePaths: ['/shared/project'],
+          state: 'superseded',
+        },
+      ],
+      messages: [msg({ role: 'user', content: 'same' })],
+    });
+    const store = makeSession({
+      source: 'store-complete',
+      workspacePath: '/shared/project',
+      workspaceMemberships: [
+        {
+          workspacePath: '/shared/project',
+          sourceRoles: ['store'],
+          contributingInstanceCount: 1,
+        },
+      ],
+      sourceInstances: [
+        {
+          sourceRole: 'store',
+          representation: 'store-db',
+          workspacePaths: ['/shared/project'],
+          state: 'contributed',
+        },
+        {
+          sourceRole: 'store',
+          representation: 'store-transcript',
+          workspacePaths: ['/shared/project'],
+          state: 'superseded',
+        },
+      ],
+      messages: [msg({ role: 'user', content: 'same' })],
+    });
+
+    expect(mergeCrossStackSessions(composer, store, 'composer', 1).workspaceMemberships).toEqual([
+      {
+        workspacePath: '/shared/project',
+        sourceRoles: ['composer', 'store'],
+        contributingInstanceCount: 2,
+      },
+    ]);
   });
 
   it('uses the preferred source as the backbone order (never timestamp-sorted)', () => {

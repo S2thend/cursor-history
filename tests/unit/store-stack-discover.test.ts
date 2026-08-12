@@ -41,6 +41,47 @@ describe('discoverStoreSessions', () => {
     expect(await discoverStoreSessions(join(ROOT(), 'does-not-exist'))).toEqual([]);
   });
 
+  it('orders non-ASCII physical occurrences by Unicode code point, independent of locale', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-store-code-point-order-'));
+    const sessionId = 'cccccccc-0000-0000-0000-000000000003';
+    const bmp = '\u{e000}';
+    const astral = '\u{10000}';
+    try {
+      for (const [hash, title] of [
+        [bmp, 'BMP occurrence'],
+        [astral, 'Astral occurrence'],
+      ] as const) {
+        const sessionDir = join(root, 'chats', hash, sessionId);
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(
+          join(sessionDir, 'meta.json'),
+          JSON.stringify({
+            cwd: `/work/${hash}`,
+            title,
+            hasConversation: true,
+            createdAtMs: 1783000000000,
+            updatedAtMs: 1783000000000,
+          })
+        );
+      }
+
+      const sessions = await discoverStoreSessions(root, { metadataOnly: true });
+
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.title).toBe('BMP occurrence');
+      expect(sessions[0]?.workspaceMemberships?.map(({ workspacePath }) => workspacePath)).toEqual([
+        `/work/${bmp}`,
+        `/work/${astral}`,
+      ]);
+      expect(sessions[0]?.sourceInstances?.map(({ workspacePaths }) => workspacePaths[0])).toEqual([
+        `/work/${bmp}`,
+        `/work/${astral}`,
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps subagent transcripts separate from the canonical main transcript', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ch-main-transcript-'));
     const sessionId = 'dddddddd-0000-0000-0000-000000000004';
@@ -513,34 +554,77 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('keeps state, path, and messages from the same best transcript', async () => {
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === UUID);
+  it('keeps the usable transcript while exposing an empty same-UUID replica as failed', async () => {
+    const session = (await discoverStoreSessions(root, { sessionIds: new Set([UUID]) })).find(
+      (item) => item.id === UUID
+    );
     expect(session?.transcriptState).toBe('parsed');
     expect(session?.transcriptPath).toContain('a-good');
     expect(session?.messages.map((message) => message.content)).toEqual(['good']);
-    expect(session?.source).toBe('global');
+    expect(session?.source).toBe('workspace-fallback');
     expect(session?.resolvedSource).toBe('store-transcript');
+    expect(session?.resolution).toMatchObject({
+      state: 'partial',
+      failedSourceRoles: ['store'],
+      reasonCodes: ['source-read-failed'],
+    });
+    expect(session?.sourceInstances).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-transcript', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-transcript', state: 'failed' }),
+      ])
+    );
   });
 
-  it('reports equal-quality divergent transcripts as one locator-free ambiguity', async () => {
-    const matches = (await discoverStoreSessions(root)).filter((item) => item.id === NEWER_UUID);
-    const row = matches[0] as unknown;
-
-    expect(matches).toHaveLength(1);
-    expect(row).toMatchObject({
-      id: NEWER_UUID,
-      resolutionState: 'ambiguous',
-      sourceRoles: ['store'],
-      occurrenceCount: 2,
-      diagnosticOccurrenceRefs: [
-        expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
-        expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
-      ],
+  it('rejects equal-quality divergent transcripts with a typed locator-free ambiguity', async () => {
+    await expect(
+      discoverStoreSessions(root, { sessionIds: new Set([NEWER_UUID]) })
+    ).rejects.toMatchObject({
+      code: 'SESSION_AMBIGUOUS',
+      details: {
+        sessionId: NEWER_UUID,
+        occurrenceCount: 2,
+        occurrenceRefs: [
+          expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+          expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+        ],
+      },
     });
-    expect(row).not.toHaveProperty('messages');
-    expect(row).not.toHaveProperty('transcriptPath');
-    expect(row).not.toHaveProperty('storeDbPath');
-    expect(JSON.stringify(row)).not.toContain(root);
+  });
+
+  it('rejects divergent parsed transcript replicas even when their message counts differ', async () => {
+    const unequalRoot = mkdtempSync(join(tmpdir(), 'ch-unequal-transcript-replicas-'));
+    const unequalUuid = 'ffffffff-0000-0000-0000-000000000016';
+    const line = (content: string): string =>
+      JSON.stringify({
+        role: 'user',
+        message: { content: [{ type: 'text', text: content }] },
+      });
+    try {
+      const shortDir = join(unequalRoot, 'projects', 'a-short', 'agent-transcripts');
+      const longDir = join(unequalRoot, 'projects', 'z-long', 'agent-transcripts');
+      mkdirSync(shortDir, { recursive: true });
+      mkdirSync(longDir, { recursive: true });
+      writeFileSync(join(shortDir, `${unequalUuid}.jsonl`), `${line('shared')}\n`);
+      writeFileSync(
+        join(longDir, `${unequalUuid}.jsonl`),
+        `${line('shared')}\n${line('additional')}\n`
+      );
+
+      await expect(discoverStoreSessions(unequalRoot)).rejects.toMatchObject({
+        code: 'SESSION_AMBIGUOUS',
+        details: {
+          sessionId: unequalUuid,
+          occurrenceCount: 2,
+          occurrenceRefs: [
+            expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+            expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+          ],
+        },
+      });
+    } finally {
+      rmSync(unequalRoot, { recursive: true, force: true });
+    }
   });
 
   it('collapses equivalent transcripts once and retains deterministic occurrence provenance', async () => {
@@ -595,7 +679,9 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
       JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'survives' }] } }) +
         '\n{"role":"assistant"'
     );
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === partialUuid);
+    const session = (
+      await discoverStoreSessions(root, { sessionIds: new Set([partialUuid]) })
+    ).find((item) => item.id === partialUuid);
     expect(session?.transcriptState).toBe('partial');
     expect(session?.source).toBe('workspace-fallback');
     expect(session?.resolvedSource).toBe('store-transcript');
@@ -607,7 +693,9 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     const dir = join(root, 'acp-sessions', metadataUuid);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'meta.json'), JSON.stringify({ cwd: '/tmp/metadata-only' }));
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === metadataUuid);
+    const session = (
+      await discoverStoreSessions(root, { sessionIds: new Set([metadataUuid]) })
+    ).find((item) => item.id === metadataUuid);
     expect(session?.transcriptState).toBe('missing');
     expect(session?.source).toBe('workspace-fallback');
     expect(session?.resolvedSource).toBe('store-metadata');

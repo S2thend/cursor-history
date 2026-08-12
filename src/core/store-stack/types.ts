@@ -8,8 +8,8 @@ import type {
   SessionDiagnostic,
   SessionResolution,
   SessionSourceInstance,
+  WorkspaceMembership,
   SessionTimestampSource,
-  SourceRole,
   TranscriptState,
 } from '../types.js';
 import type { SessionMetadataTimestamps } from '../timestamps.js';
@@ -181,14 +181,8 @@ export interface StoreSession {
   diagnostics?: SessionDiagnostic[];
   /** Locator-free physical occurrence provenance after same-tier reconciliation. */
   sourceInstances?: SessionSourceInstance[];
-  /** Present only on a message-free divergent-replica projection. */
-  resolutionState?: 'ambiguous';
-  /** Present only on a message-free divergent-replica projection. */
-  sourceRoles?: SourceRole[];
-  /** Present only on a message-free divergent-replica projection. */
-  occurrenceCount?: number;
-  /** Opaque operation-scoped references; never physical locators. */
-  diagnosticOccurrenceRefs?: string[];
+  /** Verified Store workspace memberships derived from physical occurrences. */
+  workspaceMemberships?: WorkspaceMembership[];
   /** Explicit transcript parse state, retained even when store.db backs messages. */
   transcriptState: TranscriptState;
   /** Path to store.db if present (deep-parse target / fallback). */
@@ -196,4 +190,19 @@ export interface StoreSession {
   /** Debug: raw on-disk locations. */
   chatDir?: string;
   transcriptPath?: string;
+}
+
+/**
+ * Private physical address captured during metadata inventory.  This type is
+ * exported only between core Store/storage modules; it is never part of the
+ * package declarations or a structured result.
+ */
+export interface StorePhysicalOccurrence {
+  /** Exact operation-bound key. It deliberately contains a private locator. */
+  readonly instanceKey: string;
+  readonly logicalSessionId: string;
+  readonly representation: 'store-db' | 'store-transcript' | 'store-metadata';
+  readonly path: string;
+  readonly workspacePath?: string;
+  readonly sourceOrder: number;
 }

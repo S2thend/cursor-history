@@ -16,19 +16,25 @@ import { decodeDeterministicUtf8, resolveSourceReadLimits } from '../source-read
 import { resolveSessionTimestamps } from '../timestamps.js';
 import {
   buildSessionCatalog,
-  projectAmbiguousSessionSummary,
   reconcileReplicaGroup,
+  sessionAmbiguityErrorFromReplicaGroup,
   type PhysicalSessionInstance,
   type ReplicaConsumedPayload,
 } from '../session-catalog.js';
-import { sha256CanonicalJsonV1 } from '../session-identity.js';
+import {
+  prepareStoreIdentityCandidates,
+  sha256CanonicalJsonV1,
+  type StoreIdentityRecord,
+} from '../session-identity.js';
 import type {
   Message,
   ResolutionReasonCode,
   SessionDiagnostic,
   SessionSourceInstance,
   SourceReadLimitsOverride,
+  WorkspaceMembership,
 } from '../types.js';
+import { normalizeWorkspacePath } from '../workspace-scope.js';
 import { acpSessionsDir, chatsDir, projectsDir } from './paths.js';
 import { parseStoreDb, type StoreDbData } from './store-db.js';
 import {
@@ -40,6 +46,7 @@ import type {
   StoreDbExpectation,
   StoreDbState,
   StoreMetaJson,
+  StorePhysicalOccurrence,
   StoreSession,
   TranscriptUse,
 } from './types.js';
@@ -59,15 +66,20 @@ export interface StoreDiscoveryOptions {
   sessionIds?: ReadonlySet<string>;
   /** Inventory metadata only; never decode transcript or store.db conversation payloads. */
   metadataOnly?: boolean;
+  /** Internal exact physical selection bound by one SessionReadContext. */
+  allowedOccurrenceKeys?: ReadonlySet<string>;
+  /** Internal safe-catalog mode excludes display titles until scope is bound. */
+  includeDisplayMetadata?: boolean;
 }
 
 interface InventoryEvidence {
   perSessionDirectory: boolean;
   metadataPresent: boolean;
   dbInventoried: boolean;
-  dbPaths: string[];
+  dbOccurrences: StorePhysicalOccurrence[];
   transcriptInventoried: boolean;
-  transcriptPaths: string[];
+  transcriptOccurrences: StorePhysicalOccurrence[];
+  metadataOccurrences: StorePhysicalOccurrence[];
   hasConversationTrue: boolean;
   hasConversationFalse: boolean;
   unsupportedExpectationMetadata: boolean;
@@ -89,13 +101,68 @@ interface DirectoryListing<T> {
 
 interface TranscriptCandidate {
   readonly path: string;
+  readonly workspacePath?: string;
   readonly parsed: TranscriptParseResult;
 }
 
 interface StoreDbCandidate {
   readonly path: string;
+  readonly workspacePath?: string;
   readonly parsed: StoreDbData | null;
   readonly failures: readonly TranscriptSourceFailure[];
+}
+
+/** Unicode code-point ordering, independent of ICU/process locale. */
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0)!);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0)!);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function compareStringArrays(left: readonly string[], right: readonly string[]): number {
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const difference = compareCodePoints(left[index]!, right[index]!);
+    if (difference !== 0) return difference;
+  }
+  return left.length - right.length;
+}
+
+const physicalOccurrences = new WeakMap<StoreSession, readonly StorePhysicalOccurrence[]>();
+
+/** Return private occurrence inventory for an in-process Store catalog row. */
+export function getStorePhysicalOccurrences(
+  session: StoreSession
+): readonly StorePhysicalOccurrence[] {
+  return physicalOccurrences.get(session) ?? [];
+}
+
+function occurrenceKey(
+  representation: StorePhysicalOccurrence['representation'],
+  path: string
+): string {
+  return `${representation}\0${path}`;
+}
+
+function occurrence(
+  logicalSessionId: string,
+  representation: StorePhysicalOccurrence['representation'],
+  path: string,
+  workspacePath?: string
+): StorePhysicalOccurrence {
+  return {
+    instanceKey: occurrenceKey(representation, path),
+    logicalSessionId,
+    representation,
+    path,
+    ...(workspacePath ? { workspacePath: normalizeWorkspacePath(workspacePath) } : {}),
+    sourceOrder: 0,
+  };
 }
 
 const TRANSCRIPT_STATE_RANK: Readonly<Record<StoreSession['transcriptState'], number>> =
@@ -108,6 +175,21 @@ const TRANSCRIPT_STATE_RANK: Readonly<Record<StoreSession['transcriptState'], nu
     unreadable: 1,
     missing: 0,
   });
+
+const RESOLUTION_REASON_ORDER = [
+  'workspace-scope-omitted',
+  'source-unavailable',
+  'source-read-failed',
+  'source-partial',
+  'expected-store-db-unavailable',
+  'store-db-expectation-unknown',
+  'store-conversation-unavailable',
+] as const satisfies readonly ResolutionReasonCode[];
+
+function orderedResolutionReasons(reasons: Iterable<ResolutionReasonCode>): ResolutionReasonCode[] {
+  const values = new Set(reasons);
+  return RESOLUTION_REASON_ORDER.filter((reason) => values.has(reason));
+}
 
 function consumedToolCalls(
   message: Message
@@ -127,23 +209,42 @@ function consumedStorePayload(
   messages: readonly Message[],
   identityEvidence: readonly StoreSession['messageIdentityEvidence'][number][]
 ): ReplicaConsumedPayload {
-  const occurrences = new Map<string, number>();
+  const identityRecords: StoreIdentityRecord[] = messages.map((message, index) => {
+    const evidence = identityEvidence[index];
+    if (evidence?.representation === 'db') {
+      return { representation: 'db', leafHash: evidence.leafHash };
+    }
+    if (evidence?.representation === 'transcript') {
+      return {
+        representation: 'transcript',
+        role: evidence.role,
+        content: evidence.content,
+        toolActivity: evidence.toolActivity,
+        sourceRelationships: evidence.sourceRelationships,
+      };
+    }
+    const sourceRelationships: Record<string, unknown> = {};
+    if (message.parentMessageId !== undefined) {
+      sourceRelationships['parentMessageId'] = message.parentMessageId;
+    }
+    if (message.isSidechain !== undefined) sourceRelationships['isSidechain'] = message.isSidechain;
+    return {
+      representation: 'transcript',
+      role: message.role,
+      content: message.content,
+      toolActivity: (message.toolCalls ?? []).map((tool) => ({
+        name: tool.name,
+        ...(tool.params !== undefined ? { params: tool.params } : {}),
+      })),
+      sourceRelationships,
+    };
+  });
+  const identities = prepareStoreIdentityCandidates(identityRecords);
   return {
     messages: messages.map((message, index) => {
-      const evidence = identityEvidence[index] ?? {
-        representation: 'transcript' as const,
-        sourceLine: index + 1,
-        role: message.role,
-        content: message.content,
-        toolActivity: [],
-        sourceRelationships: {},
-      };
-      const fingerprint = sha256CanonicalJsonV1(evidence);
-      const occurrence = (occurrences.get(fingerprint) ?? 0) + 1;
-      occurrences.set(fingerprint, occurrence);
       const toolCalls = consumedToolCalls(message);
       return {
-        id: `store-replica:v1:${fingerprint}:${occurrence}`,
+        id: identities[index]!.candidateId,
         role: message.role,
         content: message.content,
         ...(message.timestamp &&
@@ -192,7 +293,7 @@ function canonicalSourceInstances(
       representationOrder.indexOf(left.representation as (typeof representationOrder)[number]) -
       representationOrder.indexOf(right.representation as (typeof representationOrder)[number]);
     if (byRepresentation !== 0) return byRepresentation;
-    const byPath = (left.workspacePaths[0] ?? '').localeCompare(right.workspacePaths[0] ?? '');
+    const byPath = compareStringArrays(left.workspacePaths, right.workspacePaths);
     if (byPath !== 0) return byPath;
     return stateOrder.indexOf(left.state) - stateOrder.indexOf(right.state);
   });
@@ -204,7 +305,7 @@ function metadataSourceInstances(
 ): SessionSourceInstance[] {
   return canonicalSourceInstances(
     [...candidates]
-      .sort((left, right) => (left.chatDir ?? '').localeCompare(right.chatDir ?? ''))
+      .sort((left, right) => compareCodePoints(left.chatDir ?? '', right.chatDir ?? ''))
       .map((candidate) =>
         storeSourceInstance(
           'store-metadata',
@@ -213,6 +314,135 @@ function metadataSourceInstances(
         )
       )
   );
+}
+
+function canonicalOccurrences(evidence: InventoryEvidence): readonly StorePhysicalOccurrence[] {
+  const representationOrder = ['store-db', 'store-transcript', 'store-metadata'] as const;
+  return Object.freeze(
+    [...evidence.dbOccurrences, ...evidence.transcriptOccurrences, ...evidence.metadataOccurrences]
+      .sort((left, right) => {
+        const byRepresentation =
+          representationOrder.indexOf(left.representation) -
+          representationOrder.indexOf(right.representation);
+        return byRepresentation || compareCodePoints(left.path, right.path);
+      })
+      .map((value, sourceOrder) => Object.freeze({ ...value, sourceOrder }))
+  );
+}
+
+function inventorySourceInstances(evidence: InventoryEvidence): SessionSourceInstance[] {
+  if (evidence.dbOccurrences.length > 0) {
+    return canonicalSourceInstances([
+      ...[...evidence.dbOccurrences]
+        .sort((left, right) => compareCodePoints(left.path, right.path))
+        .map((item, index) =>
+          storeSourceInstance(
+            'store-db',
+            item.workspacePath,
+            index === 0 ? 'contributed' : 'superseded'
+          )
+        ),
+      ...[...evidence.transcriptOccurrences]
+        .sort((left, right) => compareCodePoints(left.path, right.path))
+        .map((item) => storeSourceInstance('store-transcript', item.workspacePath, 'superseded')),
+    ]);
+  }
+  if (evidence.transcriptOccurrences.length > 0) {
+    return canonicalSourceInstances(
+      [...evidence.transcriptOccurrences]
+        .sort((left, right) => compareCodePoints(left.path, right.path))
+        .map((item, index) =>
+          storeSourceInstance(
+            'store-transcript',
+            item.workspacePath,
+            index === 0 ? 'contributed' : 'superseded'
+          )
+        )
+    );
+  }
+  return canonicalSourceInstances(
+    [...evidence.metadataOccurrences]
+      .sort((left, right) => compareCodePoints(left.path, right.path))
+      .map((item, index) =>
+        storeSourceInstance(
+          'store-metadata',
+          item.workspacePath,
+          index === 0 ? 'contributed' : 'equivalent-replica'
+        )
+      )
+  );
+}
+
+function omittedSourceInstances(
+  evidence: InventoryEvidence,
+  allowed: ReadonlySet<string> | undefined
+): SessionSourceInstance[] {
+  if (!allowed) return [];
+  const relevant =
+    evidence.dbOccurrences.length > 0
+      ? [...evidence.dbOccurrences, ...evidence.transcriptOccurrences]
+      : evidence.transcriptOccurrences.length > 0
+        ? evidence.transcriptOccurrences
+        : evidence.metadataOccurrences;
+  return canonicalSourceInstances(
+    relevant
+      .filter((item) => !occurrenceIsAllowed(item, allowed))
+      .map((item) =>
+        storeSourceInstance(item.representation, item.workspacePath, 'omitted-by-scope')
+      )
+  );
+}
+
+function workspaceMembershipsFromOccurrences(
+  occurrences: readonly StorePhysicalOccurrence[]
+): WorkspaceMembership[] {
+  const countsByRepresentation = new Map<
+    string,
+    Map<StorePhysicalOccurrence['representation'], number>
+  >();
+  for (const item of occurrences) {
+    if (!item.workspacePath) continue;
+    const representationCounts =
+      countsByRepresentation.get(item.workspacePath) ??
+      new Map<StorePhysicalOccurrence['representation'], number>();
+    representationCounts.set(
+      item.representation,
+      (representationCounts.get(item.representation) ?? 0) + 1
+    );
+    countsByRepresentation.set(item.workspacePath, representationCounts);
+  }
+  return [...countsByRepresentation.entries()]
+    .sort(([left], [right]) => compareCodePoints(left, right))
+    .map(([workspacePath, representationCounts]) => {
+      // Store metadata, DB, and transcript records can describe the same
+      // physical conversation occurrence.  Union their verified paths while
+      // taking the largest per-representation multiplicity so provenance from
+      // another representation does not count the same occurrence twice.
+      const contributingInstanceCount = Math.max(...representationCounts.values());
+      return {
+        workspacePath,
+        sourceRoles: ['store'],
+        contributingInstanceCount,
+      };
+    });
+}
+
+function occurrenceIsAllowed(
+  value: StorePhysicalOccurrence,
+  allowed: ReadonlySet<string> | undefined
+): boolean {
+  return allowed === undefined || allowed.has(value.instanceKey);
+}
+
+function uniqueMetadataWorkspacePath(candidates: readonly StoreSession[]): string | undefined {
+  const paths = [
+    ...new Set(
+      candidates.flatMap(({ workspacePath }) =>
+        workspacePath ? [normalizeWorkspacePath(workspacePath)] : []
+      )
+    ),
+  ];
+  return paths.length === 1 ? paths[0] : undefined;
 }
 
 function physicalStoreCandidates<T>(
@@ -229,7 +459,7 @@ function physicalStoreCandidates<T>(
   readonly catalog: ReturnType<typeof buildSessionCatalog<T>>[number];
   readonly valueByKey: ReadonlyMap<string, T>;
 } {
-  const ordered = [...candidates].sort((left, right) => left.path.localeCompare(right.path));
+  const ordered = [...candidates].sort((left, right) => compareCodePoints(left.path, right.path));
   const valueByKey = new Map<string, T>();
   const instances: PhysicalSessionInstance<T>[] = ordered.map((candidate, sourceOrder) => {
     valueByKey.set(candidate.path, candidate.value);
@@ -246,17 +476,6 @@ function physicalStoreCandidates<T>(
     };
   });
   return { catalog: buildSessionCatalog(instances)[0]!, valueByKey };
-}
-
-function ambiguousStoreProjection(
-  catalog: ReturnType<typeof buildSessionCatalog<unknown>>[number],
-  divergence: Awaited<ReturnType<typeof reconcileReplicaGroup<unknown>>> & { state: 'divergent' }
-): StoreSession {
-  const projected = projectAmbiguousSessionSummary(catalog, [divergence], {
-    index: 0,
-    indexScope: 'global',
-  });
-  return projected as unknown as StoreSession;
 }
 
 /** Best-effort error message for debug diagnostics. */
@@ -302,9 +521,10 @@ export async function discoverStoreSessions(
         perSessionDirectory: false,
         metadataPresent: false,
         dbInventoried: false,
-        dbPaths: [],
+        dbOccurrences: [],
         transcriptInventoried: false,
-        transcriptPaths: [],
+        transcriptOccurrences: [],
+        metadataOccurrences: [],
         hasConversationTrue: false,
         hasConversationFalse: false,
         unsupportedExpectationMetadata: false,
@@ -317,10 +537,20 @@ export async function discoverStoreSessions(
 
   const recordChatInventory = (uuid: string, sessionDir: string): void => {
     throwIfAborted(signal);
-    const metaRead = readMeta(join(sessionDir, 'meta.json'), signal, io, uuid);
     const dbPath = join(sessionDir, 'store.db');
+    const metadataInstanceKey = occurrenceKey('store-metadata', sessionDir);
+    const includeDisplayMetadata =
+      (options.includeDisplayMetadata ?? true) &&
+      (!options.allowedOccurrenceKeys || options.allowedOccurrenceKeys.has(metadataInstanceKey));
+    const metaRead = readMeta(
+      join(sessionDir, 'meta.json'),
+      signal,
+      io,
+      uuid,
+      includeDisplayMetadata
+    );
     const dbInventoried = pathExists(dbPath, signal, io, 'store-session-metadata', uuid);
-    recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
+    recordInventory(evidenceFor(uuid), uuid, metaRead, sessionDir, dbPath, dbInventoried);
 
     const meta = metaRead.meta;
     const storeMetadataTimestamps = timestampsFromStoreMeta(meta);
@@ -381,10 +611,20 @@ export async function discoverStoreSessions(
       if (selectedSessionIds && !selectedSessionIds.has(uuid)) continue;
       const sessionDir = join(acp, uuid);
       throwIfAborted(signal);
-      const metaRead = readMeta(join(sessionDir, 'meta.json'), signal, io, uuid);
       const dbPath = join(sessionDir, 'store.db');
+      const metadataInstanceKey = occurrenceKey('store-metadata', sessionDir);
+      const includeDisplayMetadata =
+        (options.includeDisplayMetadata ?? true) &&
+        (!options.allowedOccurrenceKeys || options.allowedOccurrenceKeys.has(metadataInstanceKey));
+      const metaRead = readMeta(
+        join(sessionDir, 'meta.json'),
+        signal,
+        io,
+        uuid,
+        includeDisplayMetadata
+      );
       const dbInventoried = pathExists(dbPath, signal, io, 'store-session-metadata', uuid);
-      recordInventory(evidenceFor(uuid), metaRead, sessionDir, dbPath, dbInventoried);
+      recordInventory(evidenceFor(uuid), uuid, metaRead, sessionDir, dbPath, dbInventoried);
       const storeMetadataTimestamps = timestampsFromStoreMeta(metaRead.meta);
       const projectedTimestamps = resolveSessionTimestamps({
         view: 'store-only',
@@ -407,6 +647,24 @@ export async function discoverStoreSessions(
     }
   }
 
+  // An operation-bound payload read must carry scalar metadata from one of
+  // the exact permitted occurrences, never from a same-UUID off-scope copy.
+  if (options.allowedOccurrenceKeys) {
+    for (const [uuid, candidates] of metadataCandidates) {
+      const permitted = candidates
+        .filter(
+          ({ chatDir }) =>
+            chatDir && options.allowedOccurrenceKeys!.has(occurrenceKey('store-metadata', chatDir))
+        )
+        .sort((left, right) => {
+          if (shouldReplaceMetadata(left, right)) return 1;
+          if (shouldReplaceMetadata(right, left)) return -1;
+          return compareCodePoints(left.chatDir ?? '', right.chatDir ?? '');
+        });
+      if (permitted[0]) byId.set(uuid, { ...permitted[0] });
+    }
+  }
+
   // 3. Canonical transcript inventory and bounded parse.
   const projects = projectsDir(storeRoot);
   throwIfAborted(signal);
@@ -424,19 +682,27 @@ export async function discoverStoreSessions(
           if (selectedSessionIds && !selectedSessionIds.has(uuid)) continue;
           const nested = join(transcriptDir, uuid, `${uuid}.jsonl`);
           if (pathExists(nested, signal, io, 'store-session-metadata', uuid)) {
-            evidenceFor(uuid).transcriptInventoried = true;
-            if (!evidenceFor(uuid).transcriptPaths.includes(nested)) {
-              evidenceFor(uuid).transcriptPaths.push(nested);
+            const evidence = evidenceFor(uuid);
+            evidence.transcriptInventoried = true;
+            const transcriptOccurrence = occurrence(
+              uuid,
+              'store-transcript',
+              nested,
+              uniqueMetadataWorkspacePath(metadataCandidates.get(uuid) ?? [])
+            );
+            if (!evidence.transcriptOccurrences.some(({ path }) => path === nested)) {
+              evidence.transcriptOccurrences.push(transcriptOccurrence);
             }
             if (options.metadataOnly) {
               attachTranscriptInventory(byId, uuid, nested);
-            } else {
+            } else if (occurrenceIsAllowed(transcriptOccurrence, options.allowedOccurrenceKeys)) {
               attachTranscript(
                 byId,
                 selectedTranscriptFailures,
                 transcriptCandidates,
                 uuid,
                 nested,
+                transcriptOccurrence.workspacePath,
                 limits,
                 signal,
                 io
@@ -446,20 +712,28 @@ export async function discoverStoreSessions(
         } else if (entry.name.endsWith('.jsonl')) {
           const uuid = entry.name.slice(0, -'.jsonl'.length);
           if (selectedSessionIds && !selectedSessionIds.has(uuid)) continue;
-          evidenceFor(uuid).transcriptInventoried = true;
+          const evidence = evidenceFor(uuid);
+          evidence.transcriptInventoried = true;
           const transcriptPath = join(transcriptDir, entry.name);
-          if (!evidenceFor(uuid).transcriptPaths.includes(transcriptPath)) {
-            evidenceFor(uuid).transcriptPaths.push(transcriptPath);
+          const transcriptOccurrence = occurrence(
+            uuid,
+            'store-transcript',
+            transcriptPath,
+            uniqueMetadataWorkspacePath(metadataCandidates.get(uuid) ?? [])
+          );
+          if (!evidence.transcriptOccurrences.some(({ path }) => path === transcriptPath)) {
+            evidence.transcriptOccurrences.push(transcriptOccurrence);
           }
           if (options.metadataOnly) {
             attachTranscriptInventory(byId, uuid, transcriptPath);
-          } else {
+          } else if (occurrenceIsAllowed(transcriptOccurrence, options.allowedOccurrenceKeys)) {
             attachTranscript(
               byId,
               selectedTranscriptFailures,
               transcriptCandidates,
               uuid,
               transcriptPath,
+              transcriptOccurrence.workspacePath,
               limits,
               signal,
               io
@@ -475,8 +749,10 @@ export async function discoverStoreSessions(
   // until replica reconciliation is introduced; never downgrade expectation.
   for (const [uuid, ss] of byId) {
     const evidence = evidenceFor(uuid);
-    if (!ss.storeDbPath && evidence.dbPaths.length > 0) {
-      ss.storeDbPath = [...evidence.dbPaths].sort()[0];
+    if (!ss.storeDbPath && evidence.dbOccurrences.length > 0) {
+      ss.storeDbPath = [...evidence.dbOccurrences].sort((left, right) =>
+        compareCodePoints(left.path, right.path)
+      )[0]!.path;
     }
   }
 
@@ -486,6 +762,10 @@ export async function discoverStoreSessions(
       throwIfAborted(signal);
       const evidence = evidenceFor(ss.id);
       ss.storeDbExpectation = classifyStoreDbExpectation(evidence, perSessionInventoryComplete);
+      if (shouldOmitExplicitNoConversation(evidence, ss.storeDbExpectation)) {
+        logStoreResolution(ss, 'missing', 'unused', 'omitted');
+        continue;
+      }
       ss.source = evidence.transcriptInventoried ? 'transcript' : 'store';
       ss.resolvedSource = 'store-metadata';
       if (evidence.metadataFailures.length > 0) {
@@ -494,38 +774,10 @@ export async function discoverStoreSessions(
         );
         for (const diagnostic of ss.diagnostics) options.onDiagnostic?.(diagnostic);
       }
-      const metadata = metadataCandidates.get(ss.id) ?? [];
-      if (evidence.dbPaths.length > 0) {
-        ss.sourceInstances = canonicalSourceInstances([
-          ...[...evidence.dbPaths]
-            .sort()
-            .map((_path, index) =>
-              storeSourceInstance(
-                'store-db',
-                ss.workspacePath,
-                index === 0 ? 'contributed' : 'superseded'
-              )
-            ),
-          ...[...evidence.transcriptPaths]
-            .sort()
-            .map(() => storeSourceInstance('store-transcript', ss.workspacePath, 'superseded')),
-        ]);
-      } else if (evidence.transcriptPaths.length > 0) {
-        ss.sourceInstances = canonicalSourceInstances(
-          [...evidence.transcriptPaths]
-            .sort()
-            .map((_path, index) =>
-              storeSourceInstance(
-                'store-transcript',
-                ss.workspacePath,
-                index === 0 ? 'contributed' : 'superseded'
-              )
-            )
-        );
-      } else if (metadata.length > 0) {
-        ss.sourceInstances = metadataSourceInstances(ss, metadata);
-      }
+      ss.sourceInstances = inventorySourceInstances(evidence);
+      ss.workspaceMemberships = workspaceMembershipsFromOccurrences(canonicalOccurrences(evidence));
       resolveStoreSessionTimestamps(ss);
+      physicalOccurrences.set(ss, canonicalOccurrences(evidence));
       metadataRows.push(ss);
     }
     return metadataRows;
@@ -538,15 +790,20 @@ export async function discoverStoreSessions(
     const evidence = evidenceFor(ss.id);
     const expectation = classifyStoreDbExpectation(evidence, perSessionInventoryComplete);
     ss.storeDbExpectation = expectation;
+    ss.workspaceMemberships = workspaceMembershipsFromOccurrences(canonicalOccurrences(evidence));
+    physicalOccurrences.set(ss, canonicalOccurrences(evidence));
+    const scopeOmissions = omittedSourceInstances(evidence, options.allowedOccurrenceKeys);
 
     // Retain typed parser failures until both representations are known. A
     // partial outcome is safe only when the other representation contributed
     // real conversation content; otherwise the same failure is promoted to a
     // fatal operation error instead of publishing an empty/truncated session.
     const dbCandidates: StoreDbCandidate[] = [];
-    for (const path of [...evidence.dbPaths].sort()) {
+    for (const dbOccurrence of [...evidence.dbOccurrences]
+      .filter((item) => occurrenceIsAllowed(item, options.allowedOccurrenceKeys))
+      .sort((left, right) => compareCodePoints(left.path, right.path))) {
       const failures: TranscriptSourceFailure[] = [];
-      const parsed = await parseStoreDb(path, {
+      const parsed = await parseStoreDb(dbOccurrence.path, {
         limits,
         failureOutcome: 'partial',
         onDiagnostic: (error) => failures.push(error),
@@ -555,7 +812,12 @@ export async function discoverStoreSessions(
         io,
         logicalSessionId: ss.id,
       });
-      dbCandidates.push({ path, parsed, failures });
+      dbCandidates.push({
+        path: dbOccurrence.path,
+        workspacePath: dbOccurrence.workspacePath,
+        parsed,
+        failures,
+      });
     }
 
     const usableDbCandidates = dbCandidates.filter(
@@ -582,7 +844,7 @@ export async function discoverStoreSessions(
         selectedDbFidelity,
         selectedDbTier.map((candidate) => ({
           path: candidate.path,
-          workspacePath: ss.workspacePath,
+          workspacePath: candidate.workspacePath,
           payload: consumedStorePayload(
             candidate.parsed.messages,
             candidate.parsed.messageIdentityEvidence
@@ -594,61 +856,77 @@ export async function discoverStoreSessions(
         diagnosticContextId: options.io?.contextId ?? `store-discovery:${ss.id}`,
       });
       if (reconciliation.state === 'divergent') {
-        resolved.push(
-          ambiguousStoreProjection(
-            physical.catalog as ReturnType<typeof buildSessionCatalog<unknown>>[number],
-            reconciliation as Awaited<ReturnType<typeof reconcileReplicaGroup<unknown>>> & {
-              state: 'divergent';
-            }
-          )
-        );
-        continue;
+        throw sessionAmbiguityErrorFromReplicaGroup(reconciliation);
       }
       selectedDbCandidate = physical.valueByKey.get(reconciliation.selected.instanceKey)!;
       dbReplicaInstances = [...reconciliation.sourceInstances];
     } else if (selectedDbCandidate?.parsed && selectedDbCandidate.parsed.messages.length > 0) {
-      dbReplicaInstances = [storeSourceInstance('store-db', ss.workspacePath, 'contributed')];
+      dbReplicaInstances = [
+        storeSourceInstance('store-db', selectedDbCandidate.workspacePath, 'contributed'),
+      ];
     }
     for (const candidate of usableDbCandidates) {
       if (selectedDbTier.includes(candidate)) continue;
-      dbReplicaInstances.push(storeSourceInstance('store-db', ss.workspacePath, 'superseded'));
+      dbReplicaInstances.push(
+        storeSourceInstance('store-db', candidate.workspacePath, 'superseded')
+      );
     }
     for (const candidate of dbCandidates) {
       if (candidate.parsed && candidate.parsed.messages.length > 0) continue;
-      dbReplicaInstances.push(storeSourceInstance('store-db', ss.workspacePath, 'failed'));
+      dbReplicaInstances.push(storeSourceInstance('store-db', candidate.workspacePath, 'failed'));
     }
     const deep = selectedDbCandidate?.parsed ?? null;
-    const dbFailures = [...(selectedDbCandidate?.failures ?? [])];
+    const dbFailures = dbCandidates.flatMap(({ failures }) => failures);
     if (selectedDbCandidate) ss.storeDbPath = selectedDbCandidate.path;
 
     const dbUsable = Boolean(deep && deep.messages.length > 0);
+    const selectedDbSafe = dbUsable && (selectedDbCandidate?.failures.length ?? 0) === 0;
     const sessionTranscriptCandidates = transcriptCandidates.get(ss.id) ?? [];
+    let selectedTranscriptSafe = false;
     let transcriptReplicaInstances: SessionSourceInstance[] = [];
     if (dbUsable) {
-      transcriptReplicaInstances = sessionTranscriptCandidates.map(() =>
-        storeSourceInstance('store-transcript', ss.workspacePath, 'superseded')
+      selectedTranscriptSafe = sessionTranscriptCandidates.some(
+        ({ parsed }) => parsed.messages.length > 0 && !parsed.diagnostic
+      );
+      transcriptReplicaInstances = sessionTranscriptCandidates.map((candidate) =>
+        storeSourceInstance(
+          'store-transcript',
+          candidate.workspacePath,
+          candidate.parsed.diagnostic ? 'failed' : 'superseded'
+        )
       );
     } else if (sessionTranscriptCandidates.length > 0) {
-      const bestStateRank = Math.max(
-        ...sessionTranscriptCandidates.map(({ parsed }) => TRANSCRIPT_STATE_RANK[parsed.state])
+      const usableTranscriptCandidates = sessionTranscriptCandidates.filter(
+        ({ parsed }) => parsed.messages.length > 0
       );
-      const bestState = sessionTranscriptCandidates.filter(
-        ({ parsed }) => TRANSCRIPT_STATE_RANK[parsed.state] === bestStateRank
+      const selectedFidelity = usableTranscriptCandidates.some(
+        ({ parsed }) => parsed.state === 'parsed'
+      )
+        ? ('complete' as const)
+        : ('partial' as const);
+      const selectedTranscriptTier = usableTranscriptCandidates.filter(
+        ({ parsed }) => (parsed.state === 'parsed' ? 'complete' : 'partial') === selectedFidelity
       );
-      const bestMessageCount = Math.max(...bestState.map(({ parsed }) => parsed.messages.length));
-      const selectedTranscriptTier = bestState.filter(
-        ({ parsed }) => parsed.messages.length === bestMessageCount
-      );
-      let selectedTranscript = selectedTranscriptTier[0]!;
+      let selectedTranscript: TranscriptCandidate;
+      if (selectedTranscriptTier.length > 0) {
+        selectedTranscript = selectedTranscriptTier[0]!;
+      } else {
+        // No candidate contains usable conversation content. Retain the best
+        // parser state only for the eventual degraded metadata projection.
+        selectedTranscript = [...sessionTranscriptCandidates].sort(
+          (left, right) =>
+            TRANSCRIPT_STATE_RANK[right.parsed.state] - TRANSCRIPT_STATE_RANK[left.parsed.state] ||
+            compareCodePoints(left.path, right.path)
+        )[0]!;
+      }
       if (selectedTranscriptTier.length > 1) {
-        const fidelity = selectedTranscript.parsed.state === 'parsed' ? 'complete' : 'partial';
         const physical = physicalStoreCandidates(
           ss.id,
           'store-transcript',
-          fidelity,
+          selectedFidelity,
           selectedTranscriptTier.map((candidate) => ({
             path: candidate.path,
-            workspacePath: ss.workspacePath,
+            workspacePath: candidate.workspacePath,
             payload: consumedStorePayload(
               candidate.parsed.messages,
               candidate.parsed.messageIdentityEvidence
@@ -660,27 +938,27 @@ export async function discoverStoreSessions(
           diagnosticContextId: options.io?.contextId ?? `store-discovery:${ss.id}`,
         });
         if (reconciliation.state === 'divergent') {
-          resolved.push(
-            ambiguousStoreProjection(
-              physical.catalog as ReturnType<typeof buildSessionCatalog<unknown>>[number],
-              reconciliation as Awaited<ReturnType<typeof reconcileReplicaGroup<unknown>>> & {
-                state: 'divergent';
-              }
-            )
-          );
-          continue;
+          throw sessionAmbiguityErrorFromReplicaGroup(reconciliation);
         }
         selectedTranscript = physical.valueByKey.get(reconciliation.selected.instanceKey)!;
         transcriptReplicaInstances = [...reconciliation.sourceInstances];
-      } else {
+      } else if (selectedTranscriptTier.length === 1) {
         transcriptReplicaInstances = [
-          storeSourceInstance('store-transcript', ss.workspacePath, 'contributed'),
+          storeSourceInstance('store-transcript', selectedTranscript.workspacePath, 'contributed'),
         ];
+      } else {
+        transcriptReplicaInstances = [];
       }
       for (const candidate of sessionTranscriptCandidates) {
         if (selectedTranscriptTier.includes(candidate)) continue;
         transcriptReplicaInstances.push(
-          storeSourceInstance('store-transcript', ss.workspacePath, 'superseded')
+          storeSourceInstance(
+            'store-transcript',
+            candidate.workspacePath,
+            candidate.parsed.diagnostic || candidate.parsed.messages.length === 0
+              ? 'failed'
+              : 'superseded'
+          )
         );
       }
       ss.transcriptState = selectedTranscript.parsed.state;
@@ -688,13 +966,13 @@ export async function discoverStoreSessions(
       ss.messages = selectedTranscript.parsed.messages;
       ss.messageIdentityEvidence = selectedTranscript.parsed.messageIdentityEvidence;
       ss.rawContentBlockEvidence = selectedTranscript.parsed.rawContentBlockEvidence;
-      selectedTranscriptFailures.set(
-        ss.id,
-        selectedTranscript.parsed.diagnostic ? [selectedTranscript.parsed.diagnostic] : []
-      );
+      selectedTranscriptSafe =
+        selectedTranscript.parsed.messages.length > 0 && !selectedTranscript.parsed.diagnostic;
     }
 
-    const transcriptFailures = selectedTranscriptFailures.get(ss.id) ?? [];
+    const transcriptFailures = sessionTranscriptCandidates.flatMap(({ parsed }) =>
+      parsed.diagnostic ? [parsed.diagnostic] : []
+    );
     const transcriptUsable = ss.messages.length > 0;
     if (deep?.rawContentBlockEvidence.length) {
       ss.rawContentBlockEvidence = [
@@ -702,15 +980,21 @@ export async function discoverStoreSessions(
         ...deep.rawContentBlockEvidence,
       ];
     }
-    const retainedSourceFailure = retainSafeSourceFailures(
-      ss,
-      evidence.metadataFailures,
-      transcriptFailures,
-      dbFailures,
-      transcriptUsable,
-      dbUsable,
-      options.onDiagnostic
-    );
+    const unusableSelectedTierReplica = dbUsable
+      ? dbCandidates.some(({ parsed }) => !parsed || parsed.messages.length === 0)
+      : transcriptUsable
+        ? sessionTranscriptCandidates.some(({ parsed }) => parsed.messages.length === 0)
+        : false;
+    const retainedSourceFailure =
+      retainSafeSourceFailures(
+        ss,
+        evidence.metadataFailures,
+        transcriptFailures,
+        dbFailures,
+        selectedTranscriptSafe,
+        selectedDbSafe,
+        options.onDiagnostic
+      ) || unusableSelectedTierReplica;
 
     if (deep?.title) ss.title = deep.title;
     if (deep?.createdAt) {
@@ -739,6 +1023,7 @@ export async function discoverStoreSessions(
       ss.sourceInstances = canonicalSourceInstances([
         ...dbReplicaInstances,
         ...transcriptReplicaInstances,
+        ...scopeOmissions,
       ]);
       if (deep.completeness === 'complete' && !retainedSourceFailure) {
         setResolution(ss, 'complete', []);
@@ -748,6 +1033,7 @@ export async function discoverStoreSessions(
           ...(retainedSourceFailure ? (['source-read-failed'] as const) : []),
         ]);
       }
+      applyScopeOmission(ss, scopeOmissions.length > 0);
       resolveStoreSessionTimestamps(ss);
       logStoreResolution(ss, dbState, 'unused');
       resolved.push(ss);
@@ -764,25 +1050,17 @@ export async function discoverStoreSessions(
       ss.sourceInstances = canonicalSourceInstances([
         ...transcriptReplicaInstances,
         ...dbReplicaInstances,
+        ...scopeOmissions,
       ]);
       setResolution(ss, reasons.length === 0 ? 'complete' : 'partial', reasons);
+      applyScopeOmission(ss, scopeOmissions.length > 0);
       resolveStoreSessionTimestamps(ss);
       logStoreResolution(ss, dbState, ss.storeDbPath ? 'fallback' : 'only-source');
       resolved.push(ss);
       continue;
     }
 
-    const explicitNoConversation =
-      expectation === 'not-expected' &&
-      evidence.hasConversationFalse &&
-      !evidence.hasConversationTrue;
-    const positiveConversationEvidence =
-      evidence.dbInventoried ||
-      evidence.transcriptInventoried ||
-      evidence.hasConversationTrue ||
-      expectation === 'unknown';
-
-    if (explicitNoConversation && !positiveConversationEvidence) {
+    if (shouldOmitExplicitNoConversation(evidence, expectation)) {
       logStoreResolution(ss, dbState, 'unused', 'omitted');
       continue;
     }
@@ -791,14 +1069,36 @@ export async function discoverStoreSessions(
     ss.messageIdentityEvidence = [];
     ss.resolvedSource = 'store-metadata';
     const metadata = metadataCandidates.get(ss.id) ?? [];
-    if (metadata.length > 0) ss.sourceInstances = metadataSourceInstances(ss, metadata);
+    if (metadata.length > 0) {
+      ss.sourceInstances = canonicalSourceInstances([
+        ...metadataSourceInstances(ss, metadata),
+        ...scopeOmissions,
+      ]);
+    }
     setResolution(ss, 'partial', ['store-conversation-unavailable']);
+    applyScopeOmission(ss, scopeOmissions.length > 0);
     resolveStoreSessionTimestamps(ss);
     logStoreResolution(ss, dbState, 'unused');
     resolved.push(ss);
   }
 
   return resolved;
+}
+
+function shouldOmitExplicitNoConversation(
+  evidence: Readonly<InventoryEvidence>,
+  expectation: StoreDbExpectation
+): boolean {
+  const explicitNoConversation =
+    expectation === 'not-expected' &&
+    evidence.hasConversationFalse &&
+    !evidence.hasConversationTrue;
+  const positiveConversationEvidence =
+    evidence.dbInventoried ||
+    evidence.transcriptInventoried ||
+    evidence.hasConversationTrue ||
+    expectation === 'unknown';
+  return explicitNoConversation && !positiveConversationEvidence;
 }
 
 export function classifyStoreDbExpectation(
@@ -847,8 +1147,9 @@ function emptyStoreSession(
 
 function recordInventory(
   evidence: InventoryEvidence,
+  logicalSessionId: string,
   metaRead: MetaReadResult,
-  _sessionDir: string,
+  sessionDir: string,
   dbPath: string,
   dbInventoried: boolean
 ): void {
@@ -858,9 +1159,22 @@ function recordInventory(
   evidence.hasConversationFalse ||= metaRead.hasConversation === false;
   evidence.unsupportedExpectationMetadata ||= metaRead.unsupportedExpectationMetadata;
   if (metaRead.diagnostic) evidence.metadataFailures.push(metaRead.diagnostic);
+  const metadataOccurrence = occurrence(
+    logicalSessionId,
+    'store-metadata',
+    sessionDir,
+    metaRead.meta?.cwd
+  );
+  if (!evidence.metadataOccurrences.some(({ path }) => path === sessionDir)) {
+    evidence.metadataOccurrences.push(metadataOccurrence);
+  }
   if (dbInventoried) {
     evidence.dbInventoried = true;
-    if (!evidence.dbPaths.includes(dbPath)) evidence.dbPaths.push(dbPath);
+    if (!evidence.dbOccurrences.some(({ path }) => path === dbPath)) {
+      evidence.dbOccurrences.push(
+        occurrence(logicalSessionId, 'store-db', dbPath, metaRead.meta?.cwd)
+      );
+    }
   }
 }
 
@@ -869,15 +1183,33 @@ function setResolution(
   state: 'complete' | 'partial',
   reasonCodes: ResolutionReasonCode[]
 ): void {
+  const normalizedReasons = orderedResolutionReasons(reasonCodes);
   ss.source = state === 'complete' ? 'global' : 'workspace-fallback';
   ss.resolution = {
     state,
     expectedSourceRoles: ['store'],
     loadedSourceRoles: ['store'],
     omittedSourceRoles: [],
-    failedSourceRoles: [],
-    reasonCodes: [...new Set(reasonCodes)],
+    failedSourceRoles: normalizedReasons.includes('source-read-failed') ? ['store'] : [],
+    reasonCodes: normalizedReasons,
   };
+}
+
+function applyScopeOmission(session: StoreSession, omitted: boolean): void {
+  if (!omitted || !session.resolution) return;
+  session.resolution = {
+    ...session.resolution,
+    state: 'partial',
+    expectedSourceRoles: ['store'],
+    loadedSourceRoles: ['store'],
+    omittedSourceRoles: ['store'],
+    failedSourceRoles: [...session.resolution.failedSourceRoles],
+    reasonCodes: orderedResolutionReasons([
+      ...session.resolution.reasonCodes,
+      'workspace-scope-omitted',
+    ]),
+  };
+  session.source = 'workspace-fallback';
 }
 
 function toSessionDiagnostic(
@@ -959,19 +1291,17 @@ function retainSafeSourceFailures(
   metadataFailures: readonly SourceEncodingError[],
   transcriptFailures: readonly TranscriptSourceFailure[],
   dbFailures: readonly TranscriptSourceFailure[],
-  transcriptUsable: boolean,
-  dbUsable: boolean,
+  transcriptSafe: boolean,
+  dbSafe: boolean,
   onDiagnostic?: (diagnostic: SessionDiagnostic) => void
 ): boolean {
-  const transcriptSafe = transcriptUsable && transcriptFailures.length === 0;
-  const dbSafe = dbUsable && dbFailures.length === 0;
   if (metadataFailures.length > 0 && !transcriptSafe && !dbSafe) {
     throw promoteSourceFailure(metadataFailures[0]!);
   }
-  if (transcriptFailures.length > 0 && !dbSafe) {
+  if (transcriptFailures.length > 0 && !dbSafe && !transcriptSafe) {
     throw promoteSourceFailure(transcriptFailures[0]!);
   }
-  if (dbFailures.length > 0 && !transcriptSafe) {
+  if (dbFailures.length > 0 && !transcriptSafe && !dbSafe) {
     throw promoteSourceFailure(dbFailures[0]!);
   }
 
@@ -990,6 +1320,7 @@ function attachTranscript(
   candidatesById: Map<string, TranscriptCandidate[]>,
   uuid: string,
   file: string,
+  workspacePath: string | undefined,
   limits: ReturnType<typeof resolveSourceReadLimits>,
   signal?: AbortSignal,
   io?: OperationIoContext
@@ -997,7 +1328,7 @@ function attachTranscript(
   throwIfAborted(signal);
   const parsed = parseTranscriptFile(file, limits, 'partial', signal, io, uuid);
   const candidates = candidatesById.get(uuid) ?? [];
-  candidates.push({ path: file, parsed });
+  candidates.push({ path: file, workspacePath, parsed });
   candidatesById.set(uuid, candidates);
   const existing = byId.get(uuid);
   const failures = parsed.diagnostic ? [parsed.diagnostic] : [];
@@ -1022,7 +1353,7 @@ function attachTranscript(
 
   byId.set(uuid, {
     id: uuid,
-    workspacePath: undefined,
+    workspacePath,
     title: null,
     ...projectedTimestamps,
     messages: parsed.messages,
@@ -1136,7 +1467,7 @@ function listDirs(
       entries: readdirSync(dir, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name)
-        .sort(),
+        .sort(compareCodePoints),
       complete: true,
     };
   } catch (error) {
@@ -1160,7 +1491,7 @@ function listEntries(
     observeStoreFs(io, 'read', 'store-root-directory');
     return {
       entries: readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
-        a.name.localeCompare(b.name)
+        compareCodePoints(a.name, b.name)
       ),
       complete: true,
     };
@@ -1179,7 +1510,8 @@ function readMeta(
   path: string,
   signal?: AbortSignal,
   io?: OperationIoContext,
-  logicalSessionId?: string
+  logicalSessionId?: string,
+  includeDisplayMetadata = true
 ): MetaReadResult {
   throwIfAborted(signal);
   let raw: Buffer;
@@ -1195,7 +1527,8 @@ function readMeta(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(decodeDeterministicUtf8(raw, 'jsonl', 'partial').text) as unknown;
+    const projected = includeDisplayMetadata ? raw : redactTopLevelDisplayTitle(raw);
+    parsed = JSON.parse(decodeDeterministicUtf8(projected, 'jsonl', 'partial').text) as unknown;
   } catch (error) {
     if (error instanceof SourceEncodingError) {
       return {
@@ -1232,7 +1565,7 @@ function readMeta(
     }
   }
   if (typeof record['cwd'] === 'string') meta.cwd = record['cwd'];
-  if (typeof record['title'] === 'string') meta.title = record['title'];
+  if (includeDisplayMetadata && typeof record['title'] === 'string') meta.title = record['title'];
   if (isValidMs(record['createdAtMs'])) meta.createdAtMs = record['createdAtMs'];
   if (isValidMs(record['updatedAtMs'])) meta.updatedAtMs = record['updatedAtMs'];
 
@@ -1242,6 +1575,95 @@ function readMeta(
     hasConversation,
     unsupportedExpectationMetadata,
   };
+}
+
+/**
+ * Produce the metadata-only projection used before an operation binds exact
+ * Store occurrences.  A title is conversation display payload, so its bytes
+ * must not participate in UTF-8 decoding or JSON materialization during the
+ * safe catalog pass.
+ *
+ * The scan is deliberately byte-oriented.  It decodes only a top-level object
+ * key token, then replaces the matching key and string value in a private copy
+ * before the ordinary deterministic decoder sees the document.  Unknown
+ * fields remain untouched and continue to follow JSON's forward-compatible
+ * ignore behavior.
+ */
+function redactTopLevelDisplayTitle(raw: Buffer): Buffer {
+  let depth = 0;
+  let redacted: Buffer | undefined;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const byte = raw[index];
+    if (byte === 0x7b || byte === 0x5b) {
+      depth += 1;
+      continue;
+    }
+    if (byte === 0x7d || byte === 0x5d) {
+      depth -= 1;
+      continue;
+    }
+    if (byte !== 0x22) continue;
+
+    const keyStart = index;
+    const keyEnd = findJsonStringEnd(raw, keyStart);
+    if (keyEnd === undefined) break;
+    index = keyEnd;
+    if (depth !== 1 || decodeJsonObjectKey(raw, keyStart, keyEnd) !== 'title') continue;
+
+    let cursor = keyEnd + 1;
+    while (cursor < raw.length && isJsonWhitespace(raw[cursor]!)) cursor += 1;
+    if (raw[cursor] !== 0x3a) continue;
+    cursor += 1;
+    while (cursor < raw.length && isJsonWhitespace(raw[cursor]!)) cursor += 1;
+    if (raw[cursor] !== 0x22) continue;
+
+    const valueStart = cursor;
+    const valueEnd = findJsonStringEnd(raw, valueStart);
+    if (valueEnd === undefined) break;
+
+    redacted ??= Buffer.from(raw);
+    // Rename the property so JSON.parse never materializes a field named
+    // `title`, then blank the payload bytes without decoding them.
+    redacted.fill(0x5f, keyStart + 1, keyEnd);
+    redacted.fill(0x20, valueStart + 1, valueEnd);
+    index = valueEnd;
+  }
+
+  return redacted ?? raw;
+}
+
+function findJsonStringEnd(raw: Buffer, start: number): number | undefined {
+  let escaped = false;
+  for (let index = start + 1; index < raw.length; index += 1) {
+    const byte = raw[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (byte === 0x5c) {
+      escaped = true;
+      continue;
+    }
+    if (byte === 0x22) return index;
+  }
+  return undefined;
+}
+
+function decodeJsonObjectKey(raw: Buffer, start: number, end: number): string | undefined {
+  try {
+    const token = decodeDeterministicUtf8(raw.subarray(start, end + 1), 'jsonl', 'partial').text;
+    const parsed = JSON.parse(token) as unknown;
+    return typeof parsed === 'string' ? parsed : undefined;
+  } catch {
+    // The full deterministic decode below remains authoritative for malformed
+    // metadata.  This helper only decides whether a valid key names payload.
+    return undefined;
+  }
+}
+
+function isJsonWhitespace(byte: number): boolean {
+  return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
 }
 
 function pathExists(
@@ -1310,7 +1732,7 @@ function shouldReplaceMetadata(existing: StoreSession, candidate: StoreSession):
   if (updateDelta !== 0) return updateDelta > 0;
   const creationDelta = candidate.createdAt.getTime() - existing.createdAt.getTime();
   if (creationDelta !== 0) return creationDelta > 0;
-  return (candidate.chatDir ?? '') < (existing.chatDir ?? '');
+  return compareCodePoints(candidate.chatDir ?? '', existing.chatDir ?? '') < 0;
 }
 
 function replaceMetadata(target: StoreSession, source: StoreSession): void {
