@@ -16,7 +16,6 @@ import {
   listSessions,
   openDatabase,
   openDatabaseReadWrite,
-  getComposerData,
   updateComposerData,
   getWorkspaceLinkedComposerIds,
   readWorkspaceJson,
@@ -43,12 +42,17 @@ import {
   SessionAmbiguityError,
   SessionScopeMismatchError,
   UnsupportedSessionMigrationError,
-  WorkspaceAmbiguityError,
   isSessionIntegrityError,
 } from './errors.js';
 import { ensureDriver, selectDatabaseDriver, type DriverName } from './database/index.js';
 import type { Database } from './database/types.js';
 import { resolveSourceReadLimits, SqliteSourceReadBudget } from './source-read-limits.js';
+import {
+  forEachBoundedComposerValue,
+  readBoundedComposerValueByKey,
+  sqliteLikeLiteralPrefix,
+} from './composer-sqlite.js';
+import { resolveWorkspaceScope } from './workspace-scope.js';
 import type {
   ChatSessionSummary,
   MigrateSessionOptions,
@@ -482,6 +486,18 @@ function throwIfMigrationAborted(signal?: AbortSignal): void {
   throw new DOMException('The migration operation was aborted.', 'AbortError');
 }
 
+function isMissingMigrationTableError(
+  error: unknown,
+  table: 'ItemTable' | 'cursorDiskKV'
+): boolean {
+  if (!(error instanceof Error) || !/(?:no such table|does not exist)/iu.test(error.message)) {
+    return false;
+  }
+  return table === 'ItemTable'
+    ? /\bItemTable\b/iu.test(error.message)
+    : /\bcursorDiskKV\b/iu.test(error.message);
+}
+
 function createMigrationReadGuard(
   limits: Readonly<SourceReadLimitsV1>,
   signal?: AbortSignal,
@@ -585,27 +601,14 @@ function getComposerDataBounded(
   budget = new SqliteSourceReadBudget(guard.limits, 'fatal')
 ): ComposerDataResult | null {
   throwIfMigrationAborted(guard.signal);
-  const metadata = db
-    .prepare(
-      "SELECT length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key = 'composer.composerData'"
-    )
-    .all() as Array<{ valueBytes: number }>;
-  budget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
-  throwIfMigrationAborted(guard.signal);
-  const raw = db
-    .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
-    .get() as { value: string } | undefined;
-  // Compatibility for database adapters/mocks that expose the historical
-  // storage helper but no raw row. A real admitted row always follows the
-  // single-read path below, so its payload is never decoded twice.
-  if (!raw?.value) return getComposerData(db);
-  budget.admitDecodedValue(Buffer.byteLength(raw.value));
-  throwIfMigrationAborted(guard.signal);
-
-  // Decode the exact value that was admitted above. Calling getComposerData()
-  // here would issue a second, uncharged SELECT and could observe a different
-  // value between admission and use.
-  return decodeComposerDataValue(raw.value);
+  const value = readBoundedComposerValueByKey(
+    db,
+    'ItemTable',
+    'composer.composerData',
+    budget,
+    guard.signal
+  );
+  return decodeComposerDataValue(value);
 }
 
 function canonicalizeForHash(value: unknown): unknown {
@@ -690,23 +693,39 @@ async function resolveMigrationWorkspacePath(
   guard: MigrationReadGuard
 ): Promise<string | undefined> {
   if (!requested) return undefined;
-  const normalizedRequest = normalizedPathKey(requested);
-  const workspaces = await findWorkspaces(dataPath, undefined, {
-    sqliteDriver: guard.sqliteDriver,
-    sourceReadLimits: guard.limits,
-    signal: guard.signal,
-  });
-  const exact = workspaces.find((workspace) => pathsEqual(workspace.path, normalizedRequest));
-  if (exact) return normalizePath(exact.path);
+  const basePath = getCursorDataPath(dataPath);
+  const workspacePaths: string[] = [];
+  if (existsSync(basePath)) {
+    let entries: Dirent<string>[];
+    try {
+      entries = readdirSync(basePath, { withFileTypes: true });
+    } catch (error) {
+      if (
+        isSessionIntegrityError(error) ||
+        (error instanceof Error && error.name === 'AbortError')
+      ) {
+        throw error;
+      }
+      // The subsequent occurrence inventory is the authority for destructive
+      // eligibility and will convert an incomplete corpus into the typed
+      // incomplete-composer-inventory refusal. Do not decode session/pointer
+      // payload merely to normalize a workspace selector.
+      const fallback = resolveWorkspaceScope(requested, []);
+      return fallback.kind === 'not-found' ? fallback.normalizedRequest : fallback.path;
+    }
 
-  const suffix = normalizedRequest.replace(/^\/+/, '');
-  const matches = workspaces.filter((workspace) => {
-    const candidate = normalizedPathKey(workspace.path);
-    return candidate === suffix || candidate.endsWith(`/${suffix}`);
-  });
-  const uniquePaths = [...new Set(matches.map((workspace) => normalizePath(workspace.path)))];
-  if (uniquePaths.length > 1) throw new WorkspaceAmbiguityError(requested, uniquePaths);
-  return uniquePaths[0] ?? normalizePath(requested);
+    for (const entry of entries) {
+      throwIfMigrationAborted(guard.signal);
+      if (!entry.isDirectory()) continue;
+      const workspaceDirectory = join(basePath, entry.name);
+      if (!existsSync(join(workspaceDirectory, 'state.vscdb'))) continue;
+      const workspacePath = readWorkspaceJson(workspaceDirectory);
+      if (workspacePath) workspacePaths.push(normalizePath(workspacePath));
+    }
+  }
+
+  const resolution = resolveWorkspaceScope(requested, workspacePaths);
+  return resolution.kind === 'matched' ? resolution.path : resolution.normalizedRequest;
 }
 
 async function findMigrationWorkspaceByPath(
@@ -777,17 +796,11 @@ async function preflightComposerSourceLimits(
     const budget = new SqliteSourceReadBudget(limits, 'fatal');
     const db = await openDatabase(databasePath, { sqliteDriver, signal });
     try {
-      const metadata = db
-        .prepare(
-          "SELECT length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key = 'composer.composerData'"
-        )
-        .all() as Array<{ valueBytes: number }>;
-      budget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
-      if (metadata.length === 0) continue;
-      const row = db
-        .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
-        .get() as { value: string } | undefined;
-      if (row) budget.admitDecodedValue(Buffer.byteLength(row.value));
+      try {
+        readBoundedComposerValueByKey(db, 'ItemTable', 'composer.composerData', budget, signal);
+      } catch (error) {
+        if (!isMissingMigrationTableError(error, 'ItemTable')) throw error;
+      }
     } finally {
       db.close();
     }
@@ -839,7 +852,13 @@ async function collectComposerOccurrences(
         sourceReadLimits: guard.limits,
         signal: guard.signal,
       });
-      const result = getComposerDataBounded(db, guard);
+      let result: ComposerDataResult | null;
+      try {
+        result = getComposerDataBounded(db, guard);
+      } catch (error) {
+        if (isMissingMigrationTableError(error, 'ItemTable')) continue;
+        throw error;
+      }
       const pointerBudget = new SqliteSourceReadBudget(guard.limits, 'fatal');
       result?.composers.forEach((composer, composerIndex) => {
         if (composer.composerId !== sessionId) return;
@@ -854,36 +873,19 @@ async function collectComposerOccurrences(
         });
       });
 
-      let afterKey = '';
-      while (true) {
-        throwIfMigrationAborted(guard.signal);
-        const metadata = db
-          .prepare(
-            "SELECT key, length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key LIKE '%composerChatViewPane%' AND key > ? ORDER BY key LIMIT ?"
-          )
-          .all(afterKey, guard.limits.sqlitePageRows) as Array<{
-          key: string;
-          valueBytes: number;
-        }>;
-        pointerBudget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
-        if (metadata.length === 0) break;
-        for (const row of metadata) {
-          throwIfMigrationAborted(guard.signal);
-          const payload = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(row.key) as
-            { value: string } | undefined;
-          if (!payload) {
-            complete = false;
-            continue;
-          }
-          pointerBudget.admitDecodedValue(Buffer.byteLength(payload.value));
-          const pointerText = `${row.key}\n${payload.value}`.toLowerCase();
+      forEachBoundedComposerValue(
+        db,
+        'ItemTable',
+        '%composerChatViewPane%',
+        pointerBudget,
+        (row) => {
+          const pointerText = `${row.key}\n${row.value}`.toLowerCase();
           if (pointerText.includes(sessionId.toLowerCase())) {
             pointerMembershipPaths.add(workspacePath);
           }
-        }
-        afterKey = metadata[metadata.length - 1]!.key;
-        if (metadata.length < guard.limits.sqlitePageRows) break;
-      }
+        },
+        guard.signal
+      );
     } catch (error) {
       if (
         isSessionIntegrityError(error) ||
@@ -921,7 +923,12 @@ async function readGlobalSessionRows(
     signal: guard.signal,
   });
   try {
-    return readGlobalSessionRowsFromDatabase(sessionId, db, guard);
+    try {
+      return readGlobalSessionRowsFromDatabase(sessionId, db, guard);
+    } catch (error) {
+      if (isMissingMigrationTableError(error, 'cursorDiskKV')) return [];
+      throw error;
+    }
   } finally {
     db.close();
   }
@@ -935,23 +942,25 @@ function readGlobalSessionRowsFromDatabase(
   const rows: GlobalSessionRow[] = [];
   const budget = new SqliteSourceReadBudget(guard.limits, 'fatal');
   let afterKey = '';
+  const bubblePattern = `bubbleId:${sqliteLikeLiteralPrefix(sessionId)}:%`;
   while (true) {
     throwIfMigrationAborted(guard.signal);
     const metadata = db
       .prepare(
-        'SELECT key, length(CAST(value AS BLOB)) AS valueBytes FROM cursorDiskKV WHERE (key = ? OR key LIKE ?) AND key > ? ORDER BY key LIMIT 1'
+        `SELECT key FROM cursorDiskKV WHERE (key = ? OR key LIKE ? ESCAPE '\\') AND key > ? ORDER BY key LIMIT 1`
       )
-      .get(`composerData:${sessionId}`, `bubbleId:${sessionId}:%`, afterKey) as
-      { key: string; valueBytes: number } | undefined;
+      .get(`composerData:${sessionId}`, bubblePattern, afterKey) as { key: string } | undefined;
     if (!metadata) break;
-    budget.admitMetadataPage([Number(metadata.valueBytes)]);
     throwIfMigrationAborted(guard.signal);
-    const row = db
-      .prepare('SELECT key, value FROM cursorDiskKV WHERE key = ?')
-      .get(metadata.key) as GlobalSessionRow | undefined;
-    if (!row) throw new MigrationTargetChangedError(sessionId);
-    budget.admitDecodedValue(Buffer.byteLength(row.value));
-    rows.push(row);
+    const value = readBoundedComposerValueByKey(
+      db,
+      'cursorDiskKV',
+      metadata.key,
+      budget,
+      guard.signal
+    );
+    if (value === undefined) throw new MigrationTargetChangedError(sessionId);
+    rows.push({ key: metadata.key, value });
     afterKey = metadata.key;
   }
   return rows;
@@ -1175,10 +1184,19 @@ function inspectStoreSessionIdMetadataOnly(
   try {
     const chats = join(storeRoot, 'chats');
     if (existsSync(chats)) {
+      const compactSessionId = sessionId.replaceAll('-', '').toLowerCase();
       for (const hash of readdirSync(chats, { withFileTypes: true })) {
         throwIfMigrationAborted(signal);
         if (!hash.isDirectory()) continue;
-        const sessionEntries = readdirSync(join(chats, hash.name), { withFileTypes: true });
+        const hashPath = join(chats, hash.name);
+        if (
+          /^[0-9a-f]{32}$/iu.test(hash.name) &&
+          hash.name.toLowerCase() === compactSessionId &&
+          existsSync(join(hashPath, 'store.db'))
+        ) {
+          return { exists: true, complete: true };
+        }
+        const sessionEntries = readdirSync(hashPath, { withFileTypes: true });
         if (sessionEntries.some((entry) => entry.isDirectory() && entry.name === sessionId)) {
           return { exists: true, complete: true };
         }
@@ -1804,21 +1822,17 @@ function snapshotWorkspaceComposerRowFromDatabase(
 ): WorkspaceComposerRowSnapshot {
   throwIfMigrationAborted(guard.signal);
   const budget = new SqliteSourceReadBudget(guard.limits, 'fatal');
-  const metadata = db
-    .prepare(
-      "SELECT length(CAST(value AS BLOB)) AS valueBytes FROM ItemTable WHERE key = 'composer.composerData'"
-    )
-    .all() as Array<{ valueBytes: number }>;
-  budget.admitMetadataPage(metadata.map((row) => Number(row.valueBytes)));
-  throwIfMigrationAborted(guard.signal);
-  const row = db
-    .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
-    .get() as { value: string } | undefined;
-  if (row) budget.admitDecodedValue(Buffer.byteLength(row.value));
+  const value = readBoundedComposerValueByKey(
+    db,
+    'ItemTable',
+    'composer.composerData',
+    budget,
+    guard.signal
+  );
   return Object.freeze({
     databasePath,
     sqliteDriver: guard.sqliteDriver,
-    ...(row ? { value: row.value } : {}),
+    ...(value === undefined ? {} : { value }),
   });
 }
 

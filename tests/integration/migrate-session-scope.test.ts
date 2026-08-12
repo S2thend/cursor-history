@@ -341,6 +341,161 @@ describe.sequential('workspace-scoped migration selection', () => {
     expect(applied[0]?.sessionId).toBe(preview[0]?.sessionId);
   });
 
+  it('normalizes file URI and dot-segment workspace selectors before binding an index', async () => {
+    const fixture = newFixture();
+    const { sessionA, sessionB } = seedConflictingWorkspaceCorpus(fixture);
+    const destination = addDestination(fixture);
+    const workspaceFileUri = `file://${fixture.root}/workspaces/./discard/../a/`;
+    const before = mutationSnapshot(fixture);
+
+    const result = await migrateLibrarySession(
+      sessionConfig(fixture, destination, 1, {
+        workspace: workspaceFileUri,
+        dryRun: true,
+      })
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        success: true,
+        sessionId: sessionA.id,
+        sourceWorkspace: fixture.projectA,
+        dryRun: true,
+      }),
+    ]);
+    expect(result[0]?.sessionId).not.toBe(sessionB.id);
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
+  it('prefers an exact workspace match over another path with the same component suffix', async () => {
+    const fixture = newFixture();
+    const exactSession = composerSession(
+      fixture,
+      '13131313-0000-4000-8000-000000000016',
+      'Exact workspace target'
+    );
+    const shadowPath = join(fixture.root, 'shadow', fixture.projectA);
+    const suffixSession = composerSession(
+      fixture,
+      '14141414-0000-4000-8000-000000000016',
+      'Suffix-only workspace target',
+      shadowPath
+    );
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [exactSession]);
+    writeComposerWorkspaceSummary(fixture, 'workspace-b', shadowPath, [suffixSession]);
+    writeComposerGlobalSessions(fixture, [exactSession, suffixSession]);
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    const result = await migrateLibrarySession(
+      sessionConfig(fixture, destination, 1, {
+        workspace: fixture.projectA,
+        dryRun: true,
+      })
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        success: true,
+        sessionId: exactSession.id,
+        sourceWorkspace: fixture.projectA,
+        dryRun: true,
+      }),
+    ]);
+    expect(result[0]?.sessionId).not.toBe(suffixSession.id);
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
+  it('accepts an unambiguous complete-component workspace suffix', async () => {
+    const fixture = newFixture();
+    const { sessionA, sessionB } = seedConflictingWorkspaceCorpus(fixture);
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    const result = await migrateLibrarySession(
+      sessionConfig(fixture, destination, 1, {
+        workspace: join('workspaces', 'a'),
+        dryRun: true,
+      })
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        success: true,
+        sessionId: sessionA.id,
+        sourceWorkspace: fixture.projectA,
+        dryRun: true,
+      }),
+    ]);
+    expect(result[0]?.sessionId).not.toBe(sessionB.id);
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
+  it('refuses an ambiguous component suffix before performing migration writes', async () => {
+    const fixture = newFixture();
+    const leftPath = join(fixture.root, 'tenant-a', 'team', 'project');
+    const rightPath = join(fixture.root, 'tenant-b', 'team', 'project');
+    const leftSession = composerSession(
+      fixture,
+      '15151515-0000-4000-8000-000000000016',
+      'Left ambiguous target',
+      leftPath
+    );
+    const rightSession = composerSession(
+      fixture,
+      '16161616-0000-4000-8000-000000000016',
+      'Right ambiguous target',
+      rightPath
+    );
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', leftPath, [leftSession]);
+    writeComposerWorkspaceSummary(fixture, 'workspace-b', rightPath, [rightSession]);
+    writeComposerGlobalSessions(fixture, [leftSession, rightSession]);
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    await expectTypedRefusal(
+      migrateLibrarySession(
+        sessionConfig(fixture, destination, 1, {
+          workspace: join('team', 'project'),
+          dryRun: false,
+        })
+      ),
+      'WORKSPACE_AMBIGUOUS'
+    );
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
+  it('treats Windows drive and WSL mount spellings as the same workspace selector', async () => {
+    const fixture = newFixture();
+    const wslWorkspacePath = '/mnt/d/Team/Project';
+    const session = composerSession(
+      fixture,
+      '17171717-0000-4000-8000-000000000016',
+      'Cross-platform workspace target',
+      wslWorkspacePath
+    );
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', wslWorkspacePath, [session]);
+    writeComposerGlobalSessions(fixture, [session]);
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    const result = await migrateLibrarySession(
+      sessionConfig(fixture, destination, 1, {
+        workspace: 'D:\\TEAM\\discard\\..\\PROJECT\\',
+        dryRun: true,
+      })
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        success: true,
+        sessionId: session.id,
+        dryRun: true,
+      }),
+    ]);
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
   it('keeps unfiltered one-based numeric preview/apply behavior unchanged', async () => {
     const fixture = newFixture();
     const { sessionA, sessionB } = seedConflictingWorkspaceCorpus(fixture);
@@ -923,7 +1078,12 @@ describe.sequential('legacy and operation-bound migration regressions', () => {
     let abortedDuringInventory = false;
     const driver = hookedBetterSqliteDriver({
       beforeAll(_path, sql) {
-        if (abortedDuringInventory || !sql.includes('composerChatViewPane')) return;
+        if (
+          abortedDuringInventory ||
+          !sql.includes('FROM ItemTable') ||
+          !sql.includes('WHERE key LIKE ?')
+        )
+          return;
         abortedDuringInventory = true;
         controller.abort();
       },
@@ -1133,6 +1293,41 @@ describe.sequential('legacy and operation-bound migration regressions', () => {
 });
 
 describe.sequential('migration preparation policy', () => {
+  it('ignores an unrelated valid workspace database that has no ItemTable', async () => {
+    const fixture = newFixture();
+    const session = composerSession(
+      fixture,
+      'cececece-2222-4000-8000-000000000016',
+      'Missing unrelated ItemTable'
+    );
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [session]);
+    writeComposerGlobalSessions(fixture, [session]);
+    const unrelatedPath = writeComposerWorkspaceSummary(
+      fixture,
+      'workspace-b',
+      fixture.projectB,
+      []
+    );
+    const unrelated = new BetterSqlite3(unrelatedPath);
+    try {
+      unrelated.exec('DROP TABLE ItemTable; CREATE TABLE unrelated (value TEXT)');
+    } finally {
+      unrelated.close();
+    }
+    const destination = addDestination(fixture);
+
+    await expect(
+      migrateLibrarySession(
+        sessionConfig(fixture, destination, session.id, {
+          workspace: fixture.projectA,
+          dryRun: true,
+        })
+      )
+    ).resolves.toEqual([
+      expect.objectContaining({ success: true, sessionId: session.id, dryRun: true }),
+    ]);
+  });
+
   it('resets SQLite aggregate counters at each catalog and logical hydration boundary', async () => {
     const fixture = newFixture();
     const session = composerSession(
@@ -1598,6 +1793,50 @@ describe.sequential('migration preparation policy', () => {
     }
   });
 
+  it('rejects invalid UTF-8 in a prepared destination catalog before any write', async () => {
+    const pipeline = requireMigrationPipeline();
+    const fixture = newFixture();
+    const session = composerSession(
+      fixture,
+      'dededede-2222-4000-8000-000000000016',
+      'Invalid destination UTF-8'
+    );
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [session]);
+    writeComposerGlobalSessions(fixture, [session]);
+    const destination = addDestination(fixture);
+    const destinationPath = join(fixture.workspaceStorage, 'workspace-destination', 'state.vscdb');
+    const context = storage.createSessionReadContext(fixture.workspaceStorage);
+    try {
+      const [target] = await pipeline.bindMigrationTargets(
+        [session.id],
+        { numericBase: 1 },
+        context
+      );
+      const db = new BetterSqlite3(destinationPath);
+      try {
+        db.prepare("UPDATE ItemTable SET value = ? WHERE key = 'composer.composerData'").run(
+          Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d])
+        );
+      } finally {
+        db.close();
+      }
+      const before = mutationSnapshot(fixture);
+
+      await expect(
+        pipeline.prepareSessionMigration(target!, destination, {
+          mode: 'move',
+          dataPath: fixture.workspaceStorage,
+        })
+      ).rejects.toMatchObject({
+        code: 'SOURCE_ENCODING_INVALID',
+        details: { sourceKind: 'sqlite', outcome: 'fatal' },
+      });
+      expect(mutationSnapshot(fixture)).toBe(before);
+    } finally {
+      await (context as { dispose?: () => Promise<void> }).dispose?.();
+    }
+  });
+
   it('propagates malformed global payload errors instead of silently dropping hydration', async () => {
     const pipeline = requireMigrationPipeline();
     const fixture = newFixture();
@@ -1727,6 +1966,43 @@ describe.sequential('migration preparation policy', () => {
       await (context as { dispose?: () => Promise<void> }).dispose?.();
     }
   });
+
+  it('rejects a generated copy UUID that collides with the compact chats layout', async () => {
+    const pipeline = requireMigrationPipeline();
+    const fixture = newFixture();
+    const { sessionA } = seedConflictingWorkspaceCorpus(fixture);
+    const destination = addDestination(fixture);
+    const compactCollisionId = '55555555-0000-4000-8000-000000000016';
+    const uniqueCopyId = '66666666-0000-4000-8000-000000000016';
+    const compactStoreDir = join(
+      fixture.storeRoot,
+      'chats',
+      compactCollisionId.replaceAll('-', '')
+    );
+    mkdirSync(compactStoreDir, { recursive: true });
+    writeFileSync(join(compactStoreDir, 'store.db'), 'metadata-only collision marker');
+    const context = storage.createSessionReadContext(fixture.workspaceStorage);
+    let calls = 0;
+    try {
+      const [target] = await pipeline.bindMigrationTargets(
+        [sessionA.id],
+        { numericBase: 1 },
+        context
+      );
+      const prepared = await pipeline.prepareSessionMigration(target!, destination, {
+        mode: 'copy',
+        dataPath: fixture.workspaceStorage,
+        uuidFactory: () => [compactCollisionId, uniqueCopyId][calls++]!,
+      });
+
+      expect(calls).toBe(2);
+      expect((prepared as { proposedCopySessionId?: string }).proposedCopySessionId).toBe(
+        uniqueCopyId
+      );
+    } finally {
+      await (context as { dispose?: () => Promise<void> }).dispose?.();
+    }
+  });
 });
 
 describe.sequential('ambiguous and unsupported migration targets', () => {
@@ -1835,6 +2111,32 @@ describe.sequential('ambiguous and unsupported migration targets', () => {
     expect(mutationSnapshot(fixture)).toBe(before);
   });
 
+  it('rejects a Composer target whose Store counterpart uses the compact chats layout', async () => {
+    const fixture = newFixture();
+    const session = composerSession(
+      fixture,
+      'abababab-1111-4000-8000-000000000016',
+      'Compact Store counterpart'
+    );
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [session]);
+    writeComposerGlobalSessions(fixture, [session]);
+    const compactStoreDir = join(fixture.storeRoot, 'chats', session.id.replaceAll('-', ''));
+    mkdirSync(compactStoreDir, { recursive: true });
+    writeFileSync(join(compactStoreDir, 'store.db'), 'metadata-only collision marker');
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    await expect(
+      migrateLibrarySession(
+        sessionConfig(fixture, destination, session.id, { workspace: fixture.projectA })
+      )
+    ).rejects.toMatchObject({
+      code: 'UNSUPPORTED_SESSION_MIGRATION',
+      details: expect.objectContaining({ eligibility: 'merged' }),
+    });
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
   it('rejects a global-only UUID whose pointer footprint is shared by two workspaces', async () => {
     const fixture = newFixture();
     const session = composerSession(
@@ -1920,7 +2222,11 @@ describe.sequential('ambiguous and unsupported migration targets', () => {
     const workspaceBPath = join(fixture.workspaceStorage, 'workspace-b', 'state.vscdb');
     const driver = hookedBetterSqliteDriver({
       beforeAll(path, sql) {
-        if (path === workspaceBPath && sql.includes('composerChatViewPane')) {
+        if (
+          path === workspaceBPath &&
+          sql.includes('FROM ItemTable') &&
+          sql.includes('WHERE key LIKE ?')
+        ) {
           throw new Error('synthetic pointer inventory failure');
         }
       },
