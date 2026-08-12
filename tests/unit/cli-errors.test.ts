@@ -15,6 +15,8 @@ import {
   SessionAmbiguityError,
   SourceLimitConfigurationError,
   SourceLimitExceededError,
+  SourceEncodingError,
+  WorkspaceAmbiguityError,
 } from '../../src/core/errors.js';
 
 afterEach(() => {
@@ -142,6 +144,19 @@ describe('handleError', () => {
     });
   });
 
+  it('prints safe candidates and a remedy for ambiguous workspace input', () => {
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    handleError(new WorkspaceAmbiguityError('project', ['/work/b/project', '/work/a/project']));
+
+    expect(mockExit).toHaveBeenCalledWith(ExitCode.GENERAL_ERROR);
+    expect(consoleError).toHaveBeenCalledWith('Candidates:\n  /work/a/project\n  /work/b/project');
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('Remedy: Use a longer component-aligned suffix')
+    );
+  });
+
   it('preserves locked legacy fields while adding a stable code', () => {
     const output = formatFatalJson(
       new CliError('Cursor data not found', ExitCode.NOT_FOUND, undefined, undefined, {
@@ -154,6 +169,28 @@ describe('handleError', () => {
       error: 'Cursor data not found',
       path: '/fixture/v017/missing-data',
       code: 'CLI_NOT_FOUND',
+    });
+  });
+
+  it('never overwrites released code or details fields in a legacy envelope', () => {
+    const output = formatFatalJson(
+      new CliError(
+        'released',
+        ExitCode.GENERAL_ERROR,
+        'NEW_CODE',
+        { remedy: 'new remedy' },
+        {
+          error: 'released',
+          code: 'RELEASED_CODE',
+          details: { released: true },
+        }
+      )
+    );
+
+    expect(JSON.parse(output)).toEqual({
+      error: 'released',
+      code: 'RELEASED_CODE',
+      details: { released: true },
     });
   });
 
@@ -203,6 +240,10 @@ describe('feature-016 typed error mapping', () => {
     );
     expect(exceeded.exitCode).toBe(ExitCode.IO_ERROR);
     expect(exceeded.details?.['observedAtLeast']).toBe(200.5);
+
+    const encoding = mapSessionIntegrityError(new SourceEncodingError('jsonl', 'fatal'));
+    expect(encoding.code).toBe('SOURCE_ENCODING_INVALID');
+    expect(encoding.exitCode).toBe(ExitCode.IO_ERROR);
   });
 
   it('keeps ambiguity details opaque and content-free', () => {
@@ -210,7 +251,7 @@ describe('feature-016 typed error mapping', () => {
       new SessionAmbiguityError('session-1', ['occurrence:b', 'occurrence:a'])
     );
     expect(mapped.code).toBe('SESSION_AMBIGUOUS');
-    expect(mapped.details?.['occurrenceRefs']).toEqual(['occurrence:a', 'occurrence:b']);
+    expect(mapped.details?.['occurrenceRefs']).toEqual(['occurrence:b', 'occurrence:a']);
     expect(JSON.stringify(mapped.details)).not.toContain('/private/source');
   });
 });

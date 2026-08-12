@@ -4,11 +4,18 @@
 
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { searchSessions } from '../../core/storage.js';
+import { createSessionReadContext, searchSessions } from '../../core/storage.js';
+import type { SourceReadLimitsOverride } from '../../core/types.js';
 import { validateBackup } from '../../core/backup.js';
-import { formatSearchResultsTable, formatSearchResultsJson } from '../formatters/index.js';
-import { NoSearchResultsError, handleError } from '../errors.js';
+import {
+  formatSearchResultsTable,
+  formatSearchResultsJson,
+  formatOperationDiagnostics,
+} from '../formatters/index.js';
+import { NoSearchResultsError, handleCommandError, handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
+import { createCliDiagnosticCollector } from '../diagnostics.js';
 
 interface SearchCommandOptions {
   limit?: string;
@@ -34,68 +41,127 @@ export function registerSearchCommand(program: Command): void {
         json?: boolean;
         dataPath?: string;
         workspace?: string;
+        includeCrossWorkspaceSources?: boolean;
+        sourceLimit?: SourceReadLimitsOverride;
       };
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
       const workspaceFilter = options.workspace ?? globalOptions?.workspace;
       const backupPath = options.backup ? expandPath(options.backup) : undefined;
+      const expandedPath = customPath ? expandPath(customPath) : undefined;
+      const includeCrossWorkspaceSources = globalOptions?.includeCrossWorkspaceSources ?? false;
 
       const limit = parseInt(options.limit ?? '10', 10);
       const contextChars = parseInt(options.context ?? '50', 10);
 
-      // T036: Validate backup if searching from backup
-      if (backupPath) {
-        const validation = await validateBackup(backupPath);
-        if (validation.status === 'invalid') {
-          if (useJson) {
-            console.log(JSON.stringify({ error: 'Invalid backup', errors: validation.errors }));
-          } else {
-            console.error(pc.red('Invalid backup file:'));
-            for (const err of validation.errors) {
-              console.error(pc.dim(`  ${err}`));
-            }
-          }
-          process.exit(3);
-        }
-        if (validation.status === 'warnings' && !useJson) {
-          console.error(
-            pc.yellow(
-              `Warning: Backup has integrity issues (${validation.corruptedFiles.length} corrupted files)`
-            )
-          );
-          console.error(pc.dim('Continuing with intact files...\n'));
-        }
-      }
-
       try {
-        const results = await searchSessions(
-          query,
-          { limit, contextChars, workspacePath: workspaceFilter },
-          customPath ? expandPath(customPath) : undefined,
-          backupPath
-        );
+        const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
 
-        if (results.length === 0) {
-          if (useJson) {
-            console.log(JSON.stringify({ query, count: 0, totalMatches: 0, results: [] }));
-          } else {
-            throw new NoSearchResultsError(query);
+        // T036: Validate backup if searching from backup. The CLI policy is frozen before this
+        // first carrier read and then reused by every nested operation.
+        if (backupPath) {
+          const validation = await validateBackup(backupPath, { sourceReadLimits });
+          if (validation.status === 'invalid') {
+            if (useJson) {
+              handleCommandError(new Error('Invalid backup'), {
+                json: true,
+                exitCode: ExitCode.NOT_FOUND,
+                legacyJson: { error: 'Invalid backup', errors: validation.errors },
+              });
+            } else {
+              console.error(pc.red('Invalid backup file:'));
+              for (const err of validation.errors) {
+                console.error(pc.dim(`  ${err}`));
+              }
+            }
+            process.exit(3);
           }
-          return;
+          if (validation.status === 'warnings' && !useJson) {
+            console.error(
+              pc.yellow(
+                `Warning: Backup has integrity issues (${validation.corruptedFiles.length} corrupted files)`
+              )
+            );
+            console.error(pc.dim('Continuing with intact files...\n'));
+          }
         }
 
-        // Show backup source indicator if searching from backup
-        if (backupPath && !useJson) {
-          console.log(pc.dim(`Searching in backup: ${contractPath(backupPath)}\n`));
-        }
+        const diagnosticCollector = createCliDiagnosticCollector();
+        const context = createSessionReadContext({
+          dataPath: expandedPath,
+          backupPath,
+          workspacePath: workspaceFilter,
+          ...(includeCrossWorkspaceSources ? { includeCrossWorkspaceSources: true } : {}),
+          resolvedSessionCapacity: 0,
+          sourceReadLimits,
+          onDiagnostic: diagnosticCollector.onDiagnostic,
+        });
+        try {
+          const results = await searchSessions(
+            query,
+            {
+              limit,
+              contextChars,
+              workspacePath: workspaceFilter,
+              ...(includeCrossWorkspaceSources ? { includeCrossWorkspaceSources: true } : {}),
+              ...(sourceReadLimits ? { sourceReadLimits } : {}),
+            },
+            expandedPath,
+            backupPath,
+            context
+          );
 
-        if (useJson) {
-          console.log(formatSearchResultsJson(results, query));
-        } else {
-          console.log(formatSearchResultsTable(results, query));
+          const indexScope = workspaceFilter ? 'workspace' : 'global';
+          const indexWorkspacePath = workspaceFilter
+            ? (context.logicalSummaries?.find((summary) => summary.resolutionState !== 'ambiguous')
+                ?.indexWorkspacePath ??
+              context.workspaceScope ??
+              expandPath(workspaceFilter))
+            : undefined;
+          const jsonOptions = {
+            indexScope,
+            ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
+            diagnostics: diagnosticCollector.diagnostics,
+          } as const;
+
+          if (results.length === 0) {
+            if (useJson) {
+              console.log(formatSearchResultsJson([], query, jsonOptions));
+            } else if (diagnosticCollector.diagnostics.length > 0) {
+              console.log(
+                [
+                  formatSearchResultsTable([], query),
+                  formatOperationDiagnostics(diagnosticCollector.diagnostics),
+                ].join('\n\n')
+              );
+            } else {
+              throw new NoSearchResultsError(query);
+            }
+            return;
+          }
+
+          // Show backup source indicator if searching from backup
+          if (backupPath && !useJson) {
+            console.log(pc.dim(`Searching in backup: ${contractPath(backupPath)}\n`));
+          }
+
+          if (useJson) {
+            console.log(formatSearchResultsJson(results, query, jsonOptions));
+          } else {
+            console.log(
+              [
+                formatSearchResultsTable(results, query),
+                formatOperationDiagnostics(diagnosticCollector.diagnostics),
+              ]
+                .filter(Boolean)
+                .join('\n\n')
+            );
+          }
+        } finally {
+          await context.dispose();
         }
       } catch (error) {
-        handleError(error);
+        handleError(error, { json: useJson });
       }
     });
 }

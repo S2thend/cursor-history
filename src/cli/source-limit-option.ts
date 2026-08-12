@@ -20,12 +20,20 @@ const BYTE_FIELDS = new Set<SourceReadLimitField>([
 const FIELD_SET = new Set<string>(SOURCE_READ_LIMIT_FIELDS);
 const IEC_MULTIPLIERS: Readonly<Record<string, bigint>> = Object.freeze({
   '': 1n,
-  B: 1n,
   KiB: 1_024n,
   MiB: 1_048_576n,
   GiB: 1_073_741_824n,
-  TiB: 1_099_511_627_776n,
 });
+
+/** Closed registry used by CLI coverage to detect unvalidated Source Read Limits fields. */
+export const CLI_SOURCE_LIMIT_REGISTRY = Object.freeze(
+  SOURCE_READ_LIMIT_FIELDS.map((field) =>
+    Object.freeze({
+      field,
+      valueKind: BYTE_FIELDS.has(field) ? ('bytes' as const) : ('integer' as const),
+    })
+  )
+);
 
 export type CliSourceLimitOverrides = Readonly<SourceReadLimitsOverride>;
 
@@ -34,7 +42,7 @@ function invalid(field: string, value: unknown, constraint: string): never {
 }
 
 function parsePositiveSafeInteger(field: SourceReadLimitField, rawValue: string): number {
-  const match = rawValue.match(/^(0|[1-9]\d*)(B|KiB|MiB|GiB|TiB)?$/u);
+  const match = rawValue.match(/^(0|[1-9]\d*)(KiB|MiB|GiB)?$/u);
   if (!match) invalid(field, rawValue, 'must be a positive integer or documented IEC byte size');
 
   const suffix = match[2] ?? '';
@@ -77,4 +85,39 @@ export function resolveCliSourceReadLimits(
   overrides?: CliSourceLimitOverrides
 ): Readonly<SourceReadLimitsV1> {
   return resolveSourceReadLimits(overrides);
+}
+
+/** Validate and freeze the sparse CLI override while preserving omission/default inheritance. */
+export function validateCliSourceLimitOverrides(
+  overrides?: CliSourceLimitOverrides
+): CliSourceLimitOverrides | undefined {
+  resolveCliSourceReadLimits(overrides);
+  return overrides === undefined ? undefined : Object.freeze({ ...overrides });
+}
+
+/**
+ * Validate every source-limit assignment in an argv vector before command loading or payload I/O.
+ * Commander still owns normal option parsing; this pass preserves the typed usage error and also
+ * validates cross-field relationships before a command action can open a source.
+ */
+export function validateCliSourceLimitArguments(
+  argv: readonly string[]
+): Readonly<SourceReadLimitsV1> {
+  let overrides: CliSourceLimitOverrides = Object.freeze({});
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    if (argument === '--') break;
+    let assignment: string | undefined;
+    if (argument === '--source-limit') {
+      assignment = argv[index + 1];
+      if (assignment === undefined || assignment.startsWith('-')) {
+        invalid('sourceReadLimits', assignment, 'requires one field=value assignment');
+      }
+      index += 1;
+    } else if (argument.startsWith('--source-limit=')) {
+      assignment = argument.slice('--source-limit='.length);
+    }
+    if (assignment !== undefined) overrides = parseSourceLimitOption(assignment, overrides);
+  }
+  return resolveCliSourceReadLimits(overrides);
 }

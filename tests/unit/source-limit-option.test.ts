@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import { SourceLimitConfigurationError } from '../../src/core/errors.js';
 import {
+  CLI_SOURCE_LIMIT_REGISTRY,
   parseSourceLimitOption,
   resolveCliSourceReadLimits,
+  validateCliSourceLimitArguments,
+  validateCliSourceLimitOverrides,
 } from '../../src/cli/source-limit-option.js';
+import { SOURCE_READ_LIMIT_FIELDS } from '../../src/core/source-read-limits.js';
 
 describe('repeatable CLI source-limit parsing', () => {
   it('parses decimal counts and IEC byte sizes without mutating prior accumulators', () => {
@@ -28,6 +32,8 @@ describe('repeatable CLI source-limit parsing', () => {
     'jsonlRecordBytes=1=2',
     'jsonlRecordBytes=0',
     'jsonlRecordBytes=1MB',
+    'jsonlRecordBytes=1B',
+    'jsonlRecordBytes=1TiB',
     'jsonlRecordCount=1KiB',
     'zipCompressionRatio=1.5',
     'zipEntryCount=9007199254740992',
@@ -55,5 +61,56 @@ describe('repeatable CLI source-limit parsing', () => {
     expect(resolved.sqlitePageRows).toBe(512);
     expect(resolved.sqliteRowCount).toBe(5_000_000);
     expect(Object.isFrozen(resolved)).toBe(true);
+  });
+
+  it('keeps the sparse operation override immutable after validating effective defaults', () => {
+    const input = { sqliteRowCount: 6_000_000 };
+    const validated = validateCliSourceLimitOverrides(input);
+    input.sqliteRowCount = 7_000_000;
+
+    expect(validated).toEqual({ sqliteRowCount: 6_000_000 });
+    expect(Object.isFrozen(validated)).toBe(true);
+    expect(validateCliSourceLimitOverrides(undefined)).toBeUndefined();
+  });
+
+  it('prevalidates separated and equals-form argv assignments including relationships', () => {
+    const resolved = validateCliSourceLimitArguments([
+      '--source-limit',
+      'jsonlRecordBytes=128MiB',
+      '--source-limit=jsonlRecordCount=3000000',
+      'list',
+    ]);
+    expect(resolved.jsonlRecordBytes).toBe(134_217_728);
+    expect(resolved.jsonlRecordCount).toBe(3_000_000);
+
+    expect(() =>
+      validateCliSourceLimitArguments([
+        '--source-limit=zipEntryBytes=2GiB',
+        '--source-limit=zipAggregateBytes=1GiB',
+        'backup',
+      ])
+    ).toThrow(SourceLimitConfigurationError);
+
+    expect(() =>
+      validateCliSourceLimitArguments(['search', '--', '--source-limit=not-an-option'])
+    ).not.toThrow();
+  });
+
+  it.each([
+    ['missing value', ['--source-limit']],
+    ['missing assignment before another option', ['--source-limit', '--json', 'list']],
+    ['duplicate field', ['--source-limit=zipEntryCount=10', '--source-limit', 'zipEntryCount=11']],
+    ['unknown field', ['--source-limit=noSuchField=1']],
+    ['policyVersion', ['--source-limit=policyVersion=1']],
+    ['unsafe range', ['--source-limit=zipEntryCount=9007199254740992']],
+  ])('rejects %s during argv preflight', (_label, argv) => {
+    expect(() => validateCliSourceLimitArguments(argv)).toThrow(SourceLimitConfigurationError);
+  });
+
+  it('keeps the CLI registry closed over every policy field exactly once', () => {
+    expect(CLI_SOURCE_LIMIT_REGISTRY.map(({ field }) => field)).toEqual(SOURCE_READ_LIMIT_FIELDS);
+    expect(new Set(CLI_SOURCE_LIMIT_REGISTRY.map(({ field }) => field)).size).toBe(
+      SOURCE_READ_LIMIT_FIELDS.length
+    );
   });
 });

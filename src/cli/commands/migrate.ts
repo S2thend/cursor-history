@@ -22,6 +22,8 @@ import {
 } from '../../lib/errors.js';
 import type { MigrationMode, WorkspaceMigrationResult } from '../../core/types.js';
 import type { SourceReadLimitsOverride } from '../../core/types.js';
+import { handleCommandError } from '../errors.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 
 interface MigrateOptions {
   dryRun?: boolean;
@@ -52,6 +54,7 @@ export function registerMigrateCommand(program: Command): void {
       const jsonOutput = globalOptions.json || options.json;
 
       try {
+        const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions.sourceLimit);
         // Expand ~ in paths
         const source = expandPath(sourceArg);
         const destination = expandPath(destinationArg);
@@ -68,7 +71,7 @@ export function registerMigrateCommand(program: Command): void {
           force: options.force ?? false,
           dataPath,
           debug: options.debug ?? false,
-          sourceReadLimits: globalOptions.sourceLimit,
+          sourceReadLimits,
         });
 
         // Output results
@@ -83,12 +86,12 @@ export function registerMigrateCommand(program: Command): void {
           process.exit(1);
         }
       } catch (error) {
-        if (jsonOutput) {
-          console.log(JSON.stringify({ error: formatError(error) }, null, 2));
-        } else {
-          console.error(pc.red(formatError(error)));
-        }
-        process.exit(1);
+        const message = formatError(error);
+        handleCommandError(error, {
+          json: jsonOutput,
+          message,
+          legacyJson: { error: message },
+        });
       }
     });
 }

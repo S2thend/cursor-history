@@ -11,11 +11,13 @@ import {
   filterMessages,
   validateMessageTypes,
 } from '../formatters/index.js';
-import { handleError } from '../errors.js';
+import { CliError, ExitCode, handleCommandError } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 import type { MessageType } from '../../core/types.js';
 import { MESSAGE_TYPES } from '../../core/types.js';
 import { resolveCommandSession } from './session-lookup.js';
+import type { SourceReadLimitsOverride } from '../../core/types.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 
 interface ShowCommandOptions {
   json?: boolean;
@@ -49,11 +51,20 @@ export function registerShowCommand(program: Command): void {
         json?: boolean;
         dataPath?: string;
         workspace?: string;
+        includeCrossWorkspaceSources?: boolean;
+        sourceLimit?: SourceReadLimitsOverride;
       };
       const useJson = options.json ?? globalOptions?.json ?? false;
       const customPath = options.dataPath ?? globalOptions?.dataPath;
       const workspaceFilter = globalOptions?.workspace;
       const backupPath = options.backup ? expandPath(options.backup) : undefined;
+      const includeCrossWorkspaceSources = globalOptions?.includeCrossWorkspaceSources ?? false;
+      let sourceReadLimits;
+      try {
+        sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
+      } catch (error) {
+        handleCommandError(error, { json: useJson });
+      }
 
       // Only treat arg as index when the entire string is digits
       const identifier: number | string = /^\d+$/.test(indexArg!)
@@ -62,7 +73,13 @@ export function registerShowCommand(program: Command): void {
 
       // CLI uses 1-based index; 0 is invalid
       if (typeof identifier === 'number' && identifier < 1) {
-        handleError(new Error(`Invalid index: ${indexArg}. Must be a positive number.`));
+        handleCommandError(
+          new CliError(
+            `Invalid index: ${indexArg}. Must be a positive number.`,
+            ExitCode.GENERAL_ERROR
+          ),
+          { json: useJson }
+        );
       }
 
       // Parse and validate message type filter
@@ -71,26 +88,34 @@ export function registerShowCommand(program: Command): void {
         const types = options.only.split(',').map((t) => t.trim().toLowerCase());
         const invalidTypes = validateMessageTypes(types);
         if (invalidTypes.length > 0) {
-          console.error(pc.red(`Invalid message type(s): ${invalidTypes.join(', ')}`));
-          console.error(`Valid types: ${MESSAGE_TYPES.join(', ')}`);
-          process.exit(1);
+          handleCommandError(
+            new CliError(
+              `Invalid message type(s): ${invalidTypes.join(', ')}\nValid types: ${MESSAGE_TYPES.join(', ')}`,
+              ExitCode.GENERAL_ERROR
+            ),
+            { json: useJson }
+          );
         }
         messageFilter = types as MessageType[];
       }
 
       // T035: Validate backup if reading from backup
       if (backupPath) {
-        const validation = await validateBackup(backupPath);
+        const validation = await validateBackup(backupPath, { sourceReadLimits });
         if (validation.status === 'invalid') {
           if (useJson) {
-            console.log(JSON.stringify({ error: 'Invalid backup', errors: validation.errors }));
+            handleCommandError(new Error('Invalid backup'), {
+              json: true,
+              exitCode: ExitCode.NOT_FOUND,
+              legacyJson: { error: 'Invalid backup', errors: validation.errors },
+            });
           } else {
             console.error(pc.red('Invalid backup file:'));
             for (const err of validation.errors) {
               console.error(pc.dim(`  ${err}`));
             }
           }
-          process.exit(3);
+          process.exit(ExitCode.NOT_FOUND);
         }
         if (validation.status === 'warnings' && !useJson) {
           console.error(
@@ -108,7 +133,8 @@ export function registerShowCommand(program: Command): void {
           identifier,
           workspaceFilter,
           expanded,
-          backupPath
+          backupPath,
+          { includeCrossWorkspaceSources, sourceReadLimits }
         );
 
         // Show backup source indicator if reading from backup
@@ -139,7 +165,7 @@ export function registerShowCommand(program: Command): void {
           );
         }
       } catch (error) {
-        handleError(error);
+        handleCommandError(error, { json: useJson });
       }
     });
 }

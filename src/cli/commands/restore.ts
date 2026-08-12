@@ -7,8 +7,9 @@ import pc from 'picocolors';
 import { existsSync } from 'node:fs';
 import { restoreBackup, validateBackup } from '../../core/backup.js';
 import type { RestoreProgress, RestoreResult, SourceReadLimitsOverride } from '../../core/types.js';
-import { handleError, ExitCode } from '../errors.js';
+import { CliError, handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 
 interface RestoreCommandOptions {
   target?: string;
@@ -126,10 +127,17 @@ export function registerRestoreCommand(program: Command): void {
       const backupPath = expandPath(backupArg);
 
       try {
+        const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
         // T051: Check if backup file exists
         if (!existsSync(backupPath)) {
           if (useJson) {
-            console.log(JSON.stringify({ error: 'Backup file not found', path: backupPath }));
+            throw new CliError(
+              'Backup file not found',
+              ExitCode.USAGE_ERROR,
+              undefined,
+              undefined,
+              { error: 'Backup file not found', path: backupPath }
+            );
           } else {
             console.error(pc.red('Backup file not found:'));
             console.error(pc.dim(`  ${backupPath}`));
@@ -139,15 +147,16 @@ export function registerRestoreCommand(program: Command): void {
 
         // T052: Validate backup before attempting restore
         const validation = await validateBackup(backupPath, {
-          sourceReadLimits: globalOptions?.sourceLimit,
+          sourceReadLimits,
         });
         if (validation.status === 'invalid') {
           if (useJson) {
-            console.log(
-              JSON.stringify({
-                error: 'Invalid or corrupted backup',
-                errors: validation.errors,
-              })
+            throw new CliError(
+              'Invalid or corrupted backup',
+              ExitCode.NOT_FOUND,
+              undefined,
+              undefined,
+              { error: 'Invalid or corrupted backup', errors: validation.errors }
             );
           } else {
             console.error(pc.red('Invalid or corrupted backup file:'));
@@ -183,7 +192,7 @@ export function registerRestoreCommand(program: Command): void {
           backupPath,
           targetPath,
           force: options.force ?? false,
-          sourceReadLimits: globalOptions?.sourceLimit,
+          sourceReadLimits,
           onProgress,
         });
 
@@ -197,7 +206,13 @@ export function registerRestoreCommand(program: Command): void {
           // T053: Target exists without --force
           if (result.error?.includes('already has Cursor data')) {
             if (useJson) {
-              console.log(formatRestoreResultJson(result));
+              throw new CliError(
+                result.error ?? 'Target directory already has Cursor data.',
+                ExitCode.IO_ERROR,
+                undefined,
+                undefined,
+                JSON.parse(formatRestoreResultJson(result)) as Record<string, unknown>
+              );
             } else {
               console.error(pc.red('Target directory already has Cursor data.'));
               console.error(pc.dim('Use --force to overwrite existing data.'));
@@ -208,7 +223,13 @@ export function registerRestoreCommand(program: Command): void {
           // T054: Integrity check failures
           if (result.error?.includes('integrity') || result.error?.includes('checksum')) {
             if (useJson) {
-              console.log(formatRestoreResultJson(result));
+              throw new CliError(
+                result.error ?? 'Backup integrity check failed.',
+                ExitCode.INTEGRITY_ERROR,
+                undefined,
+                undefined,
+                JSON.parse(formatRestoreResultJson(result)) as Record<string, unknown>
+              );
             } else {
               console.error(pc.red('Backup integrity check failed.'));
               console.error(pc.dim(result.error));
@@ -218,7 +239,13 @@ export function registerRestoreCommand(program: Command): void {
 
           // Generic error
           if (useJson) {
-            console.log(formatRestoreResultJson(result));
+            throw new CliError(
+              result.error ?? 'Restore failed.',
+              ExitCode.GENERAL_ERROR,
+              undefined,
+              undefined,
+              JSON.parse(formatRestoreResultJson(result)) as Record<string, unknown>
+            );
           } else {
             console.error(formatRestoreResult(result));
           }
@@ -232,7 +259,7 @@ export function registerRestoreCommand(program: Command): void {
           console.log(formatRestoreResult(result));
         }
       } catch (error) {
-        handleError(error);
+        handleError(error, { json: useJson });
       }
     });
 }

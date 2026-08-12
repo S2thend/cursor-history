@@ -8,18 +8,117 @@ import type {
   ChatSession,
   SearchResult,
   MessageType,
+  IndexScope,
+  SessionDiagnostic,
+  LogicalSessionSummary,
 } from '../../core/types.js';
 import { getMessageType } from './table.js';
 import { serializeToolCall } from '../../core/parser.js';
 import { getPublicMessageTimestamp } from '../../core/timestamps.js';
 
+type JsonAddressingSource = Pick<
+  ChatSession,
+  | 'indexScope'
+  | 'indexWorkspacePath'
+  | 'canonicalWorkspacePath'
+  | 'matchedWorkspacePath'
+  | 'workspaceMatchKind'
+  | 'workspaceMemberships'
+  | 'sourceInstances'
+  | 'resolution'
+  | 'resolvedSource'
+  | 'messageIdentityVersion'
+> & { resolutionState?: ChatSessionSummary['resolutionState'] };
+
+export interface JsonEnvelopeOptions {
+  indexScope?: IndexScope;
+  indexWorkspacePath?: string;
+  diagnostics?: readonly SessionDiagnostic[];
+}
+
+export interface ExportedSessionFile {
+  index: number;
+  indexScope: IndexScope;
+  indexWorkspacePath?: string;
+  sessionId: string;
+  path: string;
+}
+
+function addDiagnostics(
+  output: Record<string, unknown>,
+  diagnostics: readonly SessionDiagnostic[] | undefined
+): void {
+  if (diagnostics && diagnostics.length > 0) {
+    output['diagnostics'] = diagnostics;
+  }
+}
+
+function structuredWorkspacePath(...candidates: Array<string | undefined>): string | null {
+  const selected = candidates.find(
+    (candidate) =>
+      candidate !== undefined &&
+      candidate.length > 0 &&
+      candidate !== 'unknown' &&
+      !candidate.startsWith('(')
+  );
+  return selected ?? null;
+}
+
+/** Copy only stable, locator-free addressing and resolution fields. */
+function addAddressingFields(output: Record<string, unknown>, source: JsonAddressingSource): void {
+  for (const field of [
+    'indexScope',
+    'indexWorkspacePath',
+    'canonicalWorkspacePath',
+    'matchedWorkspacePath',
+    'workspaceMatchKind',
+    'workspaceMemberships',
+    'sourceInstances',
+    'resolutionState',
+    'resolution',
+    'resolvedSource',
+    'messageIdentityVersion',
+  ] as const) {
+    const value = source[field];
+    if (value !== undefined) output[field] = value;
+  }
+}
+
 /**
  * Format sessions list as JSON
  */
-export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
-  const output = {
+export function formatSessionsJson(
+  sessions: LogicalSessionSummary[],
+  options: JsonEnvelopeOptions = {}
+): string {
+  const first = sessions[0];
+  const indexScope = options.indexScope ?? first?.indexScope ?? 'global';
+  const indexWorkspacePath =
+    indexScope === 'workspace'
+      ? (options.indexWorkspacePath ??
+        first?.indexWorkspacePath ??
+        first?.matchedWorkspacePath ??
+        (first && first.resolutionState !== 'ambiguous' ? first.workspacePath : undefined))
+      : undefined;
+  const output: Record<string, unknown> = {
     count: sessions.length,
+    indexScope,
+    ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
     sessions: sessions.map((s) => {
+      if (s.resolutionState === 'ambiguous') {
+        return {
+          index: s.index,
+          indexScope: s.indexScope,
+          ...(s.indexWorkspacePath ? { indexWorkspacePath: s.indexWorkspacePath } : {}),
+          id: s.id,
+          resolutionState: s.resolutionState,
+          sourceRoles: s.sourceRoles,
+          occurrenceCount: s.occurrenceCount,
+          diagnosticOccurrenceRefs: s.diagnosticOccurrenceRefs,
+          ...(s.canonicalWorkspacePath ? { canonicalWorkspacePath: s.canonicalWorkspacePath } : {}),
+          ...(s.matchedWorkspacePath ? { matchedWorkspacePath: s.matchedWorkspacePath } : {}),
+        };
+      }
       const obj: Record<string, unknown> = {
         index: s.index,
         id: s.id,
@@ -28,7 +127,7 @@ export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
         lastUpdatedAt: s.lastUpdatedAt.toISOString(),
         messageCount: s.messageCount,
         workspaceId: s.workspaceId,
-        workspacePath: s.workspacePath,
+        workspacePath: structuredWorkspacePath(s.canonicalWorkspacePath, s.workspacePath),
         preview: s.preview,
       };
       if (s.source !== undefined) {
@@ -49,9 +148,11 @@ export function formatSessionsJson(sessions: ChatSessionSummary[]): string {
       if (s.lastUpdatedAtSource !== undefined) {
         obj['lastUpdatedAtSource'] = s.lastUpdatedAtSource;
       }
+      addAddressingFields(obj, s);
       return obj;
     }),
   };
+  addDiagnostics(output, options.diagnostics);
 
   return JSON.stringify(output, null, 2);
 }
@@ -90,7 +191,11 @@ export function formatSessionJson(
     lastUpdatedAt: session.lastUpdatedAt.toISOString(),
     messageCount: originalMessageCount ?? session.messageCount,
     workspaceId: session.workspaceId,
-    workspacePath: workspacePath ?? null,
+    workspacePath: structuredWorkspacePath(
+      session.canonicalWorkspacePath,
+      workspacePath,
+      session.workspacePath
+    ),
   };
 
   if (session.source !== undefined) {
@@ -114,6 +219,7 @@ export function formatSessionJson(
   if (session.lastUpdatedAtSource !== undefined) {
     output['lastUpdatedAtSource'] = session.lastUpdatedAtSource;
   }
+  addAddressingFields(output, session);
 
   // Add filter metadata if filtering is active
   if (messageFilter && messageFilter.length > 0) {
@@ -157,6 +263,19 @@ export function formatSessionJson(
       })),
     };
 
+    if (m.messageIdentityVersion !== undefined) {
+      msg['messageIdentityVersion'] = m.messageIdentityVersion;
+    }
+    if (m.identityOrigin !== undefined) {
+      msg['identityOrigin'] = m.identityOrigin;
+    }
+    if (m.parentMessageId !== undefined) {
+      msg['parentMessageId'] = m.parentMessageId;
+    }
+    if (m.isSidechain !== undefined) {
+      msg['isSidechain'] = m.isSidechain;
+    }
+
     const messageTime = getPublicMessageTimestamp(m);
     msg['timestamp'] = messageTime.timestamp.toISOString();
     msg['timestampSource'] = messageTime.timestampSource;
@@ -197,13 +316,26 @@ export function formatSessionJson(
 /**
  * Format search results as JSON
  */
-export function formatSearchResultsJson(results: SearchResult[], query: string): string {
-  const output = {
+export function formatSearchResultsJson(
+  results: SearchResult[],
+  query: string,
+  options: JsonEnvelopeOptions = {}
+): string {
+  const indexScope = options.indexScope ?? 'global';
+  const indexWorkspacePath =
+    indexScope === 'workspace'
+      ? (options.indexWorkspacePath ?? results[0]?.workspacePath)
+      : undefined;
+  const output: Record<string, unknown> = {
     query,
     count: results.length,
     totalMatches: results.reduce((sum, r) => sum + r.matchCount, 0),
+    indexScope,
+    ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
     results: results.map((r) => ({
       index: r.index,
+      indexScope,
+      ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
       sessionId: r.sessionId,
       workspacePath: r.workspacePath,
       createdAt: r.createdAt.toISOString(),
@@ -215,6 +347,7 @@ export function formatSearchResultsJson(results: SearchResult[], query: string):
       })),
     })),
   };
+  addDiagnostics(output, options.diagnostics);
 
   return JSON.stringify(output, null, 2);
 }
@@ -222,11 +355,15 @@ export function formatSearchResultsJson(results: SearchResult[], query: string):
 /**
  * Format export result as JSON
  */
-export function formatExportResultJson(exported: { index: number; path: string }[]): string {
-  const output = {
+export function formatExportResultJson(
+  exported: readonly ExportedSessionFile[],
+  options: Pick<JsonEnvelopeOptions, 'diagnostics'> = {}
+): string {
+  const output: Record<string, unknown> = {
     count: exported.length,
     files: exported,
   };
+  addDiagnostics(output, options.diagnostics);
 
   return JSON.stringify(output, null, 2);
 }

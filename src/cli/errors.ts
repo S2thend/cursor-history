@@ -13,6 +13,7 @@ export const ExitCode = {
   USAGE_ERROR: 2, // Invalid arguments
   NOT_FOUND: 3, // Resource not found
   IO_ERROR: 4, // File/database access error
+  INTEGRITY_ERROR: 5, // Released restore checksum/integrity category
 } as const;
 
 export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
@@ -35,6 +36,16 @@ export type LegacyFatalJson = Readonly<Record<string, unknown>>;
 export interface HandleErrorOptions {
   /** Emit one machine-readable fatal object to stderr instead of human text. */
   readonly json?: boolean;
+}
+
+/** Options for adapting one command-owned legacy JSON failure to shared fatal handling. */
+export interface HandleCommandErrorOptions extends HandleErrorOptions {
+  /** Human-safe message, including any released v0.17 formatting. */
+  readonly message?: string;
+  /** Released category for an untyped legacy error. Typed integrity errors keep their category. */
+  readonly exitCode?: ExitCode;
+  /** Released v0.17 top-level JSON fields to preserve exactly. */
+  readonly legacyJson?: LegacyFatalJson;
 }
 
 /**
@@ -79,13 +90,19 @@ export function formatFatalJson(error: unknown): string {
   if (cliError instanceof CliError) {
     const envelope: Record<string, unknown> = {
       ...(cliError.legacyJson ?? { error: cliError.message }),
-      code: cliError.code ?? fallbackCode(cliError.exitCode),
     };
+    if (!Object.prototype.hasOwnProperty.call(envelope, 'code')) {
+      envelope['code'] = cliError.code ?? fallbackCode(cliError.exitCode);
+    }
     // A malformed legacy envelope must not suppress the required human-safe error field.
     if (typeof envelope['error'] !== 'string' || envelope['error'].length === 0) {
       envelope['error'] = cliError.message;
     }
-    if (cliError.details && Object.keys(cliError.details).length > 0) {
+    if (
+      cliError.details &&
+      Object.keys(cliError.details).length > 0 &&
+      !Object.prototype.hasOwnProperty.call(envelope, 'details')
+    ) {
       envelope['details'] = cliError.details;
     }
     return JSON.stringify(envelope, null, 2);
@@ -126,6 +143,47 @@ export function mapSessionIntegrityError(error: SessionIntegrityError): CliError
           : ExitCode.GENERAL_ERROR;
   return new CliError(error.message, exitCode, error.code, error.details);
 }
+
+/**
+ * Route a command-owned failure through the common serializer while retaining typed integrity
+ * codes/details and the command's released top-level JSON fields.
+ */
+export function handleCommandError(error: unknown, options: HandleCommandErrorOptions = {}): never {
+  const mapped =
+    error instanceof SessionIntegrityError
+      ? mapSessionIntegrityError(error)
+      : error instanceof CliError
+        ? error
+        : undefined;
+  const message =
+    options.message ??
+    mapped?.message ??
+    (error instanceof Error ? error.message : 'An unexpected error occurred');
+  const commandError = new CliError(
+    message,
+    mapped?.exitCode ?? options.exitCode ?? ExitCode.GENERAL_ERROR,
+    mapped?.code,
+    mapped?.details,
+    options.legacyJson ?? mapped?.legacyJson
+  );
+  return handleError(commandError, { json: options.json });
+}
+
+/** Closed fatal-category registry used by built-process coverage. */
+export const CLI_FATAL_CATEGORY_REGISTRY = Object.freeze({
+  general: Object.freeze({ exitCode: ExitCode.GENERAL_ERROR }),
+  usage: Object.freeze({ exitCode: ExitCode.USAGE_ERROR }),
+  notFound: Object.freeze({ exitCode: ExitCode.NOT_FOUND }),
+  io: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  integrity: Object.freeze({ exitCode: ExitCode.INTEGRITY_ERROR }),
+  commandLoading: Object.freeze({ exitCode: ExitCode.GENERAL_ERROR }),
+  unexpected: Object.freeze({ exitCode: ExitCode.GENERAL_ERROR }),
+  sourceLimitConfiguration: Object.freeze({ exitCode: ExitCode.USAGE_ERROR }),
+  sourceEncoding: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  sourceLimitExceeded: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  databaseCapability: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  temporaryArtifactCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+});
 
 /**
  * Error for when no Cursor installation is found
@@ -205,6 +263,14 @@ export function handleError(error: unknown, options: HandleErrorOptions = {}): n
       process.stderr.write(`${formatFatalJson(error)}\n`);
     } else {
       console.error(error.message);
+      const candidates = error.details?.['candidates'];
+      if (Array.isArray(candidates) && candidates.every((value) => typeof value === 'string')) {
+        console.error(`Candidates:\n${candidates.map((value) => `  ${value}`).join('\n')}`);
+      }
+      const remedy = error.details?.['remedy'];
+      if (typeof remedy === 'string' && remedy.length > 0) {
+        console.error(`Remedy: ${remedy}`);
+      }
     }
     return process.exit(error.exitCode);
   }

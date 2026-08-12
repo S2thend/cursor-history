@@ -7,8 +7,9 @@ import pc from 'picocolors';
 import { existsSync } from 'node:fs';
 import { listBackups, getDefaultBackupDir } from '../../core/backup.js';
 import type { BackupInfo, SourceReadLimitsOverride } from '../../core/types.js';
-import { handleError, ExitCode } from '../errors.js';
+import { CliError, handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 
 interface ListBackupsCommandOptions {
   directory?: string;
@@ -140,20 +141,19 @@ export function registerListBackupsCommand(program: Command): void {
       const useJson = options.json ?? globalOptions?.json ?? false;
 
       try {
+        const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
         // Resolve directory path
         const directory = options.directory ? expandPath(options.directory) : getDefaultBackupDir();
 
         // T064: Check if directory exists
         if (!existsSync(directory)) {
           if (useJson) {
-            console.log(
-              JSON.stringify({
-                error: 'Directory not found',
-                directory,
-                count: 0,
-                backups: [],
-              })
-            );
+            throw new CliError('Directory not found', ExitCode.USAGE_ERROR, undefined, undefined, {
+              error: 'Directory not found',
+              directory,
+              count: 0,
+              backups: [],
+            });
           } else {
             console.error(pc.yellow('Backup directory not found:'));
             console.error(pc.dim(`  ${contractPath(directory)}`));
@@ -165,7 +165,7 @@ export function registerListBackupsCommand(program: Command): void {
 
         // List backups
         const backups = await listBackups(directory, {
-          sourceReadLimits: globalOptions?.sourceLimit,
+          sourceReadLimits,
         });
 
         // T063: Handle no backups found
@@ -195,7 +195,7 @@ export function registerListBackupsCommand(program: Command): void {
           console.log(formatBackupsTable(backups));
         }
       } catch (error) {
-        handleError(error);
+        handleError(error, { json: useJson });
       }
     });
 }

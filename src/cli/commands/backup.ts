@@ -6,8 +6,9 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { createBackup } from '../../core/backup.js';
 import type { BackupProgress, BackupResult, SourceReadLimitsOverride } from '../../core/types.js';
-import { handleError, ExitCode } from '../errors.js';
+import { CliError, handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 
 interface BackupCommandOptions {
   output?: string;
@@ -126,6 +127,7 @@ export function registerBackupCommand(program: Command): void {
       const customPath = options.dataPath ?? globalOptions?.dataPath;
 
       try {
+        const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
         // Resolve output path if provided
         const outputPath = options.output ? expandPath(options.output) : undefined;
 
@@ -138,7 +140,7 @@ export function registerBackupCommand(program: Command): void {
           outputPath,
           force: options.force ?? false,
           sharedPermissions: options.shared ?? false,
-          sourceReadLimits: globalOptions?.sourceLimit,
+          sourceReadLimits,
           onProgress,
         });
 
@@ -152,7 +154,13 @@ export function registerBackupCommand(program: Command): void {
           // T022: No data to backup
           if (result.error?.includes('No Cursor data found')) {
             if (useJson) {
-              console.log(formatBackupResultJson(result));
+              throw new CliError(
+                result.error ?? 'No Cursor data found to backup.',
+                ExitCode.USAGE_ERROR,
+                undefined,
+                undefined,
+                JSON.parse(formatBackupResultJson(result)) as Record<string, unknown>
+              );
             } else {
               console.error(pc.yellow('No Cursor data found to backup.'));
               console.error(pc.dim('Make sure Cursor has been used and has chat history.'));
@@ -163,7 +171,13 @@ export function registerBackupCommand(program: Command): void {
           // T023: File exists without --force
           if (result.error?.includes('already exists')) {
             if (useJson) {
-              console.log(formatBackupResultJson(result));
+              throw new CliError(
+                result.error ?? 'Backup file already exists.',
+                ExitCode.NOT_FOUND,
+                undefined,
+                undefined,
+                JSON.parse(formatBackupResultJson(result)) as Record<string, unknown>
+              );
             } else {
               console.error(pc.red('Backup file already exists.'));
               console.error(pc.dim('Use --force to overwrite.'));
@@ -174,7 +188,13 @@ export function registerBackupCommand(program: Command): void {
           // T024: Insufficient disk space
           if (result.error?.includes('Insufficient disk space')) {
             if (useJson) {
-              console.log(formatBackupResultJson(result));
+              throw new CliError(
+                result.error ?? 'Insufficient disk space for backup.',
+                ExitCode.IO_ERROR,
+                undefined,
+                undefined,
+                JSON.parse(formatBackupResultJson(result)) as Record<string, unknown>
+              );
             } else {
               console.error(pc.red('Insufficient disk space for backup.'));
             }
@@ -183,7 +203,13 @@ export function registerBackupCommand(program: Command): void {
 
           // Generic error
           if (useJson) {
-            console.log(formatBackupResultJson(result));
+            throw new CliError(
+              result.error ?? 'Backup failed.',
+              ExitCode.GENERAL_ERROR,
+              undefined,
+              undefined,
+              JSON.parse(formatBackupResultJson(result)) as Record<string, unknown>
+            );
           } else {
             console.error(formatBackupResult(result));
           }
@@ -197,7 +223,7 @@ export function registerBackupCommand(program: Command): void {
           console.log(formatBackupResult(result));
         }
       } catch (error) {
-        handleError(error);
+        handleError(error, { json: useJson });
       }
     });
 }
