@@ -614,7 +614,8 @@ import {
   restoreBackup,
   validateBackup,
   listBackups,
-  getDefaultBackupDir
+  getDefaultBackupDir,
+  listSessions
 } from 'cursor-history';
 
 // Create a backup
@@ -678,6 +679,8 @@ const sessions = await listSessions({ backupPath: '~/backup.zip' });
 ### Configuration Options
 
 ```typescript
+import type { MessageType } from 'cursor-history';
+
 interface LibraryConfig {
   dataPath?: string;       // Custom Cursor data path
   workspace?: string;      // Filter by workspace path
@@ -695,16 +698,15 @@ interface LibraryConfig {
 ```typescript
 import {
   listSessions,
-  getSession,
   createBackup,
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
-  isInvalidFilterError,
   isBackupError,
   isRestoreError,
-  isInvalidBackupError
+  isInvalidBackupError,
+  validateMessageTypes
 } from 'cursor-history';
 
 try {
@@ -721,14 +723,10 @@ try {
   }
 }
 
-// Filter error handling
-try {
-  const session = await getSession(0, { messageFilter: ['invalid'] });
-} catch (err) {
-  if (isInvalidFilterError(err)) {
-    console.error('Invalid filter types:', err.invalidTypes);
-    console.error('Valid types:', err.validTypes);
-  }
+// Validate untyped filter values before passing them to a read operation
+const invalidTypes = validateMessageTypes(['invalid']);
+if (invalidTypes.length > 0) {
+  console.error('Invalid filter types:', invalidTypes);
 }
 
 // Backup-specific errors

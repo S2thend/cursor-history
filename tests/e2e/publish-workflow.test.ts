@@ -8,6 +8,36 @@ function workflow(): string {
   return readFileSync(workflowPath, 'utf8');
 }
 
+function jobBlock(source: string, jobName: string): string {
+  const lines = source.split(/\r?\n/u);
+  const start = lines.findIndex((line) => line === `  ${jobName}:`);
+  if (start < 0) return '';
+  const end = lines.findIndex(
+    (line, index) => index > start && /^  [a-zA-Z0-9_-]+:\s*$/u.test(line)
+  );
+  return lines.slice(start, end < 0 ? undefined : end).join('\n');
+}
+
+function jobNeeds(source: string, jobName: string): string[] {
+  const block = jobBlock(source, jobName);
+  const lines = block.split(/\r?\n/u);
+  const needsIndex = lines.findIndex((line) => /^    needs:/u.test(line));
+  if (needsIndex < 0) return [];
+  const value = lines[needsIndex].replace(/^    needs:\s*/u, '').trim();
+  if (value.startsWith('[') && value.endsWith(']')) {
+    return value
+      .slice(1, -1)
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  if (value.length > 0) return [value];
+  return lines
+    .slice(needsIndex + 1)
+    .map((line) => /^      -\s+([a-zA-Z0-9_-]+)\s*$/u.exec(line)?.[1])
+    .filter((item): item is string => item !== undefined);
+}
+
 function unsafeReleaseBypasses(source: string): string[] {
   const failures: string[] = [];
   if (
@@ -18,9 +48,39 @@ function unsafeReleaseBypasses(source: string): string[] {
   if (/continue-on-error:\s*true/.test(source)) failures.push('workflow permits a failed step');
   if ((source.match(/\bnpm pack\b/g) ?? []).length !== 1)
     failures.push('candidate is not packed once');
-  if (!/needs:\s*verify-candidate/.test(source)) failures.push('publish bypasses verification');
-  if (!/npm publish[^\n]*needs\.package-candidate\.outputs\.tarball/.test(source)) {
+
+  const verificationNeeds = jobNeeds(source, 'verify-candidate');
+  const approvalNeeds = jobNeeds(source, 'approve-candidate');
+  const publishNeeds = jobNeeds(source, 'publish');
+  const approvalJob = jobBlock(source, 'approve-candidate');
+  const publishJob = jobBlock(source, 'publish');
+  if (!verificationNeeds.includes('package-candidate')) {
+    failures.push('verification bypasses the preserved candidate');
+  }
+  if (!approvalNeeds.includes('verify-candidate')) {
+    failures.push('protected approval bypasses verification');
+  }
+  if (!publishNeeds.includes('approve-candidate')) {
+    failures.push('publish bypasses protected approval');
+  }
+  if (!publishNeeds.includes('package-candidate')) {
+    failures.push('publish cannot address the preserved candidate');
+  }
+  if (!/^    environment:\s*npm-release-verification\s*$/mu.test(approvalJob)) {
+    failures.push('approval is not protected by the release environment');
+  }
+  if (/^    if:\s*.*\balways\s*\(\s*\)/mu.test(approvalJob)) {
+    failures.push('protected approval runs after failed verification');
+  }
+  if (/^    if:\s*.*\balways\s*\(\s*\)/mu.test(publishJob)) {
+    failures.push('publish runs after a failed dependency');
+  }
+
+  if (!/npm publish[^\n]*needs\.package-candidate\.outputs\.tarball/.test(publishJob)) {
     failures.push('publish does not consume the tarball');
+  }
+  if (/\bnpm (?:pack|run build)\b/u.test(publishJob)) {
+    failures.push('publish rebuilds or repacks after approval');
   }
   return failures;
 }
@@ -56,10 +116,12 @@ describe('npm publication workflow', () => {
     expect(source).toContain('Clean-install and smoke exact package');
     expect(source).toContain('scripts/smoke-packed-package.mjs');
     expect(source).toContain('environment: npm-release-verification');
-    expect(source).toContain('needs: package-candidate');
-    expect(source).toContain('needs: verify-candidate');
+    expect(jobNeeds(source, 'verify-candidate')).toEqual(['package-candidate']);
+    expect(jobNeeds(source, 'approve-candidate')).toEqual(['verify-candidate']);
+    expect(jobNeeds(source, 'publish')).toEqual(['package-candidate', 'approve-candidate']);
     expect(source).toMatch(/npm publish[^\n]*needs\.package-candidate\.outputs\.tarball/);
     expect(source).not.toMatch(/npm publish\s+--/);
+    expect(unsafeReleaseBypasses(source)).toEqual([]);
   });
 
   it('checks tag/package version equality before creating the candidate', () => {
@@ -76,5 +138,36 @@ describe('npm publication workflow', () => {
 
     const mutated = source.replace('run: npm test', 'run: npm test || echo "skipping failures"');
     expect(unsafeReleaseBypasses(mutated)).toContain('validation failure is swallowed');
+  });
+
+  it('detects publish and approval dependency-graph bypass mutations', () => {
+    const source = workflow();
+
+    const publishSkipsApproval = source.replace(
+      'needs: [package-candidate, approve-candidate]',
+      'needs: [package-candidate, verify-candidate]'
+    );
+    expect(publishSkipsApproval).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishSkipsApproval)).toContain(
+      'publish bypasses protected approval'
+    );
+
+    const approvalSkipsVerification = source.replace(
+      'approve-candidate:\n    name: Approve maintainer verification\n    needs: verify-candidate',
+      'approve-candidate:\n    name: Approve maintainer verification\n    needs: package-candidate'
+    );
+    expect(approvalSkipsVerification).not.toBe(source);
+    expect(unsafeReleaseBypasses(approvalSkipsVerification)).toContain(
+      'protected approval bypasses verification'
+    );
+
+    const publishAfterFailure = source.replace(
+      'publish:\n    name: Publish preserved candidate',
+      'publish:\n    name: Publish preserved candidate\n    if: always()'
+    );
+    expect(publishAfterFailure).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishAfterFailure)).toContain(
+      'publish runs after a failed dependency'
+    );
   });
 });

@@ -123,6 +123,9 @@ jobs:
         with:
           node-version: '24.x'
 
+      - name: Install declaration-audit toolchain
+        run: npm ci --ignore-scripts
+
       - name: Download preserved candidate
         uses: actions/download-artifact@v4
         with:
