@@ -24,7 +24,11 @@ import type {
 } from '../core/types.js';
 
 export type {
+  GeneralSessionDiagnostic,
+  GeneralSessionDiagnosticCode,
   IndexScope,
+  JsonlSourceBoundKind,
+  JsonlSourceLimitDimension,
   MessageIdentityOrigin,
   MessageTimestampSource,
   ResolvedSource,
@@ -34,15 +38,21 @@ export type {
   SessionResolution,
   SessionSourceInstance,
   SessionTimestampSource,
+  SourceEncodingDiagnostic,
+  SourceLimitExceededDiagnostic,
   SourceBoundKind,
   SourceReadLimitsOverride,
   SourceReadOptions,
   SourceReadLimitsV1,
   SourceRepresentation,
   SourceRole,
+  SqliteSourceBoundKind,
+  SqliteSourceLimitDimension,
   ToolIdentityOrigin,
   WorkspaceMatchKind,
   WorkspaceMembership,
+  ZipSourceBoundKind,
+  ZipSourceLimitDimension,
 } from '../core/types.js';
 
 /**
@@ -74,7 +84,10 @@ export interface Session {
   indexWorkspacePath?: string;
 
   /**
-   * Source data completeness:
+   * Compatibility replacement-safety signal. Corrective-release runtime
+   * values are `global` for a complete view and `workspace-fallback` for a
+   * degraded view. The remaining literals stay declared so existing source
+   * code compiled against the v0.17 transition continues to type-check:
    * - 'global': full global bubbles (Composer stack)
    * - 'workspace-fallback': degraded, workspace storage only (Composer stack)
    * - 'transcript': Store stack; the transcript supplies the messages (sole source when no store.db
@@ -93,11 +106,7 @@ export interface Session {
     | 'store-partial'
     | 'merged';
 
-  /**
-   * Cross-stack provenance. Present only when `source === 'merged'`:
-   * the contributing stacks and the stack that supplies canonical order /
-   * wins true scalar conflicts.
-   */
+  /** Cross-stack provenance, independent of the compatibility `source` signal. */
   sources?: Array<'composer' | 'store'>;
   preferredSource?: 'composer' | 'store';
 
@@ -106,6 +115,9 @@ export interface Session {
 
   /** Replacement-safety and contributor state. */
   resolution?: SessionResolution;
+
+  /** Convenience mirror of `resolution.state` for structured consumers. */
+  resolutionState?: ResolutionState;
 
   /** Stable canonical workspace path, absent for pathless sessions. */
   canonicalWorkspacePath?: string;
@@ -215,7 +227,10 @@ export interface Message {
    */
   timestamp: string;
 
-  /** Provenance of `timestamp` when it is directly stored (not inferred). */
+  /**
+   * Provenance of `timestamp`: a directly stored source, deterministic
+   * previous/next inference, session fallback, or the explicit unknown anchor.
+   */
   timestampSource?: MessageTimestampSource;
 
   /**
@@ -362,7 +377,12 @@ export interface LibraryConfig {
   /** Load related contributors outside scope only for UUIDs already selected in scope. */
   includeCrossWorkspaceSources?: boolean;
 
-  /** Receive safe continuation diagnostics such as skipped ambiguity groups. */
+  /**
+   * Receive safe continuation diagnostics such as skipped ambiguity groups.
+   *
+   * @param diagnostic - Content-free diagnostic emitted while the operation continues.
+   * @returns Nothing; callback return values are ignored.
+   */
   onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
 
   /** Immutable per-operation Source Read Limits v1 overrides. */
@@ -377,48 +397,135 @@ export interface LibraryConfig {
 
 /** Options for constructing an immutable public read context. */
 export interface SessionReadContextOptions {
+  /** Optional live Cursor data root permanently bound to the context. */
   dataPath?: string;
+  /** Optional cursor-history backup archive permanently bound to the context. */
   backupPath?: string;
+  /** Optional normalized workspace membership scope permanently bound to the context. */
   workspace?: string;
+  /** Permit related contributors outside the bound workspace for selected logical UUIDs. */
   includeCrossWorkspaceSources?: boolean;
+  /** Maximum completed decoded sessions retained by the context; defaults to one. */
   resolvedSessionCapacity?: number;
+  /**
+   * Receive content-free continuation diagnostics emitted by operations using this context.
+   *
+   * @param diagnostic - Diagnostic emitted by an operation bound to this context.
+   * @returns Nothing; callback return values are ignored.
+   */
   onDiagnostic?: (diagnostic: SessionDiagnostic) => void;
+  /** Optional SQLite provider preference permanently bound to the context. */
   sqliteDriver?: SqliteDriverName;
+  /** Immutable Source Read Limits v1 overrides permanently bound to the context. */
   sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel operations and cleanup owned by the context. */
   signal?: AbortSignal;
 }
 
 /** Opaque lifecycle for scope-bound, bounded session reads. */
 export interface SessionReadContext {
+  /** Maximum number of completed decoded sessions retained by this context. */
   readonly resolvedSessionCapacity: number;
+  /** Whether the context has completed its idempotent disposal lifecycle. */
   readonly disposed: boolean;
+
+  /**
+   * Release one completed decoded session without changing the immutable binding.
+   *
+   * @param sessionId - Native logical Cursor session UUID to release.
+   * @returns Nothing; absent or already-released values are harmless.
+   * @throws {ReadContextDisposedError} If the context has already been disposed.
+   */
   releaseSession(sessionId: string): void;
+
+  /**
+   * Dispose context-owned caches and resources. Repeated calls are safe.
+   *
+   * @returns A promise that resolves after all context-owned resources are released.
+   * @throws {TemporaryArtifactCleanupError} If a context-owned temporary resource cannot be removed.
+   */
   dispose(): Promise<void>;
 }
 
-/** Message-free public logical catalog row. */
-export interface SessionSummary {
-  id: string;
+/**
+ * A resolved, message-free logical catalog row.
+ *
+ * The row retains the complete public session metadata needed for addressing,
+ * provenance, replacement-safety decisions, and incremental synchronization,
+ * but deliberately excludes messages and branch arrays. Its `index` uses the
+ * public read API's zero-based convention.
+ */
+export interface ResolvedSessionSummary extends Omit<
+  Session,
+  'messages' | 'source' | 'activeBranchBubbleIds' | 'activeBranchMessageIds'
+> {
+  /** Zero-based presentation index within this catalog invocation and scope. */
   index: number;
+  /** Scope in which the zero-based presentation index may be reused. */
   indexScope: IndexScope;
+  /** Full workspace scope path; present only for a workspace-scoped index. */
   indexWorkspacePath?: string;
-  resolutionState: ResolutionState | 'ambiguous';
-  title?: string | null;
-  preview?: string;
-  messageCount?: number;
-  source?: 'global' | 'workspace-fallback';
-  resolvedSource?: ResolvedSource;
-  sources?: SourceRole[];
-  resolution?: SessionResolution;
-  canonicalWorkspacePath?: string;
-  matchedWorkspacePath?: string;
-  workspaceMatchKind?: WorkspaceMatchKind;
-  workspaceMemberships?: WorkspaceMembership[];
-  sourceInstances?: SessionSourceInstance[];
-  sourceRoles?: SourceRole[];
-  occurrenceCount?: number;
-  diagnosticOccurrenceRefs?: string[];
+  /** Cursor title, or null when Cursor did not store one. */
+  title: string | null;
+  /** Lightweight message-free preview retained from the catalog row. */
+  preview: string;
+  /** Number of messages in the resolved logical session. */
+  messageCount: number;
+  /** Replacement-safety compatibility signal for unchanged consumers. */
+  source: 'global' | 'workspace-fallback';
+  /** Actual source representation selected for this resolved row. */
+  resolvedSource: ResolvedSource;
+  /** Canonically ordered logical source roles that contributed to the row. */
+  sources: SourceRole[];
+  /** Completeness and contributor state for the resolved row. */
+  resolution: SessionResolution;
+  /** Required mirror of `resolution.state`. */
+  resolutionState: ResolutionState;
+  /** Provenance of the required creation timestamp. */
+  createdAtSource: SessionTimestampSource;
+  /** Provenance of the required last-modified timestamp. */
+  lastUpdatedAtSource: SessionTimestampSource;
+  /** Deterministically ordered historical workspace memberships. */
+  workspaceMemberships: WorkspaceMembership[];
+  /** Public-safe source occurrence provenance with no physical locators. */
+  sourceInstances: SessionSourceInstance[];
+  /** Version of the stable message identity contract used by this row. */
+  messageIdentityVersion: 1;
+  /** Metadata with a required ISO 8601 last-modified value. */
+  metadata: NonNullable<Session['metadata']> & { lastModified: string };
 }
+
+/**
+ * A message-free catalog row for divergent physical occurrences of one UUID.
+ *
+ * No occurrence is hydrated or silently selected. Opaque occurrence references
+ * are valid only for diagnostics in the bound data source and invocation.
+ */
+export interface AmbiguousSessionSummary {
+  /** Native logical Cursor session UUID shared by the divergent occurrences. */
+  id: string;
+  /** Zero-based presentation index within this catalog invocation and scope. */
+  index: number;
+  /** Scope in which the zero-based presentation index may be reused. */
+  indexScope: IndexScope;
+  /** Full workspace scope path; present only for a workspace-scoped index. */
+  indexWorkspacePath?: string;
+  /** Discriminant proving that no complete session was selected. */
+  resolutionState: 'ambiguous';
+  /** Canonically ordered roles represented by the divergent occurrences. */
+  sourceRoles: SourceRole[];
+  /** Number of divergent physical occurrences represented by this row. */
+  occurrenceCount: number;
+  /** Opaque, invocation-local references safe for diagnostics. */
+  diagnosticOccurrenceRefs: string[];
+  /** Stable canonical workspace path when one can be established safely. */
+  canonicalWorkspacePath?: string;
+  /** Full workspace path selected by the active filter, when applicable. */
+  matchedWorkspacePath?: string;
+}
+
+/** One message-free logical catalog row, resolved or explicitly ambiguous. */
+export type SessionSummary = ResolvedSessionSummary | AmbiguousSessionSummary;
 
 /**
  * Wrapper for paginated API responses.
@@ -441,6 +548,9 @@ export interface PaginatedResult<T> {
     /** Whether more pages exist after this one */
     hasMore: boolean;
   };
+
+  /** Content-free continuation diagnostics associated with omitted logical rows. */
+  diagnostics?: SessionDiagnostic[];
 }
 
 // ============================================================================
@@ -480,6 +590,15 @@ export interface MigrateSessionConfig {
 
   /** Custom Cursor data path (optional, uses default if not specified) */
   dataPath?: string;
+
+  /** Scope one-based numeric and direct-ID selectors to this historical workspace. */
+  workspace?: string;
+
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+
+  /** Cooperatively cancel before mutation or between bounded stages. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -503,6 +622,12 @@ export interface MigrateWorkspaceConfig {
 
   /** Custom Cursor data path (optional, uses default if not specified) */
   dataPath?: string;
+
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+
+  /** Cooperatively cancel before mutation or between bounded stages. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -532,6 +657,24 @@ export interface SessionMigrationResult {
 
   /** Whether this was a dry run */
   dryRun: boolean;
+
+  /** Public-safe eligibility; private database locators are never returned. */
+  eligibility?:
+    | 'eligible-composer'
+    | 'multiple-composer-occurrences'
+    | 'shared-membership'
+    | 'ambiguous'
+    | 'store-only'
+    | 'merged';
+
+  /** Opaque fingerprint that identifies the same prepared preview/apply target. */
+  targetFingerprint?: string;
+
+  /** Stable typed failure code when a batch result reports failure. */
+  errorCode?: string;
+
+  /** Whether path-bearing payload would be rewritten during a dry run. */
+  pathsWillBeUpdated?: boolean;
 }
 
 /**
@@ -643,7 +786,12 @@ export interface BackupConfig {
   /** Request platform-default shared permissions for the completed archive. */
   sharedPermissions?: boolean;
 
-  /** Progress callback for UI updates */
+  /**
+   * Progress callback for UI updates.
+   *
+   * @param progress - Current backup phase and aggregate file/byte progress.
+   * @returns Nothing; callback return values are ignored.
+   */
   onProgress?: (progress: BackupProgress) => void;
 
   /** Immutable per-operation Source Read Limits v1 overrides. */
@@ -705,7 +853,12 @@ export interface RestoreConfig {
   /** Overwrite existing data without prompting */
   force?: boolean;
 
-  /** Progress callback for UI updates */
+  /**
+   * Progress callback for UI updates.
+   *
+   * @param progress - Current restore phase, file progress, and integrity state.
+   * @returns Nothing; callback return values are ignored.
+   */
   onProgress?: (progress: RestoreProgress) => void;
 
   /** Immutable per-operation Source Read Limits v1 overrides. */

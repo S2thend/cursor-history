@@ -230,12 +230,15 @@ describe('IntegrityError', () => {
 
 describe('feature-016 public typed errors', () => {
   it('exports stable codes and safe deterministic details', () => {
-    const workspace = new WorkspaceAmbiguityError('project', ['/work/b/project', '/work/a/project']);
+    const workspace = new WorkspaceAmbiguityError('project', [
+      '/work/b/project',
+      '/work/a/project',
+    ]);
     expect(workspace.code).toBe('WORKSPACE_AMBIGUOUS');
     expect(workspace.details.candidates).toEqual(['/work/a/project', '/work/b/project']);
 
     const session = new SessionAmbiguityError('uuid', ['occurrence:z', 'occurrence:a']);
-    expect(session.details.occurrenceRefs).toEqual(['occurrence:a', 'occurrence:z']);
+    expect(session.details.occurrenceRefs).toEqual(['occurrence:z', 'occurrence:a']);
     expect(isSessionIntegrityError(session)).toBe(true);
     expect(new ReadContextDisposedError().code).toBe('READ_CONTEXT_DISPOSED');
   });

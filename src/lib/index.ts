@@ -47,17 +47,30 @@ export type {
   WorkspaceMatchKind,
   MessageIdentityOrigin,
   MessageTimestampSource,
+  ToolIdentityOrigin,
   SessionTimestampSource,
   SessionResolution,
+  GeneralSessionDiagnosticCode,
+  GeneralSessionDiagnostic,
+  SourceEncodingDiagnostic,
+  SourceLimitExceededDiagnostic,
   SessionDiagnostic,
   SessionSourceInstance,
   WorkspaceMembership,
   SourceReadLimitsV1,
   SourceReadLimitsOverride,
   SourceReadOptions,
+  JsonlSourceBoundKind,
+  SqliteSourceBoundKind,
+  ZipSourceBoundKind,
   SourceBoundKind,
+  JsonlSourceLimitDimension,
+  SqliteSourceLimitDimension,
+  ZipSourceLimitDimension,
   SessionReadContextOptions,
   SessionReadContext,
+  ResolvedSessionSummary,
+  AmbiguousSessionSummary,
   SessionSummary,
 } from './types.js';
 
@@ -105,12 +118,32 @@ export {
   isInvalidBackupError,
   isTargetExistsError,
   isIntegrityError,
+  isWorkspaceAmbiguityError,
+  isSessionAmbiguityError,
+  isSessionScopeMismatchError,
+  isUnsupportedSessionMigrationError,
+  isMigrationTargetChangedError,
+  isDatabaseCapabilityError,
+  isNoCapableDriverError,
+  isTemporaryArtifactCleanupError,
+  isReadContextError,
+  isReadContextSourceMismatchError,
+  isReadContextScopeMismatchError,
+  isReadContextOptionsMismatchError,
+  isReadContextDisposedError,
+  isSourceEncodingError,
+  isSourceLimitExceededError,
+  isSourceLimitConfigurationError,
   SessionIntegrityError,
   WorkspaceAmbiguityError,
   SessionAmbiguityError,
   SessionScopeMismatchError,
   UnsupportedSessionMigrationError,
   MigrationTargetChangedError,
+  DatabaseCapabilityError,
+  NoCapableDriverError,
+  DriverNotAvailableError,
+  NoDriverAvailableError,
   DatabaseCapabilityMissingError,
   NoCapableDatabaseDriverError,
   TemporaryArtifactCleanupError,
@@ -142,13 +175,29 @@ import type {
   SessionMigrationResult,
   WorkspaceMigrationResult,
   SqliteDriverName,
+  SessionReadContext as PublicSessionReadContext,
+  SessionReadContextOptions,
+  ResolvedSessionSummary,
+  SessionSummary,
+  SourceRole,
+  ResolvedSource,
+  SessionResolution,
+  SessionSourceInstance,
 } from './types.js';
 import { mergeWithDefaults, type ResolvedConfig } from './config.js';
 import {
   DatabaseLockedError,
   DatabaseNotFoundError,
   InvalidFilterError,
+  DriverNotAvailableError,
+  NoDriverAvailableError,
+  SessionAmbiguityError,
+  SessionIntegrityError,
+  SessionScopeMismatchError,
   SessionNotFoundError,
+  ReadContextOptionsMismatchError,
+  ReadContextScopeMismatchError,
+  ReadContextSourceMismatchError,
 } from './errors.js';
 import {
   filterMessages as filterMessagesImpl,
@@ -158,8 +207,13 @@ import { MESSAGE_TYPES as MESSAGE_TYPES_CONST } from '../core/types.js';
 import * as storage from '../core/storage.js';
 import * as migrate from '../core/migrate.js';
 import { exportToJson, exportToMarkdown } from '../core/parser.js';
-import { expandPath } from './platform.js';
-import type { ChatSession as CoreSession } from '../core/types.js';
+import { expandPath, pathsEqual } from './platform.js';
+import { normalizeWorkspacePath } from '../core/workspace-scope.js';
+import type {
+  AmbiguousSessionSummary as CoreAmbiguousSessionSummary,
+  ChatSession as CoreSession,
+  LogicalSessionSummary as CoreLogicalSessionSummary,
+} from '../core/types.js';
 import {
   setDriver as coreSetDriver,
   getActiveDriver as coreGetActiveDriver,
@@ -172,33 +226,341 @@ function toCoreSessionIdentifier(identifier: number | string): number | string {
   return identifier;
 }
 
-async function getCoreSessionInScope(
-  identifier: number | string,
-  resolved: ResolvedConfig
-): Promise<CoreSession | null> {
-  // Workspace scope disambiguates mutable numeric indices only. Stable IDs
-  // retain their existing global lookup semantics.
-  if (!resolved.workspace || typeof identifier === 'string') {
-    return storage.getSession(identifier, resolved.dataPath, resolved.backupPath);
+interface PublicReadContextRecord {
+  readonly core: storage.SessionReadContext;
+  readonly dataPath?: string;
+  readonly backupPath?: string;
+  readonly workspace?: string;
+  readonly includeCrossWorkspaceSources: boolean;
+  readonly sqliteDriver?: SqliteDriverName;
+  readonly signal?: AbortSignal;
+  readonly onDiagnostic?: ResolvedConfig['onDiagnostic'];
+}
+
+const publicReadContexts = new WeakMap<object, PublicReadContextRecord>();
+
+function hasOwn(object: object | undefined, key: PropertyKey): boolean {
+  return object !== undefined && Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function unwrapPublicReadContext(value: PublicSessionReadContext): PublicReadContextRecord {
+  const issued = publicReadContexts.get(value as object);
+  if (issued) return issued;
+  // Keep the package declaration opaque while allowing the core integration
+  // seam to exercise the exact same lifecycle implementation end to end.
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'activeResolutions' in value &&
+    'completedSessions' in value
+  ) {
+    const core = value as storage.SessionReadContext;
+    return {
+      core,
+      dataPath: core.customDataPath,
+      backupPath: core.backupPath,
+      workspace: core.workspaceScope ?? undefined,
+      includeCrossWorkspaceSources: core.includeCrossWorkspaceSources,
+      sqliteDriver: core.sqliteDriver,
+      signal: core.signal,
+      onDiagnostic: core.onDiagnostic,
+    };
+  }
+  throw new ReadContextOptionsMismatchError('readContext');
+}
+
+interface ConfiguredReadContext {
+  readonly context: storage.SessionReadContext;
+  readonly ownsContext: boolean;
+  readonly dataPath?: string;
+  readonly backupPath?: string;
+  readonly workspace?: string;
+  readonly includeCrossWorkspaceSources: boolean;
+  readonly onDiagnostic?: ResolvedConfig['onDiagnostic'];
+}
+
+function bindConfiguredReadContext(
+  config: LibraryConfig | undefined,
+  resolvedSessionCapacity = 1
+): ConfiguredReadContext {
+  const resolved = mergeWithDefaults(config);
+  if (resolved.readContext) {
+    if (hasOwn(config, 'sourceReadLimits')) {
+      throw new ReadContextOptionsMismatchError('sourceReadLimits');
+    }
+    const record = unwrapPublicReadContext(resolved.readContext);
+    const context = record.core;
+    if (
+      config?.dataPath !== undefined &&
+      (record.dataPath === undefined || !pathsEqual(config.dataPath, record.dataPath))
+    ) {
+      throw new ReadContextSourceMismatchError();
+    }
+    if (
+      config?.backupPath !== undefined &&
+      (record.backupPath === undefined || !pathsEqual(config.backupPath, record.backupPath))
+    ) {
+      throw new ReadContextSourceMismatchError();
+    }
+    if (
+      config?.workspace !== undefined &&
+      (record.workspace === undefined ||
+        normalizeWorkspacePath(config.workspace) !== normalizeWorkspacePath(record.workspace))
+    ) {
+      throw new ReadContextScopeMismatchError();
+    }
+    if (config?.sqliteDriver !== undefined && config.sqliteDriver !== record.sqliteDriver) {
+      throw new ReadContextOptionsMismatchError('sqliteDriver');
+    }
+    if (config?.signal !== undefined && config.signal !== record.signal) {
+      throw new ReadContextOptionsMismatchError('signal');
+    }
+    if (
+      hasOwn(config, 'includeCrossWorkspaceSources') &&
+      resolved.includeCrossWorkspaceSources !== record.includeCrossWorkspaceSources
+    ) {
+      throw new ReadContextOptionsMismatchError('includeCrossWorkspaceSources');
+    }
+    if (hasOwn(config, 'onDiagnostic') && resolved.onDiagnostic !== record.onDiagnostic) {
+      throw new ReadContextOptionsMismatchError('onDiagnostic');
+    }
+    return {
+      context,
+      ownsContext: false,
+      dataPath: resolved.dataPath ?? record.dataPath,
+      backupPath: resolved.backupPath ?? record.backupPath,
+      workspace: resolved.workspace ?? record.workspace,
+      includeCrossWorkspaceSources: hasOwn(config, 'includeCrossWorkspaceSources')
+        ? resolved.includeCrossWorkspaceSources
+        : record.includeCrossWorkspaceSources,
+      onDiagnostic: resolved.onDiagnostic ?? record.onDiagnostic,
+    };
   }
 
-  const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
-  await storage.listSessions(
-    { limit: 0, all: true, workspacePath: resolved.workspace },
-    resolved.dataPath,
-    resolved.backupPath,
-    context
-  );
-  return storage.getSession(identifier, resolved.dataPath, resolved.backupPath, context);
+  const context = storage.createSessionReadContext({
+    dataPath: resolved.dataPath,
+    backupPath: resolved.backupPath,
+    workspacePath: resolved.workspace,
+    includeCrossWorkspaceSources: resolved.includeCrossWorkspaceSources,
+    resolvedSessionCapacity,
+    sqliteDriver: resolved.sqliteDriver,
+    sourceReadLimits: resolved.sourceReadLimits,
+    signal: resolved.signal,
+    onDiagnostic: resolved.onDiagnostic,
+  });
+  return {
+    context,
+    ownsContext: true,
+    dataPath: resolved.dataPath,
+    backupPath: resolved.backupPath,
+    workspace: resolved.workspace,
+    includeCrossWorkspaceSources: resolved.includeCrossWorkspaceSources,
+    onDiagnostic: resolved.onDiagnostic,
+  };
 }
 
 /**
- * Convert core ChatSession to library Session
+ * Create an opaque, immutable-binding session read context.
+ *
+ * @param options - Data source, workspace, driver, limits, diagnostics, and cache capacity.
+ * @returns A caller-owned bounded context reusable across compatible read operations.
+ * @throws {InvalidConfigError} If a public option is invalid.
+ * @throws {SourceLimitConfigurationError} If Source Read Limits v1 overrides are invalid.
+ * @throws {ReadContextDisposedError} If a lifecycle method is used after disposal.
  */
+export function createSessionReadContext(
+  options: SessionReadContextOptions = {}
+): PublicSessionReadContext {
+  const resolved = mergeWithDefaults(options);
+  const core = storage.createSessionReadContext({
+    dataPath: resolved.dataPath,
+    backupPath: resolved.backupPath,
+    workspacePath: resolved.workspace,
+    includeCrossWorkspaceSources: resolved.includeCrossWorkspaceSources,
+    resolvedSessionCapacity: options.resolvedSessionCapacity,
+    sqliteDriver: resolved.sqliteDriver,
+    sourceReadLimits: resolved.sourceReadLimits,
+    signal: resolved.signal,
+    onDiagnostic: resolved.onDiagnostic,
+  });
+  const wrapper: PublicSessionReadContext = {
+    get resolvedSessionCapacity() {
+      return core.resolvedSessionCapacity;
+    },
+    get disposed() {
+      return core.disposed;
+    },
+    releaseSession(sessionId: string): void {
+      core.releaseSession(sessionId);
+    },
+    dispose(): Promise<void> {
+      return core.dispose();
+    },
+  };
+  publicReadContexts.set(wrapper, {
+    core,
+    dataPath: resolved.dataPath,
+    backupPath: resolved.backupPath,
+    workspace: resolved.workspace,
+    includeCrossWorkspaceSources: resolved.includeCrossWorkspaceSources,
+    sqliteDriver: resolved.sqliteDriver,
+    signal: resolved.signal,
+    onDiagnostic: resolved.onDiagnostic,
+  });
+  return Object.freeze(wrapper);
+}
+
+function isReadPassThroughError(error: unknown): boolean {
+  return (
+    error instanceof SessionIntegrityError ||
+    error instanceof DriverNotAvailableError ||
+    error instanceof NoDriverAvailableError ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
+}
+
+async function getCoreSessionInScope(
+  identifier: number | string,
+  bound: ConfiguredReadContext
+): Promise<CoreSession | null> {
+  if (!bound.workspace) {
+    return storage.getSession(identifier, bound.dataPath, bound.backupPath, bound.context);
+  }
+
+  const scopedSessions = await storage.listSessionSummaries(
+    {
+      limit: 0,
+      all: true,
+      workspacePath: bound.workspace,
+      includeCrossWorkspaceSources: bound.includeCrossWorkspaceSources,
+    },
+    bound.dataPath,
+    bound.backupPath,
+    bound.context
+  );
+  if (typeof identifier === 'string') {
+    const summary = scopedSessions.find(({ id }) => id === identifier);
+    if (!summary) {
+      throw new SessionScopeMismatchError(identifier, bound.workspace);
+    }
+    return storage.getSession(
+      summary.id,
+      bound.dataPath,
+      bound.backupPath,
+      bound.context,
+      summary.index
+    );
+  }
+  return storage.getSession(identifier, bound.dataPath, bound.backupPath, bound.context);
+}
+
+type CoreCompatibilitySource = CoreSession['source'];
+
+interface CoreResolutionProjection {
+  source?: CoreCompatibilitySource;
+  resolvedSource?: ResolvedSource;
+  sources?: SourceRole[];
+  resolution?: SessionResolution;
+  transcriptState?: CoreSession['transcriptState'];
+}
+
+/** Map modern provenance to the two-value replacement-safety compatibility signal. */
+function compatibilitySourceOf(value: CoreResolutionProjection): 'global' | 'workspace-fallback' {
+  if (value.resolution) {
+    return value.resolution.state === 'complete' ? 'global' : 'workspace-fallback';
+  }
+  switch (value.source) {
+    case undefined:
+    case 'global':
+      return 'global';
+    case 'workspace-fallback':
+      return 'workspace-fallback';
+    case 'store-complete':
+      return 'global';
+    case 'transcript':
+      return value.transcriptState === 'parsed' ? 'global' : 'workspace-fallback';
+    case 'store':
+    case 'store-partial':
+    case 'merged':
+      // Modern adapters attach an explicit resolution. Conservatively prevent
+      // replacement when older/mocked data does not carry one.
+      return 'workspace-fallback';
+  }
+}
+
+/** Resolve the selected representation without changing the compatibility source signal. */
+function resolvedSourceOf(value: CoreResolutionProjection): ResolvedSource {
+  if (value.resolvedSource) return value.resolvedSource;
+  switch (value.source) {
+    case 'transcript':
+      return 'store-transcript';
+    case 'store':
+    case 'store-complete':
+    case 'store-partial':
+      return 'store-db';
+    case 'merged':
+      return 'merged';
+    case undefined:
+    case 'global':
+    case 'workspace-fallback':
+      return 'composer';
+  }
+}
+
+/** Infer canonical source roles only when older data omitted additive provenance. */
+function sourceRolesOf(value: CoreResolutionProjection): SourceRole[] {
+  if (value.sources && value.sources.length > 0) {
+    const declared = new Set<SourceRole>(value.sources);
+    const canonicalOrder: SourceRole[] = ['composer', 'store'];
+    return canonicalOrder.filter((role) => declared.has(role));
+  }
+  switch (resolvedSourceOf(value)) {
+    case 'composer':
+      return ['composer'];
+    case 'merged':
+      return ['composer', 'store'];
+    case 'store-db':
+    case 'store-transcript':
+    case 'store-metadata':
+      return ['store'];
+  }
+}
+
+/** Clone resolution arrays so public callers cannot mutate the bound catalog state. */
+function cloneResolution(resolution: SessionResolution): SessionResolution {
+  return {
+    ...resolution,
+    expectedSourceRoles: [...resolution.expectedSourceRoles],
+    loadedSourceRoles: [...resolution.loadedSourceRoles],
+    omittedSourceRoles: [...resolution.omittedSourceRoles],
+    failedSourceRoles: [...resolution.failedSourceRoles],
+    reasonCodes: [...resolution.reasonCodes],
+  };
+}
+
+/** Supply an honest compatibility projection for legacy rows lacking additive resolution fields. */
+function resolutionOf(value: CoreResolutionProjection): SessionResolution {
+  if (value.resolution) return cloneResolution(value.resolution);
+  const roles = sourceRolesOf(value);
+  const state = compatibilitySourceOf(value) === 'global' ? 'complete' : 'partial';
+  return {
+    state,
+    expectedSourceRoles: [...roles],
+    loadedSourceRoles: [...roles],
+    omittedSourceRoles: [],
+    failedSourceRoles: [],
+    reasonCodes: state === 'partial' ? ['source-partial'] : [],
+  };
+}
+
+/** Convert core ChatSession to the detached public Session contract. */
 function convertToLibrarySession(coreSession: CoreSession): Session {
+  const canonicalWorkspacePath = coreSession.canonicalWorkspacePath ?? coreSession.workspacePath;
+  const compatibilitySource = compatibilitySourceOf(coreSession);
+
   return {
     id: coreSession.id,
-    workspace: coreSession.workspacePath ?? 'unknown',
+    workspace: canonicalWorkspacePath ?? 'unknown',
     timestamp: coreSession.createdAt.toISOString(),
     messages: coreSession.messages.map((msg) => {
       const m: Record<string, unknown> = {
@@ -212,29 +574,230 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
       };
       // Provenance remains absent when the public timestamp uses the
       // compatibility fallback above.
+      if (msg.messageIdentityVersion) m['messageIdentityVersion'] = msg.messageIdentityVersion;
+      if (msg.identityOrigin) m['identityOrigin'] = msg.identityOrigin;
+      if (msg.parentMessageId) m['parentMessageId'] = msg.parentMessageId;
+      if (msg.isSidechain !== undefined) m['isSidechain'] = msg.isSidechain;
       if (msg.timestampSource) m['timestampSource'] = msg.timestampSource;
       if (msg.source) m['source'] = msg.source;
-      if (msg.toolCalls) m['toolCalls'] = msg.toolCalls;
+      if (msg.toolCalls) {
+        m['toolCalls'] = msg.toolCalls.map((call) => ({
+          ...call,
+          ...(call.params !== undefined ? { params: structuredClone(call.params) } : {}),
+          ...(call.files !== undefined ? { files: [...call.files] } : {}),
+        }));
+      }
       if (msg.thinking) m['thinking'] = msg.thinking;
-      if (msg.tokenUsage) m['tokenUsage'] = msg.tokenUsage;
+      if (msg.tokenUsage) m['tokenUsage'] = { ...msg.tokenUsage };
       if (msg.model) m['model'] = msg.model;
       if (msg.durationMs !== undefined) m['durationMs'] = msg.durationMs;
-      if (msg.metadata) m['metadata'] = msg.metadata;
+      if (msg.metadata) m['metadata'] = { ...msg.metadata };
       return m as unknown as import('./types.js').Message;
     }),
     messageCount: coreSession.messageCount,
-    source: coreSession.source,
-    ...(coreSession.sources ? { sources: coreSession.sources } : {}),
+    index: Math.max(0, coreSession.index - 1),
+    ...(coreSession.indexScope ? { indexScope: coreSession.indexScope } : {}),
+    ...(coreSession.indexWorkspacePath
+      ? { indexWorkspacePath: coreSession.indexWorkspacePath }
+      : {}),
+    source: compatibilitySource,
+    ...(coreSession.resolvedSource ? { resolvedSource: coreSession.resolvedSource } : {}),
+    ...(coreSession.sources ? { sources: [...coreSession.sources] } : {}),
     ...(coreSession.preferredSource ? { preferredSource: coreSession.preferredSource } : {}),
+    ...(coreSession.resolution ? { resolution: cloneResolution(coreSession.resolution) } : {}),
+    ...(coreSession.resolutionState ? { resolutionState: coreSession.resolutionState } : {}),
+    ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
+    ...(coreSession.matchedWorkspacePath
+      ? { matchedWorkspacePath: coreSession.matchedWorkspacePath }
+      : {}),
+    ...(coreSession.workspaceMatchKind
+      ? { workspaceMatchKind: coreSession.workspaceMatchKind }
+      : {}),
+    ...(coreSession.workspaceMemberships
+      ? {
+          workspaceMemberships: coreSession.workspaceMemberships.map((membership) => ({
+            ...membership,
+            sourceRoles: [...membership.sourceRoles],
+          })),
+        }
+      : {}),
+    ...(coreSession.sourceInstances
+      ? {
+          sourceInstances: coreSession.sourceInstances.map((instance) => ({
+            ...instance,
+            workspacePaths: [...instance.workspacePaths],
+          })),
+        }
+      : {}),
+    ...(coreSession.messageIdentityVersion
+      ? { messageIdentityVersion: coreSession.messageIdentityVersion }
+      : {}),
+    ...(coreSession.createdAtSource ? { createdAtSource: coreSession.createdAtSource } : {}),
+    ...(coreSession.lastUpdatedAtSource
+      ? { lastUpdatedAtSource: coreSession.lastUpdatedAtSource }
+      : {}),
     ...(coreSession.transcriptState ? { transcriptState: coreSession.transcriptState } : {}),
-    usage: coreSession.usage,
+    // `usage` has always been an own property, including when undefined.
+    // Preserve that observable runtime shape while detaching defined values.
+    usage: coreSession.usage ? { ...coreSession.usage } : undefined,
     ...(coreSession.activeBranchBubbleIds
-      ? { activeBranchBubbleIds: coreSession.activeBranchBubbleIds }
+      ? { activeBranchBubbleIds: [...coreSession.activeBranchBubbleIds] }
+      : {}),
+    ...(coreSession.activeBranchMessageIds
+      ? { activeBranchMessageIds: [...coreSession.activeBranchMessageIds] }
       : {}),
     metadata: {
       lastModified: coreSession.lastUpdatedAt.toISOString(),
     },
   };
+}
+
+function isCoreAmbiguousSummary(
+  summary: CoreLogicalSessionSummary
+): summary is CoreAmbiguousSessionSummary {
+  return summary.resolutionState === 'ambiguous';
+}
+
+/** Convert a message-free core catalog row to the zero-based public contract. */
+function convertToLibrarySummary(summary: CoreLogicalSessionSummary): SessionSummary {
+  if (isCoreAmbiguousSummary(summary)) {
+    return {
+      id: summary.id,
+      index: summary.index - 1,
+      indexScope: summary.indexScope,
+      ...(summary.indexWorkspacePath ? { indexWorkspacePath: summary.indexWorkspacePath } : {}),
+      resolutionState: 'ambiguous',
+      sourceRoles: [...summary.sourceRoles],
+      occurrenceCount: summary.occurrenceCount,
+      diagnosticOccurrenceRefs: [...summary.diagnosticOccurrenceRefs],
+      ...(summary.canonicalWorkspacePath
+        ? { canonicalWorkspacePath: summary.canonicalWorkspacePath }
+        : {}),
+      ...(summary.matchedWorkspacePath
+        ? { matchedWorkspacePath: summary.matchedWorkspacePath }
+        : {}),
+    };
+  }
+
+  const catalogWorkspacePath =
+    summary.workspacePath === '(unknown workspace)' ? undefined : summary.workspacePath;
+  const canonicalWorkspacePath = summary.canonicalWorkspacePath ?? catalogWorkspacePath;
+  const source = compatibilitySourceOf(summary);
+  const resolvedSource = resolvedSourceOf(summary);
+  const sources = sourceRolesOf(summary);
+  const resolution = resolutionOf(summary);
+  const workspaceMemberships = summary.workspaceMemberships
+    ? summary.workspaceMemberships.map((membership) => ({
+        ...membership,
+        sourceRoles: [...membership.sourceRoles],
+      }))
+    : canonicalWorkspacePath
+      ? [
+          {
+            workspacePath: canonicalWorkspacePath,
+            sourceRoles: [...sources],
+            contributingInstanceCount: 1,
+          },
+        ]
+      : [];
+  const sourceInstances: SessionSourceInstance[] = summary.sourceInstances
+    ? summary.sourceInstances.map((instance) => ({
+        ...instance,
+        workspacePaths: [...instance.workspacePaths],
+      }))
+    : [];
+
+  const result: ResolvedSessionSummary = {
+    id: summary.id,
+    index: summary.index - 1,
+    indexScope: summary.indexScope ?? 'global',
+    ...(summary.indexWorkspacePath ? { indexWorkspacePath: summary.indexWorkspacePath } : {}),
+    workspace: canonicalWorkspacePath ?? 'unknown',
+    timestamp: summary.createdAt.toISOString(),
+    title: summary.title,
+    preview: summary.preview,
+    messageCount: summary.messageCount,
+    source,
+    resolvedSource,
+    sources,
+    ...(summary.preferredSource ? { preferredSource: summary.preferredSource } : {}),
+    resolution,
+    resolutionState: resolution.state,
+    ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
+    ...(summary.matchedWorkspacePath ? { matchedWorkspacePath: summary.matchedWorkspacePath } : {}),
+    ...(summary.workspaceMatchKind ? { workspaceMatchKind: summary.workspaceMatchKind } : {}),
+    workspaceMemberships,
+    sourceInstances,
+    messageIdentityVersion: summary.messageIdentityVersion ?? 1,
+    createdAtSource: summary.createdAtSource ?? 'epoch-unknown',
+    lastUpdatedAtSource: summary.lastUpdatedAtSource ?? 'epoch-unknown',
+    ...(summary.transcriptState ? { transcriptState: summary.transcriptState } : {}),
+    metadata: {
+      lastModified: summary.lastUpdatedAt.toISOString(),
+    },
+  };
+  return result;
+}
+
+function reportAmbiguousSummary(
+  summary: CoreAmbiguousSessionSummary,
+  onDiagnostic: ConfiguredReadContext['onDiagnostic']
+): void {
+  if (!onDiagnostic) {
+    throw new SessionAmbiguityError(summary.id, summary.diagnosticOccurrenceRefs);
+  }
+  onDiagnostic({
+    code: 'SESSION_AMBIGUOUS',
+    message: `Session ${summary.id} has divergent physical occurrences.`,
+    sessionId: summary.id,
+    occurrenceCount: summary.occurrenceCount,
+    occurrenceRefs: [...summary.diagnosticOccurrenceRefs],
+    remedy: 'Resolve or remove the divergent replicas, then retry the operation.',
+  });
+}
+
+/**
+ * List one message-free row for every logical session in the requested catalog window.
+ *
+ * @param config - Optional immutable data source, workspace, and pagination configuration.
+ * @returns A zero-based page containing resolved and ambiguous logical summaries.
+ * @throws {DatabaseLockedError} If Cursor holds a database lock that prevents the read.
+ * @throws {DatabaseNotFoundError} If the configured data source does not exist.
+ * @throws {InvalidConfigError} If a configuration field is invalid.
+ * @throws {SessionIntegrityError} If catalog discovery cannot be completed safely.
+ */
+export async function listSessionSummaries(
+  config?: LibraryConfig
+): Promise<PaginatedResult<SessionSummary>> {
+  const resolved = mergeWithDefaults(config);
+  const bound = bindConfiguredReadContext(config);
+  try {
+    const rows = await storage.listSessionSummaries(
+      {
+        limit: -1,
+        all: true,
+        workspacePath: bound.workspace,
+        includeCrossWorkspaceSources: bound.includeCrossWorkspaceSources,
+      },
+      bound.dataPath,
+      bound.backupPath,
+      bound.context
+    );
+    const total = rows.length;
+    const start = resolved.offset;
+    const end = Math.min(start + resolved.limit, total);
+    return {
+      data: rows.slice(start, end).map(convertToLibrarySummary),
+      pagination: {
+        total,
+        limit: resolved.limit,
+        offset: resolved.offset,
+        hasMore: end < total,
+      },
+    };
+  } finally {
+    if (bound.ownsContext) await bound.context.dispose();
+  }
 }
 
 /**
@@ -263,58 +826,62 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
 export async function listSessions(config?: LibraryConfig): Promise<PaginatedResult<Session>> {
   try {
     const resolved = mergeWithDefaults(config);
-
-    // Use one read context for the whole listing. It caches Store
-    // sessions and summaries so each per-session load below does not re-discover.
-    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
-
-    // Get all sessions using core storage layer
-    const coreSessions = await storage.listSessions(
-      {
-        limit: -1, // Get all, we'll paginate ourselves
-        all: true,
-        workspacePath: resolved.workspace,
-      },
-      resolved.dataPath,
-      resolved.backupPath,
-      context
-    );
-
-    // Total count before pagination
-    const total = coreSessions.length;
-
-    // Apply offset and limit
-    const start = resolved.offset;
-    const end = Math.min(start + resolved.limit, total);
-    const paginatedSessions = coreSessions.slice(start, end);
-
-    // Convert to library Session format
-    // We need full sessions, not summaries, so we'll fetch each one
-    const sessions: Session[] = [];
-    for (const summary of paginatedSessions) {
-      const fullSession = await storage.getSession(
-        summary.id,
-        resolved.dataPath,
-        resolved.backupPath,
-        context,
-        summary.index
+    const bound = bindConfiguredReadContext(config);
+    try {
+      const logicalSummaries = await storage.listSessionSummaries(
+        {
+          limit: -1,
+          all: true,
+          workspacePath: bound.workspace,
+          includeCrossWorkspaceSources: bound.includeCrossWorkspaceSources,
+        },
+        bound.dataPath,
+        bound.backupPath,
+        bound.context
       );
-      if (!fullSession) {
-        throw new DatabaseNotFoundError(`Session ${summary.index} not found`);
-      }
-      sessions.push(convertToLibrarySession(fullSession));
-    }
 
-    return {
-      data: sessions,
-      pagination: {
-        total,
-        limit: resolved.limit,
-        offset: resolved.offset,
-        hasMore: end < total,
-      },
-    };
+      const total = logicalSummaries.length;
+      const start = resolved.offset;
+      const end = Math.min(start + resolved.limit, total);
+      const paginatedRows = logicalSummaries.slice(start, end);
+
+      const sessions: Session[] = [];
+      for (const summary of paginatedRows) {
+        if (isCoreAmbiguousSummary(summary)) {
+          reportAmbiguousSummary(summary, bound.onDiagnostic);
+          continue;
+        }
+        try {
+          const fullSession = await storage.getSession(
+            summary.id,
+            bound.dataPath,
+            bound.backupPath,
+            bound.context,
+            summary.index
+          );
+          if (!fullSession) {
+            throw new DatabaseNotFoundError(`Session ${summary.index} not found`);
+          }
+          sessions.push(convertToLibrarySession(fullSession));
+        } finally {
+          bound.context.releaseSession(summary.id);
+        }
+      }
+
+      return {
+        data: sessions,
+        pagination: {
+          total,
+          limit: resolved.limit,
+          offset: resolved.offset,
+          hasMore: end < total,
+        },
+      };
+    } finally {
+      if (bound.ownsContext) await bound.context.dispose();
+    }
   } catch (err) {
+    if (isReadPassThroughError(err)) throw err;
     // Check for SQLite BUSY error (database locked)
     if (err instanceof Error && err.message.includes('SQLITE_BUSY')) {
       throw new DatabaseLockedError(config?.dataPath ?? 'default path');
@@ -364,31 +931,35 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
  */
 export async function getSession(index: number | string, config?: LibraryConfig): Promise<Session> {
   try {
-    const resolved = mergeWithDefaults(config);
+    const bound = bindConfiguredReadContext(config);
 
-    // Validate message filter if provided
-    if (config?.messageFilter && config.messageFilter.length > 0) {
-      const invalidTypes = validateMessageTypesImpl(config.messageFilter);
-      if (invalidTypes.length > 0) {
-        throw new InvalidFilterError(invalidTypes, MESSAGE_TYPES_CONST);
+    try {
+      // Validate message filter if provided
+      if (config?.messageFilter && config.messageFilter.length > 0) {
+        const invalidTypes = validateMessageTypesImpl(config.messageFilter);
+        if (invalidTypes.length > 0) {
+          throw new InvalidFilterError(invalidTypes, MESSAGE_TYPES_CONST);
+        }
       }
+
+      const coreIdentifier = toCoreSessionIdentifier(index);
+      const coreSession = await getCoreSessionInScope(coreIdentifier, bound);
+
+      if (!coreSession) {
+        throw new SessionNotFoundError(index);
+      }
+
+      // Apply message filter if provided
+      if (config?.messageFilter && config.messageFilter.length > 0) {
+        coreSession.messages = filterMessagesImpl(coreSession.messages, config.messageFilter);
+      }
+
+      return convertToLibrarySession(coreSession);
+    } finally {
+      if (bound.ownsContext) await bound.context.dispose();
     }
-
-    const coreIdentifier = toCoreSessionIdentifier(index);
-
-    const coreSession = await getCoreSessionInScope(coreIdentifier, resolved);
-
-    if (!coreSession) {
-      throw new SessionNotFoundError(index);
-    }
-
-    // Apply message filter if provided
-    if (config?.messageFilter && config.messageFilter.length > 0) {
-      coreSession.messages = filterMessagesImpl(coreSession.messages, config.messageFilter);
-    }
-
-    return convertToLibrarySession(coreSession);
   } catch (err) {
+    if (isReadPassThroughError(err)) throw err;
     // Check for SQLite BUSY error (database locked)
     if (err instanceof Error && err.message.includes('SQLITE_BUSY')) {
       throw new DatabaseLockedError(config?.dataPath ?? 'default path');
@@ -446,83 +1017,82 @@ export async function searchSessions(
 ): Promise<SearchResult[]> {
   try {
     const resolved = mergeWithDefaults(config);
-    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
-
-    // Search using core storage layer
-    const coreResults = await storage.searchSessions(
-      query,
-      {
-        limit: resolved.limit === Number.MAX_SAFE_INTEGER ? 0 : resolved.limit,
-        contextChars: resolved.context * 80, // Rough estimate: 1 line = 80 chars
-        workspacePath: resolved.workspace,
-      },
-      resolved.dataPath,
-      resolved.backupPath,
-      context
-    );
-
-    // Convert core results to library format
-    const results: SearchResult[] = [];
-    for (const coreResult of coreResults) {
-      // Get full session for reference
-      const fullSession = await storage.getSession(
-        coreResult.sessionId,
-        resolved.dataPath,
-        resolved.backupPath,
-        context,
-        coreResult.index
+    const bound = bindConfiguredReadContext(config, 0);
+    try {
+      const coreResults = await storage.searchSessions(
+        query,
+        {
+          limit: resolved.limit === Number.MAX_SAFE_INTEGER ? 0 : resolved.limit,
+          contextChars: resolved.context * 80,
+          workspacePath: bound.workspace,
+          includeCrossWorkspaceSources: bound.includeCrossWorkspaceSources,
+        },
+        bound.dataPath,
+        bound.backupPath,
+        bound.context
       );
-      if (!fullSession) {
-        throw new DatabaseNotFoundError(`Session ${coreResult.index} not found`);
-      }
+      const results: SearchResult[] = [];
+      for (const coreResult of coreResults) {
+        try {
+          const fullSession = await storage.getSession(
+            coreResult.sessionId,
+            bound.dataPath,
+            bound.backupPath,
+            bound.context,
+            coreResult.index
+          );
+          if (!fullSession) {
+            throw new DatabaseNotFoundError(`Session ${coreResult.index} not found`);
+          }
 
-      // Find the first match to get offset and context
-      const firstSnippet = coreResult.snippets[0];
-      const match = firstSnippet?.text ?? '';
-      const offset = firstSnippet?.matchPositions[0]?.[0] ?? 0;
+          const firstSnippet = coreResult.snippets[0];
+          const match = firstSnippet?.text ?? '';
+          const offset = firstSnippet?.matchPositions[0]?.[0] ?? 0;
+          const lines = match.split('\n');
+          const contextBefore: string[] = [];
+          const contextAfter: string[] = [];
 
-      // Extract context lines (split by newlines)
-      const lines = match.split('\n');
-      const contextBefore: string[] = [];
-      const contextAfter: string[] = [];
+          let matchLineIndex = 0;
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (line && line.includes(query)) {
+              matchLineIndex = i;
+              break;
+            }
+          }
 
-      // Find the line containing the match
-      let matchLineIndex = 0;
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (line && line.includes(query)) {
-          matchLineIndex = i;
-          break;
+          if (resolved.context > 0) {
+            const start = Math.max(0, matchLineIndex - resolved.context);
+            const end = Math.min(lines.length, matchLineIndex + resolved.context + 1);
+
+            for (let i = start; i < matchLineIndex; i++) {
+              const line = lines[i];
+              if (line) contextBefore.push(line);
+            }
+            for (let i = matchLineIndex + 1; i < end; i++) {
+              const line = lines[i];
+              if (line) contextAfter.push(line);
+            }
+          }
+
+          results.push({
+            session: convertToLibrarySession(fullSession),
+            match: lines[matchLineIndex] ?? match,
+            messageIndex: 0,
+            offset,
+            contextBefore: contextBefore.length > 0 ? contextBefore : undefined,
+            contextAfter: contextAfter.length > 0 ? contextAfter : undefined,
+          });
+        } finally {
+          bound.context.releaseSession(coreResult.sessionId);
         }
       }
-
-      // Get context lines before and after
-      if (resolved.context > 0) {
-        const start = Math.max(0, matchLineIndex - resolved.context);
-        const end = Math.min(lines.length, matchLineIndex + resolved.context + 1);
-
-        for (let i = start; i < matchLineIndex; i++) {
-          const line = lines[i];
-          if (line) contextBefore.push(line);
-        }
-        for (let i = matchLineIndex + 1; i < end; i++) {
-          const line = lines[i];
-          if (line) contextAfter.push(line);
-        }
-      }
-
-      results.push({
-        session: convertToLibrarySession(fullSession),
-        match: lines[matchLineIndex] ?? match,
-        messageIndex: 0, // Would need to track which message contains the match
-        offset,
-        contextBefore: contextBefore.length > 0 ? contextBefore : undefined,
-        contextAfter: contextAfter.length > 0 ? contextAfter : undefined,
-      });
+      return results;
+    } finally {
+      if (bound.ownsContext) await bound.context.dispose();
     }
-
-    return results;
   } catch (err) {
+    if (isReadPassThroughError(err)) throw err;
     // Check for SQLite BUSY error (database locked)
     if (err instanceof Error && err.message.includes('SQLITE_BUSY')) {
       throw new DatabaseLockedError(config?.dataPath ?? 'default path');
@@ -567,17 +1137,19 @@ export async function exportSessionToJson(
   config?: LibraryConfig
 ): Promise<string> {
   try {
-    const resolved = mergeWithDefaults(config);
-
+    const bound = bindConfiguredReadContext(config);
     const coreIdentifier = toCoreSessionIdentifier(index);
-
-    const coreSession = await getCoreSessionInScope(coreIdentifier, resolved);
-    if (!coreSession) {
-      throw new SessionNotFoundError(index);
+    try {
+      const coreSession = await getCoreSessionInScope(coreIdentifier, bound);
+      if (!coreSession) {
+        throw new SessionNotFoundError(index);
+      }
+      return exportToJson(coreSession, coreSession.workspacePath);
+    } finally {
+      if (bound.ownsContext) await bound.context.dispose();
     }
-
-    return exportToJson(coreSession, coreSession.workspacePath);
   } catch (err) {
+    if (isReadPassThroughError(err)) throw err;
     if (
       err instanceof DatabaseLockedError ||
       err instanceof DatabaseNotFoundError ||
@@ -613,17 +1185,19 @@ export async function exportSessionToMarkdown(
   config?: LibraryConfig
 ): Promise<string> {
   try {
-    const resolved = mergeWithDefaults(config);
-
+    const bound = bindConfiguredReadContext(config);
     const coreIdentifier = toCoreSessionIdentifier(index);
-
-    const coreSession = await getCoreSessionInScope(coreIdentifier, resolved);
-    if (!coreSession) {
-      throw new SessionNotFoundError(index);
+    try {
+      const coreSession = await getCoreSessionInScope(coreIdentifier, bound);
+      if (!coreSession) {
+        throw new SessionNotFoundError(index);
+      }
+      return exportToMarkdown(coreSession, coreSession.workspacePath);
+    } finally {
+      if (bound.ownsContext) await bound.context.dispose();
     }
-
-    return exportToMarkdown(coreSession, coreSession.workspacePath);
   } catch (err) {
+    if (isReadPassThroughError(err)) throw err;
     if (
       err instanceof DatabaseLockedError ||
       err instanceof DatabaseNotFoundError ||
@@ -655,41 +1229,48 @@ export async function exportSessionToMarkdown(
  */
 export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<string> {
   try {
-    const resolved = mergeWithDefaults(config);
-
-    // Share one Store discovery across the export-all loop.
-    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
-
-    // Get all sessions
-    const coreSessions = await storage.listSessions(
-      {
-        limit: -1,
-        all: true,
-        workspacePath: resolved.workspace,
-      },
-      resolved.dataPath,
-      resolved.backupPath,
-      context
-    );
-
-    // Export each session
-    const exportedSessions: Record<string, unknown>[] = [];
-    for (const summary of coreSessions) {
-      const session = await storage.getSession(
-        summary.id,
-        resolved.dataPath,
-        resolved.backupPath,
-        context,
-        summary.index
+    const bound = bindConfiguredReadContext(config, 0);
+    try {
+      const coreSessions = await storage.listSessionSummaries(
+        {
+          limit: -1,
+          all: true,
+          workspacePath: bound.workspace,
+          includeCrossWorkspaceSources: bound.includeCrossWorkspaceSources,
+        },
+        bound.dataPath,
+        bound.backupPath,
+        bound.context
       );
-      if (!session) continue;
-      exportedSessions.push(
-        JSON.parse(exportToJson(session, session.workspacePath)) as Record<string, unknown>
-      );
+
+      const exportedSessions: Record<string, unknown>[] = [];
+      for (const summary of coreSessions) {
+        if (isCoreAmbiguousSummary(summary)) {
+          reportAmbiguousSummary(summary, bound.onDiagnostic);
+          continue;
+        }
+        try {
+          const session = await storage.getSession(
+            summary.id,
+            bound.dataPath,
+            bound.backupPath,
+            bound.context,
+            summary.index
+          );
+          if (!session) continue;
+          exportedSessions.push(
+            JSON.parse(exportToJson(session, session.workspacePath)) as Record<string, unknown>
+          );
+        } finally {
+          bound.context.releaseSession(summary.id);
+        }
+      }
+      return JSON.stringify(exportedSessions, null, 2);
+    } finally {
+      if (bound.ownsContext) await bound.context.dispose();
     }
-
-    return JSON.stringify(exportedSessions, null, 2);
   } catch (err) {
+    if (isReadPassThroughError(err)) throw err;
     if (err instanceof DatabaseLockedError || err instanceof DatabaseNotFoundError) {
       throw err;
     }
@@ -713,42 +1294,49 @@ export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<s
  */
 export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promise<string> {
   try {
-    const resolved = mergeWithDefaults(config);
-
-    // Share one Store discovery across the export-all loop.
-    const context = storage.createSessionReadContext(resolved.dataPath, resolved.backupPath);
-
-    // Get all sessions
-    const coreSessions = await storage.listSessions(
-      {
-        limit: -1,
-        all: true,
-        workspacePath: resolved.workspace,
-      },
-      resolved.dataPath,
-      resolved.backupPath,
-      context
-    );
-
-    // Export each session
-    const parts: string[] = [];
-
-    for (const summary of coreSessions) {
-      const session = await storage.getSession(
-        summary.id,
-        resolved.dataPath,
-        resolved.backupPath,
-        context,
-        summary.index
+    const bound = bindConfiguredReadContext(config, 0);
+    try {
+      const coreSessions = await storage.listSessionSummaries(
+        {
+          limit: -1,
+          all: true,
+          workspacePath: bound.workspace,
+          includeCrossWorkspaceSources: bound.includeCrossWorkspaceSources,
+        },
+        bound.dataPath,
+        bound.backupPath,
+        bound.context
       );
-      if (!session) continue;
 
-      parts.push(exportToMarkdown(session, session.workspacePath));
-      parts.push('\n\n---\n\n'); // Separator between sessions
+      const parts: string[] = [];
+      for (const summary of coreSessions) {
+        if (isCoreAmbiguousSummary(summary)) {
+          reportAmbiguousSummary(summary, bound.onDiagnostic);
+          continue;
+        }
+        try {
+          const session = await storage.getSession(
+            summary.id,
+            bound.dataPath,
+            bound.backupPath,
+            bound.context,
+            summary.index
+          );
+          if (!session) continue;
+
+          parts.push(exportToMarkdown(session, session.workspacePath));
+          parts.push('\n\n---\n\n');
+        } finally {
+          bound.context.releaseSession(summary.id);
+        }
+      }
+
+      return parts.join('');
+    } finally {
+      if (bound.ownsContext) await bound.context.dispose();
     }
-
-    return parts.join('');
   } catch (err) {
+    if (isReadPassThroughError(err)) throw err;
     if (err instanceof DatabaseLockedError || err instanceof DatabaseNotFoundError) {
       throw err;
     }
@@ -801,20 +1389,27 @@ export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promi
 export async function migrateSession(
   config: MigrateSessionConfig
 ): Promise<SessionMigrationResult[]> {
-  // Resolve session identifiers to IDs
-  const sessionIds = await storage.resolveSessionIdentifiers(config.sessions, config.dataPath);
+  const selectors: Array<string | number> = Array.isArray(config.sessions)
+    ? [...config.sessions]
+    : typeof config.sessions === 'string' && config.sessions.includes(',')
+      ? config.sessions.split(',').map((value) => value.trim())
+      : [config.sessions];
 
   // Expand ~ in destination path
   const destination = expandPath(config.destination);
 
-  // Call core migration function
+  // Selectors remain one-based for this released migration API. Core binds
+  // them once inside the requested workspace and never reloads by index.
   return await migrate.migrateSessions({
-    sessionIds,
+    selectors,
+    workspacePath: config.workspace,
     destination,
     mode: config.mode ?? 'move',
     dryRun: config.dryRun ?? false,
     force: config.force ?? false,
     dataPath: config.dataPath,
+    sourceReadLimits: config.sourceReadLimits,
+    signal: config.signal,
   });
 }
 
@@ -871,6 +1466,8 @@ export async function migrateWorkspace(
     dryRun: config.dryRun ?? false,
     force: config.force ?? false,
     dataPath: config.dataPath,
+    sourceReadLimits: config.sourceReadLimits,
+    signal: config.signal,
   });
 }
 
@@ -899,7 +1496,8 @@ export {
  * then falls back to better-sqlite3.
  *
  * @param name - Driver name: 'better-sqlite3' or 'node:sqlite'
- * @throws {Error} If the specified driver is not available
+ * @returns Nothing; the preference is recorded synchronously. The next awaited
+ * database operation validates availability and operation-specific capabilities.
  *
  * @example
  * // Force use of better-sqlite3
@@ -926,5 +1524,12 @@ export function setDriver(name: SqliteDriverName): void {
  * console.log(`Using ${driver ?? 'auto-detect'}`);
  */
 export function getActiveDriver(): SqliteDriverName | undefined {
-  return coreGetActiveDriver() as SqliteDriverName | undefined;
+  try {
+    return coreGetActiveDriver() as SqliteDriverName;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('No driver is currently active.')) {
+      return undefined;
+    }
+    throw error;
+  }
 }
