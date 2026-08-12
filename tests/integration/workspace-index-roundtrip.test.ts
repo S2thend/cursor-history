@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createBackup } from '../../src/core/backup.js';
+import { resolveCommandSession } from '../../src/cli/commands/session-lookup.js';
 import {
   createSessionReadContext,
   getSession,
@@ -90,7 +91,11 @@ async function expectWorkspaceRoundTrip(
   const global = await listSessions({ limit: 0, all: true }, customDataPath, sourceBackupPath);
   expect(global.map((summary) => summary.id)).toEqual([sessionB, sessionA]);
 
-  const context = createSessionReadContext(customDataPath, sourceBackupPath);
+  const context = createSessionReadContext({
+    ...(customDataPath ? { dataPath: customDataPath } : {}),
+    ...(sourceBackupPath ? { backupPath: sourceBackupPath } : {}),
+    workspacePath: projectA,
+  });
   const filtered = await listSessions(
     { limit: 0, all: true, workspacePath: projectA },
     customDataPath,
@@ -102,6 +107,12 @@ async function expectWorkspaceRoundTrip(
   const resolved = await getSession(1, customDataPath, sourceBackupPath, context);
   expect(resolved?.id).toBe(sessionA);
   expect(resolved?.messages[0]?.content).toBe('needle-a');
+  await expect(
+    resolveCommandSession(sessionA, projectA, customDataPath, sourceBackupPath)
+  ).resolves.toMatchObject({ id: sessionA });
+  await expect(
+    resolveCommandSession(sessionB, projectA, customDataPath, sourceBackupPath)
+  ).rejects.toMatchObject({ code: 'SESSION_SCOPE_MISMATCH' });
 
   const foundA = await searchSessions(
     'needle-a',
@@ -128,6 +139,10 @@ async function expectWorkspaceRoundTrip(
   const librarySession = await getLibrarySession(0, libraryConfig);
   expect(librarySession.id).toBe(sessionA);
   expect(librarySession.messages[0]?.content).toBe('needle-a');
+  await expect(getLibrarySession(sessionA, libraryConfig)).resolves.toMatchObject({ id: sessionA });
+  await expect(getLibrarySession(sessionB, libraryConfig)).rejects.toMatchObject({
+    code: 'SESSION_SCOPE_MISMATCH',
+  });
 
   const libraryFoundA = await searchLibrarySessions('needle-a', libraryConfig);
   const libraryFoundB = await searchLibrarySessions('needle-b', libraryConfig);

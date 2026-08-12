@@ -4,12 +4,55 @@ import { join } from 'node:path';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
+import type { AdapterIoEvent } from '../../src/core/io-observer.js';
+import { normalizeWorkspacePath } from '../../src/core/workspace-scope.js';
 import * as storage from '../../src/core/storage.js';
 
 // Real Store-stack fixture (no Composer vscdb): two Store sessions.
 const STORE_ROOT = () => join(process.cwd(), 'tests', 'fixtures', 'store-root');
 const UUID1 = 'aaaaaaaa-0000-0000-0000-000000000001'; // has meta.json.cwd
 const UUID2 = 'bbbbbbbb-0000-0000-0000-000000000002'; // transcript-only, no path
+
+interface ContextOwnershipSnapshot {
+  readonly resolvedSessionCapacity: number;
+  readonly activeResolutions: number;
+  readonly completedSessions: number;
+  readonly discoveryDecodedSessions: number;
+  readonly ownedDecodedSessions: number;
+  readonly resolutionStarts: number;
+}
+
+interface BoundedReadContext extends storage.SessionReadContext {
+  readonly resolvedSessionCapacity: number;
+  readonly disposed: boolean;
+  releaseSession(sessionId: string): void;
+  dispose(): Promise<void>;
+}
+
+interface BoundedContextOptions {
+  dataPath?: string;
+  backupPath?: string;
+  workspacePath?: string;
+  resolvedSessionCapacity?: number;
+  ioObserver?: (event: Readonly<AdapterIoEvent>) => void;
+  testOnlyOnOwnershipChange?: (snapshot: Readonly<ContextOwnershipSnapshot>) => void;
+}
+
+function createBoundedContext(
+  options: BoundedContextOptions,
+  snapshots: ContextOwnershipSnapshot[] = []
+): BoundedReadContext {
+  const create = storage.createSessionReadContext as unknown as (
+    options: BoundedContextOptions
+  ) => BoundedReadContext;
+  return create({
+    ...options,
+    testOnlyOnOwnershipChange: (snapshot) => {
+      snapshots.push({ ...snapshot });
+      options.testOnlyOnOwnershipChange?.(snapshot);
+    },
+  });
+}
 
 describe('listWorkspaces — aggregates from the resolved session set', () => {
   it('groups Store sessions by workspacePath; transcript-only → unknown bucket', async () => {
@@ -99,7 +142,7 @@ describe('listWorkspaces — aggregates from the resolved session set', () => {
       const workspaces = await storage.listWorkspaces();
 
       expect(workspaces.map(({ path, sessionCount }) => ({ path, sessionCount }))).toEqual([
-        { path: storePath, sessionCount: 1 },
+        { path: composerPath, sessionCount: 1 },
       ]);
     } finally {
       if (previousHome === undefined) delete process.env['HOME'];
@@ -144,7 +187,10 @@ describe('SessionReadContext — one Store discovery per operation', () => {
       const global = await storage.listSessions({ limit: 0, all: true }, root);
       expect(global.map((summary) => summary.id)).toEqual([sessionB, sessionA]);
 
-      const context = storage.createSessionReadContext(root);
+      const context = storage.createSessionReadContext({
+        dataPath: root,
+        workspacePath: '/workspace/a',
+      });
       const filtered = await storage.listSessions(
         { limit: 0, all: true, workspacePath: '/workspace/a' },
         root,
@@ -265,7 +311,10 @@ describe('SessionReadContext — one Store discovery per operation', () => {
 
     try {
       writeComposer('initial content');
-      const context = storage.createSessionReadContext(workspaceStorage);
+      const context = storage.createSessionReadContext({
+        dataPath: workspaceStorage,
+        workspacePath: projectPath,
+      });
       await storage.listSessions(
         { limit: 0, all: true, workspacePath: projectPath },
         workspaceStorage,
@@ -279,7 +328,10 @@ describe('SessionReadContext — one Store discovery per operation', () => {
       const cached = await storage.getSession(1, workspaceStorage, undefined, context);
       expect(cached?.messages[0]?.content).toBe('initial content');
 
-      const freshContext = storage.createSessionReadContext(workspaceStorage);
+      const freshContext = storage.createSessionReadContext({
+        dataPath: workspaceStorage,
+        workspacePath: projectPath,
+      });
       await storage.listSessions(
         { limit: 0, all: true, workspacePath: projectPath },
         workspaceStorage,
@@ -294,7 +346,7 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     }
   });
 
-  it('keeps duplicate filtered summaries distinct in the final-session cache and bulk search', async () => {
+  it('projects divergent filtered replicas once and never searches contested payloads', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ch-composer-duplicate-cache-'));
     const workspaceStorage = join(root, 'User', 'workspaceStorage');
     const projectPath = join(root, 'shared-project');
@@ -329,36 +381,47 @@ describe('SessionReadContext — one Store discovery per operation', () => {
       writeWorkspace('workspace-a', 'alpha-only duplicate', 1783000000000);
       writeWorkspace('workspace-b', 'beta-only duplicate', 1784000000000);
 
-      const context = storage.createSessionReadContext(workspaceStorage);
-      const summaries = await storage.listSessions(
+      const context = storage.createSessionReadContext({
+        dataPath: workspaceStorage,
+        workspacePath: projectPath,
+      });
+      const logicalRows = await storage.listSessionSummaries(
         { limit: 0, all: true, workspacePath: projectPath },
         workspaceStorage,
         undefined,
         context
       );
 
-      // Workspace-filtered duplicate listing is intentional legacy behavior.
-      expect(summaries).toHaveLength(2);
-      expect(summaries.every((summary) => summary.id === sessionId)).toBe(true);
+      expect(logicalRows).toHaveLength(1);
+      expect(logicalRows[0]).toMatchObject({
+        id: sessionId,
+        resolutionState: 'ambiguous',
+        occurrenceCount: 2,
+      });
+      await expect(
+        storage.getSession(sessionId, workspaceStorage, undefined, context)
+      ).rejects.toMatchObject({ code: 'SESSION_AMBIGUOUS' });
+      expect(context.resolutionStarts).toBe(0);
 
-      const resolved = await Promise.all(
-        summaries.map((summary) =>
-          storage.getSession(summary.id, workspaceStorage, undefined, context, summary.index)
-        )
-      );
-      expect(resolved.map((session) => session?.messages[0]?.content).sort()).toEqual([
-        'alpha-only duplicate',
-        'beta-only duplicate',
-      ]);
-      expect(context.resolvedSessions.size).toBe(2);
-
-      const betaSummary = summaries.find((summary) => summary.title === 'beta-only duplicate')!;
+      const diagnostics: unknown[] = [];
+      const searchContext = storage.createSessionReadContext({
+        dataPath: workspaceStorage,
+        workspacePath: projectPath,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      });
       const results = await storage.searchSessions(
         'beta-only',
         { limit: 0, contextChars: 50, workspacePath: projectPath },
-        workspaceStorage
+        workspaceStorage,
+        undefined,
+        searchContext
       );
-      expect(results.map((result) => result.index)).toEqual([betaSummary.index]);
+      expect(results).toEqual([]);
+      expect(diagnostics).toEqual([
+        expect.objectContaining({ code: 'SESSION_AMBIGUOUS', sessionId, occurrenceCount: 2 }),
+      ]);
+      await context.dispose();
+      await searchContext.dispose();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -414,7 +477,10 @@ describe('SessionReadContext — one Store discovery per operation', () => {
   });
 
   it('resolves a workspace-filtered numeric index against the cached filtered summaries', async () => {
-    const ctx = storage.createSessionReadContext(STORE_ROOT());
+    const ctx = storage.createSessionReadContext({
+      dataPath: STORE_ROOT(),
+      workspacePath: '/mnt/d/1_yuyu_proj/cursor-history',
+    });
     const summaries = await storage.listSessions(
       { limit: 0, all: true, workspacePath: '/mnt/d/1_yuyu_proj/cursor-history' },
       STORE_ROOT(),
@@ -427,11 +493,16 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     expect(ctx.summaries).toEqual(summaries);
     const session = await storage.getSession(1, STORE_ROOT(), undefined, ctx);
     expect(session?.id).toBe(summaries[0]!.id);
-    expect(session?.workspacePath).toBe(summaries[0]!.workspacePath);
+    expect(normalizeWorkspacePath(session?.workspacePath ?? '')).toBe(
+      normalizeWorkspacePath(summaries[0]!.workspacePath)
+    );
   });
 
-  it('normalizes equivalent WSL and Windows workspace filters without suffix matches', async () => {
-    const context = storage.createSessionReadContext(STORE_ROOT());
+  it('normalizes equivalent WSL and Windows filters and accepts one unique suffix', async () => {
+    const context = storage.createSessionReadContext({
+      dataPath: STORE_ROOT(),
+      workspacePath: 'D:\\1_yuyu_proj\\cursor-history',
+    });
     const equivalent = await storage.listSessions(
       { limit: 0, all: true, workspacePath: 'D:\\1_yuyu_proj\\cursor-history' },
       STORE_ROOT(),
@@ -452,11 +523,14 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     expect(equivalent.map((session) => session.id)).toEqual([UUID1]);
     expect(sameScope).not.toBe(context.summaries);
     expect(sameScope).toEqual(context.summaries);
-    expect(suffixOnly).toEqual([]);
+    expect(suffixOnly.map((session) => session.id)).toEqual([UUID1]);
   });
 
   it('rejects reusing a context for a different workspace scope', async () => {
-    const ctx = storage.createSessionReadContext(STORE_ROOT());
+    const ctx = storage.createSessionReadContext({
+      dataPath: STORE_ROOT(),
+      workspacePath: '/workspace/a',
+    });
     await storage.listSessions(
       { limit: 0, all: true, workspacePath: '/workspace/a' },
       STORE_ROOT(),
@@ -471,7 +545,7 @@ describe('SessionReadContext — one Store discovery per operation', () => {
         undefined,
         ctx
       )
-    ).rejects.toThrow('SessionReadContext workspace scope mismatch');
+    ).rejects.toMatchObject({ code: 'READ_CONTEXT_SCOPE_MISMATCH' });
   });
 
   it('rejects reusing a context for a different data source', async () => {
@@ -479,6 +553,191 @@ describe('SessionReadContext — one Store discovery per operation', () => {
 
     await expect(
       storage.listSessions({ limit: 0, all: true }, join(STORE_ROOT(), 'other'), undefined, ctx)
-    ).rejects.toThrow('SessionReadContext source mismatch');
+    ).rejects.toMatchObject({ code: 'READ_CONTEXT_SOURCE_MISMATCH' });
+  });
+});
+
+describe('SessionReadContext — immutable bounded lifecycle contract', () => {
+  const workspacePath = '/mnt/d/1_yuyu_proj/cursor-history';
+
+  async function listStoreSessions(context: BoundedReadContext) {
+    return storage.listSessions({ limit: 0, all: true }, STORE_ROOT(), undefined, context);
+  }
+
+  it('binds copied options at construction and defaults completed retention to C=1', async () => {
+    const options: BoundedContextOptions = {
+      dataPath: STORE_ROOT(),
+      workspacePath,
+    };
+    const context = createBoundedContext(options);
+
+    options.dataPath = join(STORE_ROOT(), 'mutated');
+    options.workspacePath = '/workspace/mutated';
+    options.resolvedSessionCapacity = 0;
+
+    expect(context.resolvedSessionCapacity).toBe(1);
+    expect(context.disposed).toBe(false);
+    await expect(
+      storage.listSessions({ limit: 0, all: true, workspacePath }, STORE_ROOT(), undefined, context)
+    ).resolves.toHaveLength(1);
+    await context.dispose();
+  });
+
+  it.each([-1, 0.5, Number.POSITIVE_INFINITY, Number.NaN])(
+    'rejects invalid finite capacity %s before any I/O',
+    (resolvedSessionCapacity) => {
+      const events: AdapterIoEvent[] = [];
+
+      expect(() =>
+        createBoundedContext({
+          dataPath: STORE_ROOT(),
+          resolvedSessionCapacity,
+          ioObserver: (event) => events.push({ ...event }),
+        })
+      ).toThrow(TypeError);
+      expect(events).toEqual([]);
+    }
+  );
+
+  it('evicts the least-recently-used completed value at C=1', async () => {
+    const snapshots: ContextOwnershipSnapshot[] = [];
+    const context = createBoundedContext(
+      { dataPath: STORE_ROOT(), resolvedSessionCapacity: 1 },
+      snapshots
+    );
+    await listStoreSessions(context);
+
+    await storage.getSession(UUID1, STORE_ROOT(), undefined, context);
+    await storage.getSession(UUID2, STORE_ROOT(), undefined, context);
+    expect(snapshots.at(-1)).toMatchObject({ completedSessions: 1, resolutionStarts: 2 });
+
+    // UUID2 is the most recently completed entry and remains cached.
+    await storage.getSession(UUID2, STORE_ROOT(), undefined, context);
+    expect(snapshots.at(-1)?.resolutionStarts).toBe(2);
+
+    // UUID1 was evicted when UUID2 completed, so it resolves again.
+    await storage.getSession(UUID1, STORE_ROOT(), undefined, context);
+    expect(snapshots.at(-1)).toMatchObject({ completedSessions: 1, resolutionStarts: 3 });
+    expect(snapshots.every((snapshot) => snapshot.completedSessions <= 1)).toBe(true);
+    await context.dispose();
+  });
+
+  it('supports C=0 without retaining successful completed resolutions', async () => {
+    const snapshots: ContextOwnershipSnapshot[] = [];
+    const context = createBoundedContext(
+      { dataPath: STORE_ROOT(), resolvedSessionCapacity: 0 },
+      snapshots
+    );
+    await listStoreSessions(context);
+
+    await storage.getSession(UUID1, STORE_ROOT(), undefined, context);
+    await storage.getSession(UUID1, STORE_ROOT(), undefined, context);
+
+    expect(snapshots.at(-1)).toMatchObject({
+      resolvedSessionCapacity: 0,
+      activeResolutions: 0,
+      completedSessions: 0,
+      resolutionStarts: 2,
+    });
+    expect(snapshots.every((snapshot) => snapshot.completedSessions === 0)).toBe(true);
+    await context.dispose();
+  });
+
+  it('releaseSession evicts one logical ID and leaves other completed values cached', async () => {
+    const snapshots: ContextOwnershipSnapshot[] = [];
+    const context = createBoundedContext(
+      { dataPath: STORE_ROOT(), resolvedSessionCapacity: 2 },
+      snapshots
+    );
+    await listStoreSessions(context);
+    await storage.getSession(UUID1, STORE_ROOT(), undefined, context);
+    await storage.getSession(UUID2, STORE_ROOT(), undefined, context);
+    expect(snapshots.at(-1)).toMatchObject({ completedSessions: 2, resolutionStarts: 2 });
+
+    context.releaseSession(UUID1);
+    context.releaseSession('absent-session-id');
+    expect(snapshots.at(-1)).toMatchObject({ completedSessions: 1, resolutionStarts: 2 });
+
+    await storage.getSession(UUID2, STORE_ROOT(), undefined, context);
+    expect(snapshots.at(-1)?.resolutionStarts).toBe(2);
+    await storage.getSession(UUID1, STORE_ROOT(), undefined, context);
+    expect(snapshots.at(-1)?.resolutionStarts).toBe(3);
+    await context.dispose();
+  });
+
+  it('removes a rejected entry immediately and permits a successful retry', async () => {
+    const snapshots: ContextOwnershipSnapshot[] = [];
+    let armed = false;
+    const context = createBoundedContext(
+      {
+        dataPath: STORE_ROOT(),
+        resolvedSessionCapacity: 1,
+        ioObserver: (event) => {
+          if (
+            armed &&
+            event.resourceClass === 'store-transcript' &&
+            event.classification === 'conversation-payload'
+          ) {
+            armed = false;
+            throw new Error('one-shot transcript failure');
+          }
+        },
+      },
+      snapshots
+    );
+    await listStoreSessions(context);
+
+    // Releasing the discovery/catalog payload requires the next resolution to
+    // hydrate the selected Store transcript through the observer seam.
+    context.releaseSession(UUID2);
+    armed = true;
+    await expect(storage.getSession(UUID2, STORE_ROOT(), undefined, context)).rejects.toThrow(
+      'one-shot transcript failure'
+    );
+    expect(snapshots.at(-1)).toMatchObject({ activeResolutions: 0, completedSessions: 0 });
+
+    await expect(
+      storage.getSession(UUID2, STORE_ROOT(), undefined, context)
+    ).resolves.toMatchObject({ id: UUID2 });
+    expect(snapshots.at(-1)?.resolutionStarts).toBe(2);
+    await context.dispose();
+  });
+
+  it('disposes idempotently, releases ownership, and rejects every later use before I/O', async () => {
+    const snapshots: ContextOwnershipSnapshot[] = [];
+    const events: AdapterIoEvent[] = [];
+    const context = createBoundedContext(
+      {
+        dataPath: STORE_ROOT(),
+        resolvedSessionCapacity: 1,
+        ioObserver: (event) => events.push({ ...event }),
+      },
+      snapshots
+    );
+    await listStoreSessions(context);
+    await storage.getSession(UUID1, STORE_ROOT(), undefined, context);
+    expect(snapshots.at(-1)?.completedSessions).toBe(1);
+
+    await context.dispose();
+    await expect(context.dispose()).resolves.toBeUndefined();
+    expect(context.disposed).toBe(true);
+    expect(snapshots.at(-1)).toMatchObject({
+      activeResolutions: 0,
+      completedSessions: 0,
+      discoveryDecodedSessions: 0,
+      ownedDecodedSessions: 0,
+    });
+    const eventCountAfterDispose = events.length;
+
+    await expect(storage.getSession(UUID1, STORE_ROOT(), undefined, context)).rejects.toMatchObject(
+      { code: 'READ_CONTEXT_DISPOSED' }
+    );
+    await expect(listStoreSessions(context)).rejects.toMatchObject({
+      code: 'READ_CONTEXT_DISPOSED',
+    });
+    expect(() => context.releaseSession(UUID1)).toThrowError(
+      expect.objectContaining({ code: 'READ_CONTEXT_DISPOSED' })
+    );
+    expect(events).toHaveLength(eventCountAfterDispose);
   });
 });

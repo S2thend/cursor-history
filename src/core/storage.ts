@@ -2,6 +2,7 @@
  * Storage discovery and database access for Cursor chat history
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -29,6 +30,8 @@ import type {
   ToolCall,
   SessionUsage,
   ContextWindowStatus,
+  AmbiguousSessionSummary,
+  LogicalSessionSummary,
 } from './types.js';
 import {
   getCursorDataPath,
@@ -44,6 +47,7 @@ import {
   parseChatData,
   getSearchSnippets,
   mapStoreSession,
+  resolveComposerMessageIdentities,
   type CursorChatBundle,
 } from './parser.js';
 import {
@@ -58,7 +62,35 @@ import { discoverStoreSessions } from './store-stack/discover.js';
 import type { StoreSession } from './store-stack/types.js';
 import { mergeCrossStackSessions, applyStoreMergeToSummary } from './store-stack/merge.js';
 import { resolveSourceReadLimits } from './source-read-limits.js';
-import { isSessionIntegrityError } from './errors.js';
+import {
+  isSessionIntegrityError,
+  SessionAmbiguityError,
+  ReadContextDisposedError,
+  ReadContextOptionsMismatchError,
+  ReadContextScopeMismatchError,
+  ReadContextSourceMismatchError,
+} from './errors.js';
+import {
+  buildSessionCatalog,
+  projectAmbiguousSessionSummary,
+  reconcileReplicaGroup,
+  type PhysicalSessionInstance,
+  type ReplicaConsumedPayload,
+} from './session-catalog.js';
+import { projectV016ComposerMessages } from './session-identity.js';
+import {
+  normalizeWorkspacePath,
+  resolveWorkspaceScope,
+  type WorkspaceScopeResult,
+} from './workspace-scope.js';
+import {
+  createOperationIoContext,
+  IoObserverError,
+  observeAdapterIo,
+  type AdapterIoEventInput,
+  type AdapterIoObserver,
+  type OperationIoContext,
+} from './io-observer.js';
 import {
   isValidTimestamp,
   resolveMessageTimestamps,
@@ -67,21 +99,61 @@ import {
   type SessionMetadataTimestamps,
 } from './timestamps.js';
 
-interface StorageReadOperationOptions {
+export interface ContextOwnershipSnapshot {
+  readonly resolvedSessionCapacity: number;
+  readonly activeResolutions: number;
+  readonly completedSessions: number;
+  readonly discoveryDecodedSessions: number;
+  readonly ownedDecodedSessions: number;
+  readonly resolutionStarts: number;
+}
+
+export interface StorageReadOperationOptions {
   readonly sqliteDriver?: DriverName;
   readonly sourceReadLimits?: SourceReadLimitsOverride | Readonly<SourceReadLimitsV1>;
   readonly signal?: AbortSignal;
+  /** Internal/test-only low-level adapter observer. */
+  readonly ioObserver?: AdapterIoObserver;
+  /** Immutable operation context inherited by nested adapters. */
+  readonly io?: OperationIoContext;
+  /** Reviewed default classification for an opened SQLite source. */
+  readonly ioResource?: DatabaseOperationRequest['ioResource'];
+  /** Full normalized Composer workspace selected before payload discovery. */
+  readonly workspaceFilterPath?: string;
+  /** Immutable workspace request bound at context construction. */
+  readonly workspacePath?: string;
+  /** Permit contributors outside scope only for logical IDs selected in scope. */
+  readonly includeCrossWorkspaceSources?: boolean;
+  /** Maximum completed decoded sessions retained by the context. */
+  readonly resolvedSessionCapacity?: number;
+  /** Safe continuation diagnostic sink owned by the top-level operation. */
+  readonly onDiagnostic?: (diagnostic: import('./types.js').SessionDiagnostic) => void;
+  /** Internal ownership-bound observer used only by regression tests. */
+  readonly testOnlyOnOwnershipChange?: (snapshot: Readonly<ContextOwnershipSnapshot>) => void;
+}
+
+export interface SessionReadContextOptions extends StorageReadOperationOptions {
+  readonly dataPath?: string;
+  readonly backupPath?: string;
 }
 
 const SESSION_READ_CAPABILITIES = new Set<DatabaseCapability>(['read']);
 const MIGRATION_CAPABILITIES = new Set<DatabaseCapability>(['readWrite']);
 const OWNING_DATABASE_READ_FAILURES = new WeakSet<object>();
 
-function sessionReadRequest(sqliteDriver?: DriverName): DatabaseOperationRequest {
+function sessionReadRequest(
+  sqliteDriver?: DriverName,
+  io?: OperationIoContext,
+  ioResource: DatabaseOperationRequest['ioResource'] = {
+    resourceClass: 'unclassified-resource',
+  }
+): DatabaseOperationRequest {
   return {
     operation: 'read-session',
     required: SESSION_READ_CAPABILITIES,
     ...(sqliteDriver ? { forcedDriver: sqliteDriver } : {}),
+    ...(io ? { io } : {}),
+    ioResource,
   };
 }
 
@@ -111,7 +183,33 @@ function bindStorageReadOptions(
     ...(options.sqliteDriver ? { sqliteDriver: options.sqliteDriver } : {}),
     ...(sourceReadLimits ? { sourceReadLimits } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.io ? { io: options.io } : {}),
+    ...(options.ioResource ? { ioResource: options.ioResource } : {}),
+    ...(options.workspaceFilterPath
+      ? { workspaceFilterPath: normalizeWorkspacePath(options.workspaceFilterPath) }
+      : {}),
   });
+}
+
+function withDatabaseIo(
+  options: StorageReadOperationOptions | undefined,
+  ioResource: NonNullable<DatabaseOperationRequest['ioResource']>
+): StorageReadOperationOptions {
+  return {
+    ...(options?.sqliteDriver ? { sqliteDriver: options.sqliteDriver } : {}),
+    ...(options?.sourceReadLimits ? { sourceReadLimits: options.sourceReadLimits } : {}),
+    ...(options?.signal ? { signal: options.signal } : {}),
+    ...(options?.io ? { io: options.io } : {}),
+    ...(options?.workspaceFilterPath ? { workspaceFilterPath: options.workspaceFilterPath } : {}),
+    ioResource,
+  };
+}
+
+function observeStorageAdapterIo(
+  options: Pick<StorageReadOperationOptions, 'io'> | undefined,
+  input: AdapterIoEventInput
+): void {
+  if (options?.io) observeAdapterIo(options.io, input);
 }
 
 /** Infrastructure/cancellation failures must never become empty or partial reads. */
@@ -122,9 +220,8 @@ function shouldPropagateReadFailure(error: unknown): boolean {
       : undefined;
   return (
     isSessionIntegrityError(error) ||
-    (typeof error === 'object' &&
-      error !== null &&
-      OWNING_DATABASE_READ_FAILURES.has(error)) ||
+    error instanceof IoObserverError ||
+    (typeof error === 'object' && error !== null && OWNING_DATABASE_READ_FAILURES.has(error)) ||
     error instanceof ZipArchiveFormatError ||
     error instanceof DriverNotAvailableError ||
     error instanceof NoDriverAvailableError ||
@@ -177,7 +274,10 @@ export async function openDatabase(
   options: StorageReadOperationOptions = {}
 ): Promise<Database> {
   throwIfReadAborted(options.signal);
-  const db = await openDatabaseAsync(dbPath, sessionReadRequest(options.sqliteDriver));
+  const db = await openDatabaseAsync(
+    dbPath,
+    sessionReadRequest(options.sqliteDriver, options.io, options.ioResource)
+  );
   try {
     throwIfReadAborted(options.signal);
     return db;
@@ -332,14 +432,11 @@ function composerMetadataTimestamps(
 ): SessionMetadataTimestamps {
   return {
     createdAt: parseDateValue(data['createdAt']),
-    lastUpdatedAt:
-      parseDateValue(data['lastUpdatedAt']) ?? parseDateValue(data['updatedAt']),
+    lastUpdatedAt: parseDateValue(data['lastUpdatedAt']) ?? parseDateValue(data['updatedAt']),
   };
 }
 
-function composerMetadataTimestampsFromJson(
-  value: string | undefined
-): SessionMetadataTimestamps {
+function composerMetadataTimestampsFromJson(value: string | undefined): SessionMetadataTimestamps {
   if (!value) return {};
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -364,9 +461,7 @@ function composerMetadataTimestampsForSummary(
       (summary.createdAtSource === 'composer-metadata' ? summary.createdAt : undefined),
     lastUpdatedAt:
       stored.lastUpdatedAt ??
-      (summary.lastUpdatedAtSource === 'composer-metadata'
-        ? summary.lastUpdatedAt
-        : undefined),
+      (summary.lastUpdatedAtSource === 'composer-metadata' ? summary.lastUpdatedAt : undefined),
   };
 }
 
@@ -703,7 +798,9 @@ function resolveBubbleMessages(
   bubbleRows: BubbleRow[],
   composerMetadata: SessionMetadataTimestamps = {}
 ): ComposerBubbleProjection {
-  const messages = bubbleRows.map((row) => mapBubbleToMessage(row)) as Message[];
+  const messages = resolveComposerMessageIdentities(
+    bubbleRows.map((row) => mapBubbleToMessage(row)) as Message[]
+  );
   const sessionTimestamps = resolveSessionTimestamps({
     view: 'composer-backed',
     composerMetadata,
@@ -863,6 +960,13 @@ async function findWorkspacesFromBackup(
       (await readWorkspaceJsonFromBackup(backupPath, workspaceId, readOptions)) ??
       `(workspace: ${workspaceId})`;
 
+    if (
+      readOptions.workspaceFilterPath &&
+      !pathsEqual(workspacePath, readOptions.workspaceFilterPath)
+    ) {
+      continue;
+    }
+
     // Count sessions in this workspace
     let sessionCount = 0;
     let db: Database | null = null;
@@ -902,15 +1006,138 @@ async function findWorkspacesFromBackup(
 }
 
 /**
+ * Enumerate Composer workspace membership without opening any conversation DB.
+ * This preflight is the only input to exact/unique-suffix scope resolution.
+ */
+async function findComposerWorkspaceInventory(
+  customDataPath: string | undefined,
+  backupPath: string | undefined,
+  readOptions: Readonly<StorageReadOperationOptions>
+): Promise<Workspace[]> {
+  if (backupPath) {
+    const manifest = await readBackupManifest(backupPath, readOptions);
+    if (!manifest) return [];
+    const inventory: Workspace[] = [];
+    for (const file of manifest.files) {
+      if (file.type !== 'workspace-db') continue;
+      const match = file.path.match(/^workspaceStorage\/([^/]+)\/state\.vscdb$/u);
+      if (!match) continue;
+      const workspaceId = match[1]!;
+      const workspacePath =
+        (await readWorkspaceJsonFromBackup(backupPath, workspaceId, readOptions)) ??
+        `(workspace: ${workspaceId})`;
+      inventory.push({
+        id: workspaceId,
+        path: workspacePath,
+        dbPath: file.path,
+        sessionCount: 0,
+      });
+    }
+    return inventory;
+  }
+
+  const basePath = getCursorDataPath(customDataPath);
+  observeStorageAdapterIo(readOptions, {
+    adapter: 'filesystem',
+    operation: 'open',
+    resourceClass: 'workspace-root-directory',
+  });
+  if (!existsSync(basePath)) return [];
+
+  observeStorageAdapterIo(readOptions, {
+    adapter: 'filesystem',
+    operation: 'read',
+    resourceClass: 'workspace-root-directory',
+  });
+  const entries = readdirSync(basePath, { withFileTypes: true });
+  const inventory: Workspace[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const workspaceDir = join(basePath, entry.name);
+    const dbPath = join(workspaceDir, 'state.vscdb');
+    observeStorageAdapterIo(readOptions, {
+      adapter: 'filesystem',
+      operation: 'open',
+      resourceClass: 'workspace-session-index',
+      sourceRole: 'composer',
+      representation: 'composer-workspace',
+    });
+    if (!existsSync(dbPath)) continue;
+    inventory.push({
+      id: entry.name,
+      path: readWorkspaceJson(workspaceDir, readOptions) ?? `(workspace: ${entry.name})`,
+      dbPath,
+      sessionCount: 0,
+    });
+  }
+  return inventory;
+}
+
+/** Read only native Composer UUIDs from one workspace catalog row. */
+function loadWorkspaceComposerIdsOnly(db: Database): string[] {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT json_extract(j.value, '$.composerId') AS composerId
+         FROM ItemTable AS i, json_each(i.value, '$.allComposers') AS j
+         WHERE i.key = 'composer.composerData'
+           AND json_type(j.value, '$.composerId') = 'text'`
+      )
+      .all() as Array<{ composerId?: string }>;
+    return [...new Set(rows.map(({ composerId }) => composerId).filter(Boolean) as string[])];
+  } catch {
+    return [];
+  }
+}
+
+/** Hydrate only one admitted workspace Composer object after scope planning. */
+function loadOneWorkspaceComposer(db: Database, composerId: string): ChatSession | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT j.value AS value
+         FROM ItemTable AS i, json_each(i.value, '$.allComposers') AS j
+         WHERE i.key = 'composer.composerData'
+           AND json_extract(j.value, '$.composerId') = ?
+         LIMIT 1`
+      )
+      .get(composerId) as { value?: string } | undefined;
+    if (!row?.value) return null;
+    return (
+      parseChatData(JSON.stringify({ allComposers: [JSON.parse(row.value) as unknown] }))[0] ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read workspace.json to get the original workspace path.
  * Supports single-folder workspaces (folder) and .code-workspace files (configuration).
  */
-export function readWorkspaceJson(workspaceDir: string): string | null {
+export function readWorkspaceJson(
+  workspaceDir: string,
+  readOptions: Pick<StorageReadOperationOptions, 'io'> = {}
+): string | null {
   const jsonPath = join(workspaceDir, 'workspace.json');
+  observeStorageAdapterIo(readOptions, {
+    adapter: 'filesystem',
+    operation: 'open',
+    resourceClass: 'workspace-membership-json',
+    sourceRole: 'composer',
+    representation: 'composer-workspace',
+  });
   if (!existsSync(jsonPath)) {
     return null;
   }
 
+  observeStorageAdapterIo(readOptions, {
+    adapter: 'filesystem',
+    operation: 'read',
+    resourceClass: 'workspace-membership-json',
+    sourceRole: 'composer',
+    representation: 'composer-workspace',
+  });
   try {
     const content = readFileSync(jsonPath, 'utf-8');
     const data = JSON.parse(content) as WorkspaceJsonShape;
@@ -961,6 +1188,11 @@ export async function findWorkspaces(
 
   const basePath = getCursorDataPath(customDataPath);
 
+  observeStorageAdapterIo(operationOptions, {
+    adapter: 'filesystem',
+    operation: 'open',
+    resourceClass: 'workspace-root-directory',
+  });
   if (!existsSync(basePath)) {
     return [];
   }
@@ -976,6 +1208,11 @@ export async function findWorkspaces(
   const attributedComposerIds = new Set<string>();
 
   try {
+    observeStorageAdapterIo(operationOptions, {
+      adapter: 'filesystem',
+      operation: 'read',
+      resourceClass: 'workspace-root-directory',
+    });
     const entries = readdirSync(basePath, { withFileTypes: true });
 
     for (const entry of entries) {
@@ -984,13 +1221,27 @@ export async function findWorkspaces(
       const workspaceDir = join(basePath, entry.name);
       const dbPath = join(workspaceDir, 'state.vscdb');
 
+      observeStorageAdapterIo(operationOptions, {
+        adapter: 'filesystem',
+        operation: 'open',
+        resourceClass: 'workspace-session-index',
+        sourceRole: 'composer',
+        representation: 'composer-workspace',
+      });
       if (!existsSync(dbPath)) continue;
 
-      const workspacePath = readWorkspaceJson(workspaceDir) ?? `(workspace: ${entry.name})`;
+      const workspacePath =
+        readWorkspaceJson(workspaceDir, operationOptions) ?? `(workspace: ${entry.name})`;
       if (workspacePath.startsWith('(workspace:')) {
         debugLogStorage(
           `Using workspace ID fallback path for ${entry.name} (workspace.json missing/unknown)`
         );
+      }
+      if (
+        operationOptions.workspaceFilterPath &&
+        !pathsEqual(workspacePath, operationOptions.workspaceFilterPath)
+      ) {
+        continue;
       }
 
       // Count sessions in this workspace
@@ -1001,7 +1252,14 @@ export async function findWorkspaces(
       let workspaceDb: Database | null = null;
       try {
         throwIfReadAborted(operationOptions.signal);
-        workspaceDb = await openDatabase(dbPath, operationOptions);
+        workspaceDb = await openDatabase(
+          dbPath,
+          withDatabaseIo(operationOptions, {
+            resourceClass: 'workspace-conversation',
+            sourceRole: 'composer',
+            representation: 'composer-workspace',
+          })
+        );
         throwIfReadAborted(operationOptions.signal);
         const result = getChatDataFromDb(workspaceDb);
         if (result) {
@@ -1036,16 +1294,30 @@ export async function findWorkspaces(
       if (!globalDbChecked) {
         globalDbChecked = true;
         const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
+        observeStorageAdapterIo(operationOptions, {
+          adapter: 'filesystem',
+          operation: 'open',
+          resourceClass: 'global-session-index',
+          sourceRole: 'composer',
+          representation: 'composer-global',
+        });
         if (existsSync(globalDbPath)) {
           try {
             throwIfReadAborted(operationOptions.signal);
-            globalDb = await openDatabase(globalDbPath, operationOptions);
+            globalDb = await openDatabase(
+              globalDbPath,
+              withDatabaseIo(operationOptions, {
+                resourceClass: 'global-session-index',
+                sourceRole: 'composer',
+                representation: 'composer-global',
+              })
+            );
             throwIfReadAborted(operationOptions.signal);
             const tableCheck = globalDb
               .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
               .get();
             globalDbAvailable = Boolean(tableCheck);
-            if (globalDbAvailable) {
+            if (globalDbAvailable && !operationOptions.workspaceFilterPath) {
               globalComposerRecords = loadGlobalComposerRecords(globalDb);
               globalBubbleCounts = loadGlobalBubbleCounts(globalDb);
             }
@@ -1059,33 +1331,52 @@ export async function findWorkspaces(
       }
 
       if (globalDb && globalDbAvailable) {
-        // Selected + pointer IDs are only counted when they resolve to a real
-        // global composer with bubbles, so non-composer GUIDs never inflate counts.
-        for (const composerId of [...selectedIds, ...pointerIds]) {
-          if (seenComposerIds.has(composerId) || attributedComposerIds.has(composerId)) continue;
-          if ((globalBubbleCounts.get(composerId) ?? 0) > 0) {
-            seenComposerIds.add(composerId);
-            attributedComposerIds.add(composerId);
-            sessionCount++;
-          }
-        }
-
         const workspaceForGlobalMatch: Workspace = {
           id: entry.name,
           path: workspacePath,
           dbPath,
           sessionCount,
         };
-        for (const summary of getGlobalComposerSummariesForWorkspace(
-          globalDb,
-          workspaceForGlobalMatch,
-          globalComposerRecords,
-          globalBubbleCounts
-        )) {
-          if (seenComposerIds.has(summary.id) || attributedComposerIds.has(summary.id)) continue;
-          seenComposerIds.add(summary.id);
-          attributedComposerIds.add(summary.id);
-          sessionCount++;
+
+        // Selected + pointer IDs are only counted when they resolve to a real
+        // global composer with bubbles, so non-composer GUIDs never inflate counts.
+        for (const composerId of [...selectedIds, ...pointerIds]) {
+          if (seenComposerIds.has(composerId) || attributedComposerIds.has(composerId)) continue;
+          const bubbleCount = operationOptions.workspaceFilterPath
+            ? countGlobalComposerBubbles(globalDb, composerId)
+            : (globalBubbleCounts.get(composerId) ?? 0);
+          if (bubbleCount > 0) {
+            seenComposerIds.add(composerId);
+            attributedComposerIds.add(composerId);
+            sessionCount++;
+          }
+        }
+
+        if (operationOptions.workspaceFilterPath) {
+          for (const composerId of loadGlobalComposerMembershipIds(
+            globalDb,
+            workspaceForGlobalMatch
+          )) {
+            if (seenComposerIds.has(composerId) || attributedComposerIds.has(composerId)) continue;
+            if (countGlobalComposerBubbles(globalDb, composerId) <= 0) continue;
+            seenComposerIds.add(composerId);
+            attributedComposerIds.add(composerId);
+            sessionCount++;
+          }
+        }
+
+        if (!operationOptions.workspaceFilterPath) {
+          for (const summary of getGlobalComposerSummariesForWorkspace(
+            globalDb,
+            workspaceForGlobalMatch,
+            globalComposerRecords,
+            globalBubbleCounts
+          )) {
+            if (seenComposerIds.has(summary.id) || attributedComposerIds.has(summary.id)) continue;
+            seenComposerIds.add(summary.id);
+            attributedComposerIds.add(summary.id);
+            sessionCount++;
+          }
         }
       } else {
         // No global storage: pointer GUIDs cannot be confirmed as composers, so
@@ -1218,6 +1509,18 @@ function loadGlobalBubbleCounts(db: Database): Map<string, number> {
   return counts;
 }
 
+/** Count one already selected Composer UUID without scanning another session's keys. */
+function countGlobalComposerBubbles(db: Database, composerId: string): number {
+  try {
+    const row = db
+      .prepare('SELECT COUNT(*) as count FROM cursorDiskKV WHERE key LIKE ?')
+      .get(`bubbleId:${composerId}:%`) as { count?: number } | undefined;
+    return typeof row?.count === 'number' ? row.count : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function buildGlobalComposerSummary(
   db: Database,
   composerId: string,
@@ -1333,6 +1636,60 @@ function loadGlobalComposerRecords(db: Database): GlobalComposerRecord[] {
   }
 }
 
+interface GlobalComposerMembershipRow {
+  key: string;
+  workspaceId?: string | null;
+  fsPath?: string | null;
+  uriPath?: string | null;
+  externalPath?: string | null;
+  workspaceUri?: string | null;
+  /** Test-double compatibility only; the production query never selects this column. */
+  value?: string;
+}
+
+/**
+ * Read only UUID/workspace membership fields from global composer records.
+ * SQLite performs the JSON projection so titles and other payload fields never
+ * cross the adapter boundary during scoped discovery.
+ */
+function loadGlobalComposerMembershipIds(db: Database, workspace: Workspace): string[] {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT key,
+          CASE WHEN json_valid(value) THEN json_extract(value, '$.workspaceIdentifier.id') END AS workspaceId,
+          CASE WHEN json_valid(value) THEN json_extract(value, '$.workspaceIdentifier.uri.fsPath') END AS fsPath,
+          CASE WHEN json_valid(value) THEN json_extract(value, '$.workspaceIdentifier.uri.path') END AS uriPath,
+          CASE WHEN json_valid(value) THEN json_extract(value, '$.workspaceIdentifier.uri.external') END AS externalPath,
+          CASE WHEN json_valid(value) THEN json_extract(value, '$.workspaceUri') END AS workspaceUri
+        FROM cursorDiskKV WHERE key LIKE 'composerData:%'`
+      )
+      .all() as GlobalComposerMembershipRow[];
+    const ids = new Set<string>();
+    for (const row of rows) {
+      let matches =
+        row.workspaceId === workspace.id ||
+        [row.fsPath, row.uriPath, row.externalPath, row.workspaceUri].some((candidate) =>
+          workspacePathMatches(candidate, workspace.path)
+        );
+      // Existing unit-test adapters may return the historical key/value row
+      // shape. Real SQLite never selects `value` in this query.
+      if (!matches && typeof row.value === 'string') {
+        try {
+          const parsed = JSON.parse(row.value) as unknown;
+          matches = isRecord(parsed) && composerBelongsToWorkspace(parsed, workspace);
+        } catch {
+          matches = false;
+        }
+      }
+      if (matches) ids.add(row.key.replace(/^composerData:/u, ''));
+    }
+    return [...ids];
+  } catch {
+    return [];
+  }
+}
+
 function getGlobalComposerSummariesForWorkspace(
   db: Database,
   workspace: Workspace,
@@ -1438,11 +1795,18 @@ export interface SessionReadContext {
   readonly sourceReadLimits?: Readonly<SourceReadLimitsV1>;
   /** Cooperative cancellation inherited by discovery, snapshot, and payload readers. */
   readonly signal?: AbortSignal;
-  /**
-   * Workspace scope bound to this operation. `null` means an unfiltered
-   * listing; `undefined` means no listing has been performed yet.
-   */
-  workspaceScope: string | null | undefined;
+  /** Internal immutable low-level adapter observation context. */
+  readonly io: OperationIoContext;
+  /** Immutable normalized workspace request; `null` is explicit global scope. */
+  readonly workspaceScope: string | null;
+  /** Whether selected UUIDs may load disclosed contributors outside scope. */
+  readonly includeCrossWorkspaceSources: boolean;
+  /** Maximum number of completed decoded sessions retained by this context. */
+  readonly resolvedSessionCapacity: number;
+  /** Whether the idempotent disposal lifecycle has begun. */
+  readonly disposed: boolean;
+  /** Safe continuation diagnostic sink, if supplied by the operation owner. */
+  readonly onDiagnostic?: (diagnostic: import('./types.js').SessionDiagnostic) => void;
   /** Cached Store sessions (discovered at most once per operation). */
   storeSessions: StoreSession[] | null;
   /** In-flight Store discovery, shared by concurrent readers. */
@@ -1453,42 +1817,199 @@ export interface SessionReadContext {
   workspacesPromise?: Promise<Workspace[]> | null;
   /** Cached summaries for the operation's current listing scope. */
   summaries: ChatSessionSummary[] | null;
-  /**
-   * Lazily resolved final sessions, after Composer/Store loading and any
-   * cross-stack merge. Promises coalesce concurrent reads of the same selected
-   * summary; duplicate filtered summaries with one stable ID remain distinct.
-   */
-  resolvedSessions: Map<string, Promise<ChatSession | null>>;
+  /** One row per logical UUID, including message-free ambiguity rows. */
+  logicalSummaries: LogicalSessionSummary[] | null;
+  /** In-flight resolutions only; concurrent reads of one key share one promise. */
+  readonly activeResolutions: Map<string, Promise<ChatSession | null>>;
+  /** Completed decoded sessions in least-to-most-recently-used order. */
+  readonly completedSessions: Map<string, ChatSession | null>;
+  /** Backward-compatible read-only cache view used by internal diagnostics/tests. */
+  readonly resolvedSessions: ReadonlyMap<string, Promise<ChatSession | null>>;
+  /** Monotonic count of actual resolution starts for bounded-memory auditing. */
+  resolutionStarts: number;
+  /** Evict every completed occurrence for one logical native session ID. */
+  releaseSession(sessionId: string): void;
+  /** Idempotently release context-owned decoded values and discovery state. */
+  dispose(): Promise<void>;
+  /** Internal ownership-bound observer used only by regression tests. */
+  readonly testOnlyOnOwnershipChange?: (snapshot: Readonly<ContextOwnershipSnapshot>) => void;
 }
 
-/**
- * Create an empty operation-scoped read context for one storage source.
- * @param customDataPath - Optional live Cursor data path bound to this context.
- * @param backupPath - Optional backup path bound to this context.
- * @returns A context that lazily caches discovery and listing results for that source.
- */
+let nextReadContextId = 1;
+
+function storageDataSourceIdentity(customDataPath?: string, backupPath?: string): string {
+  const source = backupPath
+    ? `backup\0${backupPath}`
+    : customDataPath
+      ? `live\0${customDataPath}`
+      : 'live\0default';
+  return `source:${createHash('sha256').update(source).digest('hex')}`;
+}
+
+function countDiscoveryDecodedSessions(context: SessionReadContext): number {
+  return context.storeSessions?.filter((session) => session.messages.length > 0).length ?? 0;
+}
+
+function contextOwnershipSnapshot(context: SessionReadContext): Readonly<ContextOwnershipSnapshot> {
+  const discoveryDecodedSessions = countDiscoveryDecodedSessions(context);
+  const activeResolutions = context.activeResolutions.size;
+  const completedSessions = context.completedSessions.size;
+  return Object.freeze({
+    resolvedSessionCapacity: context.resolvedSessionCapacity,
+    activeResolutions,
+    completedSessions,
+    discoveryDecodedSessions,
+    ownedDecodedSessions: completedSessions + discoveryDecodedSessions + activeResolutions,
+    resolutionStarts: context.resolutionStarts,
+  });
+}
+
+function emitContextOwnership(context: SessionReadContext): void {
+  context.testOnlyOnOwnershipChange?.(contextOwnershipSnapshot(context));
+}
+
+function assertValidResolvedSessionCapacity(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError('resolvedSessionCapacity must be a finite non-negative safe integer.');
+  }
+}
+
+function isSessionReadContextOptions(value: unknown): value is SessionReadContextOptions {
+  return typeof value === 'object' && value !== null;
+}
+
+/** Create an immutable-binding, bounded operation-scoped read context. */
+export function createSessionReadContext(options?: SessionReadContextOptions): SessionReadContext;
+/** Deprecated compatibility overload for an explicitly global source binding. */
 export function createSessionReadContext(
   customDataPath?: string,
   backupPath?: string,
-  options: StorageReadOperationOptions = {}
+  options?: StorageReadOperationOptions
+): SessionReadContext;
+export function createSessionReadContext(
+  customDataPathOrOptions?: string | SessionReadContextOptions,
+  legacyBackupPath?: string,
+  legacyOptions: StorageReadOperationOptions = {}
 ): SessionReadContext {
+  const options = isSessionReadContextOptions(customDataPathOrOptions)
+    ? { ...customDataPathOrOptions }
+    : { ...legacyOptions };
+  const customDataPath = isSessionReadContextOptions(customDataPathOrOptions)
+    ? customDataPathOrOptions.dataPath
+    : customDataPathOrOptions;
+  const backupPath = isSessionReadContextOptions(customDataPathOrOptions)
+    ? customDataPathOrOptions.backupPath
+    : legacyBackupPath;
+  const resolvedSessionCapacity = options.resolvedSessionCapacity ?? 1;
+  assertValidResolvedSessionCapacity(resolvedSessionCapacity);
+  if (
+    options.includeCrossWorkspaceSources !== undefined &&
+    typeof options.includeCrossWorkspaceSources !== 'boolean'
+  ) {
+    throw new TypeError('includeCrossWorkspaceSources must be a boolean.');
+  }
   // Validate caller policy and cancellation before any later source I/O.
   const sourceReadLimits = resolveSourceReadLimits(options.sourceReadLimits);
   throwIfReadAborted(options.signal);
-  return {
+  const io =
+    options.io ??
+    createOperationIoContext({
+      contextId: `read-context:${nextReadContextId++}`,
+      dataSourceIdentity: storageDataSourceIdentity(customDataPath, backupPath),
+      sourceReadLimits,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.ioObserver ? { emit: options.ioObserver } : {}),
+    });
+  const activeResolutions = new Map<string, Promise<ChatSession | null>>();
+  const completedSessions = new Map<string, ChatSession | null>();
+  let contextDisposed = false;
+  const context: SessionReadContext = {
     customDataPath,
     backupPath,
     ...(options.sqliteDriver ? { sqliteDriver: options.sqliteDriver } : {}),
     sourceReadLimits,
     ...(options.signal ? { signal: options.signal } : {}),
-    workspaceScope: undefined,
+    io,
+    workspaceScope: options.workspacePath ? normalizeWorkspacePath(options.workspacePath) : null,
+    includeCrossWorkspaceSources: options.includeCrossWorkspaceSources ?? false,
+    resolvedSessionCapacity,
+    get disposed() {
+      return contextDisposed;
+    },
+    ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
     storeSessions: null,
     storeSessionsPromise: null,
     workspaces: null,
     workspacesPromise: null,
     summaries: null,
+    logicalSummaries: null,
+    activeResolutions,
+    completedSessions,
     resolvedSessions: new Map(),
+    resolutionStarts: 0,
+    releaseSession(sessionId: string): void {
+      if (context.disposed) throw new ReadContextDisposedError();
+      for (const key of [...context.completedSessions.keys()]) {
+        if (key === sessionId || key.startsWith(`${sessionId}\0`)) {
+          context.completedSessions.delete(key);
+        }
+      }
+      emitContextOwnership(context);
+    },
+    async dispose(): Promise<void> {
+      if (contextDisposed) return;
+      contextDisposed = true;
+      const active = [...context.activeResolutions.values()];
+      if (active.length > 0) await Promise.allSettled(active);
+      context.activeResolutions.clear();
+      context.completedSessions.clear();
+      context.storeSessions = null;
+      context.storeSessionsPromise = null;
+      context.workspaces = null;
+      context.workspacesPromise = null;
+      context.summaries = null;
+      context.logicalSummaries = null;
+      emitContextOwnership(context);
+    },
+    ...(options.testOnlyOnOwnershipChange
+      ? { testOnlyOnOwnershipChange: options.testOnlyOnOwnershipChange }
+      : {}),
   };
+
+  Object.defineProperty(context, 'resolvedSessions', {
+    configurable: false,
+    enumerable: true,
+    get(): ReadonlyMap<string, Promise<ChatSession | null>> {
+      const view = new Map(context.activeResolutions);
+      for (const [key, value] of context.completedSessions) {
+        if (!view.has(key)) view.set(key, Promise.resolve(value));
+      }
+      return view;
+    },
+  });
+  for (const key of [
+    'customDataPath',
+    'backupPath',
+    'sqliteDriver',
+    'sourceReadLimits',
+    'signal',
+    'io',
+    'workspaceScope',
+    'includeCrossWorkspaceSources',
+    'resolvedSessionCapacity',
+    'onDiagnostic',
+    'testOnlyOnOwnershipChange',
+  ] as const) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) continue;
+    Object.defineProperty(context, key, {
+      configurable: false,
+      enumerable: true,
+      value: context[key],
+      writable: false,
+    });
+  }
+  emitContextOwnership(context);
+  return context;
 }
 
 function optionalPathsEqual(left?: string, right?: string): boolean {
@@ -1498,7 +2019,7 @@ function optionalPathsEqual(left?: string, right?: string): boolean {
 
 const UNKNOWN_WORKSPACE_PATH = '(unknown workspace)';
 
-/** Workspace filters are exact after cross-platform normalization; suffixes never qualify. */
+/** Compare an already bound full workspace path. Suffix resolution happens before payload I/O. */
 function workspaceFilterMatches(candidatePath: string | undefined, requestedPath: string): boolean {
   if (!candidatePath) return requestedPath === UNKNOWN_WORKSPACE_PATH;
   return pathsEqual(candidatePath, requestedPath);
@@ -1510,13 +2031,12 @@ function assertContextSource(
   backupPath?: string
 ): void {
   if (!context) return;
+  if (context.disposed) throw new ReadContextDisposedError();
   if (
     !optionalPathsEqual(context.customDataPath, customDataPath) ||
     !optionalPathsEqual(context.backupPath, backupPath)
   ) {
-    throw new Error(
-      'SessionReadContext source mismatch: create a new context for each dataPath/backupPath pair'
-    );
+    throw new ReadContextSourceMismatchError();
   }
 }
 
@@ -1525,21 +2045,47 @@ function bindContextWorkspaceScope(
   workspacePath?: string
 ): void {
   if (!context) return;
+  if (context.disposed) throw new ReadContextDisposedError();
 
-  const requestedScope = workspacePath ?? null;
-  if (context.workspaceScope === undefined) {
-    context.workspaceScope = requestedScope;
-    return;
-  }
-
+  const requestedScope = workspacePath ? normalizeWorkspacePath(workspacePath) : null;
   const sameScope =
     context.workspaceScope === null
       ? requestedScope === null
-      : requestedScope !== null && pathsEqual(context.workspaceScope, requestedScope);
+      : requestedScope !== null && context.workspaceScope === requestedScope;
   if (!sameScope) {
-    throw new Error(
-      'SessionReadContext workspace scope mismatch: create a new context for each workspace scope'
-    );
+    throw new ReadContextScopeMismatchError();
+  }
+}
+
+function sourceReadLimitsEqual(
+  left: Readonly<SourceReadLimitsV1>,
+  right: Readonly<SourceReadLimitsV1>
+): boolean {
+  for (const key of Object.keys(left) as Array<keyof SourceReadLimitsV1>) {
+    if (left[key] !== right[key]) return false;
+  }
+  return true;
+}
+
+function assertContextReadOptions(
+  context: SessionReadContext,
+  options: Pick<ListOptions, 'includeCrossWorkspaceSources' | 'sourceReadLimits' | 'signal'>
+): void {
+  if (context.disposed) throw new ReadContextDisposedError();
+  if (
+    options.includeCrossWorkspaceSources !== undefined &&
+    options.includeCrossWorkspaceSources !== context.includeCrossWorkspaceSources
+  ) {
+    throw new ReadContextOptionsMismatchError('includeCrossWorkspaceSources');
+  }
+  if (options.signal !== undefined && options.signal !== context.signal) {
+    throw new ReadContextOptionsMismatchError('signal');
+  }
+  if (options.sourceReadLimits !== undefined) {
+    const requested = resolveSourceReadLimits(options.sourceReadLimits);
+    if (!sourceReadLimitsEqual(requested, context.sourceReadLimits!)) {
+      throw new ReadContextOptionsMismatchError('sourceReadLimits');
+    }
   }
 }
 
@@ -1552,17 +2098,362 @@ function applySessionListLimit(
   return structuredClone(selected);
 }
 
+interface ComposerPhysicalCandidate {
+  readonly summary: ChatSessionSummary;
+  readonly session: ChatSession;
+  readonly workspace: Workspace;
+}
+
+function consumedComposerPayload(session: ChatSession): ReplicaConsumedPayload {
+  const projected = projectV016ComposerMessages(session.messages);
+  return {
+    messages: projected.map((message) => ({
+      id: message.id!,
+      role: message.role,
+      content: message.content,
+      ...(message.timestamp &&
+      (message.timestampSource === 'composer-created-at' ||
+        message.timestampSource === 'composer-timing' ||
+        message.timestampSource === 'store-turn-timing')
+        ? { directTimestamp: message.timestamp.toISOString() }
+        : {}),
+      ...(message.thinking !== undefined ? { thinking: message.thinking } : {}),
+      ...(message.parentMessageId !== undefined
+        ? { parentMessageId: message.parentMessageId }
+        : {}),
+      ...(message.isSidechain !== undefined ? { isSidechain: message.isSidechain } : {}),
+      ...(message.toolCalls
+        ? {
+            toolCalls: message.toolCalls.map((tool, toolIndex) => ({
+              id: tool.id ?? `tool:${toolIndex}`,
+              name: tool.name,
+              status: tool.status,
+              ...(tool.params !== undefined ? { params: tool.params } : {}),
+              ...(tool.result !== undefined ? { result: tool.result } : {}),
+              ...(tool.error !== undefined ? { error: tool.error } : {}),
+            })),
+          }
+        : {}),
+    })),
+    ...(session.activeBranchMessageIds
+      ? { activeBranchMessageIds: [...session.activeBranchMessageIds] }
+      : {}),
+  };
+}
+
+function composerWorkspaceMemberships(
+  candidates: readonly ComposerPhysicalCandidate[]
+): NonNullable<ChatSessionSummary['workspaceMemberships']> {
+  const counts = new Map<string, number>();
+  for (const candidate of candidates) {
+    const path = normalizeWorkspacePath(candidate.workspace.path);
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([workspacePath, contributingInstanceCount]) => ({
+      workspacePath,
+      sourceRoles: ['composer'],
+      contributingInstanceCount,
+    }));
+}
+
+interface ReconciledComposerRows {
+  readonly resolved: ChatSessionSummary[];
+  readonly ambiguous: AmbiguousSessionSummary[];
+}
+
+/** Reconcile workspace replicas and apply the global-primary Composer rule. */
+async function reconcileComposerRows(
+  candidatesById: ReadonlyMap<string, readonly ComposerPhysicalCandidate[]>,
+  globalPrimaryIds: ReadonlySet<string>,
+  omittedWorkspacesById: ReadonlyMap<string, readonly Workspace[]>,
+  indexScope: 'global' | 'workspace',
+  activeWorkspacePath: string | undefined,
+  workspaceMatchKind: ChatSessionSummary['workspaceMatchKind'],
+  diagnosticContextId: string
+): Promise<ReconciledComposerRows> {
+  const resolved: ChatSessionSummary[] = [];
+  const ambiguous: AmbiguousSessionSummary[] = [];
+  for (const [id, unsorted] of [...candidatesById.entries()].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )) {
+    const candidates = [...unsorted].sort((left, right) => {
+      const leftPath = normalizeWorkspacePath(left.workspace.path);
+      const rightPath = normalizeWorkspacePath(right.workspace.path);
+      const leftMatched = activeWorkspacePath === leftPath ? 0 : 1;
+      const rightMatched = activeWorkspacePath === rightPath ? 0 : 1;
+      return (
+        leftMatched - rightMatched ||
+        leftPath.localeCompare(rightPath) ||
+        left.workspace.id.localeCompare(right.workspace.id)
+      );
+    });
+    if (candidates.length === 0) continue;
+    const omittedWorkspaces = omittedWorkspacesById.get(id) ?? [];
+    const membershipCandidates = [
+      ...candidates,
+      ...omittedWorkspaces.map((workspace): ComposerPhysicalCandidate => ({
+        workspace,
+        summary: candidates[0]!.summary,
+        session: candidates[0]!.session,
+      })),
+    ];
+    const memberships = composerWorkspaceMemberships(membershipCandidates);
+    if (globalPrimaryIds.has(id)) {
+      const selected = candidates[0]!;
+      const summary = selected.summary;
+      summary.source = 'global';
+      summary.resolvedSource = 'composer';
+      summary.resolutionState = 'complete';
+      summary.resolution = {
+        state: 'complete',
+        expectedSourceRoles: ['composer'],
+        loadedSourceRoles: ['composer'],
+        omittedSourceRoles: [],
+        failedSourceRoles: [],
+        reasonCodes: [],
+      };
+      summary.workspaceMemberships = memberships;
+      summary.sourceInstances = [
+        {
+          sourceRole: 'composer',
+          representation: 'composer-global',
+          workspacePaths: memberships.map(({ workspacePath }) => workspacePath),
+          state: 'contributed',
+        },
+        ...candidates.map((candidate) => ({
+          sourceRole: 'composer' as const,
+          representation: 'composer-workspace' as const,
+          workspacePaths: [normalizeWorkspacePath(candidate.workspace.path)],
+          state: 'superseded' as const,
+        })),
+      ];
+      resolved.push(summary);
+      continue;
+    }
+
+    const instances: PhysicalSessionInstance<ComposerPhysicalCandidate>[] = candidates.map(
+      (candidate, sourceOrder) => ({
+        instanceKey: `${candidate.workspace.id}\0${id}`,
+        logicalSessionId: id,
+        sourceRole: 'composer',
+        representation: 'composer-workspace',
+        fidelityTier: 'partial',
+        locator: candidate,
+        workspacePaths: [normalizeWorkspacePath(candidate.workspace.path)],
+        canonicalWorkspaceCandidates: [
+          {
+            workspacePath: normalizeWorkspacePath(candidate.workspace.path),
+            kind: candidate.workspace.path.toLowerCase().endsWith('.code-workspace')
+              ? 'composer-configuration'
+              : 'composer-folder',
+          },
+        ],
+        sourceOrder,
+        loadConsumedPayload: () => consumedComposerPayload(candidate.session),
+      })
+    );
+    const catalog = buildSessionCatalog(instances, {
+      ...(activeWorkspacePath
+        ? {
+            activeWorkspace: {
+              matchedWorkspacePath: activeWorkspacePath,
+              matchKind: workspaceMatchKind ?? 'exact',
+            },
+          }
+        : {}),
+    })[0]!;
+    const reconciliation = await reconcileReplicaGroup(catalog.replicaGroups[0]!, {
+      diagnosticContextId,
+    });
+    if (reconciliation.state === 'divergent') {
+      ambiguous.push(
+        projectAmbiguousSessionSummary(catalog, [reconciliation], {
+          index: 0,
+          indexScope,
+          ...(activeWorkspacePath ? { indexWorkspacePath: activeWorkspacePath } : {}),
+        })
+      );
+      continue;
+    }
+
+    const selected = reconciliation.selected.locator;
+    const summary = selected.summary;
+    summary.source = 'workspace-fallback';
+    summary.resolvedSource = 'composer';
+    summary.resolutionState = 'partial';
+    summary.resolution = {
+      state: 'partial',
+      expectedSourceRoles: ['composer'],
+      loadedSourceRoles: ['composer'],
+      omittedSourceRoles: omittedWorkspaces.length > 0 ? ['composer'] : [],
+      failedSourceRoles: [],
+      reasonCodes:
+        omittedWorkspaces.length > 0
+          ? ['workspace-scope-omitted', 'source-unavailable']
+          : ['source-unavailable'],
+    };
+    summary.canonicalWorkspacePath = catalog.canonicalWorkspacePath;
+    summary.matchedWorkspacePath = catalog.matchedWorkspacePath;
+    summary.workspaceMatchKind = catalog.workspaceMatchKind;
+    summary.workspaceMemberships = memberships;
+    summary.sourceInstances = [
+      ...reconciliation.sourceInstances,
+      ...omittedWorkspaces.map((workspace) => ({
+        sourceRole: 'composer' as const,
+        representation: 'composer-workspace' as const,
+        workspacePaths: [normalizeWorkspacePath(workspace.path)],
+        state: 'omitted-by-scope' as const,
+      })),
+    ];
+    resolved.push(summary);
+  }
+  return { resolved, ambiguous };
+}
+
+/** Record a known Store counterpart that strict workspace scope did not permit loading. */
+function markStoreContributorOmittedByScope(
+  summary: ChatSessionSummary,
+  store: StoreSession
+): void {
+  summary.resolutionState = 'partial';
+  summary.resolution = {
+    state: 'partial',
+    expectedSourceRoles: ['composer', 'store'],
+    loadedSourceRoles: ['composer'],
+    omittedSourceRoles: ['store'],
+    failedSourceRoles: [],
+    reasonCodes: ['workspace-scope-omitted'],
+  };
+  summary.resolvedSource ??= 'composer';
+  const storePath = store.workspacePath ? normalizeWorkspacePath(store.workspacePath) : undefined;
+  summary.sourceInstances = [
+    ...(summary.sourceInstances ?? []),
+    {
+      sourceRole: 'store',
+      representation: store.storeDbPath
+        ? 'store-db'
+        : store.transcriptPath
+          ? 'store-transcript'
+          : 'store-metadata',
+      workspacePaths: storePath ? [storePath] : [],
+      state: 'omitted-by-scope',
+    },
+  ];
+}
+
+/** Attach locator-free scope/provenance fields after source merging is complete. */
+function projectSummaryAddressing(
+  summary: ChatSessionSummary,
+  activeWorkspacePath: string | undefined,
+  workspaceMatchKind: ChatSessionSummary['workspaceMatchKind']
+): void {
+  const composerBacked = summary.workspaceId !== 'store';
+  const reportedPath =
+    summary.workspacePath && !summary.workspacePath.startsWith('(')
+      ? normalizeWorkspacePath(summary.workspacePath)
+      : undefined;
+  const composerPath = composerBacked ? reportedPath : undefined;
+  const storePath = composerBacked ? undefined : reportedPath;
+  const canonicalWorkspacePath = summary.canonicalWorkspacePath ?? composerPath ?? storePath;
+  const sourceRoles: Array<'composer' | 'store'> = summary.sources
+    ? (['composer', 'store'] as const).filter((role) => summary.sources!.includes(role))
+    : summary.resolvedSource === 'merged'
+      ? (['composer', 'store'] as const)
+      : composerBacked
+        ? (['composer'] as const)
+        : (['store'] as const);
+  summary.sources = [...sourceRoles];
+  summary.resolvedSource ??= composerBacked ? 'composer' : 'store-metadata';
+  const inferredState = summary.source === 'global' ? 'complete' : 'partial';
+  const resolution = (summary.resolution ??= {
+    state: inferredState,
+    expectedSourceRoles: [...sourceRoles],
+    loadedSourceRoles: [...sourceRoles],
+    omittedSourceRoles: [],
+    failedSourceRoles: [],
+    reasonCodes: inferredState === 'complete' ? [] : ['source-unavailable'],
+  });
+  summary.resolutionState = resolution.state;
+  summary.source = resolution.state === 'complete' ? 'global' : 'workspace-fallback';
+  summary.messageIdentityVersion = 1;
+  summary.indexScope = activeWorkspacePath ? 'workspace' : 'global';
+  if (activeWorkspacePath) {
+    summary.indexWorkspacePath = activeWorkspacePath;
+    summary.matchedWorkspacePath = activeWorkspacePath;
+    if (workspaceMatchKind) summary.workspaceMatchKind = workspaceMatchKind;
+  }
+  if (canonicalWorkspacePath) summary.canonicalWorkspacePath = canonicalWorkspacePath;
+  if (composerBacked && canonicalWorkspacePath) {
+    // `workspacePath` is the released compatibility alias for the canonical
+    // Composer attribution, never the currently selected replica path.
+    summary.workspacePath = contractPath(canonicalWorkspacePath);
+  }
+  if (!summary.workspaceMemberships) {
+    summary.workspaceMemberships = canonicalWorkspacePath
+      ? [
+          {
+            workspacePath: canonicalWorkspacePath,
+            sourceRoles: [...sourceRoles],
+            contributingInstanceCount: sourceRoles.length,
+          },
+        ]
+      : [];
+  }
+  {
+    const sourceInstances: NonNullable<ChatSessionSummary['sourceInstances']> = [
+      ...(summary.sourceInstances ?? []),
+    ];
+    if (composerBacked && !sourceInstances.some(({ sourceRole }) => sourceRole === 'composer')) {
+      sourceInstances.push({
+        sourceRole: 'composer',
+        representation: summary.workspaceId === 'global' ? 'composer-global' : 'composer-workspace',
+        workspacePaths: composerPath ? [composerPath] : [],
+        state: 'contributed',
+      });
+    }
+    if (
+      (summary.sources?.includes('store') || !composerBacked) &&
+      !sourceInstances.some(({ sourceRole }) => sourceRole === 'store')
+    ) {
+      sourceInstances.push({
+        sourceRole: 'store',
+        representation:
+          summary.resolvedSource === 'store-transcript'
+            ? 'store-transcript'
+            : summary.resolvedSource === 'store-metadata'
+              ? 'store-metadata'
+              : 'store-db',
+        workspacePaths: storePath ? [storePath] : [],
+        state: 'contributed',
+      });
+    }
+    summary.sourceInstances = sourceInstances.sort((left, right) => {
+      if (left.sourceRole !== right.sourceRole) return left.sourceRole === 'composer' ? -1 : 1;
+      if (left.representation !== right.representation) {
+        return left.representation.localeCompare(right.representation);
+      }
+      return left.workspacePaths.join('\0').localeCompare(right.workspacePaths.join('\0'));
+    });
+  }
+}
+
 async function getWorkspacesCached(
   context: SessionReadContext | undefined,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  workspaceFilterPath?: string
 ): Promise<Workspace[]> {
   assertContextSource(context, customDataPath, backupPath);
   throwIfReadAborted(context?.signal);
   if (context?.workspaces) return context.workspaces;
   if (context?.workspacesPromise) return context.workspacesPromise;
 
-  const discovery = findWorkspaces(customDataPath, backupPath, context);
+  const discovery = findWorkspaces(customDataPath, backupPath, {
+    ...(context ?? {}),
+    ...(workspaceFilterPath ? { workspaceFilterPath } : {}),
+  });
   if (!context) return discovery;
 
   context.workspacesPromise = discovery;
@@ -1582,11 +2473,22 @@ async function getWorkspacesCached(
 async function getStoreSessionsCached(
   context: SessionReadContext | undefined,
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  sessionIds?: ReadonlySet<string>,
+  mode: 'metadata' | 'payload' = 'metadata'
 ): Promise<StoreSession[]> {
   assertContextSource(context, customDataPath, backupPath);
   throwIfReadAborted(context?.signal);
   if (backupPath) return [];
+  if (mode === 'payload') {
+    return discoverStoreSessions(getStoreStackRoot(customDataPath), {
+      sourceReadLimits: context?.sourceReadLimits,
+      sqliteDriver: context?.sqliteDriver,
+      signal: context?.signal,
+      io: context?.io,
+      ...(sessionIds ? { sessionIds } : {}),
+    });
+  }
   if (context?.storeSessions) return context.storeSessions;
   if (context?.storeSessionsPromise) return context.storeSessionsPromise;
 
@@ -1594,6 +2496,9 @@ async function getStoreSessionsCached(
     sourceReadLimits: context?.sourceReadLimits,
     sqliteDriver: context?.sqliteDriver,
     signal: context?.signal,
+    io: context?.io,
+    ...(sessionIds ? { sessionIds } : {}),
+    metadataOnly: true,
   });
   if (!context) return discovery;
 
@@ -1601,6 +2506,7 @@ async function getStoreSessionsCached(
   try {
     const sessions = await discovery;
     context.storeSessions = sessions;
+    emitContextOwnership(context);
     return sessions;
   } finally {
     context.storeSessionsPromise = null;
@@ -1623,7 +2529,11 @@ export async function listSessions(
   backupPath?: string,
   context?: SessionReadContext
 ): Promise<ChatSessionSummary[]> {
-  context ??= createSessionReadContext(customDataPath, backupPath, {
+  context ??= createSessionReadContext({
+    dataPath: customDataPath,
+    backupPath,
+    workspacePath: options.workspacePath,
+    includeCrossWorkspaceSources: options.includeCrossWorkspaceSources,
     sourceReadLimits: options.sourceReadLimits,
     signal: options.signal,
   });
@@ -1631,18 +2541,49 @@ export async function listSessions(
   throwIfReadAborted(options.signal ?? context?.signal);
   assertContextSource(context, customDataPath, backupPath);
   bindContextWorkspaceScope(context, options.workspacePath);
+  assertContextReadOptions(context, options);
+
+  let workspaceScopeResult: WorkspaceScopeResult | undefined;
+  let activeWorkspacePath: string | undefined;
+  let composerWorkspaceInventory: Workspace[] = [];
+  if (options.workspacePath) {
+    composerWorkspaceInventory = await findComposerWorkspaceInventory(
+      customDataPath,
+      backupPath,
+      context
+    );
+    const storeWorkspacePaths = backupPath
+      ? []
+      : (await getStoreSessionsCached(context, customDataPath, backupPath))
+          .map(({ workspacePath }) => workspacePath)
+          .filter((path): path is string => Boolean(path));
+    workspaceScopeResult = resolveWorkspaceScope(options.workspacePath, [
+      ...composerWorkspaceInventory.map(({ path }) => path),
+      ...storeWorkspacePaths,
+    ]);
+    if (workspaceScopeResult.kind === 'not-found') {
+      if (context) context.summaries = [];
+      return [];
+    }
+    activeWorkspacePath = workspaceScopeResult.path;
+  }
   if (context?.summaries) {
     return applySessionListLimit(context.summaries, options);
   }
 
   // T029: Support reading from backup
-  const workspaces = await getWorkspacesCached(context, customDataPath, backupPath);
+  const workspaces = await getWorkspacesCached(
+    context,
+    customDataPath,
+    backupPath,
+    activeWorkspacePath
+  );
 
   // Filter by workspace if specified
   // Deterministic order: .code-workspace paths before others, then by path (for stable attribution when deduping)
   const filteredWorkspaces = (
-    options.workspacePath
-      ? workspaces.filter((w) => workspaceFilterMatches(w.path, options.workspacePath!))
+    activeWorkspacePath
+      ? workspaces.filter((w) => workspaceFilterMatches(w.path, activeWorkspacePath!))
       : workspaces
   ).sort((a, b) => {
     const normA = normalizePath(a.path);
@@ -1654,8 +2595,11 @@ export async function listSessions(
   });
 
   const allSessions: ChatSessionSummary[] = [];
+  const composerCandidatesById = new Map<string, ComposerPhysicalCandidate[]>();
+  const omittedComposerWorkspacesById = new Map<string, Workspace[]>();
+  const globalPrimaryIds = new Set<string>();
   // When listing all workspaces (no filter), dedupe by session id; keep first occurrence (workspace order is already deterministic)
-  const seenIds = options.workspacePath ? null : new Set<string>();
+  const seenIds = activeWorkspacePath ? null : new Set<string>();
   const globalFallbackCandidates: WorkspaceGlobalCandidate[] = [];
 
   for (const workspace of filteredWorkspaces) {
@@ -1669,8 +2613,16 @@ export async function listSessions(
             sourceReadLimits: context?.sourceReadLimits,
             signal: options.signal ?? context?.signal,
             sqliteDriver: context?.sqliteDriver,
+            io: context?.io,
           })
-        : await openDatabase(workspace.dbPath, context);
+        : await openDatabase(
+            workspace.dbPath,
+            withDatabaseIo(context, {
+              resourceClass: 'workspace-conversation',
+              sourceRole: 'composer',
+              representation: 'composer-workspace',
+            })
+          );
       throwIfReadAborted(options.signal ?? context?.signal);
       const result = getChatDataFromDb(workspaceDb);
       // Pointer keys (e.g. composerChatViewPane.<guid>) live in ItemTable and link
@@ -1699,9 +2651,8 @@ export async function listSessions(
 
       for (const session of sessions) {
         workspaceSeenIds.add(session.id);
-        if (seenIds?.has(session.id)) continue;
         seenIds?.add(session.id);
-        allSessions.push({
+        const summary: ChatSessionSummary = {
           id: session.id,
           index: 0, // Will be assigned after sorting
           title: session.title,
@@ -1713,7 +2664,11 @@ export async function listSessions(
           workspaceId: workspace.id,
           workspacePath: contractPath(workspace.path),
           preview: session.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
-        });
+        };
+        allSessions.push(summary);
+        const candidates = composerCandidatesById.get(session.id) ?? [];
+        candidates.push({ summary, session, workspace });
+        composerCandidatesById.set(session.id, candidates);
       }
 
       if (!backupPath) {
@@ -1736,21 +2691,142 @@ export async function listSessions(
     }
   }
 
-  if (!backupPath && (globalFallbackCandidates.length > 0 || !options.workspacePath)) {
+  // Workspace scope may inspect UUID-only catalog metadata outside the
+  // selected path. Payload hydration remains forbidden unless the caller opts
+  // in, and even then is restricted to UUIDs already admitted in scope.
+  if (activeWorkspacePath) {
+    const offScopeWorkspaces = composerWorkspaceInventory.filter(
+      ({ path }) => !workspaceFilterMatches(path, activeWorkspacePath!)
+    );
+    for (const workspace of offScopeWorkspaces) {
+      let metadataDb: Database | null = null;
+      let metadataError: unknown;
+      try {
+        metadataDb = backupPath
+          ? await openBackupDatabase(backupPath, workspace.dbPath, {
+              sourceReadLimits: context.sourceReadLimits,
+              signal: context.signal,
+              sqliteDriver: context.sqliteDriver,
+              io: context.io,
+            })
+          : await openDatabase(
+              workspace.dbPath,
+              withDatabaseIo(context, {
+                resourceClass: 'workspace-session-index',
+                sourceRole: 'composer',
+                representation: 'composer-workspace',
+              })
+            );
+        for (const id of loadWorkspaceComposerIdsOnly(metadataDb)) {
+          if (!composerCandidatesById.has(id)) continue;
+          const omitted = omittedComposerWorkspacesById.get(id) ?? [];
+          omitted.push(workspace);
+          omittedComposerWorkspacesById.set(id, omitted);
+        }
+      } catch (error) {
+        metadataError = error;
+        if (shouldPropagateReadFailure(error)) throw error;
+      } finally {
+        closeDatabaseOrThrow(metadataDb, metadataError);
+      }
+    }
+
+    if (context.includeCrossWorkspaceSources) {
+      for (const [id, offScopeWorkspacesForId] of omittedComposerWorkspacesById) {
+        for (const workspace of offScopeWorkspacesForId) {
+          let payloadDb: Database | null = null;
+          let payloadError: unknown;
+          try {
+            payloadDb = backupPath
+              ? await openBackupDatabase(backupPath, workspace.dbPath, {
+                  sourceReadLimits: context.sourceReadLimits,
+                  signal: context.signal,
+                  sqliteDriver: context.sqliteDriver,
+                  io: context.io,
+                  logicalSessionId: id,
+                })
+              : await openDatabase(
+                  workspace.dbPath,
+                  withDatabaseIo(context, {
+                    resourceClass: 'workspace-conversation',
+                    logicalSessionId: id,
+                    sourceRole: 'composer',
+                    representation: 'composer-workspace',
+                  })
+                );
+            const session = loadOneWorkspaceComposer(payloadDb, id);
+            if (!session) continue;
+            const summary: ChatSessionSummary = {
+              id,
+              index: 0,
+              title: session.title,
+              createdAt: session.createdAt,
+              createdAtSource: session.createdAtSource,
+              lastUpdatedAt: session.lastUpdatedAt,
+              lastUpdatedAtSource: session.lastUpdatedAtSource,
+              messageCount: session.messageCount,
+              workspaceId: workspace.id,
+              workspacePath: contractPath(workspace.path),
+              preview: session.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
+            };
+            const candidates = composerCandidatesById.get(id)!;
+            candidates.push({ summary, session, workspace });
+          } catch (error) {
+            payloadError = error;
+            if (shouldPropagateReadFailure(error)) throw error;
+          } finally {
+            closeDatabaseOrThrow(payloadDb, payloadError);
+          }
+        }
+      }
+    }
+  }
+
+  if (!backupPath && (globalFallbackCandidates.length > 0 || !activeWorkspacePath)) {
     const globalDbPath = join(getGlobalStoragePath(customDataPath), 'state.vscdb');
+    observeStorageAdapterIo(context, {
+      adapter: 'filesystem',
+      operation: 'open',
+      resourceClass: 'global-session-index',
+      sourceRole: 'composer',
+      representation: 'composer-global',
+    });
     if (existsSync(globalDbPath)) {
       let globalDb: Database | null = null;
       try {
         throwIfReadAborted(options.signal ?? context?.signal);
-        globalDb = await openDatabase(globalDbPath, context);
+        globalDb = await openDatabase(
+          globalDbPath,
+          withDatabaseIo(context, {
+            resourceClass: 'global-session-index',
+            sourceRole: 'composer',
+            representation: 'composer-global',
+          })
+        );
         const tableCheck = globalDb
           .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
           .get();
 
         if (tableCheck) {
-          const globalComposerRecords = loadGlobalComposerRecords(globalDb);
+          for (const composerId of composerCandidatesById.keys()) {
+            if (countGlobalComposerBubbles(globalDb, composerId) > 0) {
+              globalPrimaryIds.add(composerId);
+            }
+          }
+          const globalComposerRecords = activeWorkspacePath
+            ? []
+            : loadGlobalComposerRecords(globalDb);
           // One pass over the bubble table instead of two LIKE scans per composer.
-          const globalBubbleCounts = loadGlobalBubbleCounts(globalDb);
+          const globalBubbleCounts = activeWorkspacePath
+            ? new Map<string, number>()
+            : loadGlobalBubbleCounts(globalDb);
+          if (activeWorkspacePath) {
+            for (const candidate of globalFallbackCandidates) {
+              candidate.composerIds.push(
+                ...loadGlobalComposerMembershipIds(globalDb, candidate.workspace)
+              );
+            }
+          }
           const summaryCache = new Map<string, GlobalComposerSummary | null>();
           // Dedup recovered sessions across candidates even under `--workspace`
           // (where the shared `seenIds` is intentionally null), so a single global
@@ -1792,7 +2868,7 @@ export async function listSessions(
               });
             }
 
-            if (candidate.includeWorkspaceLinked) {
+            if (candidate.includeWorkspaceLinked && !activeWorkspacePath) {
               for (const summary of getGlobalComposerSummariesForWorkspace(
                 globalDb,
                 candidate.workspace,
@@ -1827,7 +2903,7 @@ export async function listSessions(
           // workspace (modern Cursor frequently stores no workspace stamp on the
           // global record). Only on the unfiltered listing, where `seenIds` tracks
           // everything already shown.
-          if (seenIds && !options.workspacePath) {
+          if (seenIds && !activeWorkspacePath) {
             for (const record of globalComposerRecords) {
               if (seenIds.has(record.id) || recoveredIds.has(record.id)) continue;
 
@@ -1868,50 +2944,103 @@ export async function listSessions(
     }
   }
 
+  // Backups carry the Composer global database as a separate archive entry.
+  // Its UUID/bubble presence is metadata needed to classify an already
+  // selected workspace row; inspect it before replica arbitration without
+  // decoding conversation content.
+  if (backupPath && composerCandidatesById.size > 0) {
+    let backupGlobalDb: Database | null = null;
+    let backupGlobalReadError: unknown;
+    try {
+      backupGlobalDb = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb', {
+        sourceReadLimits: context.sourceReadLimits,
+        signal: options.signal ?? context.signal,
+        sqliteDriver: context.sqliteDriver,
+        io: context.io,
+      });
+      const tableCheck = backupGlobalDb
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
+        .get();
+      if (tableCheck) {
+        for (const composerId of composerCandidatesById.keys()) {
+          if (countGlobalComposerBubbles(backupGlobalDb, composerId) > 0) {
+            globalPrimaryIds.add(composerId);
+          }
+        }
+      }
+    } catch (error) {
+      backupGlobalReadError = error;
+      if (!(error instanceof BackupEntryNotFoundError)) throw error;
+      debugLogStorage('Global DB not present in backup; using workspace fallback summaries.');
+    } finally {
+      closeDatabaseOrThrow(backupGlobalDb, backupGlobalReadError);
+    }
+  }
+
+  const composerReplicaIds = new Set(composerCandidatesById.keys());
+  const nonReplicaComposerRows = allSessions.filter(({ id }) => !composerReplicaIds.has(id));
+  const composerRows = await reconcileComposerRows(
+    composerCandidatesById,
+    globalPrimaryIds,
+    context.includeCrossWorkspaceSources ? new Map() : omittedComposerWorkspacesById,
+    activeWorkspacePath ? 'workspace' : 'global',
+    activeWorkspacePath,
+    workspaceScopeResult?.kind === 'matched' ? workspaceScopeResult.matchKind : undefined,
+    `${context.io.dataSourceIdentity}:${activeWorkspacePath ?? 'global'}`
+  );
+  allSessions.splice(0, allSessions.length, ...nonReplicaComposerRows, ...composerRows.resolved);
+
   // Merge Cursor Store-stack sessions (~/.cursor/{chats,projects}).
   // Independent from Composer customDataPath; discovered via getStoreStackRoot().
   // Falls back to [] when ~/.cursor is absent (pure-Composer users unaffected).
   // Skipped in backup mode: backups capture vscdb, not the live ~/.cursor tree.
   if (!backupPath) {
+    // Store discovery is metadata-only here. Conversation payload for one UUID
+    // is hydrated later by getSession(), never retained by the listing context.
     const storeSessions = await getStoreSessionsCached(context, customDataPath, backupPath);
     const storeSeenIds = new Set(allSessions.map((session) => session.id));
     // Conflict priority for sessions present in BOTH stacks (same ID).
     const preferredSource = detectPreferredStackSource(customDataPath);
     for (const ss of storeSessions) {
+      const storeMatchesScope = activeWorkspacePath
+        ? Boolean(ss.workspacePath && workspaceFilterMatches(ss.workspacePath, activeWorkspacePath))
+        : true;
+      const composerSelected = storeSeenIds.has(ss.id);
+      if (activeWorkspacePath && !storeMatchesScope && !composerSelected) continue;
+
       // Same ID in both stacks → merge scalar metadata and mark merged instead
       // of discarding the lower-priority representation. The full
       // field/message merge happens in getSession(). Do this before applying
       // the Store path filter: the Composer half has already matched the
       // requested workspace, while transcript-only Store metadata may not
       // contain a cwd at all.
-      if (storeSeenIds.has(ss.id)) {
+      if (composerSelected) {
         const existingSummaries = allSessions.filter((s) => s.id === ss.id);
         for (const existing of existingSummaries) {
-          applyStoreMergeToSummary(
-            existing,
-            {
-              id: ss.id,
-              title: ss.title,
-              createdAt: ss.createdAt,
-              createdAtSource: ss.createdAtSource,
-              lastUpdatedAt: ss.lastUpdatedAt,
-              lastUpdatedAtSource: ss.lastUpdatedAtSource,
-              directMessages: ss.messages,
-              workspacePath: ss.workspacePath,
-              messageCount: ss.messages.length,
-              source: ss.source,
-              resolution: ss.resolution,
-              transcriptState: ss.transcriptState,
-            },
-            preferredSource
-          );
+          if (!activeWorkspacePath || storeMatchesScope || context.includeCrossWorkspaceSources) {
+            applyStoreMergeToSummary(
+              existing,
+              {
+                id: ss.id,
+                title: ss.title,
+                createdAt: ss.createdAt,
+                createdAtSource: ss.createdAtSource,
+                lastUpdatedAt: ss.lastUpdatedAt,
+                lastUpdatedAtSource: ss.lastUpdatedAtSource,
+                directMessages: ss.messages,
+                workspacePath: ss.workspacePath,
+                messageCount: ss.messages.length,
+                source: ss.source,
+                resolution: ss.resolution,
+                transcriptState: ss.transcriptState,
+                sourceInstances: ss.sourceInstances,
+              },
+              preferredSource
+            );
+          } else {
+            markStoreContributorOmittedByScope(existing, ss);
+          }
         }
-        continue;
-      }
-      if (
-        options.workspacePath &&
-        !workspaceFilterMatches(ss.workspacePath, options.workspacePath)
-      ) {
         continue;
       }
       storeSeenIds.add(ss.id);
@@ -1926,32 +3055,97 @@ export async function listSessions(
         messageCount: ss.messages.length,
         workspaceId: 'store',
         workspacePath: ss.workspacePath ? contractPath(ss.workspacePath) : '(unknown workspace)',
-        preview: ss.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
-        source: ss.source,
+        preview:
+          ss.resolvedSource === 'store-metadata'
+            ? '(Messages not loaded)'
+            : (ss.messages[0]?.content.slice(0, 100) ?? '(Empty session)'),
+        // Metadata-only discovery cannot prove that an inventoried payload is
+        // complete. Keep the released field as the replacement-safety signal;
+        // representation/provenance lives in the additive fields below.
+        source: ss.resolution?.state === 'complete' ? 'global' : 'workspace-fallback',
         resolvedSource: ss.resolvedSource,
-        resolutionState: ss.resolution?.state,
+        resolutionState:
+          ss.resolution?.state ?? (ss.resolvedSource === 'store-metadata' ? 'partial' : undefined),
         resolution: ss.resolution,
         messageIdentityVersion: 1,
-        transcriptState: ss.transcriptState,
+        ...(ss.resolvedSource === 'store-metadata' ? {} : { transcriptState: ss.transcriptState }),
       });
     }
   }
 
-  // Sort by most recent first
-  allSessions.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  for (const summary of allSessions) {
+    projectSummaryAddressing(
+      summary,
+      activeWorkspacePath,
+      workspaceScopeResult?.kind === 'matched' ? workspaceScopeResult.matchKind : undefined
+    );
+  }
 
-  // Assign indexes
-  allSessions.forEach((session, i) => {
-    session.index = i + 1;
-  });
+  // Sort and index the logical catalog before omitting ambiguity rows from the
+  // legacy full-session listing. Resolved presentation indices may therefore
+  // contain intentional gaps and must never be backfilled.
+  const ambiguityTimes = new Map(
+    [...composerCandidatesById.entries()].map(([id, candidates]) => [
+      id,
+      Math.max(...candidates.map(({ summary }) => summary.createdAt.getTime())),
+    ])
+  );
+  const logicalRows: Array<{ row: LogicalSessionSummary; timestamp: number }> = [
+    ...allSessions.map((row) => ({ row, timestamp: row.createdAt.getTime() })),
+    ...composerRows.ambiguous.map((row) => ({
+      row,
+      timestamp: ambiguityTimes.get(row.id) ?? 0,
+    })),
+  ];
+  logicalRows.sort(
+    (left, right) => right.timestamp - left.timestamp || left.row.id.localeCompare(right.row.id)
+  );
+  const indexedLogicalRows = logicalRows.map(({ row, timestamp }, index) => ({
+    row: { ...row, index: index + 1 } as LogicalSessionSummary,
+    timestamp,
+  }));
+  allSessions.splice(
+    0,
+    allSessions.length,
+    ...indexedLogicalRows
+      .map(({ row }) => row)
+      .filter((row): row is ChatSessionSummary => row.resolutionState !== 'ambiguous')
+  );
 
   // Keep the exact listing scope. In particular, a workspace-filtered operation
   // must resolve duplicate IDs against the same workspace it listed.
   if (context) {
     context.summaries = allSessions;
+    context.logicalSummaries = indexedLogicalRows.map(({ row }) => row);
   }
 
   return applySessionListLimit(allSessions, options);
+}
+
+/**
+ * List one message-free row per logical UUID, including divergent replica
+ * rows. Indices share the one-based core/CLI catalog with `listSessions()`.
+ */
+export async function listSessionSummaries(
+  options: ListOptions,
+  customDataPath?: string,
+  backupPath?: string,
+  context?: SessionReadContext
+): Promise<LogicalSessionSummary[]> {
+  const operationContext =
+    context ??
+    createSessionReadContext({
+      dataPath: customDataPath,
+      backupPath,
+      workspacePath: options.workspacePath,
+      includeCrossWorkspaceSources: options.includeCrossWorkspaceSources,
+      sourceReadLimits: options.sourceReadLimits,
+      signal: options.signal,
+    });
+  await listSessions(options, customDataPath, backupPath, operationContext);
+  const rows = operationContext.logicalSummaries ?? [];
+  const selected = !options.all && options.limit > 0 ? rows.slice(0, options.limit) : rows;
+  return structuredClone(selected);
 }
 
 function canonicalWorkspaceAggregationKey(workspacePath: string): string {
@@ -1980,12 +3174,27 @@ function canonicalWorkspaceAggregationKey(workspacePath: string): string {
  */
 export async function listWorkspaces(
   customDataPath?: string,
-  backupPath?: string
+  backupPath?: string,
+  readOptions: StorageReadOperationOptions = {}
 ): Promise<Workspace[]> {
-  const context = createSessionReadContext(customDataPath, backupPath);
+  const context = createSessionReadContext({
+    dataPath: customDataPath,
+    backupPath,
+    sourceReadLimits: readOptions.sourceReadLimits,
+    signal: readOptions.signal,
+    sqliteDriver: readOptions.sqliteDriver,
+    ioObserver: readOptions.ioObserver,
+    io: readOptions.io,
+    onDiagnostic: readOptions.onDiagnostic,
+  });
   const composerWorkspaces = await getWorkspacesCached(context, customDataPath, backupPath);
   const summaries = await listSessions(
-    { limit: 0, all: true },
+    {
+      limit: 0,
+      all: true,
+      sourceReadLimits: readOptions.sourceReadLimits,
+      signal: readOptions.signal,
+    },
     customDataPath,
     backupPath,
     context
@@ -2071,9 +3280,14 @@ export async function getSession(
   context?: SessionReadContext,
   summaryIndexHint?: number
 ): Promise<ChatSession | null> {
-  const operationContext = context ?? createSessionReadContext(customDataPath, backupPath);
+  const operationContext =
+    context ?? createSessionReadContext({ dataPath: customDataPath, backupPath });
   throwIfReadAborted(operationContext.signal);
   assertContextSource(operationContext, customDataPath, backupPath);
+  bindContextWorkspaceScope(
+    operationContext,
+    operationContext.workspaceScope === null ? undefined : operationContext.workspaceScope
+  );
   // Resolve the summary from the cached listing when available; otherwise
   // list once (and populate the context for downstream lookups).
   let summary: ChatSessionSummary | undefined;
@@ -2088,7 +3302,14 @@ export async function getSession(
         : operationContext.summaries.find((s) => s.index === identifier);
   } else {
     const summaries = await listSessions(
-      { limit: 0, all: true },
+      {
+        limit: 0,
+        all: true,
+        workspacePath: operationContext.workspaceScope ?? undefined,
+        includeCrossWorkspaceSources: operationContext.includeCrossWorkspaceSources,
+        sourceReadLimits: operationContext.sourceReadLimits,
+        signal: operationContext.signal,
+      },
       customDataPath,
       backupPath,
       operationContext
@@ -2103,26 +3324,71 @@ export async function getSession(
         : summaries.find((s) => s.index === identifier);
   }
   if (!summary) {
+    const ambiguous = operationContext.logicalSummaries?.find(
+      (row): row is AmbiguousSessionSummary =>
+        row.resolutionState === 'ambiguous' &&
+        (typeof identifier === 'string' ? row.id === identifier : row.index === identifier)
+    );
+    if (ambiguous) {
+      throw new SessionAmbiguityError(ambiguous.id, ambiguous.diagnosticOccurrenceRefs);
+    }
     return null;
   }
 
   const index = summary.index;
   const resolutionKey = `${summary.id}\0${summary.index}`;
-  let resolution = operationContext.resolvedSessions.get(resolutionKey);
-  if (!resolution) {
-    resolution = resolveFinalSession(summary, index, customDataPath, backupPath, operationContext);
-    operationContext.resolvedSessions.set(resolutionKey, resolution);
+  if (operationContext.completedSessions.has(resolutionKey)) {
+    const completed = operationContext.completedSessions.get(resolutionKey) ?? null;
+    operationContext.completedSessions.delete(resolutionKey);
+    operationContext.completedSessions.set(resolutionKey, completed);
+    return completed ? structuredClone(completed) : null;
   }
 
-  try {
-    const session = await resolution;
-    return session ? structuredClone(session) : null;
-  } catch (error) {
-    if (operationContext.resolvedSessions.get(resolutionKey) === resolution) {
-      operationContext.resolvedSessions.delete(resolutionKey);
-    }
-    throw error;
+  let resolution = operationContext.activeResolutions.get(resolutionKey);
+  if (!resolution) {
+    operationContext.resolutionStarts++;
+    const tracked: Promise<ChatSession | null> = resolveFinalSession(
+      summary,
+      index,
+      customDataPath,
+      backupPath,
+      operationContext
+    ).then(
+      (session) => {
+        if (operationContext.activeResolutions.get(resolutionKey) === tracked) {
+          operationContext.activeResolutions.delete(resolutionKey);
+        }
+        if (!operationContext.disposed && operationContext.resolvedSessionCapacity > 0) {
+          operationContext.completedSessions.delete(resolutionKey);
+          operationContext.completedSessions.set(resolutionKey, session);
+          while (
+            operationContext.completedSessions.size > operationContext.resolvedSessionCapacity
+          ) {
+            const oldest = operationContext.completedSessions.keys().next().value as
+              string | undefined;
+            if (oldest === undefined) break;
+            operationContext.completedSessions.delete(oldest);
+          }
+        }
+        emitContextOwnership(operationContext);
+        return session;
+      },
+      (error: unknown) => {
+        if (operationContext.activeResolutions.get(resolutionKey) === tracked) {
+          operationContext.activeResolutions.delete(resolutionKey);
+        }
+        operationContext.completedSessions.delete(resolutionKey);
+        emitContextOwnership(operationContext);
+        throw error;
+      }
+    );
+    resolution = tracked;
+    operationContext.activeResolutions.set(resolutionKey, resolution);
+    emitContextOwnership(operationContext);
   }
+
+  const session = await resolution;
+  return session ? structuredClone(session) : null;
 }
 
 /**
@@ -2137,14 +3403,13 @@ async function resolveFinalSession(
   context: SessionReadContext
 ): Promise<ChatSession | null> {
   throwIfReadAborted(context.signal);
+  let resolved: ChatSession | null;
   // Merged: same ID exists in both stacks, so field-merge the two representations.
   if (summary.source === 'merged' || summary.resolvedSource === 'merged') {
-    return loadMergedSession(summary, index, customDataPath, backupPath, context);
-  }
-
-  // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via
-  // the cached Store discovery when available.
-  if (
+    resolved = await loadMergedSession(summary, index, customDataPath, backupPath, context);
+  } else if (
+    // Store-stack sessions (transcript/store*) don't live in vscdb; resolve via
+    // the cached Store discovery when available.
     summary.workspaceId === 'store' ||
     summary.resolvedSource === 'store-db' ||
     summary.resolvedSource === 'store-transcript' ||
@@ -2154,15 +3419,132 @@ async function resolveFinalSession(
     summary.source === 'store-complete' ||
     summary.source === 'store-partial'
   ) {
-    const storeSession = (await getStoreSessionsCached(context, customDataPath, backupPath)).find(
-      (s) => s.id === summary.id
-    );
-    if (!storeSession) return null;
-    return mapStoreSession(storeSession, index);
+    const storeSession = (
+      await getStoreSessionsCached(
+        context,
+        customDataPath,
+        backupPath,
+        new Set([summary.id]),
+        'payload'
+      )
+    ).find((s) => s.id === summary.id);
+    resolved = storeSession ? mapStoreSession(storeSession, index) : null;
+  } else {
+    // Composer stack: global storage (full bubbles) with workspace fallback.
+    resolved = await loadComposerSession(summary, index, customDataPath, backupPath, context);
   }
+  if (!resolved) return null;
+  return projectSessionAddressing(resolved, summary);
+}
 
-  // Composer stack: global storage (full bubbles) with workspace fallback.
-  return loadComposerSession(summary, index, customDataPath, backupPath, context);
+/** Copy safe summary scope/provenance onto the hydrated session. */
+function projectSessionAddressing(session: ChatSession, summary: ChatSessionSummary): ChatSession {
+  const hydratedRoles = new Set(
+    (session.sourceInstances ?? []).map(({ sourceRole }) => sourceRole)
+  );
+  const uniqueSourceInstances = [
+    ...(session.sourceInstances ?? []),
+    ...(summary.sourceInstances ?? []).filter(({ sourceRole }) => !hydratedRoles.has(sourceRole)),
+  ];
+  uniqueSourceInstances.sort((left, right) => {
+    if (left.sourceRole !== right.sourceRole) return left.sourceRole === 'composer' ? -1 : 1;
+    const representationOrder = [
+      'composer-global',
+      'composer-workspace',
+      'store-db',
+      'store-transcript',
+      'store-metadata',
+    ];
+    const byRepresentation =
+      representationOrder.indexOf(left.representation) -
+      representationOrder.indexOf(right.representation);
+    if (byRepresentation !== 0) return byRepresentation;
+    return left.workspacePaths.join('\0').localeCompare(right.workspacePaths.join('\0'));
+  });
+  const projected: ChatSession = {
+    ...session,
+    ...(session.resolvedSource
+      ? {}
+      : summary.resolvedSource
+        ? { resolvedSource: summary.resolvedSource }
+        : {}),
+    ...(session.sources ? {} : summary.sources ? { sources: [...summary.sources] } : {}),
+    ...(session.preferredSource
+      ? {}
+      : summary.preferredSource
+        ? { preferredSource: summary.preferredSource }
+        : {}),
+    ...(session.resolutionState
+      ? {}
+      : summary.resolutionState
+        ? { resolutionState: summary.resolutionState }
+        : {}),
+    ...(summary.indexScope ? { indexScope: summary.indexScope } : {}),
+    ...(summary.indexWorkspacePath ? { indexWorkspacePath: summary.indexWorkspacePath } : {}),
+    ...(summary.canonicalWorkspacePath
+      ? { canonicalWorkspacePath: summary.canonicalWorkspacePath }
+      : {}),
+    ...(summary.matchedWorkspacePath ? { matchedWorkspacePath: summary.matchedWorkspacePath } : {}),
+    ...(summary.workspaceMatchKind ? { workspaceMatchKind: summary.workspaceMatchKind } : {}),
+    ...(summary.workspaceMemberships
+      ? {
+          workspaceMemberships: summary.workspaceMemberships.map((membership) => ({
+            ...membership,
+            sourceRoles: [...membership.sourceRoles],
+          })),
+        }
+      : {}),
+    ...(uniqueSourceInstances.length > 0
+      ? {
+          sourceInstances: uniqueSourceInstances.map((instance) => ({
+            ...instance,
+            workspacePaths: [...instance.workspacePaths],
+          })),
+        }
+      : {}),
+  };
+  const summaryScopeIsAuthoritative =
+    summary.resolution?.reasonCodes.includes('workspace-scope-omitted') ?? false;
+  const effectiveResolution = summaryScopeIsAuthoritative
+    ? summary.resolution
+    : (session.resolution ?? summary.resolution);
+  if (effectiveResolution) {
+    projected.resolution = {
+      ...effectiveResolution,
+      expectedSourceRoles: [...effectiveResolution.expectedSourceRoles],
+      loadedSourceRoles: [...effectiveResolution.loadedSourceRoles],
+      omittedSourceRoles: [...effectiveResolution.omittedSourceRoles],
+      failedSourceRoles: [...effectiveResolution.failedSourceRoles],
+      reasonCodes: [...effectiveResolution.reasonCodes],
+    };
+    projected.resolutionState = effectiveResolution.state;
+    projected.source = effectiveResolution.state === 'complete' ? 'global' : 'workspace-fallback';
+  }
+  projected.resolvedSource ??= projected.workspaceId === 'store' ? 'store-metadata' : 'composer';
+  projected.sources = projected.sources
+    ? (['composer', 'store'] as const).filter((role) => projected.sources!.includes(role))
+    : projected.resolvedSource === 'merged'
+      ? ['composer', 'store']
+      : projected.workspaceId === 'store'
+        ? ['store']
+        : ['composer'];
+  projected.resolution ??= {
+    state: projected.source === 'global' ? 'complete' : 'partial',
+    expectedSourceRoles: [...projected.sources],
+    loadedSourceRoles: [...projected.sources],
+    omittedSourceRoles: [],
+    failedSourceRoles: [],
+    reasonCodes: projected.source === 'global' ? [] : ['source-unavailable'],
+  };
+  projected.resolutionState = projected.resolution.state;
+  projected.source = projected.resolution.state === 'complete' ? 'global' : 'workspace-fallback';
+  projected.messageIdentityVersion = 1;
+  projected.workspaceMemberships ??= [];
+  projected.sourceInstances ??= [];
+  if (projected.canonicalWorkspacePath) {
+    projected.workspacePath = contractPath(projected.canonicalWorkspacePath);
+  }
+  return projected;
 }
 
 /**
@@ -2191,6 +3573,8 @@ async function loadComposerSession(
           sourceReadLimits: context?.sourceReadLimits,
           signal: context?.signal,
           sqliteDriver: context?.sqliteDriver,
+          io: context?.io,
+          logicalSessionId: summary.id,
         });
       } catch (error) {
         globalLifecycleError = error;
@@ -2201,17 +3585,35 @@ async function loadComposerSession(
           throw error;
         }
       }
-    } else if (!existsSync(globalDbPath)) {
-      globalLoadFailed = true;
-      debugLogStorage(`Global DB not found at ${globalDbPath}`);
     } else {
-      try {
-        globalDb = await openDatabase(globalDbPath, context);
-      } catch (error) {
-        globalLifecycleError = error;
-        if (shouldPropagateReadFailure(error)) throw error;
+      observeStorageAdapterIo(context, {
+        adapter: 'filesystem',
+        operation: 'open',
+        resourceClass: 'global-session-index',
+        logicalSessionId: summary.id,
+        sourceRole: 'composer',
+        representation: 'composer-global',
+      });
+      if (!existsSync(globalDbPath)) {
         globalLoadFailed = true;
-        debugLogStorage(`Failed to open global DB at ${globalDbPath}: ${getErrorMessage(error)}`);
+        debugLogStorage(`Global DB not found at ${globalDbPath}`);
+      } else {
+        try {
+          globalDb = await openDatabase(
+            globalDbPath,
+            withDatabaseIo(context, {
+              resourceClass: 'global-composer',
+              logicalSessionId: summary.id,
+              sourceRole: 'composer',
+              representation: 'composer-global',
+            })
+          );
+        } catch (error) {
+          globalLifecycleError = error;
+          if (shouldPropagateReadFailure(error)) throw error;
+          globalLoadFailed = true;
+          debugLogStorage(`Failed to open global DB at ${globalDbPath}: ${getErrorMessage(error)}`);
+        }
       }
     }
 
@@ -2295,6 +3697,18 @@ async function loadComposerSession(
           usage: sessionUsage,
           activeBranchBubbleIds,
           source: 'global',
+          resolvedSource: 'composer',
+          sources: ['composer'],
+          resolutionState: 'complete',
+          resolution: {
+            state: 'complete',
+            expectedSourceRoles: ['composer'],
+            loadedSourceRoles: ['composer'],
+            omittedSourceRoles: [],
+            failedSourceRoles: [],
+            reasonCodes: [],
+          },
+          messageIdentityVersion: 1,
         };
       }
     }
@@ -2325,8 +3739,18 @@ async function loadComposerSession(
           sourceReadLimits: context?.sourceReadLimits,
           signal: context?.signal,
           sqliteDriver: context?.sqliteDriver,
+          io: context?.io,
+          logicalSessionId: summary.id,
         })
-      : await openDatabase(workspace.dbPath, context);
+      : await openDatabase(
+          workspace.dbPath,
+          withDatabaseIo(context, {
+            resourceClass: 'workspace-conversation',
+            logicalSessionId: summary.id,
+            sourceRole: 'composer',
+            representation: 'composer-workspace',
+          })
+        );
     throwIfReadAborted(context?.signal);
     const result = getChatDataFromDb(workspaceDb);
 
@@ -2369,9 +3793,15 @@ async function loadMergedSession(
 ): Promise<ChatSession | null> {
   const preferredSource = summary.preferredSource ?? detectPreferredStackSource(customDataPath);
 
-  const storeRaw = (await getStoreSessionsCached(context, customDataPath, backupPath)).find(
-    (s) => s.id === summary.id
-  );
+  const storeRaw = (
+    await getStoreSessionsCached(
+      context,
+      customDataPath,
+      backupPath,
+      new Set([summary.id]),
+      'payload'
+    )
+  ).find((s) => s.id === summary.id);
   const store = storeRaw ? mapStoreSession(storeRaw, index) : null;
   const composer = await loadComposerSession(summary, index, customDataPath, backupPath, context);
 
@@ -2396,65 +3826,92 @@ export async function searchSessions(
   backupPath?: string,
   readContext?: SessionReadContext
 ): Promise<SearchResult[]> {
-  // Use one Store discovery per search. The context caches store sessions and
-  // (after the listing below) the summaries, so each getSession avoids
-  // re-discovering and re-listing.
+  const ownsContext = readContext === undefined;
   const context =
     readContext ??
-    createSessionReadContext(customDataPath, backupPath, {
+    createSessionReadContext({
+      dataPath: customDataPath,
+      backupPath,
+      workspacePath: options.workspacePath,
+      includeCrossWorkspaceSources: options.includeCrossWorkspaceSources,
+      resolvedSessionCapacity: 0,
       sourceReadLimits: options.sourceReadLimits,
       signal: options.signal,
     });
-  resolveSourceReadLimits(options.sourceReadLimits ?? context.sourceReadLimits);
-  throwIfReadAborted(options.signal ?? context.signal);
-  assertContextSource(context, customDataPath, backupPath);
-  // T031: Support reading from backup
-  const summaries = await listSessions(
-    { limit: 0, all: true, workspacePath: options.workspacePath },
-    customDataPath,
-    backupPath,
-    context
-  );
-  const results: SearchResult[] = [];
-  const lowerQuery = query.toLowerCase();
-
-  for (const summary of summaries) {
+  try {
+    resolveSourceReadLimits(options.sourceReadLimits ?? context.sourceReadLimits);
     throwIfReadAborted(options.signal ?? context.signal);
-    // Resolve by stable ID via the cached context rather than mutable index.
-    const session = await getSession(
-      summary.id,
+    assertContextSource(context, customDataPath, backupPath);
+    const summaries = await listSessionSummaries(
+      {
+        limit: 0,
+        all: true,
+        workspacePath: options.workspacePath,
+        includeCrossWorkspaceSources: options.includeCrossWorkspaceSources,
+        sourceReadLimits: options.sourceReadLimits,
+        signal: options.signal,
+      },
       customDataPath,
       backupPath,
-      context,
-      summary.index
+      context
     );
-    if (!session) continue;
+    const results: SearchResult[] = [];
+    const lowerQuery = query.toLowerCase();
 
-    const snippets = getSearchSnippets(session.messages, lowerQuery, options.contextChars);
+    for (const summary of summaries) {
+      throwIfReadAborted(options.signal ?? context.signal);
+      if (summary.resolutionState === 'ambiguous') {
+        if (!context.onDiagnostic) {
+          throw new SessionAmbiguityError(summary.id, summary.diagnosticOccurrenceRefs);
+        }
+        context.onDiagnostic({
+          code: 'SESSION_AMBIGUOUS',
+          message: `Session ${summary.id} has divergent physical occurrences.`,
+          sessionId: summary.id,
+          occurrenceCount: summary.occurrenceCount,
+          occurrenceRefs: [...summary.diagnosticOccurrenceRefs],
+          remedy: 'Resolve or remove the divergent replicas, then retry the operation.',
+        });
+        continue;
+      }
+      try {
+        const session = await getSession(
+          summary.id,
+          customDataPath,
+          backupPath,
+          context,
+          summary.index
+        );
+        if (!session) continue;
 
-    if (snippets.length > 0) {
-      const matchCount = snippets.reduce((sum, s) => sum + s.matchPositions.length, 0);
+        const snippets = getSearchSnippets(session.messages, lowerQuery, options.contextChars);
 
-      results.push({
-        sessionId: summary.id,
-        index: summary.index,
-        workspacePath: summary.workspacePath,
-        createdAt: summary.createdAt,
-        matchCount,
-        snippets,
-      });
+        if (snippets.length > 0) {
+          const matchCount = snippets.reduce((sum, s) => sum + s.matchPositions.length, 0);
+
+          results.push({
+            sessionId: summary.id,
+            index: summary.index,
+            workspacePath: summary.workspacePath,
+            createdAt: summary.createdAt,
+            matchCount,
+            snippets,
+          });
+        }
+      } finally {
+        context.releaseSession(summary.id);
+      }
     }
+
+    results.sort((a, b) => b.matchCount - a.matchCount);
+
+    if (options.limit > 0) {
+      return results.slice(0, options.limit);
+    }
+    return results;
+  } finally {
+    if (ownsContext) await context.dispose();
   }
-
-  // Sort by match count descending
-  results.sort((a, b) => b.matchCount - a.matchCount);
-
-  // Apply limit
-  if (options.limit > 0) {
-    return results.slice(0, options.limit);
-  }
-
-  return results;
 }
 
 /**

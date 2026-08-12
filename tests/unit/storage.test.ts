@@ -252,6 +252,17 @@ function createGlobalDb(
           run: vi.fn(),
         };
       }
+      if (sql.includes('COUNT(*) as count') && sql.includes('cursorDiskKV')) {
+        return {
+          get: vi.fn((pattern?: string) => ({
+            count: bubbleRows.filter(({ key }) =>
+              key.startsWith(String(pattern).replace(/%$/u, ''))
+            ).length,
+          })),
+          all: vi.fn(() => []),
+          run: vi.fn(),
+        };
+      }
       if (sql.includes('cursorDiskKV')) {
         return {
           get: vi.fn(),
@@ -728,9 +739,7 @@ describe('findWorkspaces (from backup)', () => {
     await expect(findWorkspaces(undefined, '/backup.zip')).rejects.toBe(metadataIoFailure);
 
     vi.mocked(readBackupEntryBuffer).mockResolvedValueOnce(null);
-    const missingDatabase = new BackupEntryNotFoundError(
-      'workspaceStorage/ws-corrupt/state.vscdb'
-    );
+    const missingDatabase = new BackupEntryNotFoundError('workspaceStorage/ws-corrupt/state.vscdb');
     vi.mocked(openBackupDatabase).mockRejectedValueOnce(missingDatabase);
     await expect(findWorkspaces(undefined, '/backup.zip')).rejects.toBe(missingDatabase);
   });
@@ -778,11 +787,15 @@ describe('listSessions', () => {
       )
     ).resolves.toEqual([]);
 
-    expect(discoverStoreSessions).toHaveBeenCalledWith(expect.any(String), {
-      sourceReadLimits: context.sourceReadLimits,
-      sqliteDriver: 'better-sqlite3',
-      signal: controller.signal,
-    });
+    expect(discoverStoreSessions).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        sourceReadLimits: context.sourceReadLimits,
+        sqliteDriver: 'better-sqlite3',
+        signal: controller.signal,
+        io: context.io,
+      })
+    );
     expect(context.sourceReadLimits).toMatchObject({
       policyVersion: 'source-read-limits/v1',
       ...sourceReadLimits,
@@ -905,10 +918,7 @@ describe('listSessions', () => {
 
     const first = listSessions({ limit: 0, all: true }, '/data', undefined, context);
     const second = listSessions({ limit: 0, all: true }, '/data', undefined, context);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(discoverStoreSessions).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(discoverStoreSessions).toHaveBeenCalledTimes(1));
     finishDiscovery([]);
     await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
   });
@@ -1559,7 +1569,7 @@ describe('listSessions', () => {
         createWorkspaceDb(
           JSON.stringify({
             allComposers: [
-              { composerId: 'c1', name: 'A dup', createdAt: 1000 },
+              { composerId: 'c1', name: 'A', createdAt: 1000 },
               { composerId: 'c4', name: 'D', createdAt: 4000 },
             ],
           })
@@ -1658,38 +1668,51 @@ describe('listSessions', () => {
       },
     ]);
 
-    const context = createSessionReadContext('/data');
+    const context = createSessionReadContext({
+      dataPath: '/data',
+      workspacePath: '/project',
+      includeCrossWorkspaceSources: true,
+      resolvedSessionCapacity: 2,
+    });
     const summaries = await listSessions(
-      { limit: 0, all: true, workspacePath: '/project' },
+      {
+        limit: 0,
+        all: true,
+        workspacePath: '/project',
+        includeCrossWorkspaceSources: true,
+      },
       '/data',
       undefined,
       context
     );
 
-    expect(summaries).toHaveLength(2);
-    expect(summaries.every((summary) => summary.source === 'workspace-fallback')).toBe(true);
-    expect(summaries.every((summary) => summary.resolvedSource === 'merged')).toBe(true);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({
+      source: 'workspace-fallback',
+      resolvedSource: 'merged',
+    });
 
     const sessions = await Promise.all(
       summaries.map((summary) => getSession(summary.id, '/data', undefined, context, summary.index))
     );
     expect(
-      sessions.every((session) =>
-        session?.messages.some(
-          (message) =>
-            message.content === 'Store assistant detail' &&
-            message.toolCalls?.some((toolCall) => toolCall.name === 'Read')
-        )
+      sessions[0]?.messages.some(
+        (message) =>
+          message.content === 'Store assistant detail' &&
+          message.toolCalls?.some((toolCall) => toolCall.name === 'Read')
       )
     ).toBe(true);
-    expect(context.resolvedSessions.size).toBe(2);
+    expect(context.resolvedSessions.size).toBe(1);
   });
 });
 
 describe('SessionReadContext final session cache', () => {
   function backupComposerContext(sessionId: string, signal?: AbortSignal) {
-    const context = createSessionReadContext(undefined, '/backup.zip', { signal });
-    context.workspaceScope = null;
+    const context = createSessionReadContext({
+      backupPath: '/backup.zip',
+      workspacePath: '/work/a',
+      ...(signal ? { signal } : {}),
+    });
     context.workspaces = [
       {
         id: 'workspace-a',
@@ -1739,9 +1762,7 @@ describe('SessionReadContext final session cache', () => {
         allComposers: [{ composerId: sessionId, name: 'Workspace fallback', createdAt: 1000 }],
       })
     );
-    vi.mocked(openBackupDatabase)
-      .mockRejectedValueOnce(missing)
-      .mockResolvedValueOnce(workspaceDb);
+    vi.mocked(openBackupDatabase).mockRejectedValueOnce(missing).mockResolvedValueOnce(workspaceDb);
     const context = backupComposerContext(sessionId);
 
     await expect(getSession(sessionId, undefined, '/backup.zip', context)).resolves.toMatchObject({
@@ -1767,8 +1788,10 @@ describe('SessionReadContext final session cache', () => {
 
   it('removes a rejected resolution so the same operation can retry', async () => {
     const sessionId = 'aaaaaaaa-0000-0000-0000-000000000088';
-    const context = createSessionReadContext('/data');
-    context.workspaceScope = null;
+    const context = createSessionReadContext({
+      dataPath: '/data',
+      workspacePath: '/project',
+    });
     context.summaries = [
       {
         id: sessionId,
@@ -1983,8 +2006,7 @@ describe('listWorkspaces', () => {
         .map(({ path, sessionCount }) => ({ path, sessionCount }))
         .sort((a, b) => a.path.localeCompare(b.path))
     ).toEqual([
-      { path: pathA, sessionCount: 1 },
-      { path: storePath, sessionCount: 1 },
+      { path: pathA, sessionCount: 2 },
       { path: pathB, sessionCount: 1 },
     ]);
   });

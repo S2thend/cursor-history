@@ -21,6 +21,8 @@ export const IO_RESOURCE_CLASSIFICATIONS = Object.freeze({
   'workspace-database-schema': 'catalog-metadata',
   'workspace-session-index': 'catalog-metadata',
   'global-session-index': 'catalog-metadata',
+  'global-bubble-index': 'catalog-metadata',
+  'global-composer-membership': 'catalog-metadata',
   'store-root-directory': 'catalog-metadata',
   'store-session-metadata': 'catalog-metadata',
   'backup-manifest': 'catalog-metadata',
@@ -29,6 +31,7 @@ export const IO_RESOURCE_CLASSIFICATIONS = Object.freeze({
   'global-composer': 'conversation-payload',
   'global-bubble': 'conversation-payload',
   'store-transcript': 'conversation-payload',
+  'store-session-sidecar': 'conversation-payload',
   'store-database': 'conversation-payload',
   'store-leaf': 'conversation-payload',
   'backup-entry': 'conversation-payload',
@@ -51,6 +54,21 @@ export interface AdapterIoEvent {
 }
 
 export type AdapterIoObserver = (event: Readonly<AdapterIoEvent>) => void;
+
+/** Typed boundary failure so owning readers never mistake observer poison for absent data. */
+export class IoObserverError extends Error {
+  override readonly name = 'IoObserverError';
+  readonly code = 'ERR_IO_OBSERVER';
+
+  constructor(
+    readonly adapter: IoAdapter,
+    readonly operation: IoOperation,
+    options: ErrorOptions
+  ) {
+    const detail = options.cause instanceof Error ? ` ${options.cause.message}` : '';
+    super(`I/O observer rejected a ${adapter} ${operation} operation.${detail}`, options);
+  }
+}
 
 export interface OperationIoContext {
   readonly contextId: string;
@@ -147,6 +165,10 @@ export function observeAdapterIo(
     ...(input.representation ? { representation: input.representation } : {}),
     ...classification,
   });
-  context.emit?.(event);
+  try {
+    context.emit?.(event);
+  } catch (cause) {
+    throw new IoObserverError(event.adapter, event.operation, { cause });
+  }
   return event;
 }
