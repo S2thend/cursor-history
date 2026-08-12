@@ -330,7 +330,13 @@ function expectZipLimit(
 
 function databaseWithClose(close: () => void): Database {
   return {
-    prepare: vi.fn(),
+    prepare: vi.fn(() => ({
+      get: vi.fn(() => {
+        throw new Error('no such table: ItemTable');
+      }),
+      all: vi.fn(() => []),
+      run: vi.fn(() => ({ changes: 0, lastInsertRowid: 0 })),
+    })),
     runSQL: vi.fn(),
     close,
   } as unknown as Database;
@@ -890,9 +896,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     writeFileSync(malformedPath, Buffer.from('not a zip'), { mode: 0o600 });
     const before = currentPrivateTempPaths();
 
-    await expect(readBackupManifest(malformedPath)).rejects.toBeInstanceOf(
-      ZipArchiveFormatError
-    );
+    await expect(readBackupManifest(malformedPath)).rejects.toBeInstanceOf(ZipArchiveFormatError);
     const validation = await validateBackup(malformedPath);
     expect(validation.status).toBe('invalid');
     const restored = await restoreBackup({

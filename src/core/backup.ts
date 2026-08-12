@@ -48,6 +48,7 @@ import {
   type PreparedZipFileInput,
 } from './zip-stream.js';
 import { resolveSourceReadLimits } from './source-read-limits.js';
+import { createComposerSqliteBudget, readBoundedComposerValueByKey } from './composer-sqlite.js';
 import { IoObserverError, type OperationIoContext } from './io-observer.js';
 import {
   SourceLimitConfigurationError,
@@ -279,29 +280,57 @@ export function createManifest(files: BackupFileEntry[], stats: BackupStats): Ba
  * Count sessions in a database file
  * Uses the pluggable driver system (requires driver to be pre-selected)
  */
-function countSessions(dbPath: string): number {
+function closeSessionCountDatabase(db: DatabaseInterface, operationError: unknown): void {
   try {
-    const db = registry.openSync(dbPath, { readonly: true });
-    try {
-      // Try to read composer data
-      const row = db
-        .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
-        .get() as { value: string } | undefined;
-      if (row) {
-        const data = JSON.parse(row.value) as { allComposers?: unknown[] } | unknown[];
-        if (Array.isArray(data)) {
-          return data.length;
-        }
-        if (data.allComposers && Array.isArray(data.allComposers)) {
-          return data.allComposers.length;
-        }
-      }
-      return 0;
-    } finally {
-      db.close();
+    db.close();
+  } catch (closeError) {
+    if (
+      closeError instanceof Error &&
+      operationError !== undefined &&
+      !Object.prototype.hasOwnProperty.call(closeError, 'cause')
+    ) {
+      Object.defineProperty(closeError, 'cause', { configurable: true, value: operationError });
     }
-  } catch {
+    throw closeError;
+  }
+}
+
+function countSessions(dbPath: string, readOptions: Readonly<InternalSourceReadOptions>): number {
+  throwIfAborted(readOptions.signal);
+  const db = registry.openSync(dbPath, { readonly: true });
+  let operationError: unknown;
+  try {
+    let value: string | undefined;
+    try {
+      value = readBoundedComposerValueByKey(
+        db,
+        'ItemTable',
+        'composer.composerData',
+        createComposerSqliteBudget(resolveSourceReadLimits(readOptions.sourceReadLimits)),
+        readOptions.signal
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /(?:no such table|does not exist).*\bItemTable\b/iu.test(error.message)
+      ) {
+        return 0;
+      }
+      throw error;
+    }
+    if (!value) return 0;
+
+    const data = JSON.parse(value) as { allComposers?: unknown[] } | unknown[];
+    if (Array.isArray(data)) return data.length;
+    if (data.allComposers && Array.isArray(data.allComposers)) {
+      return data.allComposers.length;
+    }
     return 0;
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    closeSessionCountDatabase(db, operationError);
   }
 }
 
@@ -549,7 +578,7 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
 
       // Count sessions (only for DB files)
       if (dbFile.type === 'global-db' || dbFile.type === 'workspace-db') {
-        sessionCount += countSessions(tempFilePath);
+        sessionCount += countSessions(tempFilePath, readOptions);
       }
       if (dbFile.workspaceId) {
         workspaceIds.add(dbFile.workspaceId);
