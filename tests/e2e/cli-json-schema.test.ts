@@ -984,6 +984,7 @@ describe('built CLI schema fixtures', () => {
       ['pathless show', [...common, 'show', SESSION_INTEGRITY_IDS.storeOnly]],
       ['workspace search', [...common, ...workspace, 'search', 'needle-a']],
       ['global search', [...common, 'search', 'needle-b']],
+      ['pathless search', [...common, 'search', 'pathless-schema-needle']],
       [
         'workspace export result',
         [
@@ -1014,9 +1015,11 @@ describe('built CLI schema fixtures', () => {
     ];
 
     const failures: string[] = [];
+    let pathlessSearchOutput: unknown;
     for (const [label, args] of commands) {
       const result = await executeJsonFixture(label, args, fixture);
       failures.push(...result.errors);
+      if (label === 'pathless search') pathlessSearchOutput = result.value;
       if (result.value !== undefined) {
         if (!validateSchema(result.value)) {
           failures.push(`${label}: ${schemaErrorText()}`);
@@ -1043,5 +1046,17 @@ describe('built CLI schema fixtures', () => {
 
     expect(sessionA.id).not.toBe(sessionB.id);
     expect(failures).toEqual([]);
+    expect(pathlessSearchOutput).toMatchObject({
+      count: 1,
+      results: [
+        expect.objectContaining({
+          sessionId: SESSION_INTEGRITY_IDS.storeOnly,
+          workspacePath: null,
+        }),
+      ],
+    });
+    expect((pathlessSearchOutput as { results: JsonRecord[] }).results[0]).not.toHaveProperty(
+      'canonicalWorkspacePath'
+    );
   });
 });

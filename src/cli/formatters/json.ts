@@ -15,6 +15,7 @@ import type {
 import { getMessageType } from './table.js';
 import { serializeToolCall } from '../../core/parser.js';
 import { getPublicMessageTimestamp } from '../../core/timestamps.js';
+import { normalizePublicWorkspacePath } from '../../core/workspace-scope.js';
 
 type JsonAddressingSource = Pick<
   ChatSession,
@@ -54,13 +55,9 @@ function addDiagnostics(
 }
 
 function structuredWorkspacePath(...candidates: Array<string | undefined>): string | null {
-  const selected = candidates.find(
-    (candidate) =>
-      candidate !== undefined &&
-      candidate.length > 0 &&
-      candidate !== 'unknown' &&
-      !candidate.startsWith('(')
-  );
+  const selected = candidates
+    .map((candidate) => normalizePublicWorkspacePath(candidate))
+    .find((candidate) => candidate !== undefined);
   return selected ?? null;
 }
 
@@ -68,12 +65,7 @@ function structuredWorkspacePath(...candidates: Array<string | undefined>): stri
 function addAddressingFields(output: Record<string, unknown>, source: JsonAddressingSource): void {
   for (const field of [
     'indexScope',
-    'indexWorkspacePath',
-    'canonicalWorkspacePath',
-    'matchedWorkspacePath',
     'workspaceMatchKind',
-    'workspaceMemberships',
-    'sourceInstances',
     'resolutionState',
     'resolution',
     'resolvedSource',
@@ -81,6 +73,33 @@ function addAddressingFields(output: Record<string, unknown>, source: JsonAddres
   ] as const) {
     const value = source[field];
     if (value !== undefined) output[field] = value;
+  }
+
+  for (const field of [
+    'indexWorkspacePath',
+    'canonicalWorkspacePath',
+    'matchedWorkspacePath',
+  ] as const) {
+    const value = normalizePublicWorkspacePath(source[field]);
+    if (value !== undefined) output[field] = value;
+  }
+
+  if (source.workspaceMemberships !== undefined) {
+    output['workspaceMemberships'] = source.workspaceMemberships.flatMap((membership) => {
+      const workspacePath = normalizePublicWorkspacePath(membership.workspacePath);
+      return workspacePath
+        ? [{ ...membership, workspacePath, sourceRoles: [...membership.sourceRoles] }]
+        : [];
+    });
+  }
+  if (source.sourceInstances !== undefined) {
+    output['sourceInstances'] = source.sourceInstances.map((instance) => ({
+      ...instance,
+      workspacePaths: instance.workspacePaths.flatMap((workspacePath) => {
+        const normalized = normalizePublicWorkspacePath(workspacePath);
+        return normalized ? [normalized] : [];
+      }),
+    }));
   }
 }
 
@@ -95,10 +114,12 @@ export function formatSessionsJson(
   const indexScope = options.indexScope ?? first?.indexScope ?? 'global';
   const indexWorkspacePath =
     indexScope === 'workspace'
-      ? (options.indexWorkspacePath ??
-        first?.indexWorkspacePath ??
-        first?.matchedWorkspacePath ??
-        (first && first.resolutionState !== 'ambiguous' ? first.workspacePath : undefined))
+      ? (structuredWorkspacePath(
+          options.indexWorkspacePath,
+          first?.indexWorkspacePath,
+          first?.matchedWorkspacePath,
+          first && first.resolutionState !== 'ambiguous' ? first.workspacePath : undefined
+        ) ?? undefined)
       : undefined;
   const output: Record<string, unknown> = {
     count: sessions.length,
@@ -106,6 +127,8 @@ export function formatSessionsJson(
     ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
     sessions: sessions.map((s) => {
       if (s.resolutionState === 'ambiguous') {
+        const canonicalWorkspacePath = normalizePublicWorkspacePath(s.canonicalWorkspacePath);
+        const matchedWorkspacePath = normalizePublicWorkspacePath(s.matchedWorkspacePath);
         return {
           index: s.index,
           indexScope: s.indexScope,
@@ -115,8 +138,8 @@ export function formatSessionsJson(
           sourceRoles: s.sourceRoles,
           occurrenceCount: s.occurrenceCount,
           diagnosticOccurrenceRefs: s.diagnosticOccurrenceRefs,
-          ...(s.canonicalWorkspacePath ? { canonicalWorkspacePath: s.canonicalWorkspacePath } : {}),
-          ...(s.matchedWorkspacePath ? { matchedWorkspacePath: s.matchedWorkspacePath } : {}),
+          ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
+          ...(matchedWorkspacePath ? { matchedWorkspacePath } : {}),
         };
       }
       const obj: Record<string, unknown> = {
@@ -165,7 +188,7 @@ export function formatWorkspacesJson(workspaces: Workspace[]): string {
     count: workspaces.length,
     workspaces: workspaces.map((w) => ({
       id: w.id,
-      path: w.path,
+      path: structuredWorkspacePath(w.path),
       sessionCount: w.sessionCount,
     })),
   };
@@ -324,7 +347,8 @@ export function formatSearchResultsJson(
   const indexScope = options.indexScope ?? 'global';
   const indexWorkspacePath =
     indexScope === 'workspace'
-      ? (options.indexWorkspacePath ?? results[0]?.workspacePath)
+      ? (structuredWorkspacePath(options.indexWorkspacePath, results[0]?.workspacePath) ??
+        undefined)
       : undefined;
   const output: Record<string, unknown> = {
     query,
@@ -337,7 +361,7 @@ export function formatSearchResultsJson(
       indexScope,
       ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
       sessionId: r.sessionId,
-      workspacePath: r.workspacePath,
+      workspacePath: structuredWorkspacePath(r.workspacePath),
       createdAt: r.createdAt.toISOString(),
       matchCount: r.matchCount,
       snippets: r.snippets.map((s) => ({

@@ -155,6 +155,7 @@ import {
   InvalidFilterError,
   NoDriverAvailableError,
   ReadContextOptionsMismatchError,
+  SessionAmbiguityError,
   SessionNotFoundError,
   SessionScopeMismatchError,
   SourceLimitConfigurationError,
@@ -328,6 +329,39 @@ describe('listSessions', () => {
       true
     );
     expect(mockGetSession).not.toHaveBeenCalled();
+  });
+
+  it('projects pathless summary sentinels to the public unknown workspace contract', async () => {
+    mockListSessions.mockResolvedValue([
+      {
+        ...makeCoreSummary('pathless', 1),
+        workspacePath: '(unknown workspace)',
+        canonicalWorkspacePath: '(global)',
+        matchedWorkspacePath: '(workspace: legacy-id)',
+        workspaceMemberships: [
+          {
+            workspacePath: '(workspace: legacy-id)',
+            sourceRoles: ['composer'],
+            contributingInstanceCount: 1,
+          },
+        ],
+        sourceInstances: [
+          {
+            sourceRole: 'composer',
+            representation: 'composer-workspace',
+            workspacePaths: ['(unknown workspace)'],
+            state: 'contributed',
+          },
+        ],
+      },
+    ]);
+
+    const result = await listSessionSummaries();
+    expect(result.data[0]).toMatchObject({ id: 'pathless', workspace: 'unknown' });
+    expect(result.data[0]).not.toHaveProperty('canonicalWorkspacePath');
+    expect(result.data[0]).not.toHaveProperty('matchedWorkspacePath');
+    expect(result.data[0]!.workspaceMemberships).toEqual([]);
+    expect(result.data[0]!.sourceInstances[0]!.workspacePaths).toEqual([]);
   });
 
   it('returns PaginatedResult with sessions', async () => {
@@ -534,6 +568,39 @@ describe('getSession', () => {
     expect(session.timestamp).toBe('2024-01-15T10:00:00.000Z');
   });
 
+  it('projects pathless session sentinels to library workspace unknown', async () => {
+    mockGetSession.mockResolvedValue({
+      ...makeCoreSession('pathless'),
+      workspacePath: '(unknown workspace)',
+      canonicalWorkspacePath: '(global)',
+      matchedWorkspacePath: '(workspace: legacy-id)',
+      indexWorkspacePath: '(workspace: legacy-id)',
+      workspaceMemberships: [
+        {
+          workspacePath: '(workspace: legacy-id)',
+          sourceRoles: ['composer'],
+          contributingInstanceCount: 1,
+        },
+      ],
+      sourceInstances: [
+        {
+          sourceRole: 'composer',
+          representation: 'composer-workspace',
+          workspacePaths: ['(unknown workspace)'],
+          state: 'contributed',
+        },
+      ],
+    });
+
+    const session = await getSession(0);
+    expect(session.workspace).toBe('unknown');
+    expect(session).not.toHaveProperty('canonicalWorkspacePath');
+    expect(session).not.toHaveProperty('matchedWorkspacePath');
+    expect(session).not.toHaveProperty('indexWorkspacePath');
+    expect(session.workspaceMemberships).toEqual([]);
+    expect(session.sourceInstances?.[0]?.workspacePaths).toEqual([]);
+  });
+
   it('preserves the required library message timestamp for an untimed Store message', async () => {
     mockGetSession.mockResolvedValue({
       ...makeCoreSession(),
@@ -543,7 +610,22 @@ describe('getSession', () => {
 
     const session = await getSession(0);
     expect(session.messages[0]!.timestamp).toBe(now.toISOString());
-    expect(session.messages[0]!.timestampSource).toBeUndefined();
+    expect(session.messages[0]!.timestampSource).toBe('session-fallback');
+  });
+
+  it('marks the fixed epoch fallback unknown when the session has no source-derived anchor', async () => {
+    const epoch = new Date(0);
+    mockGetSession.mockResolvedValue({
+      ...makeCoreSession(),
+      createdAt: epoch,
+      createdAtSource: 'epoch-unknown',
+      source: 'transcript',
+      messages: [{ id: null, role: 'user', content: 'Store message', codeBlocks: [] }],
+    });
+
+    const session = await getSession(0);
+    expect(session.messages[0]!.timestamp).toBe(epoch.toISOString());
+    expect(session.messages[0]!.timestampSource).toBe('unknown');
   });
 
   it('omits library Message.id when the core message ID is null', async () => {
@@ -880,6 +962,30 @@ describe('exportSessionToMarkdown', () => {
     mockGetSession.mockResolvedValue(null);
 
     await expect(exportSessionToMarkdown(99)).rejects.toThrow(SessionNotFoundError);
+  });
+});
+
+describe('bulk export late ambiguity handling', () => {
+  it.each([
+    { label: 'JSON', run: exportAllSessionsToJson, empty: '[]' },
+    { label: 'Markdown', run: exportAllSessionsToMarkdown, empty: '' },
+  ])('skips a payload that becomes ambiguous after the $label listing', async ({ run, empty }) => {
+    const onDiagnostic = vi.fn();
+    mockListSessions.mockResolvedValue([makeCoreSummary('late-ambiguous', 1)]);
+    mockGetSession.mockRejectedValue(
+      new SessionAmbiguityError('late-ambiguous', ['occurrence:v1:late-a', 'occurrence:v1:late-b'])
+    );
+
+    await expect(run({ onDiagnostic })).resolves.toBe(empty);
+    expect(onDiagnostic).toHaveBeenCalledOnce();
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SESSION_AMBIGUOUS',
+        sessionId: 'late-ambiguous',
+        occurrenceCount: 2,
+      })
+    );
+    expect(mockReadContext.releaseSession).toHaveBeenCalledWith('late-ambiguous');
   });
 });
 

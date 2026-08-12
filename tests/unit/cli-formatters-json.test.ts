@@ -196,6 +196,39 @@ describe('formatSessionsJson', () => {
     expect(result.sessions[0]).not.toHaveProperty('preview');
     expect(result.sessions[0]).not.toHaveProperty('messageCount');
   });
+
+  it('never exposes internal workspace labels as structured canonical paths', () => {
+    const result = JSON.parse(
+      formatSessionsJson([
+        makeSummary({
+          workspacePath: '(unknown workspace)',
+          canonicalWorkspacePath: '(global)',
+          matchedWorkspacePath: '(workspace: legacy-id)',
+          workspaceMemberships: [
+            {
+              workspacePath: '(workspace: legacy-id)',
+              sourceRoles: ['composer'],
+              contributingInstanceCount: 1,
+            },
+          ],
+          sourceInstances: [
+            {
+              sourceRole: 'composer',
+              representation: 'composer-workspace',
+              workspacePaths: ['(unknown workspace)'],
+              state: 'contributed',
+            },
+          ],
+        }),
+      ])
+    );
+
+    expect(result.sessions[0].workspacePath).toBeNull();
+    expect(result.sessions[0]).not.toHaveProperty('canonicalWorkspacePath');
+    expect(result.sessions[0]).not.toHaveProperty('matchedWorkspacePath');
+    expect(result.sessions[0].workspaceMemberships).toEqual([]);
+    expect(result.sessions[0].sourceInstances[0].workspacePaths).toEqual([]);
+  });
 });
 
 describe('formatWorkspacesJson', () => {
@@ -209,6 +242,17 @@ describe('formatWorkspacesJson', () => {
   it('handles empty array', () => {
     const result = JSON.parse(formatWorkspacesJson([]));
     expect(result.count).toBe(0);
+  });
+
+  it('serializes a pathless discovery bucket without exposing its display label', () => {
+    const ws: Workspace = {
+      id: 'unknown',
+      path: '(unknown workspace)',
+      dbPath: '',
+      sessionCount: 1,
+    };
+    const result = JSON.parse(formatWorkspacesJson([ws]));
+    expect(result.workspaces[0].path).toBeNull();
   });
 });
 
@@ -246,6 +290,19 @@ describe('formatSessionJson', () => {
   it('workspacePath is null when not provided', () => {
     const result = JSON.parse(formatSessionJson(makeSession()));
     expect(result.workspacePath).toBeNull();
+  });
+
+  it('serializes a display-only session workspace as null', () => {
+    const result = JSON.parse(
+      formatSessionJson(
+        makeSession({
+          workspacePath: '(unknown workspace)',
+          canonicalWorkspacePath: '(global)',
+        })
+      )
+    );
+    expect(result.workspacePath).toBeNull();
+    expect(result).not.toHaveProperty('canonicalWorkspacePath');
   });
 
   it('includes source when present', () => {
@@ -383,6 +440,26 @@ describe('formatSearchResultsJson', () => {
     const result = JSON.parse(formatSearchResultsJson([], 'test'));
     expect(result.count).toBe(0);
     expect(result.totalMatches).toBe(0);
+  });
+
+  it('serializes pathless search results as null instead of an internal label', () => {
+    const result = JSON.parse(
+      formatSearchResultsJson(
+        [
+          {
+            sessionId: 'pathless',
+            index: 1,
+            workspacePath: '(unknown workspace)',
+            createdAt: now,
+            matchCount: 1,
+            snippets: [],
+          },
+        ],
+        'needle'
+      )
+    );
+
+    expect(result.results[0].workspacePath).toBeNull();
   });
 
   it('emits one workspace address and machine-readable diagnostics at both levels', () => {

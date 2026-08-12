@@ -251,7 +251,7 @@ describe('feature-016 typed error mapping', () => {
       new SessionAmbiguityError('session-1', ['occurrence:b', 'occurrence:a'])
     );
     expect(mapped.code).toBe('SESSION_AMBIGUOUS');
-    expect(mapped.details?.['occurrenceRefs']).toEqual(['occurrence:b', 'occurrence:a']);
+    expect(mapped.details?.['occurrenceRefs']).toEqual(['occurrence:a', 'occurrence:b']);
     expect(JSON.stringify(mapped.details)).not.toContain('/private/source');
   });
 });

@@ -596,6 +596,12 @@ describe('exportToMarkdown', () => {
     expect(md).toContain('**Messages**: 2');
   });
 
+  it('does not render an internal workspace label as a Markdown path', () => {
+    const md = exportToMarkdown(session({ workspacePath: '(unknown workspace)' }));
+    expect(md).not.toContain('**Workspace**:');
+    expect(md).not.toContain('(unknown workspace)');
+  });
+
   it('renders message IDs only when available', () => {
     const md = exportToMarkdown(
       session({
@@ -634,6 +640,41 @@ describe('exportToJson', () => {
   it('includes workspacePath when provided', () => {
     const parsed = JSON.parse(exportToJson(session(), '/my/workspace'));
     expect(parsed.workspacePath).toBe('/my/workspace');
+  });
+
+  it('nulls or omits internal labels across exported workspace metadata', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          workspacePath: '(unknown workspace)',
+          canonicalWorkspacePath: '(global)',
+          matchedWorkspacePath: '(workspace: legacy-id)',
+          indexWorkspacePath: '(workspace: legacy-id)',
+          workspaceMemberships: [
+            {
+              workspacePath: '(workspace: legacy-id)',
+              sourceRoles: ['composer'],
+              contributingInstanceCount: 1,
+            },
+          ],
+          sourceInstances: [
+            {
+              sourceRole: 'composer',
+              representation: 'composer-workspace',
+              workspacePaths: ['(unknown workspace)'],
+              state: 'contributed',
+            },
+          ],
+        })
+      )
+    );
+
+    expect(parsed.workspacePath).toBeNull();
+    expect(parsed).not.toHaveProperty('canonicalWorkspacePath');
+    expect(parsed).not.toHaveProperty('matchedWorkspacePath');
+    expect(parsed).not.toHaveProperty('indexWorkspacePath');
+    expect(parsed.workspaceMemberships).toEqual([]);
+    expect(parsed.sourceInstances[0].workspacePaths).toEqual([]);
   });
 
   it('messages include expected fields', () => {

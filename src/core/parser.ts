@@ -26,6 +26,7 @@ import {
   resolveMessageTimestamps,
   resolveSessionTimestamps,
 } from './timestamps.js';
+import { normalizePublicWorkspacePath } from './workspace-scope.js';
 
 /**
  * Serialize a `ToolCall` to a plain object preserving EVERY defined field.
@@ -319,7 +320,7 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     messageCount: messages.length,
     messages,
     workspaceId: 'store',
-    workspacePath: ss.workspacePath,
+    workspacePath: normalizePublicWorkspacePath(ss.workspacePath),
     source: hasUnsupportedSelectedEvidence ? 'workspace-fallback' : ss.source,
     resolvedSource: ss.resolvedSource,
     resolution:
@@ -340,6 +341,14 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
           sourceInstances: ss.sourceInstances.map((instance) => ({
             ...instance,
             workspacePaths: [...instance.workspacePaths],
+          })),
+        }
+      : {}),
+    ...(ss.workspaceMemberships
+      ? {
+          workspaceMemberships: ss.workspaceMemberships.map((membership) => ({
+            ...membership,
+            sourceRoles: [...membership.sourceRoles],
           })),
         }
       : {}),
@@ -863,7 +872,10 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
   const lines: string[] = [];
   // Fall back to the resolved session's own workspacePath when no explicit
   // path is supplied (Store-only sessions have no Composer workspace metadata).
-  const ws = workspacePath ?? session.workspacePath;
+  const ws =
+    normalizePublicWorkspacePath(workspacePath) ??
+    normalizePublicWorkspacePath(session.canonicalWorkspacePath) ??
+    normalizePublicWorkspacePath(session.workspacePath);
 
   // Header
   lines.push(`# ${session.title ?? 'Untitled Chat'}`);
@@ -965,7 +977,24 @@ function tc0HasFiles(toolCalls: ToolCall[]): boolean {
 export function exportToJson(session: ChatSession, workspacePath?: string): string {
   // Fall back to the resolved session's own workspacePath when no explicit
   // path is supplied (Store-only sessions have no Composer workspace metadata).
-  const ws = workspacePath ?? session.workspacePath ?? null;
+  const ws =
+    normalizePublicWorkspacePath(workspacePath) ??
+    normalizePublicWorkspacePath(session.canonicalWorkspacePath) ??
+    normalizePublicWorkspacePath(session.workspacePath) ??
+    null;
+  const workspaceMemberships = (session.workspaceMemberships ?? []).flatMap((membership) => {
+    const publicPath = normalizePublicWorkspacePath(membership.workspacePath);
+    return publicPath
+      ? [{ ...membership, workspacePath: publicPath, sourceRoles: [...membership.sourceRoles] }]
+      : [];
+  });
+  const sourceInstances = (session.sourceInstances ?? []).map((instance) => ({
+    ...instance,
+    workspacePaths: instance.workspacePaths.flatMap((candidate) => {
+      const publicPath = normalizePublicWorkspacePath(candidate);
+      return publicPath ? [publicPath] : [];
+    }),
+  }));
   const sources: Array<'composer' | 'store'> =
     session.sources ?? (session.workspaceId === 'store' ? ['store'] : ['composer']);
   const source = session.source === 'global' ? 'global' : 'workspace-fallback';
@@ -990,8 +1019,8 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
     workspacePath: ws,
     sources,
     resolution,
-    workspaceMemberships: session.workspaceMemberships ?? [],
-    sourceInstances: session.sourceInstances ?? [],
+    workspaceMemberships,
+    sourceInstances,
     messageIdentityVersion: session.messageIdentityVersion ?? MESSAGE_IDENTITY_VERSION,
   };
   exportData['source'] = source;
@@ -1002,14 +1031,17 @@ export function exportToJson(session: ChatSession, workspacePath?: string): stri
       : session.workspaceId === 'store'
         ? 'store-metadata'
         : 'composer');
-  if (session.indexWorkspacePath !== undefined) {
-    exportData['indexWorkspacePath'] = session.indexWorkspacePath;
+  const indexWorkspacePath = normalizePublicWorkspacePath(session.indexWorkspacePath);
+  if (indexWorkspacePath !== undefined) {
+    exportData['indexWorkspacePath'] = indexWorkspacePath;
   }
-  if (session.canonicalWorkspacePath !== undefined) {
-    exportData['canonicalWorkspacePath'] = session.canonicalWorkspacePath;
+  const canonicalWorkspacePath = normalizePublicWorkspacePath(session.canonicalWorkspacePath);
+  if (canonicalWorkspacePath !== undefined) {
+    exportData['canonicalWorkspacePath'] = canonicalWorkspacePath;
   }
-  if (session.matchedWorkspacePath !== undefined) {
-    exportData['matchedWorkspacePath'] = session.matchedWorkspacePath;
+  const matchedWorkspacePath = normalizePublicWorkspacePath(session.matchedWorkspacePath);
+  if (matchedWorkspacePath !== undefined) {
+    exportData['matchedWorkspacePath'] = matchedWorkspacePath;
   }
   if (session.workspaceMatchKind !== undefined) {
     exportData['workspaceMatchKind'] = session.workspaceMatchKind;

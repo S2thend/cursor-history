@@ -198,6 +198,7 @@ import {
   ReadContextOptionsMismatchError,
   ReadContextScopeMismatchError,
   ReadContextSourceMismatchError,
+  isSessionAmbiguityError,
 } from './errors.js';
 import {
   filterMessages as filterMessagesImpl,
@@ -208,7 +209,7 @@ import * as storage from '../core/storage.js';
 import * as migrate from '../core/migrate.js';
 import { exportToJson, exportToMarkdown } from '../core/parser.js';
 import { expandPath, pathsEqual } from './platform.js';
-import { normalizeWorkspacePath } from '../core/workspace-scope.js';
+import { normalizePublicWorkspacePath, normalizeWorkspacePath } from '../core/workspace-scope.js';
 import type {
   AmbiguousSessionSummary as CoreAmbiguousSessionSummary,
   ChatSession as CoreSession,
@@ -538,6 +539,26 @@ function cloneResolution(resolution: SessionResolution): SessionResolution {
   };
 }
 
+/** Select the first verified path for a public compatibility projection. */
+function firstPublicWorkspacePath(...candidates: Array<string | undefined>): string | undefined {
+  return candidates
+    .map((candidate) => normalizePublicWorkspacePath(candidate))
+    .find((candidate) => candidate !== undefined);
+}
+
+/** Remove display-only workspace labels from public source-instance metadata. */
+function publicSourceInstances(
+  instances: readonly SessionSourceInstance[] | undefined
+): SessionSourceInstance[] {
+  return (instances ?? []).map((instance) => ({
+    ...instance,
+    workspacePaths: instance.workspacePaths.flatMap((workspacePath) => {
+      const normalized = normalizePublicWorkspacePath(workspacePath);
+      return normalized ? [normalized] : [];
+    }),
+  }));
+}
+
 /** Supply an honest compatibility projection for legacy rows lacking additive resolution fields. */
 function resolutionOf(value: CoreResolutionProjection): SessionResolution {
   if (value.resolution) return cloneResolution(value.resolution);
@@ -555,7 +576,12 @@ function resolutionOf(value: CoreResolutionProjection): SessionResolution {
 
 /** Convert core ChatSession to the detached public Session contract. */
 function convertToLibrarySession(coreSession: CoreSession): Session {
-  const canonicalWorkspacePath = coreSession.canonicalWorkspacePath ?? coreSession.workspacePath;
+  const canonicalWorkspacePath = firstPublicWorkspacePath(
+    coreSession.canonicalWorkspacePath,
+    coreSession.workspacePath
+  );
+  const indexWorkspacePath = normalizePublicWorkspacePath(coreSession.indexWorkspacePath);
+  const matchedWorkspacePath = normalizePublicWorkspacePath(coreSession.matchedWorkspacePath);
   const compatibilitySource = compatibilitySourceOf(coreSession);
 
   return {
@@ -563,22 +589,31 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     workspace: canonicalWorkspacePath ?? 'unknown',
     timestamp: coreSession.createdAt.toISOString(),
     messages: coreSession.messages.map((msg) => {
+      const hasMessageTimestamp =
+        msg.timestamp instanceof Date && !Number.isNaN(msg.timestamp.getTime());
+      const timestamp = hasMessageTimestamp ? msg.timestamp! : coreSession.createdAt;
+      const timestampSource =
+        msg.timestampSource ??
+        (hasMessageTimestamp
+          ? 'unknown'
+          : coreSession.createdAtSource === 'epoch-unknown'
+            ? 'unknown'
+            : 'session-fallback');
       const m: Record<string, unknown> = {
         id: msg.id ?? undefined,
         role: msg.role === 'user' ? 'user' : 'assistant',
         content: msg.content,
         // Preserve the library's required timestamp contract. Composer
         // messages are filled by the core storage layer; Store-only messages
-        // without a turn timestamp use the session creation time.
-        timestamp: (msg.timestamp ?? coreSession.createdAt).toISOString(),
+        // without a turn timestamp use the session creation time and expose
+        // that fallback as additive provenance.
+        timestamp: timestamp.toISOString(),
+        timestampSource,
       };
-      // Provenance remains absent when the public timestamp uses the
-      // compatibility fallback above.
       if (msg.messageIdentityVersion) m['messageIdentityVersion'] = msg.messageIdentityVersion;
       if (msg.identityOrigin) m['identityOrigin'] = msg.identityOrigin;
       if (msg.parentMessageId) m['parentMessageId'] = msg.parentMessageId;
       if (msg.isSidechain !== undefined) m['isSidechain'] = msg.isSidechain;
-      if (msg.timestampSource) m['timestampSource'] = msg.timestampSource;
       if (msg.source) m['source'] = msg.source;
       if (msg.toolCalls) {
         m['toolCalls'] = msg.toolCalls.map((call) => ({
@@ -597,9 +632,7 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     messageCount: coreSession.messageCount,
     index: Math.max(0, coreSession.index - 1),
     ...(coreSession.indexScope ? { indexScope: coreSession.indexScope } : {}),
-    ...(coreSession.indexWorkspacePath
-      ? { indexWorkspacePath: coreSession.indexWorkspacePath }
-      : {}),
+    ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
     source: compatibilitySource,
     ...(coreSession.resolvedSource ? { resolvedSource: coreSession.resolvedSource } : {}),
     ...(coreSession.sources ? { sources: [...coreSession.sources] } : {}),
@@ -607,27 +640,22 @@ function convertToLibrarySession(coreSession: CoreSession): Session {
     ...(coreSession.resolution ? { resolution: cloneResolution(coreSession.resolution) } : {}),
     ...(coreSession.resolutionState ? { resolutionState: coreSession.resolutionState } : {}),
     ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
-    ...(coreSession.matchedWorkspacePath
-      ? { matchedWorkspacePath: coreSession.matchedWorkspacePath }
-      : {}),
+    ...(matchedWorkspacePath ? { matchedWorkspacePath } : {}),
     ...(coreSession.workspaceMatchKind
       ? { workspaceMatchKind: coreSession.workspaceMatchKind }
       : {}),
     ...(coreSession.workspaceMemberships
       ? {
-          workspaceMemberships: coreSession.workspaceMemberships.map((membership) => ({
-            ...membership,
-            sourceRoles: [...membership.sourceRoles],
-          })),
+          workspaceMemberships: coreSession.workspaceMemberships.flatMap((membership) => {
+            const workspacePath = normalizePublicWorkspacePath(membership.workspacePath);
+            return workspacePath
+              ? [{ ...membership, workspacePath, sourceRoles: [...membership.sourceRoles] }]
+              : [];
+          }),
         }
       : {}),
     ...(coreSession.sourceInstances
-      ? {
-          sourceInstances: coreSession.sourceInstances.map((instance) => ({
-            ...instance,
-            workspacePaths: [...instance.workspacePaths],
-          })),
-        }
+      ? { sourceInstances: publicSourceInstances(coreSession.sourceInstances) }
       : {}),
     ...(coreSession.messageIdentityVersion
       ? { messageIdentityVersion: coreSession.messageIdentityVersion }
@@ -661,36 +689,40 @@ function isCoreAmbiguousSummary(
 /** Convert a message-free core catalog row to the zero-based public contract. */
 function convertToLibrarySummary(summary: CoreLogicalSessionSummary): SessionSummary {
   if (isCoreAmbiguousSummary(summary)) {
+    const indexWorkspacePath = normalizePublicWorkspacePath(summary.indexWorkspacePath);
+    const canonicalWorkspacePath = normalizePublicWorkspacePath(summary.canonicalWorkspacePath);
+    const matchedWorkspacePath = normalizePublicWorkspacePath(summary.matchedWorkspacePath);
     return {
       id: summary.id,
       index: summary.index - 1,
       indexScope: summary.indexScope,
-      ...(summary.indexWorkspacePath ? { indexWorkspacePath: summary.indexWorkspacePath } : {}),
+      ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
       resolutionState: 'ambiguous',
       sourceRoles: [...summary.sourceRoles],
       occurrenceCount: summary.occurrenceCount,
       diagnosticOccurrenceRefs: [...summary.diagnosticOccurrenceRefs],
-      ...(summary.canonicalWorkspacePath
-        ? { canonicalWorkspacePath: summary.canonicalWorkspacePath }
-        : {}),
-      ...(summary.matchedWorkspacePath
-        ? { matchedWorkspacePath: summary.matchedWorkspacePath }
-        : {}),
+      ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
+      ...(matchedWorkspacePath ? { matchedWorkspacePath } : {}),
     };
   }
 
-  const catalogWorkspacePath =
-    summary.workspacePath === '(unknown workspace)' ? undefined : summary.workspacePath;
-  const canonicalWorkspacePath = summary.canonicalWorkspacePath ?? catalogWorkspacePath;
+  const canonicalWorkspacePath = firstPublicWorkspacePath(
+    summary.canonicalWorkspacePath,
+    summary.workspacePath
+  );
+  const indexWorkspacePath = normalizePublicWorkspacePath(summary.indexWorkspacePath);
+  const matchedWorkspacePath = normalizePublicWorkspacePath(summary.matchedWorkspacePath);
   const source = compatibilitySourceOf(summary);
   const resolvedSource = resolvedSourceOf(summary);
   const sources = sourceRolesOf(summary);
   const resolution = resolutionOf(summary);
   const workspaceMemberships = summary.workspaceMemberships
-    ? summary.workspaceMemberships.map((membership) => ({
-        ...membership,
-        sourceRoles: [...membership.sourceRoles],
-      }))
+    ? summary.workspaceMemberships.flatMap((membership) => {
+        const workspacePath = normalizePublicWorkspacePath(membership.workspacePath);
+        return workspacePath
+          ? [{ ...membership, workspacePath, sourceRoles: [...membership.sourceRoles] }]
+          : [];
+      })
     : canonicalWorkspacePath
       ? [
           {
@@ -700,18 +732,13 @@ function convertToLibrarySummary(summary: CoreLogicalSessionSummary): SessionSum
           },
         ]
       : [];
-  const sourceInstances: SessionSourceInstance[] = summary.sourceInstances
-    ? summary.sourceInstances.map((instance) => ({
-        ...instance,
-        workspacePaths: [...instance.workspacePaths],
-      }))
-    : [];
+  const sourceInstances = publicSourceInstances(summary.sourceInstances);
 
   const result: ResolvedSessionSummary = {
     id: summary.id,
     index: summary.index - 1,
     indexScope: summary.indexScope ?? 'global',
-    ...(summary.indexWorkspacePath ? { indexWorkspacePath: summary.indexWorkspacePath } : {}),
+    ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
     workspace: canonicalWorkspacePath ?? 'unknown',
     timestamp: summary.createdAt.toISOString(),
     title: summary.title,
@@ -724,7 +751,7 @@ function convertToLibrarySummary(summary: CoreLogicalSessionSummary): SessionSum
     resolution,
     resolutionState: resolution.state,
     ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
-    ...(summary.matchedWorkspacePath ? { matchedWorkspacePath: summary.matchedWorkspacePath } : {}),
+    ...(matchedWorkspacePath ? { matchedWorkspacePath } : {}),
     ...(summary.workspaceMatchKind ? { workspaceMatchKind: summary.workspaceMatchKind } : {}),
     workspaceMemberships,
     sourceInstances,
@@ -739,21 +766,39 @@ function convertToLibrarySummary(summary: CoreLogicalSessionSummary): SessionSum
   return result;
 }
 
+function reportSessionAmbiguity(
+  sessionId: string,
+  occurrenceRefs: readonly string[],
+  onDiagnostic: ConfiguredReadContext['onDiagnostic']
+): void {
+  const orderedRefs = [...new Set(occurrenceRefs)].sort((left, right) => {
+    const leftPoints = Array.from(left, (value) => value.codePointAt(0)!);
+    const rightPoints = Array.from(right, (value) => value.codePointAt(0)!);
+    const length = Math.min(leftPoints.length, rightPoints.length);
+    for (let index = 0; index < length; index += 1) {
+      const difference = leftPoints[index]! - rightPoints[index]!;
+      if (difference !== 0) return difference;
+    }
+    return leftPoints.length - rightPoints.length;
+  });
+  if (!onDiagnostic) {
+    throw new SessionAmbiguityError(sessionId, orderedRefs);
+  }
+  onDiagnostic({
+    code: 'SESSION_AMBIGUOUS',
+    message: `Session ${sessionId} has divergent physical occurrences.`,
+    sessionId,
+    occurrenceCount: orderedRefs.length,
+    occurrenceRefs: orderedRefs,
+    remedy: 'Resolve or remove the divergent replicas, then retry the operation.',
+  });
+}
+
 function reportAmbiguousSummary(
   summary: CoreAmbiguousSessionSummary,
   onDiagnostic: ConfiguredReadContext['onDiagnostic']
 ): void {
-  if (!onDiagnostic) {
-    throw new SessionAmbiguityError(summary.id, summary.diagnosticOccurrenceRefs);
-  }
-  onDiagnostic({
-    code: 'SESSION_AMBIGUOUS',
-    message: `Session ${summary.id} has divergent physical occurrences.`,
-    sessionId: summary.id,
-    occurrenceCount: summary.occurrenceCount,
-    occurrenceRefs: [...summary.diagnosticOccurrenceRefs],
-    remedy: 'Resolve or remove the divergent replicas, then retry the operation.',
-  });
+  reportSessionAmbiguity(summary.id, summary.diagnosticOccurrenceRefs, onDiagnostic);
 }
 
 /**
@@ -863,6 +908,13 @@ export async function listSessions(config?: LibraryConfig): Promise<PaginatedRes
             throw new DatabaseNotFoundError(`Session ${summary.index} not found`);
           }
           sessions.push(convertToLibrarySession(fullSession));
+        } catch (error) {
+          if (!isSessionAmbiguityError(error)) throw error;
+          reportSessionAmbiguity(
+            error.details.sessionId,
+            error.details.occurrenceRefs,
+            bound.onDiagnostic
+          );
         } finally {
           bound.context.releaseSession(summary.id);
         }
@@ -1261,6 +1313,13 @@ export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<s
           exportedSessions.push(
             JSON.parse(exportToJson(session, session.workspacePath)) as Record<string, unknown>
           );
+        } catch (error) {
+          if (!isSessionAmbiguityError(error)) throw error;
+          reportSessionAmbiguity(
+            error.details.sessionId,
+            error.details.occurrenceRefs,
+            bound.onDiagnostic
+          );
         } finally {
           bound.context.releaseSession(summary.id);
         }
@@ -1326,6 +1385,13 @@ export async function exportAllSessionsToMarkdown(config?: LibraryConfig): Promi
 
           parts.push(exportToMarkdown(session, session.workspacePath));
           parts.push('\n\n---\n\n');
+        } catch (error) {
+          if (!isSessionAmbiguityError(error)) throw error;
+          reportSessionAmbiguity(
+            error.details.sessionId,
+            error.details.occurrenceRefs,
+            bound.onDiagnostic
+          );
         } finally {
           bound.context.releaseSession(summary.id);
         }
