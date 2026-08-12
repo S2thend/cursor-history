@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { dirname } from 'node:path';
 import type { DatabaseOperationRequest } from '../../src/core/database/types.js';
 import { openObservedDatabase } from '../../src/core/database/observed.js';
 import {
@@ -22,7 +23,10 @@ import {
   createSessionIntegrityFixtureRoot,
   seedConflictingWorkspaceCorpus,
   SESSION_INTEGRITY_IDS,
+  writeComposerGlobalSessions,
+  writeComposerWorkspaceSummary,
   writeStoreDb,
+  writeStoreMeta,
   writeStoreTranscript,
   type SessionIntegrityFixtureRoot,
 } from '../helpers/session-integrity-fixtures.js';
@@ -63,6 +67,168 @@ afterEach(() => {
 });
 
 describe('operation-bound low-level I/O observation', () => {
+  it.each(['prepare', 'query', 'get'] as const)(
+    'fails closed when the global Composer metadata %s boundary rejects during hydration',
+    async (operation) => {
+      const root = fixture();
+      seedConflictingWorkspaceCorpus(root);
+      const recorder = createIoEventRecorder();
+      let armed = false;
+      const context = createSessionReadContext({
+        dataPath: root.workspaceStorage,
+        workspacePath: root.projectA,
+        ioObserver: combineIoObservers(recorder.observer, (event) => {
+          if (
+            armed &&
+            event.operation === operation &&
+            event.resourceClass === 'global-composer' &&
+            event.logicalSessionId === SESSION_INTEGRITY_IDS.workspaceA
+          ) {
+            throw new Error(`reject ${operation}`);
+          }
+        }),
+      });
+      try {
+        const rows = await listSessions(
+          { all: true, limit: 0, workspacePath: root.projectA },
+          root.workspaceStorage,
+          undefined,
+          context
+        );
+        expect(rows).toHaveLength(1);
+        armed = true;
+        await expect(
+          getSession(SESSION_INTEGRITY_IDS.workspaceA, root.workspaceStorage, undefined, context)
+        ).rejects.toBeInstanceOf(IoObserverError);
+        expect(
+          recorder.count({
+            operation,
+            resourceClass: 'global-composer',
+            logicalSessionId: SESSION_INTEGRITY_IDS.workspaceA,
+          })
+        ).toBeGreaterThan(0);
+      } finally {
+        await context.dispose();
+      }
+    }
+  );
+
+  it('classifies off-scope Composer UUID projection as catalog metadata', async () => {
+    const root = fixture();
+    const duplicateId = SESSION_INTEGRITY_IDS.duplicate;
+    writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, [
+      {
+        id: duplicateId,
+        title: 'Selected replica',
+        workspacePath: root.projectA,
+        createdAt: 1_700_000_000_000,
+        messages: [{ role: 'user', content: 'selected replica' }],
+      },
+    ]);
+    writeComposerWorkspaceSummary(root, 'workspace-b', root.projectB, [
+      {
+        id: duplicateId,
+        title: 'Off-scope replica',
+        workspacePath: root.projectB,
+        createdAt: 1_700_000_000_000,
+        messages: [{ role: 'user', content: 'off-scope replica' }],
+      },
+    ]);
+
+    const recorder = createIoEventRecorder();
+    const context = createSessionReadContext({
+      dataPath: root.workspaceStorage,
+      workspacePath: root.projectA,
+      ioObserver: recorder.observer,
+    });
+    try {
+      await listSessions(
+        { all: true, limit: 0, workspacePath: root.projectA },
+        root.workspaceStorage,
+        undefined,
+        context
+      );
+
+      expect(
+        recorder.count({
+          adapter: 'sqlite',
+          operation: 'query',
+          resourceClass: 'workspace-session-index',
+          classification: 'catalog-metadata',
+        })
+      ).toBeGreaterThan(0);
+      expect(
+        recorder.count({
+          adapter: 'sqlite',
+          operation: 'query',
+          resourceClass: 'global-composer',
+          classification: 'conversation-payload',
+        })
+      ).toBe(0);
+    } finally {
+      await context.dispose();
+    }
+  });
+
+  it('propagates observer rejection from an off-scope Composer UUID metadata query', async () => {
+    const root = fixture();
+    const duplicateId = SESSION_INTEGRITY_IDS.duplicate;
+    writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, [
+      {
+        id: duplicateId,
+        title: 'Selected replica',
+        workspacePath: root.projectA,
+        createdAt: 1_700_000_000_000,
+        messages: [{ role: 'user', content: 'selected replica' }],
+      },
+    ]);
+    writeComposerWorkspaceSummary(root, 'workspace-b', root.projectB, [
+      {
+        id: duplicateId,
+        title: 'Off-scope replica',
+        workspacePath: root.projectB,
+        createdAt: 1_700_000_000_000,
+        messages: [{ role: 'user', content: 'off-scope replica' }],
+      },
+    ]);
+
+    const recorder = createIoEventRecorder();
+    const poison = createPoisonIoObserver(
+      {
+        adapter: 'sqlite',
+        operation: 'query',
+        resourceClass: 'workspace-session-index',
+        classification: 'catalog-metadata',
+      },
+      'off-scope workspace UUID projection'
+    );
+    const context = createSessionReadContext({
+      dataPath: root.workspaceStorage,
+      workspacePath: root.projectA,
+      ioObserver: combineIoObservers(recorder.observer, poison),
+    });
+    try {
+      await expect(
+        listSessions(
+          { all: true, limit: 0, workspacePath: root.projectA },
+          root.workspaceStorage,
+          undefined,
+          context
+        )
+      ).rejects.toBeInstanceOf(IoObserverError);
+      expect(
+        recorder.count({
+          adapter: 'sqlite',
+          operation: 'query',
+          resourceClass: 'workspace-session-index',
+          classification: 'catalog-metadata',
+        })
+      ).toBe(1);
+    } finally {
+      await context.dispose();
+    }
+  });
+
   it('records safe metadata and payload events across live, Store, SQLite, key-value, and backup reads', async () => {
     const root = fixture();
     seedConflictingWorkspaceCorpus(root);
@@ -405,5 +571,88 @@ describe('operation-bound low-level I/O observation', () => {
     expect(
       optInRecorder.count({ classification: 'conversation-payload', sourceRole: 'store' })
     ).toBeGreaterThan(0);
+  });
+
+  it('probes a selected Store UUID in global Composer metadata without decoding it before opt-in', async () => {
+    const root = fixture();
+    const id = SESSION_INTEGRITY_IDS.duplicate;
+    writeComposerGlobalSessions(root, [
+      {
+        id,
+        title: 'Global counterpart',
+        workspacePath: root.projectA,
+        createdAt: 1_783_000_000_000,
+        messages: [
+          {
+            id: 'global-message',
+            role: 'user',
+            content: 'global counterpart payload',
+            createdAt: 1_783_000_000_000,
+          },
+        ],
+      },
+    ]);
+    const storePath = writeStoreDb(root, id, [
+      { role: 'assistant', content: 'selected Store payload' },
+    ]);
+    writeStoreMeta(dirname(storePath), {
+      cwd: root.projectA,
+      title: 'Selected Store',
+      hasConversation: true,
+      createdAtMs: 1_783_000_000_000,
+    });
+
+    const defaultRecorder = createIoEventRecorder();
+    const defaultContext = createSessionReadContext({
+      dataPath: root.workspaceStorage,
+      workspacePath: root.projectA,
+      ioObserver: defaultRecorder.observer,
+    });
+    const defaultRows = await listSessions(
+      { all: true, limit: 0, workspacePath: root.projectA },
+      root.workspaceStorage,
+      undefined,
+      defaultContext
+    );
+    expect(defaultRows[0]).toMatchObject({
+      id,
+      resolution: { omittedSourceRoles: ['composer'] },
+    });
+    expect(
+      defaultRecorder.count({
+        classification: 'catalog-metadata',
+        resourceClass: 'global-bubble-index',
+        logicalSessionId: id,
+      })
+    ).toBeGreaterThan(0);
+    defaultRecorder.assertNone(
+      { classification: 'conversation-payload', sourceRole: 'composer' },
+      'default Store-selected read must not decode its global Composer counterpart'
+    );
+    await defaultContext.dispose();
+
+    const optInRecorder = createIoEventRecorder();
+    const optInContext = createSessionReadContext({
+      dataPath: root.workspaceStorage,
+      workspacePath: root.projectA,
+      includeCrossWorkspaceSources: true,
+      ioObserver: optInRecorder.observer,
+    });
+    const optedIn = await listSessions(
+      {
+        all: true,
+        limit: 0,
+        workspacePath: root.projectA,
+        includeCrossWorkspaceSources: true,
+      },
+      root.workspaceStorage,
+      undefined,
+      optInContext
+    );
+    expect(optedIn[0]).toMatchObject({ id, resolvedSource: 'merged' });
+    expect(
+      optInRecorder.count({ classification: 'conversation-payload', sourceRole: 'composer' })
+    ).toBeGreaterThan(0);
+    await optInContext.dispose();
   });
 });

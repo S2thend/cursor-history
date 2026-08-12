@@ -34,6 +34,21 @@ vi.mock('../../src/core/backup.js', () => ({
 // Store-stack has its own dedicated tests (tests/unit/store-stack-*.test.ts).
 vi.mock('../../src/core/store-stack/discover.js', () => ({
   discoverStoreSessions: vi.fn(async () => []),
+  getStorePhysicalOccurrences: vi.fn(
+    (session: { id: string; workspacePath?: string; source?: string }) => [
+      {
+        instanceKey: `unit-store:${session.id}:${session.workspacePath ?? 'pathless'}`,
+        logicalSessionId: session.id,
+        representation:
+          session.source === 'store' || session.source === 'store-complete'
+            ? 'store-db'
+            : 'store-transcript',
+        path: `/unit-store/${session.id}`,
+        ...(session.workspacePath ? { workspacePath: session.workspacePath } : {}),
+        sourceOrder: 0,
+      },
+    ]
+  ),
 }));
 
 // Mock node:fs
@@ -133,7 +148,9 @@ function createWorkspaceDbWithPointers(
       get: vi.fn((key?: string) =>
         key === 'composer.composerData' ? { value: composerValue } : undefined
       ),
-      all: vi.fn(() => (sql.includes('composerChatViewPane') ? pointerRows : [])),
+      all: vi.fn(() =>
+        sql.includes('composerChatViewPane') || sql.includes('WHERE key LIKE ?') ? pointerRows : []
+      ),
       run: vi.fn(),
     })),
     close: vi.fn(),
@@ -154,6 +171,43 @@ function createGlobalDbForComposerMap(
     prepare: vi.fn((sql: string) => {
       if (sql.includes('sqlite_master')) {
         return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
+      }
+
+      if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+        const matchingRows = (pattern?: string) => {
+          const prefix = String(pattern ?? '').replace(/%$/u, '');
+          return Object.entries(composerMap).flatMap(([composerId, entry]) => {
+            const rows = [
+              {
+                key: `composerData:${composerId}`,
+                value: JSON.stringify(entry.composerData),
+              },
+              ...entry.bubbles.map((bubble, index) => ({
+                key: `bubbleId:${composerId}:${index}`,
+                value: JSON.stringify(bubble),
+              })),
+            ];
+            return rows.filter(({ key }) => key.startsWith(prefix));
+          });
+        };
+        return {
+          get: vi.fn((pattern?: string) => matchingRows(pattern)[0]),
+          all: vi.fn((pattern?: string) => matchingRows(pattern)),
+          run: vi.fn(),
+        };
+      }
+
+      if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key = ?')) {
+        return {
+          get: vi.fn((key?: string) => {
+            if (!key || !String(key).startsWith('composerData:')) return undefined;
+            const composerId = String(key).replace('composerData:', '');
+            const entry = composerMap[composerId];
+            return entry ? { key, value: JSON.stringify(entry.composerData) } : undefined;
+          }),
+          all: vi.fn(() => []),
+          run: vi.fn(),
+        };
       }
 
       if (sql.includes("LIKE 'composerData:%'")) {
@@ -601,6 +655,31 @@ describe('getWorkspaceLinkedComposerIds', () => {
     expect(result).toEqual(expect.arrayContaining([ownedId, orphanId]));
     expect(result).not.toContain(foreignId);
   });
+
+  it('fails closed when the workspace pointer database cannot be queried', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    const globalDb = createGlobalDbForComposerMap({});
+    const workspaceFailure = new Error('workspace pointer query failed');
+    const workspaceDb: Database = {
+      prepare: vi.fn(() => {
+        throw workspaceFailure;
+      }),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    };
+    mockOpenDatabase.mockImplementation(async (path: string) =>
+      String(path).includes('globalStorage') ? globalDb : workspaceDb
+    );
+
+    await expect(
+      getWorkspaceLinkedComposerIds({
+        id: 'ws-failing',
+        path: '/project/failing',
+        dbPath: '/ws-failing/state.vscdb',
+        sessionCount: 0,
+      })
+    ).rejects.toBe(workspaceFailure);
+  });
 });
 
 // =============================================================================
@@ -906,6 +985,31 @@ describe('listSessions', () => {
     expect(cleanup.cause).toBe(primary);
   });
 
+  it('treats a valid workspace database without ItemTable as an empty Composer catalog', async () => {
+    const db: Database = {
+      prepare: vi.fn(() => {
+        throw new Error('no such table: ItemTable');
+      }),
+      runSQL: vi.fn(),
+      close: vi.fn(),
+    };
+    vi.mocked(openBackupDatabase).mockResolvedValue(db);
+    const context = createSessionReadContext(undefined, '/backup.zip');
+    context.workspaces = [
+      {
+        id: 'workspace-without-chat-table',
+        path: '/work/empty',
+        dbPath: 'workspaceStorage/workspace-without-chat-table/state.vscdb',
+        sessionCount: 0,
+      },
+    ];
+
+    await expect(
+      listSessions({ limit: 0, all: true }, undefined, '/backup.zip', context)
+    ).resolves.toEqual([]);
+    expect(db.close).toHaveBeenCalledOnce();
+  });
+
   it('shares one in-flight Store discovery across concurrent context readers', async () => {
     vi.mocked(existsSync).mockReturnValue(false);
     let finishDiscovery!: (sessions: []) => void;
@@ -921,6 +1025,84 @@ describe('listSessions', () => {
     await vi.waitFor(() => expect(discoverStoreSessions).toHaveBeenCalledTimes(1));
     finishDiscovery([]);
     await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
+  });
+
+  it('awaits in-flight Store discovery and suppresses late cache writes and diagnostics on dispose', async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    let finishDiscovery!: (sessions: []) => void;
+    let emitLateDiagnostic!: () => void;
+    vi.mocked(discoverStoreSessions).mockImplementationOnce(
+      (_root, options) =>
+        new Promise((resolve) => {
+          finishDiscovery = resolve;
+          emitLateDiagnostic = () =>
+            options.onDiagnostic?.({
+              code: 'DATABASE_CAPABILITY_MISSING',
+              message: 'late diagnostic fixture',
+              sessionId: 'late-store-session',
+            });
+        })
+    );
+    const diagnostics: unknown[] = [];
+    const context = createSessionReadContext({
+      dataPath: '/data',
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    const listing = listSessions({ limit: 0, all: true }, '/data', undefined, context);
+    await vi.waitFor(() => expect(discoverStoreSessions).toHaveBeenCalledTimes(1));
+
+    let disposeSettled = false;
+    const disposing = context.dispose().then(() => {
+      disposeSettled = true;
+    });
+    const repeatedDispose = context.dispose();
+    await Promise.resolve();
+    expect(disposeSettled).toBe(false);
+
+    emitLateDiagnostic();
+    expect(diagnostics).toEqual([]);
+    finishDiscovery([]);
+
+    await expect(listing).rejects.toMatchObject({ code: 'READ_CONTEXT_DISPOSED' });
+    await expect(Promise.all([disposing, repeatedDispose])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(context.storeSessions).toBeNull();
+    expect(context.storeSessionsPromise).toBeNull();
+  });
+
+  it('awaits in-flight Composer workspace discovery without repopulating a disposed context', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+    let finishDatabaseOpen!: (db: Database) => void;
+    mockOpenDatabase.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishDatabaseOpen = resolve;
+      })
+    );
+    const context = createSessionReadContext('/data');
+
+    const listing = listSessions({ limit: 0, all: true }, '/data', undefined, context);
+    await vi.waitFor(() => expect(mockOpenDatabase).toHaveBeenCalledTimes(1));
+
+    let disposeSettled = false;
+    const disposing = context.dispose().then(() => {
+      disposeSettled = true;
+    });
+    await Promise.resolve();
+    expect(disposeSettled).toBe(false);
+
+    finishDatabaseOpen(createWorkspaceDb('{}'));
+
+    await expect(listing).rejects.toMatchObject({ code: 'READ_CONTEXT_DISPOSED' });
+    await disposing;
+    expect(context.workspaces).toBeNull();
+    expect(context.workspacesPromise).toBeNull();
   });
 
   it('returns sorted sessions across workspaces', async () => {
@@ -1788,46 +1970,41 @@ describe('SessionReadContext final session cache', () => {
 
   it('removes a rejected resolution so the same operation can retry', async () => {
     const sessionId = 'aaaaaaaa-0000-0000-0000-000000000088';
+    const storeSession = {
+      id: sessionId,
+      title: 'Retry fixture',
+      createdAt: new Date(1783000000000),
+      lastUpdatedAt: new Date(1783000000000),
+      workspacePath: '/project',
+      messages: [
+        {
+          id: null,
+          role: 'user' as const,
+          content: 'recovered',
+          codeBlocks: [],
+        },
+      ],
+      source: 'store-complete' as const,
+      transcriptState: 'parsed' as const,
+    };
     const context = createSessionReadContext({
       dataPath: '/data',
       workspacePath: '/project',
     });
-    context.summaries = [
-      {
-        id: sessionId,
-        index: 1,
-        title: 'Retry fixture',
-        createdAt: new Date(1783000000000),
-        lastUpdatedAt: new Date(1783000000000),
-        messageCount: 1,
-        workspaceId: 'store',
-        workspacePath: '/project',
-        preview: 'recovered',
-        source: 'store-complete',
-      },
-    ];
+    vi.mocked(existsSync).mockReturnValue(false);
 
     vi.mocked(discoverStoreSessions)
+      // The scoped listing first inventories and binds the exact occurrence,
+      // then hydrates only its safe display metadata.
+      .mockResolvedValueOnce([storeSession])
+      .mockResolvedValueOnce([storeSession])
       .mockRejectedValueOnce(new Error('transient discovery failure'))
-      .mockResolvedValueOnce([
-        {
-          id: sessionId,
-          title: 'Retry fixture',
-          createdAt: new Date(1783000000000),
-          lastUpdatedAt: new Date(1783000000000),
-          workspacePath: '/project',
-          messages: [
-            {
-              id: null,
-              role: 'user',
-              content: 'recovered',
-              codeBlocks: [],
-            },
-          ],
-          source: 'store-complete',
-          transcriptState: 'parsed',
-        },
-      ]);
+      .mockResolvedValueOnce([storeSession]);
+
+    await expect(
+      listSessions({ limit: 0, all: true, workspacePath: '/project' }, '/data', undefined, context)
+    ).resolves.toHaveLength(1);
+    vi.mocked(discoverStoreSessions).mockClear();
 
     await expect(getSession(sessionId, '/data', undefined, context)).rejects.toThrow(
       'transient discovery failure'
@@ -1927,7 +2104,7 @@ describe('listWorkspaces', () => {
     expect(result[0]!.id).toBe('store://server/share/project');
   });
 
-  it('reconciles a globally recovered hybrid against the workspace that was counted', async () => {
+  it('preserves Composer attribution and adds the verified Store membership for a hybrid', async () => {
     const sharedId = 'aaaaaaaa-0000-0000-0000-000000000088';
     const localA = 'aaaaaaaa-0000-0000-0000-000000000089';
     const localB = 'aaaaaaaa-0000-0000-0000-000000000090';
@@ -2007,7 +2184,8 @@ describe('listWorkspaces', () => {
         .sort((a, b) => a.path.localeCompare(b.path))
     ).toEqual([
       { path: pathA, sessionCount: 2 },
-      { path: pathB, sessionCount: 1 },
+      { path: storePath, sessionCount: 1 },
+      { path: pathB, sessionCount: 2 },
     ]);
   });
 });
@@ -2931,6 +3109,27 @@ describe('getGlobalSession', () => {
             run: vi.fn(),
           };
         }
+        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+          const matchingRows = (pattern?: string) =>
+            String(pattern).startsWith('composerData:')
+              ? [{ key: 'composerData:g1', value: composerValue }]
+              : [
+                  { key: 'bubbleId:g1:b1', value: goodBubble },
+                  { key: 'bubbleId:g1:b2', value: '{"type":2,' },
+                ];
+          return {
+            get: vi.fn((pattern?: string) => matchingRows(pattern)[0]),
+            all: vi.fn((pattern?: string) => matchingRows(pattern)),
+            run: vi.fn(),
+          };
+        }
+        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key = ?')) {
+          return {
+            get: vi.fn((key?: string) => ({ key, value: composerValue })),
+            all: vi.fn(() => []),
+            run: vi.fn(),
+          };
+        }
         if (sql.includes("LIKE 'composerData:%'")) {
           return {
             get: vi.fn(),
@@ -2948,7 +3147,7 @@ describe('getGlobalSession', () => {
             run: vi.fn(),
           };
         }
-        if (sql.includes('WHERE key LIKE ? ORDER BY rowid ASC')) {
+        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
           return {
             get: vi.fn(),
             all: vi.fn(() => [
@@ -2981,6 +3180,28 @@ describe('getGlobalSession', () => {
     expect(result!.messages[0]!.toolCalls?.[0]?.params).toEqual({ _raw: '{"bad"' });
     expect(result!.messages[1]!.content).toBe('[corrupted message]');
     expect(result!.messages[1]!.metadata?.corrupted).toBe(true);
+  });
+
+  it('fails closed when hydration cannot query the owning database', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const listDb = createGlobalDbForComposerMap({
+      [sessionId]: {
+        composerData: { name: 'Catalog row', createdAt: '2024-01-15T10:00:00Z' },
+        bubbles: [{ type: 1, text: 'catalog preview' }],
+      },
+    });
+    const hydrationFailure = new Error('global hydration query failed');
+    const hydrationDb: Database = {
+      prepare: vi.fn(() => {
+        throw hydrationFailure;
+      }),
+      close: vi.fn(),
+      runSQL: vi.fn(),
+    };
+    mockOpenDatabase.mockResolvedValueOnce(listDb).mockResolvedValueOnce(hydrationDb);
+
+    await expect(getGlobalSession(1)).rejects.toBe(hydrationFailure);
   });
 });
 
@@ -3127,6 +3348,20 @@ describe('listGlobalSessions (with data)', () => {
           return {
             get: vi.fn(() => ({ name: 'cursorDiskKV' })),
             all: vi.fn(() => []),
+            run: vi.fn(),
+          };
+        }
+        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+          const matchingRows = (pattern?: string) =>
+            String(pattern).startsWith('composerData:')
+              ? [{ key: 'composerData:g1', value: composerValue }]
+              : [
+                  { key: 'bubbleId:g1:b1', value: bubbleValue },
+                  { key: 'bubbleId:g1:b2', value: bubbleValue },
+                ];
+          return {
+            get: vi.fn((pattern?: string) => matchingRows(pattern)[0]),
+            all: vi.fn((pattern?: string) => matchingRows(pattern)),
             run: vi.fn(),
           };
         }
@@ -4041,7 +4276,7 @@ describe('getSession debug logging', () => {
     );
   });
 
-  it('logs query errors while loading global bubbles', async () => {
+  it('fails closed when a bounded global-bubble catalog query fails', async () => {
     vi.stubEnv('DEBUG', 'cursor-history:*');
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -4054,10 +4289,11 @@ describe('getSession debug logging', () => {
             run: vi.fn(),
           };
         }
-        if (sql.includes('WHERE key LIKE ? ORDER BY rowid ASC')) {
+        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
           return {
             get: vi.fn(),
-            all: vi.fn(() => {
+            all: vi.fn((pattern?: string) => {
+              if (pattern !== 'bubbleId:%') return [];
               throw new Error('query failed');
             }),
             run: vi.fn(),
@@ -4069,14 +4305,9 @@ describe('getSession debug logging', () => {
       runSQL: vi.fn(),
     });
 
-    const result = await getSession(1, '/data');
-
-    expect(result).not.toBeNull();
-    expect(result!.source).toBe('workspace-fallback');
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        '[cursor-history:storage] Failed to load global bubbles for composer c1: query failed'
-      )
+    await expect(getSession(1, '/data')).rejects.toThrow('query failed');
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('No bubbles for composer c1')
     );
   });
 

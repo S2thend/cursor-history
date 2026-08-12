@@ -14,6 +14,18 @@ function requestIdentity(request: DatabaseOperationRequest): IoIdentity {
   return request.ioResource ?? { resourceClass: 'unclassified-resource' };
 }
 
+function selectsRawPayload(sql: string): boolean {
+  const projection = sql.match(/\bSELECT\b([\s\S]*?)\bFROM\b/iu)?.[1];
+  if (!projection) return false;
+  // Declared byte lengths are catalog metadata: the engine evaluates value
+  // length without returning the raw bytes across the adapter boundary.
+  const withoutLengthPreflights = projection.replace(
+    /\blength\s*\(\s*cast\s*\(\s*(?:value|data)\s+as\s+blob\s*\)\s*\)/giu,
+    ''
+  );
+  return /\b(?:value|data)\b/iu.test(withoutLengthPreflights);
+}
+
 function eventIdentity(sql: string, params: readonly unknown[], fallback: IoIdentity): IoIdentity {
   const parameterStrings = params.filter((value): value is string => typeof value === 'string');
   const composerToken = parameterStrings.find((value) => value.startsWith('composerData:'));
@@ -24,13 +36,27 @@ function eventIdentity(sql: string, params: readonly unknown[], fallback: IoIden
   if (/\bsqlite_master\b/iu.test(sql)) {
     return { ...fallback, resourceClass: 'workspace-database-schema' };
   }
+  // A scoped off-workspace database is opened under this reviewed identity
+  // solely for UUID projection. The SQL mentions composerData as a key name,
+  // but it does not select the Composer JSON payload and must not be relabeled
+  // as a global conversation read.
+  if (fallback.resourceClass === 'workspace-session-index') {
+    return fallback;
+  }
   if (/\bjson_extract\b/iu.test(sql) && /\bworkspace(?:Identifier|Uri)\b/iu.test(sql)) {
     return { ...fallback, resourceClass: 'global-composer-membership' };
   }
-  if (bubbleToken && !/\bvalue\b/iu.test(sql) && !/\bdata\b/iu.test(sql)) {
+  if (bubbleToken && !selectsRawPayload(sql)) {
     return {
       ...fallback,
       resourceClass: 'global-bubble-index',
+      ...(logicalSessionId ? { logicalSessionId } : {}),
+    };
+  }
+  if (composerToken && !selectsRawPayload(sql)) {
+    return {
+      ...fallback,
+      resourceClass: 'global-composer-membership',
       ...(logicalSessionId ? { logicalSessionId } : {}),
     };
   }

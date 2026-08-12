@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { join } from 'node:path';
+import BetterSqlite3 from 'better-sqlite3';
+import { dirname, join } from 'node:path';
 
 import * as database from '../../src/core/database/index.js';
 import { DatabaseCapabilityError } from '../../src/core/database/errors.js';
@@ -17,6 +18,8 @@ import {
   createSessionIntegrityFixtureRoot,
   writeComposerGlobalSessions,
   writeComposerWorkspaceSummary,
+  writeStoreDb,
+  writeStoreMeta,
   type ComposerFixtureSession,
   type SessionIntegrityFixtureRoot,
 } from '../helpers/session-integrity-fixtures.js';
@@ -62,6 +65,196 @@ afterEach(() => {
 });
 
 describe.sequential('Composer tier arbitration through physical fixtures', () => {
+  it('marks a global-only Composer counterpart omitted until scoped Store reads opt in', async () => {
+    const root = fixture();
+    const global = composer(root, 'global-only-composer-needle');
+    writeComposerGlobalSessions(root, [global]);
+    const storeDb = writeStoreDb(
+      root,
+      global.id,
+      [{ role: 'assistant', content: 'scoped-store-needle' }],
+      'Scoped Store half'
+    );
+    writeStoreMeta(dirname(storeDb), {
+      cwd: root.projectA,
+      title: 'Scoped Store half',
+      hasConversation: true,
+      createdAtMs: 1_783_000_000_000,
+    });
+
+    const scopedConfig: LibraryConfig = {
+      dataPath: root.workspaceStorage,
+      workspace: root.projectA,
+    };
+    const scoped = await library.listSessions(scopedConfig);
+    expect(scoped.data).toHaveLength(1);
+    expect(scoped.data[0]).toMatchObject({
+      id: global.id,
+      resolvedSource: 'store-db',
+      sources: ['composer', 'store'],
+      resolution: {
+        state: 'partial',
+        loadedSourceRoles: ['store'],
+        omittedSourceRoles: ['composer'],
+        reasonCodes: ['workspace-scope-omitted'],
+      },
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({
+          representation: 'composer-global',
+          state: 'omitted-by-scope',
+        }),
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+      ]),
+    });
+    expect(scoped.data[0]!.messages.map(({ content }) => content)).toContain('scoped-store-needle');
+    expect(scoped.data[0]!.messages.map(({ content }) => content)).not.toContain(
+      'global-only-composer-needle'
+    );
+
+    const optedIn = await library.listSessions({
+      ...scopedConfig,
+      includeCrossWorkspaceSources: true,
+    });
+    expect(optedIn.data).toHaveLength(1);
+    expect(optedIn.data[0]).toMatchObject({
+      id: global.id,
+      resolvedSource: 'merged',
+      sources: ['composer', 'store'],
+    });
+    expect(optedIn.data[0]!.messages.map(({ content }) => content)).toEqual(
+      expect.arrayContaining(['global-only-composer-needle', 'scoped-store-needle'])
+    );
+  });
+
+  it('retains a global-only Composer canonical path while strict scope omits its payload', async () => {
+    const root = fixture();
+    const global = composer(
+      root,
+      'off-scope-global-composer-needle',
+      root.projectB,
+      '13572468-2468-4ace-8ace-135724681357'
+    );
+    writeComposerGlobalSessions(root, [global]);
+    const storeDb = writeStoreDb(
+      root,
+      global.id,
+      [{ role: 'assistant', content: 'in-scope-store-needle' }],
+      'Scoped Store half'
+    );
+    writeStoreMeta(dirname(storeDb), {
+      cwd: root.projectA,
+      title: 'Scoped Store half',
+      hasConversation: true,
+      createdAtMs: 1_783_000_000_000,
+    });
+
+    const unfiltered = await library.listSessions({ dataPath: root.workspaceStorage });
+    const scoped = await library.listSessions({
+      dataPath: root.workspaceStorage,
+      workspace: root.projectA,
+    });
+
+    expect(unfiltered.data).toHaveLength(1);
+    expect(scoped.data).toHaveLength(1);
+    expect(scoped.data[0]).toMatchObject({
+      id: global.id,
+      workspace: root.projectB,
+      canonicalWorkspacePath: root.projectB,
+      matchedWorkspacePath: root.projectA,
+      resolvedSource: 'store-db',
+      resolution: {
+        state: 'partial',
+        loadedSourceRoles: ['store'],
+        omittedSourceRoles: ['composer'],
+      },
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({
+          sourceRole: 'composer',
+          representation: 'composer-global',
+          workspacePaths: [root.projectB],
+          state: 'omitted-by-scope',
+        }),
+      ]),
+      workspaceMemberships: expect.arrayContaining([
+        expect.objectContaining({
+          workspacePath: root.projectA,
+          sourceRoles: ['store'],
+        }),
+        expect.objectContaining({
+          workspacePath: root.projectB,
+          sourceRoles: ['composer'],
+        }),
+      ]),
+    });
+    expect(scoped.data[0]!.canonicalWorkspacePath).toBe(unfiltered.data[0]!.canonicalWorkspacePath);
+    expect(scoped.data[0]!.messages.map(({ content }) => content)).toEqual([
+      'in-scope-store-needle',
+    ]);
+  });
+
+  it('merges admitted global bubbles even when their optional Composer metadata row is absent', async () => {
+    const root = fixture();
+    const global = composer(
+      root,
+      'bubble-without-composer-metadata',
+      root.projectA,
+      '24681357-1357-4bdf-8bdf-246813572468'
+    );
+    const globalDbPath = writeComposerGlobalSessions(root, [global]);
+    const raw = new BetterSqlite3(globalDbPath);
+    raw.prepare('DELETE FROM cursorDiskKV WHERE key = ?').run(`composerData:${global.id}`);
+    raw.close();
+
+    const storeDb = writeStoreDb(
+      root,
+      global.id,
+      [{ role: 'assistant', content: 'store-half-without-composer-metadata' }],
+      'Store half'
+    );
+    writeStoreMeta(dirname(storeDb), {
+      cwd: root.projectA,
+      title: 'Store half',
+      hasConversation: true,
+      createdAtMs: 1_783_000_000_000,
+    });
+
+    const unfiltered = await library.listSessions({ dataPath: root.workspaceStorage });
+    const page = await library.listSessions({
+      dataPath: root.workspaceStorage,
+      workspace: root.projectA,
+      includeCrossWorkspaceSources: true,
+    });
+
+    expect(unfiltered.data).toHaveLength(1);
+    expect(unfiltered.data[0]).toMatchObject({
+      id: global.id,
+      source: 'global',
+      resolvedSource: 'merged',
+    });
+    expect(unfiltered.data[0]!.messages.map(({ content }) => content)).toEqual(
+      expect.arrayContaining([
+        'bubble-without-composer-metadata',
+        'store-half-without-composer-metadata',
+      ])
+    );
+    expect(page.data).toHaveLength(1);
+    expect(page.data[0]).toMatchObject({
+      id: global.id,
+      source: 'global',
+      resolvedSource: 'merged',
+      resolution: {
+        state: 'complete',
+        loadedSourceRoles: ['composer', 'store'],
+      },
+    });
+    expect(page.data[0]!.messages.map(({ content }) => content)).toEqual(
+      expect.arrayContaining([
+        'bubble-without-composer-metadata',
+        'store-half-without-composer-metadata',
+      ])
+    );
+  });
+
   it('uses one global payload as primary and treats workspace rows as membership-only', async () => {
     const root = fixture();
     const global = composer(root, 'global-primary-needle');

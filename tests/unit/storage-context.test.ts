@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import type { AdapterIoEvent } from '../../src/core/io-observer.js';
+import { IoObserverError, type AdapterIoEvent } from '../../src/core/io-observer.js';
 import { normalizeWorkspacePath } from '../../src/core/workspace-scope.js';
 import * as storage from '../../src/core/storage.js';
 
@@ -55,6 +55,57 @@ function createBoundedContext(
 }
 
 describe('listWorkspaces — aggregates from the resolved session set', () => {
+  it('disposes its internally owned read context after a successful listing', async () => {
+    const snapshots: ContextOwnershipSnapshot[] = [];
+
+    await expect(
+      storage.listWorkspaces(STORE_ROOT(), undefined, {
+        testOnlyOnOwnershipChange: (snapshot) => snapshots.push({ ...snapshot }),
+      })
+    ).resolves.toHaveLength(2);
+
+    // Workspace listing owns only the message-free Store catalog; construction
+    // and final disposal must still be independently observable even when no
+    // decoded conversation is retained.
+    expect(snapshots.length).toBeGreaterThanOrEqual(2);
+    expect(snapshots.at(-1)).toMatchObject({
+      activeResolutions: 0,
+      completedSessions: 0,
+      discoveryDecodedSessions: 0,
+      ownedDecodedSessions: 0,
+    });
+  });
+
+  it('disposes its internally owned read context after an injected read failure', async () => {
+    const snapshots: ContextOwnershipSnapshot[] = [];
+
+    await expect(
+      storage.listWorkspaces(STORE_ROOT(), undefined, {
+        testOnlyOnOwnershipChange: (snapshot) => snapshots.push({ ...snapshot }),
+        ioObserver: (event) => {
+          if (
+            event.adapter === 'filesystem' &&
+            event.operation === 'read' &&
+            event.resourceClass === 'store-root-directory'
+          ) {
+            throw new Error('injected listWorkspaces Store discovery failure');
+          }
+        },
+      })
+    ).rejects.toBeInstanceOf(IoObserverError);
+
+    // Construction and final disposal each emit a zero-ownership snapshot.
+    // Requiring both distinguishes cleanup from a context merely created before
+    // the injected discovery failure.
+    expect(snapshots.length).toBeGreaterThanOrEqual(2);
+    expect(snapshots.at(-1)).toMatchObject({
+      activeResolutions: 0,
+      completedSessions: 0,
+      discoveryDecodedSessions: 0,
+      ownedDecodedSessions: 0,
+    });
+  });
+
   it('groups Store sessions by workspacePath; transcript-only → unknown bucket', async () => {
     const workspaces = await storage.listWorkspaces(STORE_ROOT());
     // UUID1 has a cwd; UUID2 is transcript-only with no path → unknown bucket.
@@ -71,7 +122,7 @@ describe('listWorkspaces — aggregates from the resolved session set', () => {
     expect(total).toBe(2); // UUID1 + UUID2
   });
 
-  it('counts a duplicate-ID hybrid once at the Store-preferred workspace', async () => {
+  it('counts a duplicate-ID hybrid once in every verified workspace membership', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ch-workspace-conflict-'));
     const previousHome = process.env['HOME'];
     const previousDataPath = process.env['CURSOR_DATA_PATH'];
@@ -141,9 +192,11 @@ describe('listWorkspaces — aggregates from the resolved session set', () => {
 
       const workspaces = await storage.listWorkspaces();
 
-      expect(workspaces.map(({ path, sessionCount }) => ({ path, sessionCount }))).toEqual([
-        { path: composerPath, sessionCount: 1 },
-      ]);
+      expect(
+        workspaces
+          .map(({ path, sessionCount }) => ({ path, sessionCount }))
+          .sort((left, right) => left.path.localeCompare(right.path))
+      ).toEqual([composerPath, storePath].sort().map((path) => ({ path, sessionCount: 1 })));
     } finally {
       if (previousHome === undefined) delete process.env['HOME'];
       else process.env['HOME'] = previousHome;
