@@ -24,8 +24,19 @@ export async function resolveCommandSession(
         context
       )
     : undefined;
+  const boundScopedSummary = scopedSessions?.find(
+    (summary) => summary.index === identifier
+  );
   const session = context
-    ? await getSession(identifier, customDataPath, backupPath, context)
+    ? boundScopedSummary
+      ? await getSession(
+          boundScopedSummary.id,
+          customDataPath,
+          backupPath,
+          context,
+          boundScopedSummary.index
+        )
+      : null
     : await getSession(identifier, customDataPath, backupPath);
 
   if (session) return session;

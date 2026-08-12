@@ -96,8 +96,10 @@ vi.mock('node:fs', async () => {
 
 // Mock migrate module
 const mockMigrateWorkspace = vi.fn();
+const mockMigrateSessions = vi.fn();
 vi.mock('../../src/core/migrate.js', () => ({
   migrateWorkspace: (...args: unknown[]) => mockMigrateWorkspace(...args),
+  migrateSessions: (...args: unknown[]) => mockMigrateSessions(...args),
 }));
 
 // Mock lib/errors type guards
@@ -114,6 +116,7 @@ import { registerSearchCommand } from '../../src/cli/commands/search.js';
 import { registerExportCommand } from '../../src/cli/commands/export.js';
 import { registerListBackupsCommand } from '../../src/cli/commands/list-backups.js';
 import { registerMigrateCommand } from '../../src/cli/commands/migrate.js';
+import { registerMigrateSessionCommand } from '../../src/cli/commands/migrate-session.js';
 import { registerBackupCommand } from '../../src/cli/commands/backup.js';
 import { registerRestoreCommand } from '../../src/cli/commands/restore.js';
 import { writeFileSync } from 'node:fs';
@@ -143,6 +146,7 @@ function createProgram() {
 // --- Sample data factories ---
 function makeSessions(count = 2) {
   return Array.from({ length: count }, (_, i) => ({
+    id: `session-${i + 1}`,
     index: i + 1,
     title: `Session ${i + 1}`,
     createdAt: new Date('2025-01-01'),
@@ -357,7 +361,7 @@ describe('show command', () => {
       expect.any(Object)
     );
     const context = mockListSessions.mock.calls[0]![3];
-    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, context);
+    expect(mockGetSession).toHaveBeenCalledWith('session-1', undefined, undefined, context, 1);
   });
 
   it('passes composer ID string to getSession when argument is not all digits', async () => {
@@ -684,7 +688,7 @@ describe('export command', () => {
       expect.any(Object)
     );
     const context = mockListSessions.mock.calls[0]![3];
-    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, context);
+    expect(mockGetSession).toHaveBeenCalledWith('session-1', undefined, undefined, context, 1);
   });
 
   it('keeps direct export by ID global when a workspace filter is present', async () => {
@@ -1274,6 +1278,155 @@ describe('migrate command', () => {
         force: true,
       })
     );
+  });
+});
+
+// ==================== MIGRATE-SESSION COMMAND ====================
+
+describe('migrate-session command', () => {
+  function successfulResult(sessionId: string, dryRun: boolean) {
+    return {
+      success: true,
+      sessionId,
+      sourceWorkspace: '/workspace/a',
+      destinationWorkspace: '/workspace/destination',
+      mode: 'move' as const,
+      dryRun,
+      pathsWillBeUpdated: true,
+    };
+  }
+
+  it('propagates the parent workspace while resolving both numeric and direct-ID selectors', async () => {
+    mockMigrateSessions.mockImplementation(
+      async (options: { selectors: string[]; dryRun: boolean }) =>
+        options.selectors.map((id) => successfulResult(id, options.dryRun))
+    );
+
+    for (const selector of ['1', 'session-a']) {
+      const program = createProgram();
+      registerMigrateSessionCommand(program);
+      await program.parseAsync([
+        'node',
+        'test',
+        '--workspace',
+        '/workspace/a',
+        'migrate-session',
+        selector,
+        '/workspace/destination',
+        '--dry-run',
+      ]);
+    }
+
+    expect(mockMigrateSessions).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        selectors: ['1'],
+        workspacePath: '/workspace/a',
+        dryRun: true,
+      })
+    );
+    expect(mockMigrateSessions).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        selectors: ['session-a'],
+        workspacePath: '/workspace/a',
+        dryRun: true,
+      })
+    );
+  });
+
+  it('uses the identical scoped target for dry-run and apply', async () => {
+    mockMigrateSessions.mockImplementation(
+      async (options: { selectors: string[]; dryRun: boolean }) =>
+        options.selectors.map((id) => successfulResult(id, options.dryRun))
+    );
+
+    const dryRunProgram = createProgram();
+    registerMigrateSessionCommand(dryRunProgram);
+    await dryRunProgram.parseAsync([
+      'node',
+      'test',
+      '--workspace',
+      '/workspace/a',
+      'migrate-session',
+      '1',
+      '/workspace/destination',
+      '--dry-run',
+    ]);
+
+    const applyProgram = createProgram();
+    registerMigrateSessionCommand(applyProgram);
+    await applyProgram.parseAsync([
+      'node',
+      'test',
+      '--workspace',
+      '/workspace/a',
+      'migrate-session',
+      '1',
+      '/workspace/destination',
+    ]);
+
+    const dryRunOptions = mockMigrateSessions.mock.calls[0]?.[0] as {
+      selectors: string[];
+      workspacePath: string;
+      dryRun: boolean;
+    };
+    const applyOptions = mockMigrateSessions.mock.calls[1]?.[0] as {
+      selectors: string[];
+      workspacePath: string;
+      dryRun: boolean;
+    };
+    expect(dryRunOptions).toMatchObject({
+      selectors: ['1'],
+      workspacePath: '/workspace/a',
+      dryRun: true,
+    });
+    expect(applyOptions).toMatchObject({
+      selectors: ['1'],
+      workspacePath: '/workspace/a',
+      dryRun: false,
+    });
+    expect(applyOptions.selectors).toEqual(dryRunOptions.selectors);
+    expect(applyOptions.workspacePath).toBe(dryRunOptions.workspacePath);
+  });
+
+  it('prints an ordinary migration failure result before exiting with partial-failure status', async () => {
+    mockMigrateSessions.mockResolvedValue([
+      {
+        success: false,
+        sessionId: 'session-a',
+        sourceWorkspace: '/workspace/a',
+        destinationWorkspace: '/workspace/destination',
+        mode: 'move',
+        error: 'synthetic destination write failure',
+        dryRun: false,
+      },
+    ]);
+
+    const program = createProgram();
+    registerMigrateSessionCommand(program);
+    await expect(
+      program.parseAsync([
+        'node',
+        'test',
+        '--workspace',
+        '/workspace/a',
+        'migrate-session',
+        'session-a',
+        '/workspace/destination',
+      ])
+    ).rejects.toThrow('process.exit');
+
+    expect(mockMigrateSessions).toHaveBeenCalledOnce();
+    expect(
+      consoleSpy.mock.calls.some(([value]) => String(value).includes('Failed to migrate'))
+    ).toBe(true);
+    expect(
+      consoleSpy.mock.calls.some(([value]) =>
+        String(value).includes('synthetic destination write failure')
+      )
+    ).toBe(true);
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });
 

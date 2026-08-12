@@ -10,7 +10,6 @@
 
 import { Command } from 'commander';
 import pc from 'picocolors';
-import { resolveSessionIdentifiers } from '../../core/storage.js';
 import { migrateSessions } from '../../core/migrate.js';
 import { expandPath } from '../../lib/platform.js';
 import {
@@ -20,6 +19,7 @@ import {
   isNestedPathError,
 } from '../../lib/errors.js';
 import type { MigrationMode } from '../../core/types.js';
+import type { SourceReadLimitsOverride } from '../../core/types.js';
 
 interface MigrateSessionOptions {
   dryRun?: boolean;
@@ -41,7 +41,12 @@ export function registerMigrateSessionCommand(program: Command): void {
     .option('-f, --force', 'Proceed even if destination has existing sessions')
     .option('--debug', 'Show detailed path transformation logs')
     .action(async (sessionArg: string, destinationArg: string, options: MigrateSessionOptions) => {
-      const globalOptions = program.opts() as { dataPath?: string; json?: boolean };
+      const globalOptions = program.opts() as {
+        dataPath?: string;
+        json?: boolean;
+        workspace?: string;
+        sourceLimit?: SourceReadLimitsOverride;
+      };
       const dataPath = globalOptions.dataPath;
       const jsonOutput = globalOptions.json || options.json;
 
@@ -49,21 +54,24 @@ export function registerMigrateSessionCommand(program: Command): void {
         // Expand ~ in destination path
         const destination = expandPath(destinationArg);
 
-        // Resolve session identifiers to IDs
-        const sessionIds = await resolveSessionIdentifiers(sessionArg, dataPath);
+        const selectors = sessionArg.includes(',')
+          ? sessionArg.split(',').map((value) => value.trim())
+          : [sessionArg];
 
         // Determine mode
         const mode: MigrationMode = options.copy ? 'copy' : 'move';
 
         // Perform migration
         const results = await migrateSessions({
-          sessionIds,
+          selectors,
+          workspacePath: globalOptions.workspace,
           destination,
           mode,
           dryRun: options.dryRun ?? false,
           force: options.force ?? false,
           dataPath,
           debug: options.debug ?? false,
+          sourceReadLimits: globalOptions.sourceLimit,
         });
 
         // Output results

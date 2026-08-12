@@ -21,6 +21,7 @@ import {
   isNestedPathError,
 } from '../../lib/errors.js';
 import type { MigrationMode, WorkspaceMigrationResult } from '../../core/types.js';
+import type { SourceReadLimitsOverride } from '../../core/types.js';
 
 interface MigrateOptions {
   dryRun?: boolean;
@@ -42,7 +43,11 @@ export function registerMigrateCommand(program: Command): void {
     .option('-f, --force', 'Proceed even if destination has existing sessions')
     .option('--debug', 'Show detailed path transformation logs')
     .action(async (sourceArg: string, destinationArg: string, options: MigrateOptions) => {
-      const globalOptions = program.opts() as { dataPath?: string; json?: boolean };
+      const globalOptions = program.opts() as {
+        dataPath?: string;
+        json?: boolean;
+        sourceLimit?: SourceReadLimitsOverride;
+      };
       const dataPath = globalOptions.dataPath;
       const jsonOutput = globalOptions.json || options.json;
 
@@ -63,6 +68,7 @@ export function registerMigrateCommand(program: Command): void {
           force: options.force ?? false,
           dataPath,
           debug: options.debug ?? false,
+          sourceReadLimits: globalOptions.sourceLimit,
         });
 
         // Output results
