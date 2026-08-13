@@ -435,6 +435,16 @@ function occurrenceIsAllowed(
 }
 
 /**
+ * Cursor uses a small number of project buckets that do not encode a cwd.
+ * Keep this allowlist deliberately narrow: an ordinary project directory is a
+ * lossy forward projection, so a mismatch is evidence against assigning it to
+ * an otherwise unique same-UUID metadata cwd.
+ */
+function isNonWorkspaceTranscriptBucket(projectDirectory: string): boolean {
+  return /^\d{13}$/u.test(projectDirectory) || projectDirectory === 'empty-window';
+}
+
+/**
  * Associate a transcript project directory only with a uniquely matching,
  * reliable metadata cwd. The project name is lossy and therefore serves as a
  * forward-match hint only; it is never reverse-decoded into a guessed path.
@@ -454,9 +464,13 @@ function transcriptWorkspacePath(
     (workspacePath) => storeProjectDirectoryName(workspacePath) === projectDirectory
   );
   if (matched.length === 1) return matched[0];
-  // Timestamp/special project directories are not forward projections. A
-  // single same-UUID metadata cwd remains the only reliable association.
-  return paths.length === 1 ? paths[0] : undefined;
+  // Positively identified timestamp/special buckets carry no cwd projection.
+  // Only those layouts may inherit a unique same-UUID metadata cwd. For an
+  // ordinary mismatched project directory, keep the transcript pathless so a
+  // workspace-scoped read cannot admit another workspace's payload.
+  return paths.length === 1 && isNonWorkspaceTranscriptBucket(projectDirectory)
+    ? paths[0]
+    : undefined;
 }
 
 function physicalStoreCandidates<T>(

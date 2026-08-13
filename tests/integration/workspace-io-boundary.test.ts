@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Database, DatabaseOperationRequest } from '../../src/core/database/types.js';
 import { openObservedDatabase } from '../../src/core/database/observed.js';
 import {
@@ -18,6 +18,7 @@ import { readBackupManifest } from '../../src/core/backup.js';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
 import { parseStoreDb } from '../../src/core/store-stack/store-db.js';
 import { parseTranscriptFile } from '../../src/core/store-stack/transcript.js';
+import { storeProjectDirectoryName } from '../../src/core/store-stack/paths.js';
 import {
   createFixtureBackup,
   createSessionIntegrityFixtureRoot,
@@ -671,6 +672,149 @@ describe('operation-bound low-level I/O observation', () => {
       optInRecorder.count({ classification: 'conversation-payload', sourceRole: 'store' })
     ).toBeGreaterThan(0);
   });
+
+  it('does not reassign an ordinary mismatched Store project directory to the only metadata cwd', async () => {
+    const root = fixture();
+    seedConflictingWorkspaceCorpus(root);
+    const id = SESSION_INTEGRITY_IDS.workspaceA;
+    const storeDbPath = writeStoreDb(
+      root,
+      id,
+      [{ role: 'assistant', content: 'in-scope Store database' }],
+      'In-scope Store database'
+    );
+    writeStoreMeta(dirname(storeDbPath), {
+      cwd: root.projectA,
+      title: 'In-scope Store database',
+      hasConversation: true,
+      createdAtMs: 1_700_000_000_000,
+    });
+    writeStoreTranscript(root, storeProjectDirectoryName(root.projectB), id, [
+      {
+        role: 'assistant',
+        message: { content: [{ type: 'text', text: 'off-scope transcript secret' }] },
+      },
+    ]);
+
+    const recorder = createIoEventRecorder();
+    const context = createSessionReadContext({
+      dataPath: root.workspaceStorage,
+      workspacePath: root.projectA,
+      includeCrossWorkspaceSources: false,
+      ioObserver: recorder.observer,
+    });
+    try {
+      const rows = await listSessions(
+        {
+          all: true,
+          limit: 0,
+          workspacePath: root.projectA,
+          includeCrossWorkspaceSources: false,
+        },
+        root.workspaceStorage,
+        undefined,
+        context
+      );
+      const row = rows.find((candidate) => candidate.id === id);
+      expect(row).toMatchObject({
+        resolutionState: 'partial',
+        resolution: {
+          reasonCodes: expect.arrayContaining(['workspace-scope-omitted']),
+        },
+        sourceInstances: expect.arrayContaining([
+          expect.objectContaining({
+            representation: 'store-transcript',
+            workspacePaths: [],
+            state: 'omitted-by-scope',
+          }),
+        ]),
+      });
+
+      const resolved = await getSession(id, root.workspaceStorage, undefined, context, row!.index);
+      expect(resolved?.messages.map(({ content }) => content)).toEqual(
+        expect.arrayContaining(['needle-a', 'in-scope Store database'])
+      );
+      expect(resolved?.messages.map(({ content }) => content)).not.toContain(
+        'off-scope transcript secret'
+      );
+      recorder.assertNone(
+        {
+          classification: 'conversation-payload',
+          logicalSessionId: id,
+          representation: 'store-transcript',
+        },
+        'an ordinary mismatched Store project directory must remain outside workspace A'
+      );
+    } finally {
+      await context.dispose();
+    }
+  });
+
+  it.each(['1783664993216', 'empty-window'])(
+    'retains the unique metadata cwd association for the non-workspace transcript bucket %s',
+    async (projectDirectory) => {
+      const root = fixture();
+      const id =
+        projectDirectory === 'empty-window'
+          ? '56565656-5656-4656-8656-565656565656'
+          : '57575757-5757-4757-8757-575757575757';
+      writeStoreMeta(join(root.storeRoot, 'chats', 'special-bucket', id), {
+        cwd: root.projectA,
+        title: 'Special bucket transcript',
+        hasConversation: false,
+        createdAtMs: 1_700_000_000_000,
+      });
+      writeStoreTranscript(root, projectDirectory, id, [
+        {
+          role: 'user',
+          message: { content: [{ type: 'text', text: `special bucket ${projectDirectory}` }] },
+        },
+      ]);
+
+      const recorder = createIoEventRecorder();
+      const context = createSessionReadContext({
+        dataPath: root.workspaceStorage,
+        workspacePath: root.projectA,
+        ioObserver: recorder.observer,
+      });
+      try {
+        const rows = await listSessions(
+          { all: true, limit: 0, workspacePath: root.projectA },
+          root.workspaceStorage,
+          undefined,
+          context
+        );
+        const row = rows.find((candidate) => candidate.id === id);
+        expect(row).toMatchObject({
+          id,
+          matchedWorkspacePath: root.projectA,
+          workspaceMemberships: expect.arrayContaining([
+            expect.objectContaining({ workspacePath: root.projectA, sourceRoles: ['store'] }),
+          ]),
+        });
+
+        const resolved = await getSession(
+          id,
+          root.workspaceStorage,
+          undefined,
+          context,
+          row!.index
+        );
+        expect(resolved?.messages.map(({ content }) => content)).toContain(
+          `special bucket ${projectDirectory}`
+        );
+        expect(
+          recorder.count({
+            classification: 'conversation-payload',
+            logicalSessionId: id,
+            representation: 'store-transcript',
+          })
+        ).toBeGreaterThan(0);
+      } finally {
+        await context.dispose();
+      }
+    }
+  );
 
   it('probes a selected Store UUID in global Composer metadata without decoding it before opt-in', async () => {
     const root = fixture();
