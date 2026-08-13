@@ -171,12 +171,12 @@ an earlier exploratory run, if a non-owner-accessible artifact was created, or i
 manifest/digest was retained in the external aggregate attestation. Delete the fresh extracted tree
 and every private intermediate after certification.
 
-Bind the run before dynamic imports or data access to the candidate revision and one checksum-
-addressed pre-freeze packed candidate, the official v0.16 revision/tree/distribution digest, the ARR
-revision and authorized source-blob inventory, the validation-harness manifest, the runtime and
-resolved production-dependency tree, and the exact policy version. Any mismatch aborts before source
-content is opened. The pre-freeze candidate is T113 evidence only; it is not the final T115 release
-tarball, and any repository edit invalidates it and restarts T112–T113.
+Bind the run before dynamic imports or data access to the candidate revision and one
+checksum-addressed pre-freeze packed candidate, the official v0.16 revision/tree/distribution
+digest, the ARR revision and authorized source-blob inventory, the validation-harness manifest, the
+runtime and resolved production-dependency tree, and the exact policy version. Any mismatch aborts
+before source content is opened. The pre-freeze candidate is T113 evidence only; it is not the final
+T115 release tarball, and any repository edit invalidates it and restarts T112–T113.
 
 The private differential must cover every discovered session, not a sample. Compare every
 pre-existing public library field, optional own-property, ordering rule, null/omission shape, message

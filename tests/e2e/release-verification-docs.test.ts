@@ -246,8 +246,33 @@ function validateReleaseVerificationDocument(
     validateOperationMatrix(t115, errors);
   }
 
-  if (t113 && !/no official tarball hash/iu.test(documentation)) {
-    errors.push('T113 is not explicitly separated from the official tarball identity');
+  if (t113) {
+    requireTerms(
+      t113,
+      [
+        'fresh owner-private directory',
+        'reject unsafe archive members',
+        'entire extracted tree',
+        'before dynamic imports or data access',
+        'one checksum-addressed pre-freeze packed candidate',
+        'real-corpus lane',
+        'Store provably empty',
+        'fictional-transaction lane',
+        'must not copy, transform, hash into, or otherwise derive',
+        'Both lanes must pass',
+        'neither lane substitutes for the other',
+        'non-excepted durable old value',
+        'predicate-guarded scalar correction',
+        'Do not introduce sampling, record caps, time budgets, or early success exits',
+        'quadratic',
+      ],
+      'T113 private certification',
+      errors
+    );
+  }
+
+  if (t113 && !/no final release-tarball hash/iu.test(documentation)) {
+    errors.push('T113 is not explicitly separated from the final release-tarball identity');
   }
 
   if (t113Attestation) {
@@ -257,34 +282,56 @@ function validateReleaseVerificationDocument(
       [
         'task',
         'candidate_source_revision',
+        'candidate_artifact_sha256',
+        'candidate_artifact_verified_before_import',
         'v016_oracle_revision',
+        'v016_oracle_tree',
+        'v016_oracle_distribution_sha256',
         'external_consumer_arr',
         'external_consumer_provenance',
+        'validation_harness_manifest_sha256',
+        'runtime_dependency_tree_sha256',
+        'source_archive_maintainer_digest_verified',
+        'fresh_safe_extraction',
+        'raw_tree_before_after_identical',
+        'owner_only_artifacts',
         'platform',
         'node',
         'corpus_counts',
         'public_value_shape_differential',
         'all_candidate_association',
-        'unchanged_consumer_initial_import',
-        'forced_transaction_failure',
-        'transaction_rollback_reopen',
-        'candidate_retry',
-        'old_key_binding_preservation',
-        'repeated_sync_writes',
+        'real_corpus_initial_import',
+        'real_corpus_v016_repeat_writes',
+        'real_corpus_candidate_upgrade',
+        'real_corpus_old_binding_preservation',
+        'real_corpus_durable_exception_counts',
+        'real_corpus_candidate_repeat_writes',
+        'fictional_transaction_complete_replacement',
+        'fictional_transaction_forced_failure',
+        'fictional_transaction_rollback_reopen',
+        'fictional_transaction_retry',
+        'fictional_transaction_final_repeat_writes',
+        'fictional_transaction_real_values_derived',
         'documented_drift_categories',
         'private_modes',
         'temporary_residue_count',
+        'private_material_deleted',
         'overall_result',
       ],
       'T113',
       errors
     );
     if (fields.get('task') !== 'T113') errors.push('T113 attestation has the wrong task identity');
-    if (fields.get('repeated_sync_writes') !== '0') {
-      errors.push('T113 repeated_sync_writes must equal 0');
-    }
-    if (fields.get('temporary_residue_count') !== '0') {
-      errors.push('T113 temporary_residue_count must equal 0');
+    for (const zeroField of [
+      'real_corpus_v016_repeat_writes',
+      'real_corpus_candidate_repeat_writes',
+      'fictional_transaction_final_repeat_writes',
+      'fictional_transaction_real_values_derived',
+      'temporary_residue_count',
+    ]) {
+      if (fields.get(zeroField) !== '0') {
+        errors.push(`T113 attestation ${zeroField} must equal 0`);
+      }
     }
     for (const forbidden of ['official_artifact', 'candidate_sha256']) {
       if (fields.has(forbidden)) errors.push(`T113 attestation must not contain ${forbidden}`);
@@ -431,6 +478,27 @@ describe('private release-verification documentation contract', () => {
     }
   });
 
+  it('rejects a T113 contract that merges, weakens, or mislabels its two private lanes', () => {
+    for (const [target, expectedError] of [
+      ['real-corpus lane', 'T113 private certification is missing real-corpus lane'],
+      ['Store provably empty', 'T113 private certification is missing Store provably empty'],
+      [
+        'fictional-transaction lane',
+        'T113 private certification is missing fictional-transaction lane',
+      ],
+      ['Both lanes must pass', 'T113 private certification is missing Both lanes must pass'],
+      [
+        'neither lane substitutes for the other',
+        'T113 private certification is missing neither lane substitutes for the other',
+      ],
+    ] as const) {
+      const mutated = documentation.replace(target, 'removed contract phrase');
+      expect(validateReleaseVerificationDocument(mutated, workflow, packageVersion)).toContain(
+        expectedError
+      );
+    }
+  });
+
   it('rejects missing interface, source, and addressing operations', () => {
     for (const [source, interfaceName, operation] of [
       ['custom-path', 'CLI', 'search'],
@@ -456,12 +524,24 @@ describe('private release-verification documentation contract', () => {
       );
     }
 
+    for (const field of [
+      'real_corpus_v016_repeat_writes',
+      'real_corpus_candidate_repeat_writes',
+      'fictional_transaction_final_repeat_writes',
+      'fictional_transaction_real_values_derived',
+    ]) {
+      const mutated = documentation.replace(`${field}: 0`, `${field}: 1`);
+      expect(validateReleaseVerificationDocument(mutated, workflow, packageVersion)).toContain(
+        `T113 attestation ${field} must equal 0`
+      );
+    }
+
     const t113Residue = documentation.replace(
       'temporary_residue_count: 0',
       'temporary_residue_count: 1'
     );
     expect(validateReleaseVerificationDocument(t113Residue, workflow, packageVersion)).toContain(
-      'T113 temporary_residue_count must equal 0'
+      'T113 attestation temporary_residue_count must equal 0'
     );
   });
 });
