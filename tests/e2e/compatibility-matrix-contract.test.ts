@@ -5,23 +5,16 @@ import { describe, expect, it } from 'vitest';
 
 import { readBackupManifest } from '../../src/core/backup.js';
 import { SessionAmbiguityError } from '../../src/core/errors.js';
-import {
-  buildSessionCatalog,
-  hydrateSelectedReplica,
-  reconcileReplicaGroup,
-  type PhysicalSessionInstance,
-  type ReplicaConsumedPayload,
-} from '../../src/core/session-catalog.js';
 import * as storage from '../../src/core/storage.js';
-import { mergeCrossStackSessions } from '../../src/core/store-stack/merge.js';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
-import type { ChatSession, Message } from '../../src/core/types.js';
 import {
   createFixtureBackup,
   createSessionIntegrityFixtureRoot,
+  seedConflictingWorkspaceCorpus,
   writeComposerGlobalSessions,
   writeComposerWorkspaceSummary,
   writeStoreDb,
+  writeStoreDbAtPath,
   writeStoreMeta,
   writeStoreTranscript,
   type ComposerFixtureSession,
@@ -98,11 +91,11 @@ const MATRIX_V1 = Object.freeze([
     expected: 'Degraded transcript fallback',
   },
   {
-    scenario: 'Store transcript selected instead of a usable Store database',
-    'Live default path': 'Unsupported',
-    'Custom data path': 'Unsupported',
+    scenario: 'Usable Store database coexists with a Store transcript',
+    'Live default path': 'Required',
+    'Custom data path': 'Required',
     'Supported backup': 'N/A',
-    expected: 'Reject; database remains Store backbone',
+    expected: 'Complete Store database backbone; transcript retained as superseded provenance',
   },
   {
     scenario: 'Complete Composer/Store merge, Composer-preferred ordering',
@@ -221,9 +214,9 @@ const MATRIX_EVIDENCE = Object.freeze({
     'Custom data path': required('transcript-fallback/custom-data-path'),
     'Supported backup': notApplicable('backup-exclusion/store-transcript-fallback'),
   },
-  'Store transcript selected instead of a usable Store database': {
-    'Live default path': unsupported('usable-database-rejects-transcript/live-default'),
-    'Custom data path': unsupported('usable-database-rejects-transcript/custom-data-path'),
+  'Usable Store database coexists with a Store transcript': {
+    'Live default path': required('usable-database-with-transcript/live-default'),
+    'Custom data path': required('usable-database-with-transcript/custom-data-path'),
     'Supported backup': notApplicable('backup-exclusion/store-representation-selection'),
   },
   'Complete Composer/Store merge, Composer-preferred ordering': {
@@ -470,7 +463,7 @@ type StoreScenario =
   | 'Store database conversation'
   | 'Store transcript with no discovered or expected database'
   | 'Store transcript after an expected database fails'
-  | 'Store transcript selected instead of a usable Store database'
+  | 'Usable Store database coexists with a Store transcript'
   | 'Store metadata indicating a possible conversation but no usable payload';
 
 async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Promise<void> {
@@ -480,7 +473,7 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
     const transcriptContent = 'matrix-store-transcript';
     if (
       scenario === 'Store database conversation' ||
-      scenario === 'Store transcript selected instead of a usable Store database'
+      scenario === 'Usable Store database coexists with a Store transcript'
     ) {
       const dbPath = writeStoreDb(
         fixture,
@@ -498,7 +491,7 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
     if (
       scenario === 'Store transcript with no discovered or expected database' ||
       scenario === 'Store transcript after an expected database fails' ||
-      scenario === 'Store transcript selected instead of a usable Store database'
+      scenario === 'Usable Store database coexists with a Store transcript'
     ) {
       writeStoreTranscript(fixture, 'matrix-project', id, [
         {
@@ -547,8 +540,19 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
           reasonCodes: expect.arrayContaining(['expected-store-db-unavailable']),
         },
       });
-    } else if (scenario === 'Store transcript selected instead of a usable Store database') {
-      expect(resolved).toMatchObject({ resolvedSource: 'store-db' });
+    } else if (scenario === 'Usable Store database coexists with a Store transcript') {
+      expect(resolved).toMatchObject({
+        source: 'global',
+        resolvedSource: 'store-db',
+        resolution: { state: 'complete' },
+        sourceInstances: expect.arrayContaining([
+          expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+          expect.objectContaining({
+            representation: 'store-transcript',
+            state: 'superseded',
+          }),
+        ]),
+      });
       expect(resolved!.messages.map(({ content }) => content)).toContain(dbContent);
       expect(resolved!.messages.map(({ content }) => content)).not.toContain(transcriptContent);
     } else {
@@ -581,6 +585,19 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
         expect(hydrated?.messages.map(({ content }) => content)).toEqual(
           resolved!.messages.map(({ content }) => content)
         );
+        if (scenario === 'Usable Store database coexists with a Store transcript') {
+          expect(hydrated).toMatchObject({
+            source: 'global',
+            resolution: { state: 'complete' },
+            sourceInstances: expect.arrayContaining([
+              expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+              expect.objectContaining({
+                representation: 'store-transcript',
+                state: 'superseded',
+              }),
+            ]),
+          });
+        }
       } else {
         expect(row?.resolvedSource).toBe('store-metadata');
       }
@@ -590,70 +607,111 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
   });
 }
 
-function mergedMessage(
-  partial: Partial<Message> & { role: 'user' | 'assistant'; content: string }
-): Message {
-  return { id: null, codeBlocks: [], ...partial };
-}
-
-function mergedSession(
-  source: ChatSession['source'],
-  messages: Message[],
-  workspacePath: string
-): ChatSession {
-  const timestamp = new Date('2026-01-01T00:00:00.000Z');
-  return {
-    id: '44444444-4444-4444-8444-444444444444',
-    index: 1,
-    title: 'Matrix merge',
-    createdAt: timestamp,
-    createdAtSource: source === 'global' ? 'composer-metadata' : 'store-metadata',
-    lastUpdatedAt: timestamp,
-    lastUpdatedAtSource: source === 'global' ? 'composer-metadata' : 'store-metadata',
-    messageCount: messages.length,
-    messages,
-    workspaceId: 'matrix-merge',
-    workspacePath,
-    source,
-  };
-}
-
 async function executeMergeOrientationCell(
   scenario:
     | 'Complete Composer/Store merge, Composer-preferred ordering'
     | 'Complete Composer/Store merge, Store-preferred ordering',
   carrier: Carrier
 ): Promise<void> {
-  const preferred = scenario.includes('Composer-preferred') ? 'composer' : 'store';
-  const composer = mergedSession(
-    'global',
-    [
-      mergedMessage({ id: 'composer-anchor', role: 'user', content: 'anchor' }),
-      mergedMessage({ id: null, role: 'assistant', content: 'composer-only' }),
-    ],
-    `/matrix/${carrier}/composer`
-  );
-  const store = mergedSession(
-    'store-complete',
-    [
-      mergedMessage({ id: 'store-gap', role: 'assistant', content: 'store-only' }),
-      mergedMessage({ id: 'store-anchor', role: 'user', content: 'anchor' }),
-    ],
-    `/matrix/${carrier}/store`
-  );
-  const resolved = mergeCrossStackSessions(composer, store, preferred, 1);
-  expect(resolved).toMatchObject({
-    id: composer.id,
-    source: 'global',
-    resolvedSource: 'merged',
-    sources: ['composer', 'store'],
-    preferredSource: preferred,
-    resolution: { state: 'complete' },
+  await withFixture('ch-matrix-merge-', async (fixture) => {
+    const preferred = scenario.includes('Composer-preferred') ? 'composer' : 'store';
+    const id = '44444444-4444-4444-8444-444444444444';
+    const composer: ComposerFixtureSession = {
+      ...composerFixture(fixture, id, 'anchor'),
+      title: 'Matrix merge',
+      messages: [
+        {
+          id: 'composer-anchor-a',
+          role: 'user',
+          content: 'anchor-a',
+          createdAt: 1_783_000_000_000,
+        },
+        {
+          id: null,
+          role: 'assistant',
+          content: 'composer-only',
+          createdAt: 1_783_000_001_000,
+        },
+        {
+          id: 'composer-anchor-b',
+          role: 'user',
+          content: 'anchor-b',
+          createdAt: 1_783_000_002_000,
+        },
+      ],
+    };
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [composer]);
+    writeComposerGlobalSessions(fixture, [composer]);
+
+    const storeDbPath =
+      preferred === 'composer'
+        ? writeStoreDb(
+            fixture,
+            id,
+            [
+              { role: 'user', content: 'anchor-a' },
+              { role: 'assistant', content: 'store-only' },
+              { role: 'user', content: 'anchor-b' },
+            ],
+            'Matrix merge Store source'
+          )
+        : writeStoreDbAtPath(
+            join(fixture.workspaceStorage, 'chats', 'matrix', id, 'store.db'),
+            id,
+            [
+              { role: 'user', content: 'anchor-a' },
+              { role: 'assistant', content: 'store-only' },
+              { role: 'user', content: 'anchor-b' },
+            ],
+            'Matrix merge Store source'
+          );
+    writeStoreMeta(dirname(storeDbPath), {
+      cwd: fixture.projectA,
+      title: 'Matrix merge Store source',
+      hasConversation: true,
+      createdAtMs: 1_783_000_000_000,
+    });
+    if (preferred === 'store') process.env['CURSOR_STORE_ROOT'] = fixture.workspaceStorage;
+    if (carrier === 'Live default path') process.env['CURSOR_DATA_PATH'] = fixture.workspaceStorage;
+    const dataPath = carrier === 'Custom data path' ? fixture.workspaceStorage : undefined;
+    const context = storage.createSessionReadContext({ dataPath });
+    try {
+      const rows = await storage.listSessions(
+        { all: true, limit: 0 },
+        dataPath,
+        undefined,
+        context
+      );
+      const row = rows.find((candidate) => candidate.id === id);
+      expect(row, `${scenario}/${carrier} must expose a real merged row`).toMatchObject({
+        id,
+        resolvedSource: 'merged',
+        preferredSource: preferred,
+      });
+      const resolved = await storage.getSession(id, dataPath, undefined, context, row!.index);
+      expect(resolved).toMatchObject({
+        id,
+        source: 'global',
+        resolvedSource: 'merged',
+        sources: ['composer', 'store'],
+        preferredSource: preferred,
+        resolution: { state: 'complete' },
+      });
+      expect(resolved!.messages.map(({ content }) => content)).toEqual(
+        preferred === 'composer'
+          ? ['anchor-a', 'composer-only', 'store-only', 'anchor-b']
+          : ['anchor-a', 'store-only', 'composer-only', 'anchor-b']
+      );
+      expect(resolved!.messages.find(({ content }) => content === 'anchor-a')?.id).toBe(
+        'composer-anchor-a'
+      );
+      expect(resolved!.messages.find(({ content }) => content === 'anchor-b')?.id).toBe(
+        'composer-anchor-b'
+      );
+    } finally {
+      await context.dispose();
+    }
   });
-  expect(resolved.messages.map(({ content }) => content)).toEqual(
-    expect.arrayContaining(['anchor', 'composer-only', 'store-only'])
-  );
-  expect(resolved.messages.find(({ content }) => content === 'anchor')?.id).toBe('composer-anchor');
 }
 
 async function executeScopedMergeCell(
@@ -727,25 +785,6 @@ async function executeScopedMergeCell(
   });
 }
 
-function replicaInstance(
-  key: string,
-  role: 'composer' | 'store',
-  carrier: Carrier,
-  payload: ReplicaConsumedPayload
-): PhysicalSessionInstance<string> {
-  return {
-    instanceKey: key,
-    logicalSessionId: '66666666-6666-4666-8666-666666666666',
-    sourceRole: role,
-    representation: role === 'composer' ? 'composer-global' : 'store-db',
-    fidelityTier: 'complete',
-    locator: `${carrier}:${key}`,
-    workspacePaths: ['/matrix/replica'],
-    sourceOrder: key === 'candidate-a' ? 1 : 2,
-    loadConsumedPayload: async () => payload,
-  };
-}
-
 async function executeReplicaCell(
   scenario:
     | 'Equivalent same-role Composer replicas'
@@ -755,43 +794,87 @@ async function executeReplicaCell(
     | 'Automatic selection or union of divergent replicas',
   carrier: Carrier
 ): Promise<void> {
-  const role =
-    scenario.includes('Composer') || carrier === 'Supported backup' ? 'composer' : 'store';
-  const divergent = scenario.startsWith('Divergent') || scenario.startsWith('Automatic');
-  const baseline: ReplicaConsumedPayload = {
-    messages: [{ id: 'replica-message', role: 'user', content: 'same' }],
-  };
-  const changed: ReplicaConsumedPayload = divergent
-    ? { messages: [{ id: 'replica-message', role: 'user', content: 'changed' }] }
-    : {
-        messages: [
-          {
-            id: 'replica-message',
-            role: 'user',
-            content: 'same',
-            timestampSource: 'inferred-previous',
-          },
-        ],
+  await withFixture('ch-matrix-replica-', async (fixture) => {
+    const id = '66666666-6666-4666-8666-666666666666';
+    const role =
+      scenario.includes('Composer') || carrier === 'Supported backup' ? 'composer' : 'store';
+    const divergent = scenario.startsWith('Divergent') || scenario.startsWith('Automatic');
+    const baselineContent = 'matrix-equivalent-replica';
+    const candidateContent = divergent ? 'matrix-divergent-replica' : baselineContent;
+
+    if (role === 'composer') {
+      const baseline = composerFixture(fixture, id, baselineContent);
+      const candidate: ComposerFixtureSession = {
+        ...baseline,
+        title: candidateContent,
+        messages: [{ ...baseline.messages[0]!, content: candidateContent }],
       };
-  const record = buildSessionCatalog([
-    replicaInstance('candidate-z', role, carrier, baseline),
-    replicaInstance('candidate-a', role, carrier, changed),
-  ])[0]!;
-  const reconciliation = await reconcileReplicaGroup(record.replicaGroups[0]!, {
-    diagnosticContextId: `matrix:${carrier}:${scenario}`,
+      writeComposerWorkspaceSummary(fixture, 'candidate-z', fixture.projectA, [baseline]);
+      writeComposerWorkspaceSummary(fixture, 'candidate-a', fixture.projectA, [candidate]);
+    } else {
+      const firstDb = writeStoreDbAtPath(
+        join(fixture.storeRoot, 'chats', 'candidate-z', id, 'store.db'),
+        id,
+        [{ role: 'user', content: baselineContent }],
+        'Matrix replica'
+      );
+      const secondDb = writeStoreDbAtPath(
+        join(fixture.storeRoot, 'chats', 'candidate-a', id, 'store.db'),
+        id,
+        [{ role: 'user', content: candidateContent }],
+        'Matrix replica'
+      );
+      for (const dbPath of [firstDb, secondDb]) {
+        writeStoreMeta(dirname(dbPath), {
+          cwd: fixture.projectA,
+          title: 'Matrix replica',
+          hasConversation: true,
+          createdAtMs: 1_783_000_000_000,
+        });
+      }
+    }
+
+    const binding = await carrierBinding(fixture, carrier);
+    const context = storage.createSessionReadContext(binding);
+    try {
+      const rows = await storage.listSessionSummaries(
+        { all: true, limit: 0 },
+        binding.dataPath,
+        binding.backupPath,
+        context
+      );
+      expect(rows, `${scenario}/${carrier} must project exactly one logical row`).toHaveLength(1);
+      const row = rows[0]!;
+      expect(row.id).toBe(id);
+      if (divergent) {
+        expect(row).toMatchObject({
+          resolutionState: 'ambiguous',
+          sourceRoles: [role],
+          occurrenceCount: 2,
+        });
+        await expect(
+          storage.getSession(id, binding.dataPath, binding.backupPath, context, row.index)
+        ).rejects.toBeInstanceOf(SessionAmbiguityError);
+      } else {
+        expect(row.sourceInstances).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ sourceRole: role, state: 'contributed' }),
+            expect.objectContaining({ sourceRole: role, state: 'equivalent-replica' }),
+          ])
+        );
+        const hydrated = await storage.getSession(
+          id,
+          binding.dataPath,
+          binding.backupPath,
+          context,
+          row.index
+        );
+        expect(hydrated?.messages.map(({ content }) => content)).toContain(baselineContent);
+      }
+    } finally {
+      await context.dispose();
+    }
   });
-  if (divergent) {
-    expect(reconciliation).toMatchObject({ state: 'divergent' });
-    await expect(hydrateSelectedReplica(reconciliation)).rejects.toBeInstanceOf(
-      SessionAmbiguityError
-    );
-  } else {
-    expect(reconciliation).toMatchObject({
-      state: 'equivalent',
-      selected: { instanceKey: 'candidate-a' },
-    });
-    await expect(hydrateSelectedReplica(reconciliation)).resolves.toMatchObject(baseline);
-  }
 }
 
 async function executeNotApplicableCell(scenario: string): Promise<void> {
@@ -842,7 +925,7 @@ async function executeCellEvidence(cell: ReturnType<typeof cells>[number]): Prom
     scenario === 'Store database conversation' ||
     scenario === 'Store transcript with no discovered or expected database' ||
     scenario === 'Store transcript after an expected database fails' ||
-    scenario === 'Store transcript selected instead of a usable Store database' ||
+    scenario === 'Usable Store database coexists with a Store transcript' ||
     scenario === 'Store metadata indicating a possible conversation but no usable payload'
   ) {
     await executeStoreCell(scenario, cell.carrier);
@@ -923,8 +1006,8 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
       expect(cell.evidence.classification, cell.evidence.evidenceId).toBe(cell.classification);
       expect(cell.evidence.evidenceId).toMatch(/^[a-z0-9-]+\/[a-z0-9-]+$/u);
     }
-    expect(mapped.filter(({ classification }) => classification === 'Required')).toHaveLength(32);
-    expect(mapped.filter(({ classification }) => classification === 'Unsupported')).toHaveLength(5);
+    expect(mapped.filter(({ classification }) => classification === 'Required')).toHaveLength(34);
+    expect(mapped.filter(({ classification }) => classification === 'Unsupported')).toHaveLength(3);
     expect(mapped.filter(({ classification }) => classification === 'N/A')).toHaveLength(11);
   });
 
@@ -1056,4 +1139,102 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
       ).toEqual([]);
     });
   }, 60_000);
+
+  it('round-trips a workspace-scoped backup index through the built CLI', async () => {
+    await withFixture('ch-matrix-backup-cli-', async (fixture) => {
+      const { sessionA, sessionB } = seedConflictingWorkspaceCorpus(fixture);
+      const backupPath = await createFixtureBackup(fixture, 'matrix-scoped-cli.zip');
+      const base = ['--json', '--workspace', fixture.projectA] as const;
+      const env = { CURSOR_STORE_ROOT: fixture.storeRoot };
+
+      const list = await runBuiltCli([...base, 'list', '--all', '--backup', backupPath], {
+        env,
+        timeoutMs: 20_000,
+      });
+      expect(list).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      const listed = JSON.parse(list.stdout) as {
+        indexScope: string;
+        indexWorkspacePath: string;
+        sessions: Array<{ index: number; id: string }>;
+      };
+      expect(listed).toMatchObject({
+        indexScope: 'workspace',
+        indexWorkspacePath: fixture.projectA,
+        sessions: [{ index: 1, id: sessionA.id }],
+      });
+      expect(listed.sessions.some(({ id }) => id === sessionB.id)).toBe(false);
+
+      const show = await runBuiltCli([...base, 'show', '1', '--backup', backupPath], {
+        env,
+        timeoutMs: 20_000,
+      });
+      expect(show).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(show.stdout)).toMatchObject({
+        id: sessionA.id,
+        index: 1,
+        indexScope: 'workspace',
+        indexWorkspacePath: fixture.projectA,
+      });
+      expect(show.stdout).toContain('needle-a');
+      expect(show.stdout).not.toContain('needle-b');
+
+      const searchA = await runBuiltCli([...base, 'search', 'needle-a', '--backup', backupPath], {
+        env,
+        timeoutMs: 20_000,
+      });
+      expect(searchA).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(searchA.stdout)).toMatchObject({
+        indexScope: 'workspace',
+        indexWorkspacePath: fixture.projectA,
+        results: [
+          expect.objectContaining({
+            index: 1,
+            indexScope: 'workspace',
+            sessionId: sessionA.id,
+          }),
+        ],
+      });
+
+      const searchB = await runBuiltCli([...base, 'search', 'needle-b', '--backup', backupPath], {
+        env,
+        timeoutMs: 20_000,
+      });
+      expect(searchB).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(searchB.stdout)).toMatchObject({ count: 0, results: [] });
+
+      const outputPath = join(fixture.root, 'matrix-scoped-backup-export.json');
+      const exported = await runBuiltCli(
+        [
+          ...base,
+          'export',
+          '1',
+          '--backup',
+          backupPath,
+          '--format',
+          'json',
+          '--output',
+          outputPath,
+          '--force',
+        ],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(exported).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(exported.stdout)).toMatchObject({
+        files: [
+          expect.objectContaining({
+            index: 1,
+            indexScope: 'workspace',
+            indexWorkspacePath: fixture.projectA,
+            sessionId: sessionA.id,
+            path: outputPath,
+          }),
+        ],
+      });
+      const exportedSession = readFileSync(outputPath, 'utf8');
+      expect(exportedSession).toContain(sessionA.id);
+      expect(exportedSession).toContain('needle-a');
+      expect(exportedSession).not.toContain(sessionB.id);
+      expect(exportedSession).not.toContain('needle-b');
+    });
+  }, 90_000);
 });
