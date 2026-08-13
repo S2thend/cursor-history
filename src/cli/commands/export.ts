@@ -15,7 +15,7 @@ import {
   formatOperationDiagnostics,
 } from '../formatters/index.js';
 import type { ExportedSessionFile } from '../formatters/index.js';
-import { FileExistsError, handleCommandError, handleError, CliError, ExitCode } from '../errors.js';
+import { FileExistsError, handleCommandError, CliError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 import { resolveCommandSession } from './session-lookup.js';
 import type { ChatSessionSummary, SourceReadLimitsOverride } from '../../core/types.js';
@@ -26,6 +26,7 @@ import {
   createSessionAmbiguityDiagnostic,
 } from '../diagnostics.js';
 import { SessionAmbiguityError } from '../../core/errors.js';
+import { adaptScopedBackupReadError } from '../backup-read-error.js';
 
 interface ExportCommandOptions {
   output?: string;
@@ -69,7 +70,7 @@ export function registerExportCommand(program: Command): void {
           const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
 
           // T037: Validate backup if exporting from backup.
-          if (backupPath) {
+          if (backupPath && !workspaceFilter) {
             const validation = await validateBackup(backupPath, { sourceReadLimits });
             if (validation.status === 'invalid') {
               if (useJson) {
@@ -310,7 +311,10 @@ export function registerExportCommand(program: Command): void {
             );
           }
         } catch (error) {
-          handleError(error, { json: useJson });
+          handleCommandError(
+            adaptScopedBackupReadError(error, Boolean(backupPath && workspaceFilter)),
+            { json: useJson }
+          );
         }
       }
     );

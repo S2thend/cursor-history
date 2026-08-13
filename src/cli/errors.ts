@@ -138,6 +138,7 @@ export function mapSessionIntegrityError(error: SessionIntegrityError): CliError
           error.code === 'RESTORE_ROLLBACK_INCOMPLETE' ||
           error.code === 'BACKUP_PUBLISHED_CLEANUP_FAILED' ||
           error.code === 'BACKUP_PUBLISHED_PERMISSION_FAILED' ||
+          error.code === 'BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED' ||
           error.code === 'DATABASE_CAPABILITY_MISSING' ||
           error.code === 'NO_CAPABLE_DATABASE_DRIVER'
         ? ExitCode.IO_ERROR
@@ -187,6 +188,7 @@ export const CLI_FATAL_CATEGORY_REGISTRY = Object.freeze({
   databaseCapability: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   backupPublishedPermission: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   backupPublishedCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  backupWorkspaceScopeMetadata: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   temporaryArtifactCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   restoreRollbackIncomplete: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
 });

@@ -14,6 +14,7 @@ import {
 import {
   BackupPublishedPermissionError,
   BackupPublishedCleanupError,
+  BackupWorkspaceScopeMetadataError,
   RestoreRollbackError,
   TemporaryArtifactCleanupError,
   SessionAmbiguityError,
@@ -276,6 +277,11 @@ describe('feature-016 typed error mapping', () => {
       unverifiedResidueCount: 0,
       unverifiedResiduePaths: [],
     });
+
+    const legacyScopedBackup = mapSessionIntegrityError(new BackupWorkspaceScopeMetadataError(2));
+    expect(legacyScopedBackup.code).toBe('BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED');
+    expect(legacyScopedBackup.exitCode).toBe(ExitCode.IO_ERROR);
+    expect(legacyScopedBackup.details).toMatchObject({ workspaceCount: 2 });
 
     const rollback = mapSessionIntegrityError(
       new RestoreRollbackError(

@@ -91,6 +91,7 @@ import {
   generateBackupFilename,
   scanDatabaseFiles,
   createManifest,
+  serializeBackupManifest,
   checkDiskSpace,
   readBackupManifest,
   readBackupEntryBuffer,
@@ -252,6 +253,60 @@ describe('createManifest', () => {
     expect(manifest.producer).toBe(packageJson.version);
     expect(manifest.cursorHistoryVersion).toBe(packageJson.version);
   });
+
+  it('keeps the v1 envelope while independently versioning additive workspace inventory', () => {
+    const manifest = createManifest(
+      [],
+      { totalSize: 0, sessionCount: 0, workspaceCount: 1 },
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'workspace-a',
+            workspacePath: '/project/a',
+            sessionIds: [],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      }
+    );
+
+    expect(manifest.version).toBe('1.0.0');
+    expect(manifest.composerWorkspaceInventory?.schemaVersion).toBe(1);
+  });
+
+  it('accepts exactly the reader metadata ceiling and rejects the first byte above it', () => {
+    const base = createManifest(
+      [],
+      { totalSize: 0, sessionCount: 0, workspaceCount: 0 },
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '',
+            sessionIds: [],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      }
+    );
+    const ceiling = 16 * 1024 * 1024;
+    const baseBytes = serializeBackupManifest(base).byteLength;
+    const exactPath = '/'.padEnd(ceiling - baseBytes, 'x');
+    const withPath = (workspacePath: string) => ({
+      ...base,
+      composerWorkspaceInventory: {
+        schemaVersion: 1 as const,
+        workspaces: [{ ...base.composerWorkspaceInventory!.workspaces[0]!, workspacePath }],
+      },
+    });
+
+    expect(serializeBackupManifest(withPath(exactPath))).toHaveLength(ceiling);
+    expect(() => serializeBackupManifest(withPath(`${exactPath}x`))).toThrow('metadata limit');
+  });
 });
 
 // =============================================================================
@@ -370,6 +425,139 @@ describe('readBackupManifest', () => {
     expect(archive.checksumEntry).not.toHaveBeenCalled();
   });
 
+  it('accepts a canonically ordered complete Composer workspace inventory', async () => {
+    const workspaceFile = {
+      path: 'workspaceStorage/ws/state.vscdb',
+      size: 1,
+      checksum: `sha256:${'0'.repeat(64)}`,
+      type: 'workspace-db',
+    };
+    const archive = mockArchive({
+      'manifest.json': Buffer.from(
+        JSON.stringify({
+          version: '1.0.0',
+          files: [workspaceFile],
+          composerWorkspaceInventory: {
+            schemaVersion: 1,
+            workspaces: [
+              {
+                workspaceId: 'ws',
+                workspacePath: '/projects/a',
+                sessionIds: ['a-session', 'b-session'],
+                globalCounterpartSessionIds: [],
+                linkedGlobalSessionIds: [],
+              },
+            ],
+          },
+        })
+      ),
+    });
+    openBoundedZipArchiveMock.mockResolvedValueOnce(archive);
+
+    await expect(readBackupManifest('/backup.zip')).resolves.toMatchObject({
+      composerWorkspaceInventory: {
+        schemaVersion: 1,
+        workspaces: [{ workspaceId: 'ws', sessionIds: ['a-session', 'b-session'] }],
+      },
+    });
+  });
+
+  it.each([
+    [
+      'incomplete coverage',
+      { schemaVersion: 1, workspaces: [] },
+      'does not cover every workspace database',
+    ],
+    [
+      'unordered session IDs',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: ['b-session', 'a-session'],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      },
+      'session IDs are not canonically ordered and unique',
+    ],
+    [
+      'global counterpart IDs outside the materialized set',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: ['materialized-session'],
+            globalCounterpartSessionIds: ['global-only-session'],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      },
+      'has a global counterpart without a materialized workspace session',
+    ],
+    [
+      'linked global IDs without a global database',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: [],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: ['global-session'],
+          },
+        ],
+      },
+      'declares global sessions without a global database entry',
+    ],
+    [
+      'overlapping materialized and linked global IDs',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: ['same-session'],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: ['same-session'],
+          },
+        ],
+      },
+      'overlaps materialized and linked global session IDs',
+    ],
+  ] as const)(
+    'rejects a Composer workspace inventory with %s',
+    async (_label, inventory, error) => {
+      openBoundedZipArchiveMock.mockResolvedValueOnce(
+        mockArchive({
+          'manifest.json': Buffer.from(
+            JSON.stringify({
+              version: '1.0.0',
+              files: [
+                {
+                  path: 'workspaceStorage/ws/state.vscdb',
+                  size: 1,
+                  checksum: `sha256:${'0'.repeat(64)}`,
+                  type: 'workspace-db',
+                },
+              ],
+              composerWorkspaceInventory: inventory,
+            })
+          ),
+        })
+      );
+
+      await expect(readBackupManifest('/backup.zip')).rejects.toThrow(error);
+    }
+  );
+
   it('propagates immutable source-read options to the bounded ZIP open', async () => {
     const controller = new AbortController();
     const archive = mockArchive({});
@@ -396,7 +584,24 @@ describe('readBackupManifest', () => {
 
 describe('readBackupEntryBuffer', () => {
   it('reads metadata through the bounded archive and returns null for a missing entry', async () => {
-    const archive = mockArchive({ 'workspaceStorage/ws/workspace.json': Buffer.from('{"x":1}') });
+    const workspaceJson = Buffer.from('{"x":1}');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        version: '1.0.0',
+        files: [
+          {
+            path: 'workspaceStorage/ws/workspace.json',
+            size: workspaceJson.length,
+            checksum: computeChecksum(workspaceJson),
+            type: 'workspace-json',
+          },
+        ],
+      })
+    );
+    const archive = mockArchive({
+      'manifest.json': manifest,
+      'workspaceStorage/ws/workspace.json': workspaceJson,
+    });
     openBoundedZipArchiveMock.mockResolvedValueOnce(archive);
     await expect(
       readBackupEntryBuffer('/backup.zip', 'workspaceStorage/ws/workspace.json', {
@@ -409,10 +614,67 @@ describe('readBackupEntryBuffer', () => {
     );
     expect(archive.close).toHaveBeenCalledOnce();
 
-    const missing = mockArchive({});
+    const missing = mockArchive({
+      'manifest.json': Buffer.from(JSON.stringify({ version: '1.0.0', files: [] })),
+    });
     openBoundedZipArchiveMock.mockResolvedValueOnce(missing);
     await expect(readBackupEntryBuffer('/backup.zip', 'missing.json')).resolves.toBeNull();
     expect(missing.close).toHaveBeenCalledOnce();
+  });
+
+  it('rejects selected metadata whose bytes do not match the manifest', async () => {
+    const declared = Buffer.from('{"folder":"/safe"}');
+    const corrupted = Buffer.from('{"folder":"/evil"}');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        version: '1.0.0',
+        files: [
+          {
+            path: 'workspaceStorage/ws/workspace.json',
+            size: corrupted.length,
+            checksum: computeChecksum(declared),
+            type: 'workspace-json',
+          },
+        ],
+      })
+    );
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': manifest,
+        'workspaceStorage/ws/workspace.json': corrupted,
+      })
+    );
+
+    await expect(
+      readBackupEntryBuffer('/backup.zip', 'workspaceStorage/ws/workspace.json')
+    ).rejects.toThrow('checksum does not match');
+  });
+
+  it('accepts a legacy uppercase checksum during lazy metadata validation', async () => {
+    const workspaceJson = Buffer.from('{"folder":"/safe"}');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        version: '1.0.0',
+        files: [
+          {
+            path: 'workspaceStorage/ws/workspace.json',
+            size: workspaceJson.length,
+            checksum: computeChecksum(workspaceJson).toUpperCase(),
+            type: 'workspace-json',
+          },
+        ],
+      })
+    );
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': manifest,
+        'workspaceStorage/ws/workspace.json': workspaceJson,
+      })
+    );
+
+    await expect(
+      readBackupEntryBuffer('/backup.zip', 'workspaceStorage/ws/workspace.json')
+    ).resolves.toEqual(workspaceJson);
   });
 });
 

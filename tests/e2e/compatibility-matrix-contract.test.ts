@@ -1,9 +1,10 @@
 import { dirname, join, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import JSZip from 'jszip';
 
-import { readBackupManifest } from '../../src/core/backup.js';
+import { computeChecksum, readBackupManifest } from '../../src/core/backup.js';
 import { SessionAmbiguityError } from '../../src/core/errors.js';
 import * as storage from '../../src/core/storage.js';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
@@ -48,6 +49,91 @@ const CARRIERS = Object.freeze([
   'Custom data path',
   'Supported backup',
 ] as const);
+
+async function rewriteBackupEntries(
+  sourcePath: string,
+  destinationPath: string,
+  replacements: Readonly<Record<string, Buffer>>,
+  updateManifest: boolean
+): Promise<void> {
+  const zip = await JSZip.loadAsync(readFileSync(sourcePath));
+  const manifestEntry = zip.file('manifest.json');
+  if (!manifestEntry) throw new Error('Synthetic backup has no manifest.');
+  const manifest = JSON.parse(await manifestEntry.async('string')) as {
+    files: Array<{ path: string; size: number; checksum: string }>;
+  };
+  for (const [entryPath, replacement] of Object.entries(replacements)) {
+    if (!zip.file(entryPath)) throw new Error(`Synthetic backup omitted ${entryPath}.`);
+    zip.file(entryPath, replacement);
+    if (!updateManifest) continue;
+    const file = manifest.files.find(({ path }) => path === entryPath);
+    if (!file) throw new Error(`Synthetic manifest omitted ${entryPath}.`);
+    file.size = replacement.length;
+    file.checksum = computeChecksum(replacement);
+  }
+  zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+  writeFileSync(
+    destinationPath,
+    await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }),
+    { mode: 0o600 }
+  );
+}
+
+async function corruptBackupEntryKeepingManifest(
+  sourcePath: string,
+  destinationPath: string,
+  entryPath: string
+): Promise<void> {
+  const zip = await JSZip.loadAsync(readFileSync(sourcePath));
+  const entry = zip.file(entryPath);
+  if (!entry) throw new Error(`Synthetic backup omitted ${entryPath}.`);
+  const corrupted = Buffer.from(await entry.async('nodebuffer'));
+  if (corrupted.length === 0) throw new Error(`Synthetic backup entry ${entryPath} is empty.`);
+  corrupted[0] = corrupted[0]! ^ 0xff;
+  zip.file(entryPath, corrupted);
+  writeFileSync(
+    destinationPath,
+    await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }),
+    { mode: 0o600 }
+  );
+}
+
+async function removeBackupEntryKeepingManifest(
+  sourcePath: string,
+  destinationPath: string,
+  entryPath: string
+): Promise<void> {
+  const zip = await JSZip.loadAsync(readFileSync(sourcePath));
+  if (!zip.file(entryPath)) throw new Error(`Synthetic backup omitted ${entryPath}.`);
+  zip.remove(entryPath);
+  writeFileSync(
+    destinationPath,
+    await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }),
+    { mode: 0o600 }
+  );
+}
+
+async function mismatchBackupEntrySizeKeepingArchive(
+  sourcePath: string,
+  destinationPath: string,
+  entryPath: string
+): Promise<void> {
+  const zip = await JSZip.loadAsync(readFileSync(sourcePath));
+  const manifestEntry = zip.file('manifest.json');
+  if (!manifestEntry) throw new Error('Synthetic backup has no manifest.');
+  const manifest = JSON.parse(await manifestEntry.async('string')) as {
+    files: Array<{ path: string; size: number; checksum: string }>;
+  };
+  const file = manifest.files.find(({ path }) => path === entryPath);
+  if (!file) throw new Error(`Synthetic manifest omitted ${entryPath}.`);
+  file.size += 1;
+  zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+  writeFileSync(
+    destinationPath,
+    await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }),
+    { mode: 0o600 }
+  );
+}
 
 type Carrier = (typeof CARRIERS)[number];
 type Classification = 'Required' | 'Unsupported' | 'N/A';
@@ -974,11 +1060,12 @@ async function executeMergeOrientationCell(
         preferredSource: preferred,
         resolution: { state: 'complete' },
       });
-      expect(resolved!.messages.map(({ content }) => content)).toEqual(
-        preferred === 'composer'
-          ? ['anchor-a', 'composer-only', 'store-only', 'anchor-b']
-          : ['anchor-a', 'store-only', 'composer-only', 'anchor-b']
-      );
+      expect(resolved!.messages.map(({ content }) => content)).toEqual([
+        'anchor-a',
+        'composer-only',
+        'store-only',
+        'anchor-b',
+      ]);
       expect(resolved!.messages.find(({ content }) => content === 'anchor-a')?.id).toBe(
         'composer-anchor-a'
       );
@@ -1424,14 +1511,153 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
     });
   }, 60_000);
 
+  it('surfaces an unlinked global-only Composer session through built CLI reads and exports', async () => {
+    await withFixture('ch-matrix-backup-global-catch-all-', async (fixture) => {
+      const workspaceSession: ComposerFixtureSession = {
+        id: 'aaaaaaaa-1000-0000-0000-000000000016',
+        title: 'Workspace-backed control session',
+        workspacePath: fixture.projectA,
+        createdAt: 1_786_100_000_000,
+        messages: [
+          {
+            role: 'user',
+            content: 'workspace-backed control payload',
+            createdAt: 1_786_100_000_000,
+          },
+        ],
+      };
+      const globalOnly: ComposerFixtureSession = {
+        id: 'abababab-1000-0000-0000-000000000016',
+        title: 'Unlinked global catch-all session',
+        workspacePath: fixture.projectB,
+        createdAt: 1_786_200_000_000,
+        messages: [
+          {
+            role: 'user',
+            content: 'built-cli-unlinked-global-needle',
+            createdAt: 1_786_200_000_000,
+          },
+        ],
+      };
+      writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [workspaceSession]);
+      writeComposerGlobalSessions(fixture, [workspaceSession, globalOnly]);
+      const backupPath = await createFixtureBackup(fixture, 'matrix-global-catch-all.zip');
+      const env = { CURSOR_STORE_ROOT: fixture.storeRoot };
+
+      const list = await runBuiltCli(['--json', 'list', '--all', '--backup', backupPath], {
+        env,
+        timeoutMs: 20_000,
+      });
+      expect(list).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      const listed = JSON.parse(list.stdout) as {
+        indexScope: string;
+        sessions: Array<{
+          index: number;
+          id: string;
+          source: string;
+          resolutionState: string;
+        }>;
+      };
+      const globalOnlyRow = listed.sessions.find(({ id }) => id === globalOnly.id);
+      expect(listed.indexScope).toBe('global');
+      expect(globalOnlyRow).toMatchObject({
+        id: globalOnly.id,
+        source: 'global',
+        resolutionState: 'complete',
+      });
+      expect(listed.sessions.filter(({ id }) => id === globalOnly.id)).toHaveLength(1);
+
+      const show = await runBuiltCli(
+        ['--json', 'show', String(globalOnlyRow!.index), '--backup', backupPath],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(show).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(show.stdout)).toMatchObject({
+        id: globalOnly.id,
+        source: 'global',
+        messages: [expect.objectContaining({ content: 'built-cli-unlinked-global-needle' })],
+      });
+
+      const search = await runBuiltCli(
+        ['--json', 'search', 'built-cli-unlinked-global-needle', '--backup', backupPath],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(search).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(search.stdout)).toMatchObject({
+        results: [expect.objectContaining({ sessionId: globalOnly.id })],
+      });
+
+      const jsonPath = join(fixture.root, 'global-catch-all.json');
+      const markdownPath = join(fixture.root, 'global-catch-all.md');
+      for (const [format, outputPath] of [
+        ['json', jsonPath],
+        ['markdown', markdownPath],
+      ] as const) {
+        const exported = await runBuiltCli(
+          [
+            '--json',
+            'export',
+            globalOnly.id,
+            '--backup',
+            backupPath,
+            '--format',
+            format,
+            '--output',
+            outputPath,
+            '--force',
+          ],
+          { env, timeoutMs: 20_000 }
+        );
+        expect(exported).toMatchObject({ status: 0, stderr: '', timedOut: false });
+        expect(readFileSync(outputPath, 'utf8')).toContain('built-cli-unlinked-global-needle');
+      }
+
+      const scoped = await runBuiltCli(
+        ['--json', '--workspace', fixture.projectA, 'list', '--all', '--backup', backupPath],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(scoped).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(
+        (JSON.parse(scoped.stdout) as { sessions: Array<{ id: string }> }).sessions.map(
+          ({ id }) => id
+        )
+      ).toEqual([workspaceSession.id]);
+    });
+  }, 60_000);
+
   it('round-trips a workspace-scoped backup index through the built CLI', async () => {
     await withFixture('ch-matrix-backup-cli-', async (fixture) => {
       const { sessionA, sessionB } = seedConflictingWorkspaceCorpus(fixture);
       const backupPath = await createFixtureBackup(fixture, 'matrix-scoped-cli.zip');
+      const scopedBackupPath = join(fixture.root, 'matrix-scoped-cli-offscope-poison.zip');
+      await rewriteBackupEntries(
+        backupPath,
+        scopedBackupPath,
+        {
+          'globalStorage/state.vscdb': Buffer.from('poison global carrier'),
+          'workspaceStorage/workspace-b/state.vscdb': Buffer.from('poison workspace B carrier'),
+        },
+        true
+      );
+      const missingGlobalPath = join(fixture.root, 'matrix-scoped-cli-missing-global.zip');
+      const missingOffscopePath = join(
+        fixture.root,
+        'matrix-scoped-cli-missing-global-and-workspace-b.zip'
+      );
+      await removeBackupEntryKeepingManifest(
+        backupPath,
+        missingGlobalPath,
+        'globalStorage/state.vscdb'
+      );
+      await removeBackupEntryKeepingManifest(
+        missingGlobalPath,
+        missingOffscopePath,
+        'workspaceStorage/workspace-b/state.vscdb'
+      );
       const base = ['--json', '--workspace', fixture.projectA] as const;
       const env = { CURSOR_STORE_ROOT: fixture.storeRoot };
 
-      const list = await runBuiltCli([...base, 'list', '--all', '--backup', backupPath], {
+      const list = await runBuiltCli([...base, 'list', '--all', '--backup', scopedBackupPath], {
         env,
         timeoutMs: 20_000,
       });
@@ -1439,35 +1665,71 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
       const listed = JSON.parse(list.stdout) as {
         indexScope: string;
         indexWorkspacePath: string;
-        sessions: Array<{ index: number; id: string }>;
+        sessions: Array<{
+          index: number;
+          id: string;
+          workspacePath: string;
+          source: string;
+          resolutionState: string;
+          resolution: Record<string, unknown>;
+          sourceInstances: Array<Record<string, unknown>>;
+        }>;
       };
       expect(listed).toMatchObject({
         indexScope: 'workspace',
         indexWorkspacePath: fixture.projectA,
-        sessions: [{ index: 1, id: sessionA.id }],
+        sessions: [
+          {
+            index: 1,
+            id: sessionA.id,
+            workspacePath: fixture.projectA,
+            source: 'workspace-fallback',
+            resolutionState: 'partial',
+            resolution: {
+              state: 'partial',
+              loadedSourceRoles: ['composer'],
+              omittedSourceRoles: ['composer'],
+              reasonCodes: expect.arrayContaining(['workspace-scope-omitted']),
+            },
+            sourceInstances: expect.arrayContaining([
+              expect.objectContaining({
+                representation: 'composer-global',
+                state: 'omitted-by-scope',
+              }),
+            ]),
+          },
+        ],
       });
       expect(listed.sessions.some(({ id }) => id === sessionB.id)).toBe(false);
+      const listedA = listed.sessions[0]!;
 
-      const show = await runBuiltCli([...base, 'show', '1', '--backup', backupPath], {
+      const show = await runBuiltCli([...base, 'show', '1', '--backup', scopedBackupPath], {
         env,
         timeoutMs: 20_000,
       });
       expect(show).toMatchObject({ status: 0, stderr: '', timedOut: false });
-      expect(JSON.parse(show.stdout)).toMatchObject({
+      const shown = JSON.parse(show.stdout) as Record<string, unknown>;
+      expect(shown).toMatchObject({
         id: sessionA.id,
         index: 1,
         indexScope: 'workspace',
         indexWorkspacePath: fixture.projectA,
+        workspacePath: fixture.projectA,
+        source: listedA.source,
+        resolutionState: listedA.resolutionState,
+        resolution: listedA.resolution,
+        sourceInstances: listedA.sourceInstances,
       });
-      expect(show.stdout).toContain('needle-a');
+      expect(show.stdout).toContain('Workspace A older session');
+      expect(show.stdout).not.toContain('needle-a');
       expect(show.stdout).not.toContain('needle-b');
 
-      const searchA = await runBuiltCli([...base, 'search', 'needle-a', '--backup', backupPath], {
-        env,
-        timeoutMs: 20_000,
-      });
-      expect(searchA).toMatchObject({ status: 0, stderr: '', timedOut: false });
-      expect(JSON.parse(searchA.stdout)).toMatchObject({
+      const searchWorkspaceA = await runBuiltCli(
+        [...base, 'search', 'Workspace A older session', '--backup', scopedBackupPath],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(searchWorkspaceA).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(searchWorkspaceA.stdout)).toMatchObject({
         indexScope: 'workspace',
         indexWorkspacePath: fixture.projectA,
         results: [
@@ -1479,10 +1741,25 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
         ],
       });
 
-      const searchB = await runBuiltCli([...base, 'search', 'needle-b', '--backup', backupPath], {
-        env,
-        timeoutMs: 20_000,
+      const searchA = await runBuiltCli(
+        [...base, 'search', 'needle-a', '--backup', scopedBackupPath],
+        {
+          env,
+          timeoutMs: 20_000,
+        }
+      );
+      expect(searchA).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(searchA.stdout)).toMatchObject({
+        indexScope: 'workspace',
+        indexWorkspacePath: fixture.projectA,
+        count: 0,
+        results: [],
       });
+
+      const searchB = await runBuiltCli(
+        [...base, 'search', 'needle-b', '--backup', scopedBackupPath],
+        { env, timeoutMs: 20_000 }
+      );
       expect(searchB).toMatchObject({ status: 0, stderr: '', timedOut: false });
       expect(JSON.parse(searchB.stdout)).toMatchObject({ count: 0, results: [] });
 
@@ -1493,7 +1770,7 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
           'export',
           '1',
           '--backup',
-          backupPath,
+          scopedBackupPath,
           '--format',
           'json',
           '--output',
@@ -1515,10 +1792,119 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
         ],
       });
       const exportedSession = readFileSync(outputPath, 'utf8');
-      expect(exportedSession).toContain(sessionA.id);
-      expect(exportedSession).toContain('needle-a');
+      const exportedValue = JSON.parse(exportedSession) as Record<string, unknown>;
+      expect(exportedValue).toMatchObject({
+        id: sessionA.id,
+        index: 1,
+        indexScope: 'workspace',
+        indexWorkspacePath: fixture.projectA,
+        workspacePath: fixture.projectA,
+        source: listedA.source,
+        resolution: listedA.resolution,
+        sourceInstances: listedA.sourceInstances,
+      });
+      expect(exportedSession).toContain('Workspace A older session');
+      expect(exportedSession).not.toContain('needle-a');
       expect(exportedSession).not.toContain(sessionB.id);
       expect(exportedSession).not.toContain('needle-b');
+
+      const missingCarrierList = await runBuiltCli(
+        [...base, 'list', '--all', '--backup', missingOffscopePath],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(missingCarrierList).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(
+        (JSON.parse(missingCarrierList.stdout) as { sessions: Array<{ id: string }> }).sessions.map(
+          ({ id }) => id
+        )
+      ).toEqual([sessionA.id]);
+
+      const missingCarrierShow = await runBuiltCli(
+        [...base, 'show', '1', '--backup', missingOffscopePath],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(missingCarrierShow).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(missingCarrierShow.stdout)).toMatchObject({ id: sessionA.id });
+
+      const missingCarrierSearch = await runBuiltCli(
+        [...base, 'search', 'Workspace A older session', '--backup', missingOffscopePath],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(missingCarrierSearch).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(missingCarrierSearch.stdout)).toMatchObject({
+        results: [expect.objectContaining({ sessionId: sessionA.id })],
+      });
+
+      const missingCarrierExportPath = join(
+        fixture.root,
+        'matrix-scoped-backup-missing-carriers-export.json'
+      );
+      const missingCarrierExport = await runBuiltCli(
+        [
+          ...base,
+          'export',
+          '1',
+          '--backup',
+          missingOffscopePath,
+          '--format',
+          'json',
+          '--output',
+          missingCarrierExportPath,
+          '--force',
+        ],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(missingCarrierExport).toMatchObject({ status: 0, stderr: '', timedOut: false });
+      expect(JSON.parse(readFileSync(missingCarrierExportPath, 'utf8'))).toMatchObject({
+        id: sessionA.id,
+      });
+
+      const selectedEntry = 'workspaceStorage/workspace-a/state.vscdb';
+      const staleChecksumPath = join(fixture.root, 'matrix-scoped-cli-selected-stale-sha.zip');
+      const staleSizePath = join(fixture.root, 'matrix-scoped-cli-selected-stale-size.zip');
+      const missingSelectedPath = join(fixture.root, 'matrix-scoped-cli-selected-missing.zip');
+      await corruptBackupEntryKeepingManifest(backupPath, staleChecksumPath, selectedEntry);
+      await mismatchBackupEntrySizeKeepingArchive(backupPath, staleSizePath, selectedEntry);
+      await removeBackupEntryKeepingManifest(backupPath, missingSelectedPath, selectedEntry);
+
+      for (const [failureKind, invalidPath] of [
+        ['stale-sha', staleChecksumPath],
+        ['stale-size', staleSizePath],
+        ['missing-entry', missingSelectedPath],
+      ] as const) {
+        const rejectedExportPath = join(fixture.root, `must-not-export-${failureKind}.json`);
+        const corruptCommands = [
+          [...base, 'list', '--all', '--backup', invalidPath],
+          [...base, 'show', '1', '--backup', invalidPath],
+          [...base, 'search', 'Workspace A older session', '--backup', invalidPath],
+          [
+            ...base,
+            'export',
+            '1',
+            '--backup',
+            invalidPath,
+            '--format',
+            'json',
+            '--output',
+            rejectedExportPath,
+            '--force',
+          ],
+        ];
+        const envelopes: Array<Record<string, unknown>> = [];
+        for (const command of corruptCommands) {
+          const rejected = await runBuiltCli(command, { env, timeoutMs: 20_000 });
+          expect(rejected).toMatchObject({ status: 3, stdout: '', timedOut: false });
+          const envelope = JSON.parse(rejected.stderr) as Record<string, unknown>;
+          expect(envelope).toMatchObject({
+            error: 'Invalid backup',
+            errors: [expect.any(String)],
+            code: 'CLI_NOT_FOUND',
+          });
+          envelopes.push(envelope);
+        }
+        expect(envelopes.slice(1)).toEqual(envelopes.slice(1).map(() => envelopes[0]!));
+        expect(existsSync(rejectedExportPath)).toBe(false);
+      }
     });
   }, 90_000);
 });

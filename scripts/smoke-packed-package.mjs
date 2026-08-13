@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   cpSync,
@@ -10,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -264,12 +266,25 @@ try {
 
   const storeRoot = join(workspace, 'synthetic-store');
   cpSync(join(repositoryRoot, 'tests/fixtures/store-root'), storeRoot, { recursive: true });
+  const scopedWorkspace = '/work/a';
+  const fixtureChatHash = '46d408964d3ec2a21d9a23d01b13d82c';
+  const fixtureProjectDirectory = 'd-1-yuyu-proj-cursor-history';
+  const scopedChatHash = createHash('md5').update(scopedWorkspace).digest('hex');
+  const scopedProjectDirectory = scopedWorkspace.replace(/^\/+|\/+$/gu, '').replace(/[/:]+/gu, '-');
+  renameSync(join(storeRoot, 'chats', fixtureChatHash), join(storeRoot, 'chats', scopedChatHash));
+  renameSync(
+    join(storeRoot, 'projects', fixtureProjectDirectory),
+    join(storeRoot, 'projects', scopedProjectDirectory)
+  );
   const scopedMetaPath = join(
     storeRoot,
-    'chats/46d408964d3ec2a21d9a23d01b13d82c/aaaaaaaa-0000-0000-0000-000000000001/meta.json'
+    'chats',
+    scopedChatHash,
+    'aaaaaaaa-0000-0000-0000-000000000001',
+    'meta.json'
   );
   const scopedMeta = JSON.parse(readFileSync(scopedMetaPath, 'utf8'));
-  scopedMeta.cwd = '/work/a';
+  scopedMeta.cwd = scopedWorkspace;
   writeFileSync(scopedMetaPath, `${JSON.stringify(scopedMeta)}\n`, { mode: 0o600 });
 
   const pathlessId = 'bbbbbbbb-0000-0000-0000-000000000002';

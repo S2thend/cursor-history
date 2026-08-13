@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { Command } from 'commander';
+import JSZip from 'jszip';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -12,7 +13,9 @@ import {
 import { CLI_FATAL_CATEGORY_REGISTRY } from '../../src/cli/errors.js';
 import { runBuiltCli } from '../helpers/run-cli.js';
 import {
+  createFixtureBackup,
   createSessionIntegrityFixtureRoot,
+  seedConflictingWorkspaceCorpus,
   writeStoreDb,
   writeStoreMeta,
   writeStoreTranscript,
@@ -253,6 +256,102 @@ describe('closed CLI fatal and Source Read Limits coverage', () => {
     }
     expect([...covered].sort()).toEqual(Object.keys(CLI_FATAL_CATEGORY_REGISTRY).sort());
   });
+
+  it('routes missing scoped-backup inventory through its typed I/O fatal category', async () => {
+    const temporary = createSessionIntegrityFixtureRoot('cursor-history-cli-legacy-scope-');
+    temporaryFixtures.push(temporary);
+    seedConflictingWorkspaceCorpus(temporary);
+
+    const currentBackup = await createFixtureBackup(temporary, 'current.zip');
+    const legacyBackup = join(temporary.root, 'legacy-multi-workspace.zip');
+    const zip = await JSZip.loadAsync(readFileSync(currentBackup));
+    const manifestEntry = zip.file('manifest.json');
+    if (!manifestEntry) throw new Error('Synthetic backup has no manifest.');
+    const manifest = JSON.parse(await manifestEntry.async('string')) as Record<string, unknown>;
+    delete manifest['composerWorkspaceInventory'];
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+    writeFileSync(
+      legacyBackup,
+      await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }),
+      { mode: 0o600 }
+    );
+
+    const run = await runBuiltCli(
+      ['--json', '--workspace', temporary.projectA, 'list', '--all', '--backup', legacyBackup],
+      { env: { CURSOR_STORE_ROOT: temporary.storeRoot }, timeoutMs: 20_000 }
+    );
+
+    expect(run).toMatchObject({ status: 4, signal: null, timedOut: false });
+    expect(run.stdoutBytes).toHaveLength(0);
+    expect(parseSingleJsonStream(run.stderr)).toMatchObject({
+      code: 'BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED',
+      details: {
+        workspaceCount: 2,
+        remedy: expect.stringContaining('Recreate the backup'),
+      },
+    });
+  });
+
+  it.each(['missing', 'manifestless', 'empty-manifest'] as const)(
+    'preserves the released invalid-backup envelope for every scoped %s backup read',
+    async (kind) => {
+      const temporary = createSessionIntegrityFixtureRoot(
+        `cursor-history-cli-scoped-${kind}-backup-`
+      );
+      temporaryFixtures.push(temporary);
+      const backupPath = join(temporary.root, `${kind}.zip`);
+      if (kind === 'manifestless' || kind === 'empty-manifest') {
+        const zip = new JSZip();
+        if (kind === 'manifestless') {
+          zip.file('unrelated.txt', 'not a cursor-history backup');
+        } else {
+          zip.file(
+            'manifest.json',
+            JSON.stringify({
+              version: '1.0.0',
+              files: [],
+              composerWorkspaceInventory: { schemaVersion: 1, workspaces: [] },
+            })
+          );
+        }
+        writeFileSync(backupPath, await zip.generateAsync({ type: 'nodebuffer' }), {
+          mode: 0o600,
+        });
+      }
+
+      const outputPath = join(temporary.root, `${kind}-must-not-export.json`);
+      const commandArgs = [
+        ['list', '--all', '--backup', backupPath],
+        ['show', '1', '--backup', backupPath],
+        ['search', 'needle', '--backup', backupPath],
+        [
+          'export',
+          '1',
+          '--backup',
+          backupPath,
+          '--format',
+          'json',
+          '--output',
+          outputPath,
+          '--force',
+        ],
+      ] as const;
+      for (const args of commandArgs) {
+        const run = await runBuiltCli(['--json', '--workspace', temporary.projectA, ...args], {
+          env: { CURSOR_STORE_ROOT: temporary.storeRoot },
+          timeoutMs: 20_000,
+        });
+        expect(run).toMatchObject({ status: 3, stdout: '', timedOut: false });
+        expect(parseSingleJsonStream(run.stderr)).toMatchObject({
+          error: 'Invalid backup',
+          code: 'CLI_NOT_FOUND',
+          errors: [expect.any(String)],
+        });
+      }
+      expect(existsSync(outputPath)).toBe(false);
+    },
+    60_000
+  );
 
   it.each([
     ['list', ['--json', '--data-path', missingDataPath, 'list', '--workspaces'], 3],

@@ -28,8 +28,9 @@ import {
 import { existsSync } from 'node:fs';
 import type { LogicalSessionSummary, SourceReadLimitsOverride } from '../../core/types.js';
 import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
-import { ExitCode, handleCommandError } from '../errors.js';
+import { CliError, ExitCode, handleCommandError } from '../errors.js';
 import { createAmbiguousSessionDiagnostic, createCliDiagnosticCollector } from '../diagnostics.js';
+import { adaptScopedBackupReadError } from '../backup-read-error.js';
 
 interface ListCommandOptions {
   limit?: string;
@@ -75,8 +76,18 @@ export function registerListCommand(program: Command): void {
         handleCommandError(error, { json: useJson });
       }
 
+      if (options.workspaces && workspaceFilter) {
+        handleCommandError(
+          new CliError(
+            '`list --workspaces` is an unscoped discovery command and cannot be combined with `--workspace`.',
+            ExitCode.USAGE_ERROR
+          ),
+          { json: useJson }
+        );
+      }
+
       // T034: Validate backup if reading from backup
-      if (backupPath) {
+      if (backupPath && !workspaceFilter) {
         const validation = await validateBackup(backupPath, { sourceReadLimits });
         if (validation.status === 'invalid') {
           if (useJson) {
@@ -166,20 +177,27 @@ export function registerListCommand(program: Command): void {
         });
         let sessions: LogicalSessionSummary[];
         try {
-          sessions = await listSessionSummaries(
-            {
-              limit,
-              all: options.all ?? false,
-              workspacePath: workspaceFilter,
-              ...(includeCrossWorkspaceSources ? { includeCrossWorkspaceSources: true } : {}),
-              ...(sourceReadLimits ? { sourceReadLimits } : {}),
-            },
-            expandedPath,
-            backupPath,
-            context
+          try {
+            sessions = await listSessionSummaries(
+              {
+                limit,
+                all: options.all ?? false,
+                workspacePath: workspaceFilter,
+                ...(includeCrossWorkspaceSources ? { includeCrossWorkspaceSources: true } : {}),
+                ...(sourceReadLimits ? { sourceReadLimits } : {}),
+              },
+              expandedPath,
+              backupPath,
+              context
+            );
+          } finally {
+            await context.dispose();
+          }
+        } catch (error) {
+          handleCommandError(
+            adaptScopedBackupReadError(error, Boolean(backupPath && workspaceFilter)),
+            { json: useJson }
           );
-        } finally {
-          await context.dispose();
         }
         for (const summary of sessions) {
           if (summary.resolutionState === 'ambiguous') {

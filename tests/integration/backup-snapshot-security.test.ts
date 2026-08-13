@@ -459,7 +459,22 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     archivePath = join(fixtureRoot, 'fixture.zip');
 
     const zip = new JSZip();
-    zip.file('globalStorage/state.vscdb', Buffer.from('synthetic sqlite bytes'));
+    const database = Buffer.from('synthetic sqlite bytes');
+    zip.file('globalStorage/state.vscdb', database);
+    zip.file(
+      'manifest.json',
+      JSON.stringify({
+        version: '1.0.0',
+        files: [
+          {
+            path: 'globalStorage/state.vscdb',
+            size: database.length,
+            checksum: computeChecksum(database),
+            type: 'global-db',
+          },
+        ],
+      })
+    );
     const archive = await zip.generateAsync({ type: 'nodebuffer' });
     writeFileSync(archivePath, archive, { mode: 0o600 });
   });
@@ -534,6 +549,23 @@ describe.sequential('backup plaintext snapshot isolation', () => {
       })
     );
     expect(openSyncMock).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it('accepts a legacy uppercase checksum during lazy database extraction', async () => {
+    const archive = await JSZip.loadAsync(readFileSync(archivePath));
+    const manifestEntry = archive.file('manifest.json');
+    if (!manifestEntry) throw new Error('Synthetic backup has no manifest.');
+    const manifest = JSON.parse(await manifestEntry.async('string')) as {
+      files: Array<{ checksum: string }>;
+    };
+    manifest.files[0]!.checksum = manifest.files[0]!.checksum.toUpperCase();
+    archive.file('manifest.json', JSON.stringify(manifest));
+    writeFileSync(archivePath, await archive.generateAsync({ type: 'nodebuffer' }), {
+      mode: 0o600,
+    });
+
+    const database = await openBackupDatabase(archivePath, 'globalStorage/state.vscdb');
     database.close();
   });
 
@@ -2460,8 +2492,25 @@ describe.sequential('backup plaintext snapshot isolation', () => {
 
   it('cooperatively cancels streamed extraction after private staging begins with no residue', async () => {
     const largePath = join(fixtureRoot, 'large-cancel.zip');
+    const largeDatabase = Buffer.alloc(32 * 1024 * 1024, 0x41);
     const largeFixture = buildZip([
-      { name: 'globalStorage/state.vscdb', data: Buffer.alloc(32 * 1024 * 1024, 0x41) },
+      { name: 'globalStorage/state.vscdb', data: largeDatabase },
+      {
+        name: 'manifest.json',
+        data: Buffer.from(
+          JSON.stringify({
+            version: '1.0.0',
+            files: [
+              {
+                path: 'globalStorage/state.vscdb',
+                size: largeDatabase.length,
+                checksum: computeChecksum(largeDatabase),
+                type: 'global-db',
+              },
+            ],
+          })
+        ),
+      },
     ]);
     writeFileSync(largePath, largeFixture.buffer, { mode: 0o600 });
     const before = currentPrivateTempPaths();

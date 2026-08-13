@@ -12,10 +12,11 @@ import {
   formatSearchResultsJson,
   formatOperationDiagnostics,
 } from '../formatters/index.js';
-import { NoSearchResultsError, handleCommandError, handleError, ExitCode } from '../errors.js';
+import { NoSearchResultsError, handleCommandError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 import { createCliDiagnosticCollector } from '../diagnostics.js';
+import { adaptScopedBackupReadError } from '../backup-read-error.js';
 
 interface SearchCommandOptions {
   limit?: string;
@@ -59,7 +60,7 @@ export function registerSearchCommand(program: Command): void {
 
         // T036: Validate backup if searching from backup. The CLI policy is frozen before this
         // first carrier read and then reused by every nested operation.
-        if (backupPath) {
+        if (backupPath && !workspaceFilter) {
           const validation = await validateBackup(backupPath, { sourceReadLimits });
           if (validation.status === 'invalid') {
             if (useJson) {
@@ -161,7 +162,10 @@ export function registerSearchCommand(program: Command): void {
           await context.dispose();
         }
       } catch (error) {
-        handleError(error, { json: useJson });
+        handleCommandError(
+          adaptScopedBackupReadError(error, Boolean(backupPath && workspaceFilter)),
+          { json: useJson }
+        );
       }
     });
 }

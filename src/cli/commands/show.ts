@@ -18,6 +18,7 @@ import { MESSAGE_TYPES } from '../../core/types.js';
 import { resolveCommandSession } from './session-lookup.js';
 import type { SourceReadLimitsOverride } from '../../core/types.js';
 import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
+import { adaptScopedBackupReadError } from '../backup-read-error.js';
 
 interface ShowCommandOptions {
   json?: boolean;
@@ -100,7 +101,7 @@ export function registerShowCommand(program: Command): void {
       }
 
       // T035: Validate backup if reading from backup
-      if (backupPath) {
+      if (backupPath && !workspaceFilter) {
         const validation = await validateBackup(backupPath, { sourceReadLimits });
         if (validation.status === 'invalid') {
           if (useJson) {
@@ -165,7 +166,10 @@ export function registerShowCommand(program: Command): void {
           );
         }
       } catch (error) {
-        handleCommandError(error, { json: useJson });
+        handleCommandError(
+          adaptScopedBackupReadError(error, Boolean(backupPath && workspaceFilter)),
+          { json: useJson }
+        );
       }
     });
 }

@@ -21,6 +21,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
   realpathSync,
@@ -51,7 +52,11 @@ import {
   type PreparedZipFileInput,
 } from './zip-stream.js';
 import { resolveSourceReadLimits } from './source-read-limits.js';
-import { createComposerSqliteBudget, readBoundedComposerValueByKey } from './composer-sqlite.js';
+import {
+  createComposerSqliteBudget,
+  forEachBoundedComposerValue,
+  readBoundedComposerValueByKey,
+} from './composer-sqlite.js';
 import { IoObserverError, type OperationIoContext } from './io-observer.js';
 import {
   RestoreRollbackError,
@@ -65,8 +70,16 @@ import {
 } from './backup-publication.js';
 import { publishBackupArchiveStage } from './backup-archive-publication.js';
 import { commitRestorePublication } from './restore-publication.js';
+import {
+  groupSessionIdSpellings,
+  logicalSessionIdKey,
+  selectNativeSessionIdSpelling,
+} from './session-id.js';
+import { parseChatData, type CursorChatBundle } from './parser.js';
 import type {
   BackupManifest,
+  BackupComposerWorkspaceInventory,
+  BackupComposerWorkspaceInventoryEntry,
   BackupFileEntry,
   BackupStats,
   BackupConfig,
@@ -82,6 +95,11 @@ const MANIFEST_VERSION = '1.0.0';
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const BACKUP_METADATA_MEMORY_LIMIT = 16 * 1024 * 1024;
 const BACKUP_DATABASE_READ_CAPABILITIES = new Set<DatabaseCapability>(['read']);
+const BACKUP_CHAT_DATA_KEYS = [
+  'composer.composerData',
+  'workbench.panel.aichat.view.aichat.chatdata',
+  'workbench.panel.chat.view.chat.chatdata',
+] as const;
 
 /** Internal options for opening one database carried by a bounded backup archive. */
 export interface BackupDatabaseReadOptions extends SourceReadOptions {
@@ -272,7 +290,11 @@ export function scanDatabaseFiles(dataPath: string): DatabaseFileInfo[] {
 /**
  * T009: Create a manifest object from file entries and stats
  */
-export function createManifest(files: BackupFileEntry[], stats: BackupStats): BackupManifest {
+export function createManifest(
+  files: BackupFileEntry[],
+  stats: BackupStats,
+  composerWorkspaceInventory?: BackupComposerWorkspaceInventory
+): BackupManifest {
   const platform = process.platform as 'darwin' | 'win32' | 'linux';
 
   return {
@@ -282,8 +304,20 @@ export function createManifest(files: BackupFileEntry[], stats: BackupStats): Ba
     producer: PACKAGE_VERSION,
     cursorHistoryVersion: PACKAGE_VERSION,
     files,
+    ...(composerWorkspaceInventory ? { composerWorkspaceInventory } : {}),
     stats,
   };
+}
+
+/** Serialize one manifest exactly as archived and reject metadata this reader cannot reopen. */
+export function serializeBackupManifest(manifest: BackupManifest): Buffer {
+  const buffer = Buffer.from(JSON.stringify(manifest, null, 2));
+  if (buffer.byteLength > BACKUP_METADATA_MEMORY_LIMIT) {
+    throw new ZipArchiveFormatError(
+      `Backup manifest exceeds the ${BACKUP_METADATA_MEMORY_LIMIT}-byte metadata limit.`
+    );
+  }
+  return buffer;
 }
 
 /**
@@ -305,42 +339,227 @@ function closeSessionCountDatabase(db: DatabaseInterface, operationError: unknow
   }
 }
 
-function countSessions(dbPath: string, readOptions: Readonly<InternalSourceReadOptions>): number {
+interface ComposerDatabaseInventory {
+  readonly sessionCount: number;
+  readonly sessionIds: readonly string[];
+  readonly linkedSessionCandidates: readonly string[];
+}
+
+const COMPOSER_GUID_RE =
+  /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/gu;
+
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = left[Symbol.iterator]();
+  const rightPoints = right[Symbol.iterator]();
+  while (true) {
+    const leftPoint = leftPoints.next();
+    const rightPoint = rightPoints.next();
+    if (leftPoint.done || rightPoint.done) {
+      return leftPoint.done === rightPoint.done ? 0 : leftPoint.done ? -1 : 1;
+    }
+    const difference = leftPoint.value.codePointAt(0)! - rightPoint.value.codePointAt(0)!;
+    if (difference !== 0) return difference;
+  }
+}
+
+function inspectComposerDatabase(
+  dbPath: string,
+  readOptions: Readonly<InternalSourceReadOptions>
+): ComposerDatabaseInventory {
   throwIfAborted(readOptions.signal);
   const db = registry.openSync(dbPath, { readonly: true });
   let operationError: unknown;
   try {
-    let value: string | undefined;
+    const budget = createComposerSqliteBudget(
+      resolveSourceReadLimits(readOptions.sourceReadLimits)
+    );
+    const candidates: Array<{ key: (typeof BACKUP_CHAT_DATA_KEYS)[number]; value: string }> = [];
     try {
-      value = readBoundedComposerValueByKey(
-        db,
-        'ItemTable',
-        'composer.composerData',
-        createComposerSqliteBudget(resolveSourceReadLimits(readOptions.sourceReadLimits)),
-        readOptions.signal
-      );
+      for (const key of BACKUP_CHAT_DATA_KEYS) {
+        const value = readBoundedComposerValueByKey(
+          db,
+          'ItemTable',
+          key,
+          budget,
+          readOptions.signal
+        );
+        if (value) candidates.push({ key, value });
+      }
     } catch (error) {
       if (
         error instanceof Error &&
         /(?:no such table|does not exist).*\bItemTable\b/iu.test(error.message)
       ) {
-        return 0;
+        return { sessionCount: 0, sessionIds: [], linkedSessionCandidates: [] };
       }
       throw error;
     }
-    if (!value) return 0;
-
-    const data = JSON.parse(value) as { allComposers?: unknown[] } | unknown[];
-    if (Array.isArray(data)) return data.length;
-    if (data.allComposers && Array.isArray(data.allComposers)) {
-      return data.allComposers.length;
+    const composerValue = candidates.find(({ key }) => key === 'composer.composerData')?.value;
+    const bundle: CursorChatBundle = composerValue ? { composerData: composerValue } : {};
+    let selectedSessions = [] as ReturnType<typeof parseChatData>;
+    for (const candidate of candidates) {
+      const parsed = parseChatData(
+        candidate.value,
+        candidate.key === 'composer.composerData'
+          ? { ...bundle, composerData: candidate.value }
+          : bundle
+      );
+      if (parsed.length > selectedSessions.length) selectedSessions = parsed;
     }
-    return 0;
+    const sessionIds = new Set<string>();
+    const linkedSessionCandidates = new Set<string>();
+    for (const session of selectedSessions) {
+      if (session.id.length > 0) sessionIds.add(session.id);
+    }
+    if (composerValue) {
+      try {
+        const data = JSON.parse(composerValue) as { selectedComposerIds?: unknown } | unknown[];
+        if (!Array.isArray(data) && Array.isArray(data.selectedComposerIds)) {
+          for (const candidate of data.selectedComposerIds) {
+            if (typeof candidate === 'string' && candidate.length > 0) {
+              linkedSessionCandidates.add(candidate);
+            }
+          }
+        }
+      } catch {
+        // A malformed/stale modern candidate does not suppress a valid legacy chat carrier.
+      }
+    }
+    forEachBoundedComposerValue(
+      db,
+      'ItemTable',
+      '%composerChatViewPane%',
+      budget,
+      ({ key, value: pointerValue }) => {
+        for (const source of [key, pointerValue]) {
+          for (const match of source.matchAll(COMPOSER_GUID_RE)) {
+            if (match[0]) linkedSessionCandidates.add(match[0]);
+          }
+        }
+      },
+      readOptions.signal
+    );
+    return {
+      sessionCount: sessionIds.size,
+      sessionIds: [...sessionIds].sort(compareCodePoints),
+      linkedSessionCandidates: [...linkedSessionCandidates].sort(compareCodePoints),
+    };
   } catch (error) {
     operationError = error;
     throw error;
   } finally {
     closeSessionCountDatabase(db, operationError);
+  }
+}
+
+/**
+ * Project only stable Composer IDs that have at least one global bubble. Values
+ * (titles/messages/tools) are never decoded for manifest membership. A composerData-only record is
+ * metadata, not a complete global conversation, and must not make a scoped backup invent an empty
+ * addressable session that live discovery would reject. Key bytes remain bounded and paginated by
+ * Source Read Limits.
+ */
+function inspectGlobalComposerPayloadIds(
+  dbPath: string,
+  readOptions: Readonly<InternalSourceReadOptions>
+): ReadonlySet<string> {
+  throwIfAborted(readOptions.signal);
+  const db = registry.openSync(dbPath, { readonly: true });
+  let operationError: unknown;
+  try {
+    const budget = createComposerSqliteBudget(
+      resolveSourceReadLimits(readOptions.sourceReadLimits)
+    );
+    const ids = new Set<string>();
+    const pageRows = budget.limits.sqlitePageRows;
+    let afterRowId: string | null = null;
+    while (true) {
+      throwIfAborted(readOptions.signal);
+      let rows: Array<{ rowId?: unknown; keyByteLength?: unknown }>;
+      try {
+        rows = db
+          .prepare(
+            `SELECT CAST(rowid AS TEXT) AS rowId,
+               length(CAST(key AS BLOB)) AS keyByteLength
+             FROM cursorDiskKV
+             WHERE key LIKE 'bubbleId:%'
+               AND (? IS NULL OR rowid > ?)
+             ORDER BY rowid ASC LIMIT ?`
+          )
+          .all(afterRowId, afterRowId, pageRows) as Array<{
+          rowId?: unknown;
+          keyByteLength?: unknown;
+        }>;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          /(?:no such table|does not exist).*\bcursorDiskKV\b/iu.test(error.message)
+        ) {
+          return ids;
+        }
+        throw error;
+      }
+      if (rows.length === 0) break;
+      const metadata = rows.map((row) => {
+        const rowId = typeof row.rowId === 'string' ? row.rowId : String(row.rowId ?? '');
+        const keyByteLength = Number(row.keyByteLength);
+        if (!/^-?\d+$/u.test(rowId) || !Number.isSafeInteger(keyByteLength) || keyByteLength < 0) {
+          throw new TypeError('SQLite returned invalid global Composer key metadata.');
+        }
+        return { rowId, keyByteLength };
+      });
+      budget.admitMetadataPage(metadata.map(({ keyByteLength }) => keyByteLength));
+      for (const row of metadata) {
+        throwIfAborted(readOptions.signal);
+        const projected = db
+          .prepare('SELECT key FROM cursorDiskKV WHERE rowid = ?')
+          .get(row.rowId) as { key?: unknown } | undefined;
+        if (typeof projected?.key !== 'string') {
+          throw new Error('Global Composer key changed after metadata admission.');
+        }
+        const keyBytes = Buffer.byteLength(projected.key);
+        if (keyBytes !== row.keyByteLength) {
+          throw new Error('Global Composer key length changed after metadata admission.');
+        }
+        budget.admitDecodedValue(keyBytes);
+        const bubble = /^bubbleId:([^:]+):/u.exec(projected.key)?.[1];
+        if (bubble) ids.add(bubble);
+      }
+      afterRowId = metadata[metadata.length - 1]!.rowId;
+      if (rows.length < pageRows) break;
+    }
+    return ids;
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    closeSessionCountDatabase(db, operationError);
+  }
+}
+
+function decodeWorkspacePathForManifest(snapshotPath: string): string | null {
+  try {
+    // This is metadata, not an authorization to materialize an arbitrarily large sidecar. The
+    // same hard ceiling bounds manifest and workspace-metadata buffers during archive reads.
+    if (statSync(snapshotPath).size > BACKUP_METADATA_MEMORY_LIMIT) return null;
+    const content = readFileSync(snapshotPath, 'utf8');
+    const parsed = JSON.parse(content) as { folder?: unknown; workspace?: unknown };
+    const uri =
+      typeof parsed.workspace === 'string'
+        ? parsed.workspace
+        : typeof parsed.folder === 'string'
+          ? parsed.folder
+          : undefined;
+    if (uri === undefined || uri.length === 0) return null;
+    try {
+      return decodeURIComponent(uri.replace(/^file:\/\//u, ''));
+    } catch {
+      return uri.replace(/^file:\/\//u, '');
+    }
+  } catch {
+    // Preserve the historical ability to archive missing/malformed workspace metadata. The
+    // archive remains addressable through its stable workspace ID placeholder.
+    return null;
   }
 }
 
@@ -576,6 +795,9 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
     let bytesCompleted = 0;
     let sessionCount = 0;
     const workspaceIds = new Set<string>();
+    const workspaceInventory = new Map<string, BackupComposerWorkspaceInventoryEntry>();
+    const linkedSessionCandidatesByWorkspace = new Map<string, readonly string[]>();
+    const globalComposerIds = new Set<string>();
 
     for (let i = 0; i < dbFiles.length; i++) {
       throwIfAborted(signal);
@@ -607,7 +829,34 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
 
       // Count sessions (only for DB files)
       if (dbFile.type === 'global-db' || dbFile.type === 'workspace-db') {
-        sessionCount += countSessions(tempFilePath, readOptions);
+        const databaseInventory = inspectComposerDatabase(tempFilePath, readOptions);
+        sessionCount += databaseInventory.sessionCount;
+        if (dbFile.type === 'global-db') {
+          for (const id of inspectGlobalComposerPayloadIds(tempFilePath, readOptions)) {
+            globalComposerIds.add(id);
+          }
+        }
+        if (dbFile.type === 'workspace-db' && dbFile.workspaceId) {
+          workspaceInventory.set(dbFile.workspaceId, {
+            workspaceId: dbFile.workspaceId,
+            workspacePath: null,
+            sessionIds: [...databaseInventory.sessionIds],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: [],
+          });
+          linkedSessionCandidatesByWorkspace.set(
+            dbFile.workspaceId,
+            databaseInventory.linkedSessionCandidates
+          );
+        }
+      } else if (dbFile.type === 'workspace-json' && dbFile.workspaceId) {
+        const existing = workspaceInventory.get(dbFile.workspaceId);
+        if (existing) {
+          workspaceInventory.set(dbFile.workspaceId, {
+            ...existing,
+            workspacePath: decodeWorkspacePathForManifest(tempFilePath),
+          });
+        }
       }
       if (dbFile.workspaceId) {
         workspaceIds.add(dbFile.workspaceId);
@@ -645,10 +894,42 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
       sessionCount,
       workspaceCount: workspaceIds.size,
     };
-    const manifest = createManifest(fileEntries, stats);
+    const composerWorkspaceInventory: BackupComposerWorkspaceInventory = {
+      schemaVersion: 1,
+      workspaces: [...workspaceInventory.values()]
+        .map((entry) => {
+          const materializedByLogicalId = groupSessionIdSpellings(entry.sessionIds);
+          const globalByLogicalId = groupSessionIdSpellings(globalComposerIds);
+          const materializedLogicalIds = new Set(materializedByLogicalId.keys());
+          // A materialized workspace spelling is the public identity authority for its own row.
+          // The global counterpart relationship is logical, but its inventory value stays the
+          // real workspace-native spelling so the lists remain subset-compatible.
+          const globalCounterpartSessionIds = entry.sessionIds.filter((sessionId) =>
+            globalByLogicalId.has(logicalSessionIdKey(sessionId))
+          );
+          const linkedGlobalSessionIds = [
+            ...new Set(
+              (linkedSessionCandidatesByWorkspace.get(entry.workspaceId) ?? []).flatMap(
+                (candidate) => {
+                  const logicalId = logicalSessionIdKey(candidate);
+                  if (materializedLogicalIds.has(logicalId)) return [];
+                  const verified = selectNativeSessionIdSpelling(
+                    globalByLogicalId.get(logicalId) ?? []
+                  );
+                  return verified ? [verified] : [];
+                }
+              )
+            ),
+          ].sort(compareCodePoints);
+          return { ...entry, globalCounterpartSessionIds, linkedGlobalSessionIds };
+        })
+        .sort((left, right) => compareCodePoints(left.workspaceId, right.workspaceId)),
+    };
+    const manifest = createManifest(fileEntries, stats, composerWorkspaceInventory);
+    const manifestBuffer = serializeBackupManifest(manifest);
     const archiveEntries: BoundedZipWriteInput[] = [
       ...preparedFiles,
-      { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest, null, 2)) },
+      { name: 'manifest.json', data: manifestBuffer },
     ];
 
     // Phase: Finalizing
@@ -828,7 +1109,8 @@ function decodeManifest(buffer: Buffer): BackupManifest {
   // Discovery consumes manifest.files directly, so validate its complete
   // structural contract here rather than allowing malformed iterable shapes
   // or invalid references to masquerade as an empty archive.
-  validatedManifestFiles(manifest);
+  const files = validatedManifestFiles(manifest);
+  validateComposerWorkspaceInventory(manifest, files);
   return manifest;
 }
 
@@ -927,6 +1209,153 @@ function backupEntryTypeForCanonicalPath(
   const match = /^workspaceStorage\/([^/]+)\/(state\.vscdb|workspace\.json)$/u.exec(path);
   if (!match || !isCanonicalBackupPathSegment(match[1]!)) return undefined;
   return match[2] === 'state.vscdb' ? 'workspace-db' : 'workspace-json';
+}
+
+function validateComposerWorkspaceInventory(
+  manifest: BackupManifest,
+  files: readonly BackupFileEntry[]
+): void {
+  const value = (manifest as unknown as Record<string, unknown>)['composerWorkspaceInventory'];
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ZipArchiveFormatError(
+      'Backup manifest Composer workspace inventory must be an object.'
+    );
+  }
+  const inventory = value as Record<string, unknown>;
+  if (inventory['schemaVersion'] !== 1) {
+    throw new ZipArchiveFormatError(
+      'Backup manifest Composer workspace inventory has an unsupported schema version.'
+    );
+  }
+  if (!Array.isArray(inventory['workspaces'])) {
+    throw new ZipArchiveFormatError(
+      'Backup manifest Composer workspace inventory workspaces must be an array.'
+    );
+  }
+
+  const expectedWorkspaceIds = files
+    .filter(({ type }) => type === 'workspace-db')
+    .map(({ path }) => /^workspaceStorage\/([^/]+)\/state\.vscdb$/u.exec(path)?.[1])
+    .filter((workspaceId): workspaceId is string => workspaceId !== undefined)
+    .sort(compareCodePoints);
+  const containsGlobalDatabase = files.some(
+    ({ type, path }) => type === 'global-db' && path === 'globalStorage/state.vscdb'
+  );
+  if (inventory['workspaces'].length !== expectedWorkspaceIds.length) {
+    throw new ZipArchiveFormatError(
+      'Backup manifest Composer workspace inventory does not cover every workspace database.'
+    );
+  }
+
+  let previousWorkspaceId: string | undefined;
+  for (let index = 0; index < inventory['workspaces'].length; index++) {
+    const candidate = inventory['workspaces'][index];
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest Composer workspace inventory entry ${index + 1} must be an object.`
+      );
+    }
+    const entry = candidate as Record<string, unknown>;
+    const workspaceId = entry['workspaceId'];
+    if (
+      typeof workspaceId !== 'string' ||
+      workspaceId.length === 0 ||
+      !isCanonicalBackupPathSegment(workspaceId)
+    ) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest Composer workspace inventory entry ${index + 1} has an invalid workspace ID.`
+      );
+    }
+    if (
+      previousWorkspaceId !== undefined &&
+      compareCodePoints(previousWorkspaceId, workspaceId) >= 0
+    ) {
+      throw new ZipArchiveFormatError(
+        'Backup manifest Composer workspace inventory entries are not canonically ordered and unique.'
+      );
+    }
+    if (workspaceId !== expectedWorkspaceIds[index]) {
+      throw new ZipArchiveFormatError(
+        'Backup manifest Composer workspace inventory does not match its workspace databases.'
+      );
+    }
+    previousWorkspaceId = workspaceId;
+
+    const workspacePath = entry['workspacePath'];
+    if (
+      workspacePath !== null &&
+      (typeof workspacePath !== 'string' || workspacePath.length === 0)
+    ) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest Composer workspace inventory entry ${index + 1} has an invalid workspace path.`
+      );
+    }
+    const validateSessionIds = (
+      field: 'sessionIds' | 'globalCounterpartSessionIds' | 'linkedGlobalSessionIds'
+    ): string[] => {
+      const sessionIds = entry[field];
+      const label =
+        field === 'sessionIds'
+          ? 'session IDs'
+          : field === 'globalCounterpartSessionIds'
+            ? 'global counterpart session IDs'
+            : 'linked global session IDs';
+      if (!Array.isArray(sessionIds)) {
+        throw new ZipArchiveFormatError(
+          `Backup manifest Composer workspace inventory entry ${index + 1} ${label} must be an array.`
+        );
+      }
+      let previousSessionId: string | undefined;
+      for (const sessionId of sessionIds) {
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw new ZipArchiveFormatError(
+            `Backup manifest Composer workspace inventory entry ${index + 1} has an invalid ${label.slice(0, -1)}.`
+          );
+        }
+        if (
+          previousSessionId !== undefined &&
+          compareCodePoints(previousSessionId, sessionId) >= 0
+        ) {
+          throw new ZipArchiveFormatError(
+            `Backup manifest Composer workspace inventory entry ${index + 1} ${label} are not canonically ordered and unique.`
+          );
+        }
+        previousSessionId = sessionId;
+      }
+      return sessionIds as string[];
+    };
+    const sessionIds = validateSessionIds('sessionIds');
+    const globalCounterpartSessionIds = validateSessionIds('globalCounterpartSessionIds');
+    const linkedGlobalSessionIds = validateSessionIds('linkedGlobalSessionIds');
+    const materializedIds = new Set(sessionIds.map(logicalSessionIdKey));
+    if (
+      globalCounterpartSessionIds.some(
+        (sessionId) => !materializedIds.has(logicalSessionIdKey(sessionId))
+      )
+    ) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest Composer workspace inventory entry ${index + 1} has a global counterpart without a materialized workspace session.`
+      );
+    }
+    if (
+      linkedGlobalSessionIds.some((sessionId) =>
+        materializedIds.has(logicalSessionIdKey(sessionId))
+      )
+    ) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest Composer workspace inventory entry ${index + 1} overlaps materialized and linked global session IDs.`
+      );
+    }
+    if (
+      !containsGlobalDatabase &&
+      (globalCounterpartSessionIds.length > 0 || linkedGlobalSessionIds.length > 0)
+    ) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest Composer workspace inventory entry ${index + 1} declares global sessions without a global database entry.`
+      );
+    }
+  }
 }
 
 interface StagedBackupFile {
@@ -1102,15 +1531,39 @@ export async function openBackupDatabase(
   let operationError: unknown;
   try {
     const tempFile = await withBoundedArchive(backupPath, readOptions, async (archive) => {
+      const manifest = await readManifestFromArchive(archive);
+      if (!manifest) {
+        throw new ZipArchiveFormatError('Manifest file not found in backup.');
+      }
+      const manifestFiles = validatedManifestFiles(manifest);
       const entry = archive.getEntry(dbPath);
       if (!entry || entry.isDirectory) {
         throw new BackupEntryNotFoundError(dbPath);
+      }
+      const manifestEntry = manifestFiles.find(({ path }) => path === dbPath);
+      if (!manifestEntry) {
+        throw new ZipArchiveFormatError(
+          `Backup database is not declared by the manifest: ${dbPath}`
+        );
+      }
+      if (entry.name !== manifestEntry.path.normalize('NFC')) {
+        throw new ZipArchiveFormatError('Manifest path is not the canonical ZIP entry name.');
+      }
+      if (entry.uncompressedSize !== manifestEntry.size) {
+        throw new ZipArchiveFormatError(
+          `Backup database size does not match its manifest: ${dbPath}`
+        );
       }
       workspace = createPrivateTempWorkspace({
         prefix: 'cursor-history-backup-read-',
       });
       const snapshotPath = workspace.createFile('state.vscdb');
-      await archive.extractEntryToFile(entry.name, snapshotPath);
+      const extracted = await archive.extractEntryToFileWithChecksum(entry.name, snapshotPath);
+      if (extracted.checksum !== manifestEntry.checksum) {
+        throw new ZipArchiveFormatError(
+          `Backup database checksum does not match its manifest: ${dbPath}`
+        );
+      }
       return snapshotPath;
     });
 
@@ -1160,9 +1613,33 @@ export async function readBackupEntryBuffer(
   const readOptions = freezeSourceReadOptions(options);
   return withBoundedArchive(backupPath, readOptions, async (archive) => {
     throwIfAborted(readOptions.signal);
+    const manifest = await readManifestFromArchive(archive);
+    if (!manifest) throw new ZipArchiveFormatError('Manifest file not found in backup.');
+    const manifestEntry = validatedManifestFiles(manifest).find(({ path }) => path === entryPath);
     const entry = archive.getEntry(entryPath);
-    if (!entry || entry.isDirectory) return null;
+    if (!entry || entry.isDirectory) {
+      if (manifestEntry) {
+        throw new ZipArchiveFormatError(`Manifest-declared backup entry is missing: ${entryPath}`);
+      }
+      return null;
+    }
+    if (!manifestEntry) {
+      throw new ZipArchiveFormatError(`Backup entry is not declared by the manifest: ${entryPath}`);
+    }
+    if (entry.name !== manifestEntry.path.normalize('NFC')) {
+      throw new ZipArchiveFormatError('Manifest path is not the canonical ZIP entry name.');
+    }
+    if (entry.uncompressedSize !== manifestEntry.size) {
+      throw new ZipArchiveFormatError(
+        `Backup entry size does not match its manifest: ${entryPath}`
+      );
+    }
     const value = await archive.readEntryBuffer(entry.name, maxBytes);
+    if (computeChecksum(value) !== manifestEntry.checksum) {
+      throw new ZipArchiveFormatError(
+        `Backup entry checksum does not match its manifest: ${entryPath}`
+      );
+    }
     throwIfAborted(readOptions.signal);
     return value;
   });

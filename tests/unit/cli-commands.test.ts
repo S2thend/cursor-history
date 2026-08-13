@@ -360,6 +360,20 @@ describe('list command', () => {
     expect(consoleSpy).toHaveBeenCalledWith('workspaces table');
   });
 
+  it('rejects combining scoped session addressing with unscoped workspace discovery', async () => {
+    const program = createProgram();
+    registerListCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'test', '--workspace', '/ws1', 'list', '--workspaces'])
+    ).rejects.toThrow('process.exit');
+    expect(exitSpy).toHaveBeenCalledWith(2);
+    expect(mockListWorkspaces).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('unscoped discovery command')
+    );
+  });
+
   it('lists workspaces with --json flag', async () => {
     mockListWorkspaces.mockResolvedValue([{ path: '/ws1', sessionCount: 3 }]);
 
@@ -2201,6 +2215,67 @@ describe('restore command source-read options', () => {
     expect(output).toContain('/private/unverified-restore-stage');
     expect(output).toContain('known-good backup');
   });
+});
+
+describe('workspace-scoped backup validation boundary', () => {
+  const cases = [
+    {
+      name: 'list',
+      register: registerListCommand,
+      args: ['list', '--all'],
+      setup: () => mockListSessions.mockResolvedValue(makeSessions(1)),
+    },
+    {
+      name: 'show',
+      register: registerShowCommand,
+      args: ['show', '1'],
+      setup: () => {
+        mockListSessions.mockResolvedValue(makeSessions(1));
+        mockGetSession.mockResolvedValue(makeSession(1));
+      },
+    },
+    {
+      name: 'search',
+      register: registerSearchCommand,
+      args: ['search', 'needle'],
+      setup: () => mockSearchSessions.mockResolvedValue(makeSearchResults()),
+    },
+    {
+      name: 'export',
+      register: registerExportCommand,
+      args: ['export', '1', '--force', '--output', '/tmp/scoped-backup-export.json'],
+      setup: () => {
+        mockListSessions.mockResolvedValue(makeSessions(1));
+        mockGetSession.mockResolvedValue(makeSession(1));
+        mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
+        mockExistsSync.mockReturnValue(false);
+      },
+    },
+  ] as const;
+
+  it.each(cases)(
+    '$name bypasses archive-wide validation under a workspace scope',
+    async (entry) => {
+      mockValidateBackup.mockRejectedValue(
+        new Error('archive-wide validation must not run for a scoped backup read')
+      );
+      entry.setup();
+      const program = createProgram();
+      entry.register(program);
+
+      await program.parseAsync([
+        'node',
+        'test',
+        '--workspace',
+        '/workspace/a',
+        ...entry.args,
+        '--backup',
+        '/backups/scoped.zip',
+      ]);
+
+      expect(mockValidateBackup).not.toHaveBeenCalled();
+    }
+  );
 });
 
 describe('global Source Read Limits command contract', () => {

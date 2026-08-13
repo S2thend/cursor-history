@@ -21,19 +21,41 @@ const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'
 export const CLI_COMMAND_REGISTRY = Object.freeze({
   list: Object.freeze({
     sourceReadLimits: true,
-    fatalCategories: Object.freeze(['notFound', 'io', 'unexpected'] as const),
+    fatalCategories: Object.freeze([
+      'notFound',
+      'io',
+      'backupWorkspaceScopeMetadata',
+      'unexpected',
+    ] as const),
   }),
   show: Object.freeze({
     sourceReadLimits: true,
-    fatalCategories: Object.freeze(['usage', 'notFound', 'io', 'unexpected'] as const),
+    fatalCategories: Object.freeze([
+      'usage',
+      'notFound',
+      'io',
+      'backupWorkspaceScopeMetadata',
+      'unexpected',
+    ] as const),
   }),
   search: Object.freeze({
     sourceReadLimits: true,
-    fatalCategories: Object.freeze(['notFound', 'io', 'unexpected'] as const),
+    fatalCategories: Object.freeze([
+      'notFound',
+      'io',
+      'backupWorkspaceScopeMetadata',
+      'unexpected',
+    ] as const),
   }),
   export: Object.freeze({
     sourceReadLimits: true,
-    fatalCategories: Object.freeze(['usage', 'notFound', 'io', 'unexpected'] as const),
+    fatalCategories: Object.freeze([
+      'usage',
+      'notFound',
+      'io',
+      'backupWorkspaceScopeMetadata',
+      'unexpected',
+    ] as const),
   }),
   migrate: Object.freeze({
     sourceReadLimits: true,
