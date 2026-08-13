@@ -114,6 +114,49 @@ describe('operation-bound low-level I/O observation', () => {
     );
   });
 
+  it('lets a raw payload projection override a workspace-index metadata fallback', () => {
+    const recorder = createIoEventRecorder();
+    const inner: Database = {
+      prepare: () => ({
+        get: () => undefined,
+        all: () => [],
+        run: () => ({ changes: 0, lastInsertRowid: 0 }),
+      }),
+      close: () => undefined,
+      runSQL: () => undefined,
+    };
+    const observed = openObservedDatabase(
+      ioContext(recorder.observer, 'raw-workspace-payload-mutation'),
+      {
+        operation: 'read-session',
+        required: new Set(['read']),
+        ioResource: {
+          resourceClass: 'workspace-session-index',
+          sourceRole: 'composer',
+          representation: 'composer-workspace',
+        },
+      },
+      () => inner
+    );
+
+    observed.prepare('SELECT j.value FROM ItemTable, json_each(ItemTable.value) AS j').all();
+
+    expect(
+      recorder.count({
+        operation: 'query',
+        resourceClass: 'workspace-conversation',
+        classification: 'conversation-payload',
+      })
+    ).toBe(1);
+    expect(
+      recorder.count({
+        operation: 'query',
+        resourceClass: 'workspace-session-index',
+        classification: 'catalog-metadata',
+      })
+    ).toBe(0);
+  });
+
   it.each(['prepare', 'query', 'get'] as const)(
     'fails closed when the global Composer metadata %s boundary rejects during hydration',
     async (operation) => {
@@ -180,21 +223,30 @@ describe('operation-bound low-level I/O observation', () => {
         createdAt: 1_700_000_000_000,
         messages: [{ role: 'user', content: 'off-scope replica' }],
       },
+      {
+        id: SESSION_INTEGRITY_IDS.workspaceB,
+        title: 'Second off-scope session',
+        workspacePath: root.projectB,
+        createdAt: 1_700_000_000_001,
+        messages: [{ role: 'user', content: 'second off-scope session' }],
+      },
     ]);
 
     const recorder = createIoEventRecorder();
     const context = createSessionReadContext({
       dataPath: root.workspaceStorage,
       workspacePath: root.projectA,
+      sourceReadLimits: { sqlitePageRows: 1 },
       ioObserver: recorder.observer,
     });
     try {
-      await listSessions(
+      const rows = await listSessions(
         { all: true, limit: 0, workspacePath: root.projectA },
         root.workspaceStorage,
         undefined,
         context
       );
+      expect(rows.map(({ id }) => id)).toEqual([duplicateId]);
 
       expect(
         recorder.count({

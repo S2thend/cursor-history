@@ -477,7 +477,9 @@ describe('formatSearchResultsJson', () => {
           {
             sessionId: 's1',
             index: 1,
-            workspacePath: '/workspaces/selected',
+            workspacePath: '/workspaces/canonical',
+            canonicalWorkspacePath: '/workspaces/canonical',
+            matchedWorkspacePath: '/workspaces/selected',
             createdAt: now,
             matchCount: 1,
             snippets: [],
@@ -500,6 +502,8 @@ describe('formatSearchResultsJson', () => {
     expect(result.results[0]).toMatchObject({
       indexScope: 'workspace',
       indexWorkspacePath: '/workspaces/selected',
+      workspacePath: '/workspaces/canonical',
+      matchedWorkspacePath: '/workspaces/selected',
     });
   });
 });

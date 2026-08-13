@@ -356,20 +356,24 @@ export function formatSearchResultsJson(
     totalMatches: results.reduce((sum, r) => sum + r.matchCount, 0),
     indexScope,
     ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
-    results: results.map((r) => ({
-      index: r.index,
-      indexScope,
-      ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
-      sessionId: r.sessionId,
-      workspacePath: structuredWorkspacePath(r.workspacePath),
-      createdAt: r.createdAt.toISOString(),
-      matchCount: r.matchCount,
-      snippets: r.snippets.map((s) => ({
-        role: s.messageRole,
-        text: s.text,
-        matchPositions: s.matchPositions,
-      })),
-    })),
+    results: results.map((r) => {
+      const matchedWorkspacePath = structuredWorkspacePath(r.matchedWorkspacePath);
+      return {
+        index: r.index,
+        indexScope,
+        ...(indexWorkspacePath ? { indexWorkspacePath } : {}),
+        sessionId: r.sessionId,
+        workspacePath: structuredWorkspacePath(r.canonicalWorkspacePath, r.workspacePath),
+        ...(matchedWorkspacePath ? { matchedWorkspacePath } : {}),
+        createdAt: r.createdAt.toISOString(),
+        matchCount: r.matchCount,
+        snippets: r.snippets.map((s) => ({
+          role: s.messageRole,
+          text: s.text,
+          matchPositions: s.matchPositions,
+        })),
+      };
+    }),
   };
   addDiagnostics(output, options.diagnostics);
 

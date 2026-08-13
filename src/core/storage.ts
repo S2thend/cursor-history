@@ -1149,7 +1149,7 @@ function loadWorkspaceComposerIdsOnly(
     if (!source) return [];
 
     const ids = new Set<string>();
-    const fixedPageRows = SOURCE_READ_LIMITS_V1_DEFAULTS.sqlitePageRows;
+    const pageRows = budget.limits.sqlitePageRows;
     let afterIndex = -1;
     while (true) {
       throwIfReadAborted(signal);
@@ -1163,7 +1163,7 @@ function loadWorkspaceComposerIdsOnly(
              AND CAST(j.key AS INTEGER) > ?
            ORDER BY itemIndex ASC LIMIT ?`
         )
-        .all(source.rowId, afterIndex, fixedPageRows) as Array<{
+        .all(source.rowId, afterIndex, pageRows) as Array<{
         itemIndex?: number | bigint;
         byteLength?: number | bigint;
         composerId?: string;
@@ -1220,7 +1220,7 @@ function loadWorkspaceComposerIdsOnly(
         ids.add(projected.composerId);
       }
       afterIndex = metadata[metadata.length - 1]!.itemIndex;
-      if (rows.length < fixedPageRows) break;
+      if (rows.length < pageRows) break;
     }
     return [...ids];
   } catch (error) {
@@ -2251,6 +2251,12 @@ export interface SessionReadContext {
 }
 
 interface SessionReadContextPrivateState {
+  /**
+   * Workspace locator selected while reconciling Composer replicas. Keeping
+   * this operation-private lets getSession() hydrate an explicitly selected
+   * cross-workspace contributor without widening the context's workspace scan.
+   */
+  readonly boundComposerWorkspaceBySession: Map<string, Workspace>;
   readonly boundStoreOccurrencesBySession: Map<string, readonly StorePhysicalOccurrence[]>;
   readonly emittedDiagnosticKeys: Set<string>;
 }
@@ -2428,6 +2434,7 @@ export function createSessionReadContext(
         context.summaries = null;
         context.logicalSummaries = null;
         const privateState = sessionReadContextPrivate.get(context);
+        privateState?.boundComposerWorkspaceBySession.clear();
         privateState?.boundStoreOccurrencesBySession.clear();
         privateState?.emittedDiagnosticKeys.clear();
         sessionReadContextPrivate.delete(context);
@@ -2441,6 +2448,7 @@ export function createSessionReadContext(
   };
 
   sessionReadContextPrivate.set(context, {
+    boundComposerWorkspaceBySession: new Map(),
     boundStoreOccurrencesBySession: new Map(),
     emittedDiagnosticKeys: new Set(),
   });
@@ -2651,6 +2659,8 @@ function canonicalComposerCandidate(
 interface ReconciledComposerRows {
   readonly resolved: ChatSessionSummary[];
   readonly ambiguous: AmbiguousSessionSummary[];
+  /** Physical Composer workspace selected for each resolved logical UUID. */
+  readonly selectedWorkspaces: ReadonlyMap<string, Workspace>;
 }
 
 /** Reconcile workspace replicas and apply the global-primary Composer rule. */
@@ -2665,6 +2675,7 @@ async function reconcileComposerRows(
 ): Promise<ReconciledComposerRows> {
   const resolved: ChatSessionSummary[] = [];
   const ambiguous: AmbiguousSessionSummary[] = [];
+  const selectedWorkspaces = new Map<string, Workspace>();
   for (const [id, unsorted] of [...candidatesById.entries()].sort(([left], [right]) =>
     compareCodePoints(left, right)
   )) {
@@ -2724,6 +2735,7 @@ async function reconcileComposerRows(
         })),
       ];
       resolved.push(summary);
+      selectedWorkspaces.set(id, selected.workspace);
       continue;
     }
 
@@ -2804,8 +2816,9 @@ async function reconcileComposerRows(
       })),
     ];
     resolved.push(summary);
+    selectedWorkspaces.set(id, selected.workspace);
   }
-  return { resolved, ambiguous };
+  return { resolved, ambiguous, selectedWorkspaces };
 }
 
 /** Record a known Store counterpart that strict workspace scope did not permit loading. */
@@ -4000,6 +4013,11 @@ export async function listSessions(
     workspaceScopeResult?.kind === 'matched' ? workspaceScopeResult.matchKind : undefined,
     `${context.io.dataSourceIdentity}:${activeWorkspacePath ?? 'global'}`
   );
+  const boundComposerWorkspaces = privateReadState(context).boundComposerWorkspaceBySession;
+  boundComposerWorkspaces.clear();
+  for (const [sessionId, workspace] of composerRows.selectedWorkspaces) {
+    boundComposerWorkspaces.set(sessionId, workspace);
+  }
   allSessions.splice(0, allSessions.length, ...nonReplicaComposerRows, ...composerRows.resolved);
   const storeAmbiguousRows: AmbiguousSessionSummary[] = [];
 
@@ -4915,8 +4933,13 @@ async function loadComposerSession(
   }
 
   // Fall back to workspace storage (or use backup for backup mode)
-  const workspaces = await getWorkspacesCached(context, customDataPath, backupPath);
-  const workspace = workspaces.find((w) => w.id === summary.workspaceId);
+  const boundWorkspace = context
+    ? privateReadState(context).boundComposerWorkspaceBySession.get(summary.id)
+    : undefined;
+  const workspaces = boundWorkspace
+    ? []
+    : await getWorkspacesCached(context, customDataPath, backupPath);
+  const workspace = boundWorkspace ?? workspaces.find((w) => w.id === summary.workspaceId);
 
   if (!workspace) {
     return null;
@@ -5000,8 +5023,38 @@ async function loadMergedSession(
   if (composer && store) {
     return mergeCrossStackSessions(composer, store, preferredSource, index);
   }
-  // Graceful degradation: one side is unavailable — return the other as-is.
-  return composer ?? store;
+  const surviving = composer ?? store;
+  if (!surviving) return null;
+
+  // The listing selected a merged logical session, so losing either bound
+  // contributor during hydration must be visible. Returning the survivor as a
+  // complete single-source session would silently change the selected object.
+  const missingRole: SourceRole = composer ? 'store' : 'composer';
+  const loadedRole: SourceRole = composer ? 'composer' : 'store';
+  const prior = surviving.resolution;
+  return {
+    ...surviving,
+    source: 'workspace-fallback',
+    sources: ['composer', 'store'],
+    resolutionState: 'partial',
+    resolution: {
+      state: 'partial',
+      expectedSourceRoles: orderedSourceRoles([
+        ...(prior?.expectedSourceRoles ?? []),
+        'composer',
+        'store',
+      ]),
+      loadedSourceRoles: orderedSourceRoles([
+        ...(prior?.loadedSourceRoles ?? []).filter((role) => role !== missingRole),
+        loadedRole,
+      ]),
+      omittedSourceRoles: orderedSourceRoles(
+        (prior?.omittedSourceRoles ?? []).filter((role) => role !== missingRole)
+      ),
+      failedSourceRoles: orderedSourceRoles([...(prior?.failedSourceRoles ?? []), missingRole]),
+      reasonCodes: orderedResolutionReasons([...(prior?.reasonCodes ?? []), 'source-unavailable']),
+    },
+  };
 }
 
 /**
@@ -5048,8 +5101,6 @@ export async function searchSessions(
       context
     );
     const results: SearchResult[] = [];
-    const lowerQuery = query.toLowerCase();
-
     for (const summary of summaries) {
       throwIfReadAborted(options.signal ?? context.signal);
       if (summary.resolutionState === 'ambiguous') {
@@ -5066,7 +5117,7 @@ export async function searchSessions(
         );
         if (!session) continue;
 
-        const snippets = getSearchSnippets(session.messages, lowerQuery, options.contextChars);
+        const snippets = getSearchSnippets(session.messages, query, options.contextChars);
 
         if (snippets.length > 0) {
           const matchCount = snippets.reduce((sum, s) => sum + s.matchPositions.length, 0);
@@ -5075,6 +5126,8 @@ export async function searchSessions(
             sessionId: summary.id,
             index: summary.index,
             workspacePath: summary.workspacePath,
+            canonicalWorkspacePath: summary.canonicalWorkspacePath,
+            matchedWorkspacePath: summary.matchedWorkspacePath,
             createdAt: summary.createdAt,
             matchCount,
             snippets,

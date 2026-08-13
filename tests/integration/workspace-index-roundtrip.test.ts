@@ -151,9 +151,11 @@ async function expectWorkspaceRoundTrip(
 
   const singleJson = JSON.parse(await exportSessionToJson(0, libraryConfig)) as {
     id: string;
+    index: number;
     messages: Array<{ content: string }>;
   };
   expect(singleJson.id).toBe(sessionA);
+  expect(singleJson.index).toBe(0);
   expect(singleJson.messages[0]?.content).toBe('needle-a');
 
   const singleMarkdown = await exportSessionToMarkdown(0, libraryConfig);
@@ -162,8 +164,10 @@ async function expectWorkspaceRoundTrip(
 
   const allJson = JSON.parse(await exportAllSessionsToJson(libraryConfig)) as Array<{
     id: string;
+    index: number;
   }>;
   expect(allJson.map((session) => session.id)).toEqual([sessionA]);
+  expect(allJson.map((session) => session.index)).toEqual([0]);
 
   const allMarkdown = await exportAllSessionsToMarkdown(libraryConfig);
   expect(allMarkdown).toContain('needle-a');

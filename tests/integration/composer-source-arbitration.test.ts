@@ -190,6 +190,109 @@ describe.sequential('Composer tier arbitration through physical fixtures', () =>
     expect(scoped.data[0]!.messages.map(({ content }) => content)).toEqual([
       'in-scope-store-needle',
     ]);
+
+    const searchResults = await storage.searchSessions(
+      'in-scope-store-needle',
+      { limit: 0, contextChars: 40, workspacePath: root.projectA },
+      root.workspaceStorage
+    );
+    expect(searchResults).toHaveLength(1);
+    expect(searchResults[0]).toMatchObject({
+      sessionId: global.id,
+      workspacePath: root.projectB,
+      canonicalWorkspacePath: root.projectB,
+      matchedWorkspacePath: root.projectA,
+    });
+  });
+
+  it('binds an opted-in off-scope workspace fallback and reports its later loss as partial', async () => {
+    const root = fixture();
+    const composerHalf = composer(
+      root,
+      'off-scope-workspace-fallback-needle',
+      root.projectB,
+      '97531864-2468-4ace-8ace-975318642468'
+    );
+    const composerDbPath = writeComposerWorkspaceSummary(root, 'workspace-b', root.projectB, [
+      composerHalf,
+    ]);
+    const storeDb = writeStoreDb(
+      root,
+      composerHalf.id,
+      [{ role: 'assistant', content: 'in-scope-store-half-needle' }],
+      'Scoped Store half'
+    );
+    writeStoreMeta(dirname(storeDb), {
+      cwd: root.projectA,
+      title: 'Scoped Store half',
+      hasConversation: true,
+      createdAtMs: 1_783_000_000_000,
+    });
+
+    const optedInConfig: LibraryConfig = {
+      dataPath: root.workspaceStorage,
+      workspace: root.projectA,
+      includeCrossWorkspaceSources: true,
+    };
+    const hydrated = await library.listSessions(optedInConfig);
+    expect(hydrated.data).toHaveLength(1);
+    expect(hydrated.data[0]).toMatchObject({
+      id: composerHalf.id,
+      resolvedSource: 'merged',
+      resolution: {
+        state: 'partial',
+        loadedSourceRoles: ['composer', 'store'],
+      },
+    });
+    expect(hydrated.data[0]!.messages.map(({ content }) => content)).toEqual(
+      expect.arrayContaining(['off-scope-workspace-fallback-needle', 'in-scope-store-half-needle'])
+    );
+
+    const context = storage.createSessionReadContext({
+      dataPath: root.workspaceStorage,
+      workspacePath: root.projectA,
+      includeCrossWorkspaceSources: true,
+    });
+    try {
+      const summaries = await storage.listSessionSummaries(
+        {
+          all: true,
+          limit: 0,
+          workspacePath: root.projectA,
+          includeCrossWorkspaceSources: true,
+        },
+        root.workspaceStorage,
+        undefined,
+        context
+      );
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]).toMatchObject({ resolvedSource: 'merged' });
+
+      const removedComposer = new BetterSqlite3(composerDbPath);
+      removedComposer.prepare("DELETE FROM ItemTable WHERE key = 'composer.composerData'").run();
+      removedComposer.close();
+      const degraded = await storage.getSession(
+        composerHalf.id,
+        root.workspaceStorage,
+        undefined,
+        context,
+        summaries[0]!.index
+      );
+      expect(degraded).toMatchObject({
+        id: composerHalf.id,
+        resolvedSource: 'store-db',
+        resolutionState: 'partial',
+        resolution: {
+          state: 'partial',
+          expectedSourceRoles: ['composer', 'store'],
+          loadedSourceRoles: ['store'],
+          failedSourceRoles: ['composer'],
+          reasonCodes: expect.arrayContaining(['source-unavailable']),
+        },
+      });
+    } finally {
+      await context.dispose();
+    }
   });
 
   it('merges admitted global bubbles even when their optional Composer metadata row is absent', async () => {

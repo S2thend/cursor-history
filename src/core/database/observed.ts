@@ -35,6 +35,14 @@ function eventIdentity(sql: string, params: readonly unknown[], fallback: IoIden
   if (/\bsqlite_master\b/iu.test(sql)) {
     return { ...fallback, resourceClass: 'workspace-database-schema' };
   }
+  // The fallback describes the database's intended use, not permission to
+  // weaken a statement that actually crosses the adapter with raw payload.
+  // Keep this check ahead of the workspace-index fast path so instrumentation
+  // and poison mutations fail closed if that reviewed projection ever starts
+  // selecting Composer JSON.
+  if (fallback.resourceClass === 'workspace-session-index' && selectsRawPayload(sql)) {
+    return { ...fallback, resourceClass: 'workspace-conversation' };
+  }
   // A scoped off-workspace database is opened under this reviewed identity
   // solely for UUID projection. The SQL mentions composerData as a key name,
   // but it does not select the Composer JSON payload and must not be relabeled
