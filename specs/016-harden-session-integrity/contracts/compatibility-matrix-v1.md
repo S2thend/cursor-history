@@ -50,7 +50,8 @@ test cannot remove or reclassify a cell.
   cursor-history-owned key/binding and complete/degraded/idempotence contract. Release-blocking
   T113 alone runs the unchanged consumer's exact adapter, digest, policy, real SQLite
   transaction/rollback/reopen, and repeated sync from an owner-authorized external checkout at the
-  recorded upstream revision; no third-party implementation or downstream archive is copied here.
+  recorded upstream revision; the current tracked matrix fixtures, package inputs, and recurring CI
+  retain no third-party implementation or downstream archive.
 - The committed v0.16 raw-layout SQLite fixture is deterministic and wholly synthetic, with a
   logical-content manifest, reproducible generation instructions, SHA-256, and a sensitive-pattern
   scan.

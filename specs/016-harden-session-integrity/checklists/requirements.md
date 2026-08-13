@@ -50,8 +50,8 @@
   Source Read Limits v1 defaults plus a real v0.16-readable Cursor-source preflight compatibility
   gate distinct from the owner-authorized external T113 downstream certification.
 - Final remediation records the authorized external vibe-history revision, source-blob inventory,
-  and license classification without copying its adapter, digest, policy, database schema, or
-  generated archive into this repository. Recurring CI owns only the generic key/binding,
+  and license classification while leaving its adapter, digest, policy, database schema, and
+  generated archive absent from the current tracked tree, package, and recurring CI. Recurring CI owns only the generic key/binding,
   complete/degraded replacement, and idempotence contract; owner-authorized external T113 alone
   verifies the exact adapter, digest, SQLite transaction, rollback/reopen/retry, and repeated sync.
   It also made all 13 source-limit diagnostic dimensions exact (including fractional ZIP-ratio
