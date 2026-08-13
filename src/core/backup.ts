@@ -21,12 +21,13 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, dirname, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type {
   Database as DatabaseInterface,
   DatabaseCapability,
@@ -791,12 +792,7 @@ function validatedManifestFiles(manifest: BackupManifest): BackupFileEntry[] {
   if (!Array.isArray(manifest.files)) {
     throw new ZipArchiveFormatError('Backup manifest files must be an array.');
   }
-  const allowedTypes = new Set<BackupFileEntry['type']>([
-    'global-db',
-    'workspace-db',
-    'workspace-json',
-    'manifest',
-  ]);
+  const destinationKeys = new Set<string>();
   return manifest.files.map((value, index) => {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} must be an object.`);
@@ -814,22 +810,83 @@ function validatedManifestFiles(manifest: BackupManifest): BackupFileEntry[] {
     ) {
       throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} has an invalid checksum.`);
     }
-    if (!allowedTypes.has(entry['type'] as BackupFileEntry['type'])) {
+    const type = entry['type'];
+    if (
+      type !== 'global-db' &&
+      type !== 'workspace-db' &&
+      type !== 'workspace-json' &&
+      type !== 'manifest'
+    ) {
       throw new ZipArchiveFormatError(`Backup manifest file ${index + 1} has an invalid type.`);
     }
+
+    const path = entry['path'];
+    const expectedType = backupEntryTypeForCanonicalPath(path);
+    if (expectedType === undefined || type !== expectedType) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest file ${index + 1} has an unsupported path/type combination.`
+      );
+    }
+
+    // ZIP readers reject portable-name aliases too, but enforce destination uniqueness at the
+    // manifest boundary so restore never depends on host case sensitivity or extraction order.
+    const destinationKey = path.normalize('NFC').toLowerCase();
+    if (destinationKeys.has(destinationKey)) {
+      throw new ZipArchiveFormatError(
+        `Backup manifest contains a duplicate restore destination: ${path}`
+      );
+    }
+    destinationKeys.add(destinationKey);
+
     return {
-      path: entry['path'],
+      path,
       size: Number(entry['size']),
       checksum: entry['checksum'].toLowerCase(),
-      type: entry['type'] as BackupFileEntry['type'],
+      type,
     };
   });
+}
+
+function isCanonicalBackupPathSegment(value: string): boolean {
+  const hasControlCharacter = [...value].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (
+    value.length === 0 ||
+    value === '.' ||
+    value === '..' ||
+    value !== value.normalize('NFC') ||
+    value.includes(':') ||
+    /[\\/\0]/u.test(value) ||
+    hasControlCharacter ||
+    /[. ]$/u.test(value) ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(value)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function backupEntryTypeForCanonicalPath(
+  path: string
+): Exclude<BackupFileEntry['type'], 'manifest'> | undefined {
+  if (path === 'globalStorage/state.vscdb') return 'global-db';
+
+  const match = /^workspaceStorage\/([^/]+)\/(state\.vscdb|workspace\.json)$/u.exec(path);
+  if (!match || !isCanonicalBackupPathSegment(match[1]!)) return undefined;
+  return match[2] === 'state.vscdb' ? 'workspace-db' : 'workspace-json';
 }
 
 interface StagedBackupFile {
   readonly manifestEntry: BackupFileEntry;
   readonly archiveEntryName: string;
   readonly temporaryPath?: string;
+}
+
+interface PlannedRestoreFile extends StagedBackupFile {
+  readonly trustedRoot: string;
+  readonly destinationPath: string;
 }
 
 interface ArchiveInspection {
@@ -1095,6 +1152,120 @@ export async function validateBackup(
   }
 }
 
+type RestoreLeafKind = 'directory' | 'file';
+
+function lstatIfPresent(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+/**
+ * Inspect every existing component without following links.
+ *
+ * Node 20 does not expose portable openat-style directory descriptors, so restore validates the
+ * complete chain before publication and repeats the check immediately before each copy. This
+ * rejects static symlinks/junctions and dangling links instead of letting existsSync hide them.
+ */
+function assertNoLinkedRestorePath(
+  trustedRoot: string,
+  path: string,
+  leafKind: RestoreLeafKind
+): boolean {
+  const absoluteRoot = resolve(trustedRoot);
+  const absolutePath = resolve(path);
+  const suffix = relative(absoluteRoot, absolutePath);
+  if (suffix === '..' || suffix.startsWith(`..${sep}`) || isAbsolute(suffix)) {
+    throw new Error(`Restore destination escapes the Cursor data directory: ${absolutePath}`);
+  }
+  const components = suffix === '' ? [] : suffix.split(sep);
+  let currentPath = absoluteRoot;
+  let missingAncestor = false;
+
+  const rootStats = lstatIfPresent(absoluteRoot);
+  if (rootStats && !rootStats.isDirectory()) {
+    throw new Error(`Restore target root is not a directory: ${absoluteRoot}`);
+  }
+
+  for (let index = 0; index < components.length; index++) {
+    currentPath = join(currentPath, components[index]!);
+    const stats = lstatIfPresent(currentPath);
+    if (!stats) {
+      missingAncestor = true;
+      continue;
+    }
+    if (missingAncestor) {
+      throw new Error(`Restore target has an inconsistent filesystem path: ${currentPath}`);
+    }
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Restore target traverses an unsafe filesystem link: ${currentPath}`);
+    }
+
+    const isLeaf = index === components.length - 1;
+    if (!isLeaf || leafKind === 'directory') {
+      if (!stats.isDirectory()) {
+        throw new Error(`Restore target ancestor is not a directory: ${currentPath}`);
+      }
+    } else if (!stats.isFile()) {
+      throw new Error(`Restore destination is not a regular file: ${currentPath}`);
+    }
+  }
+
+  return !missingAncestor;
+}
+
+function isConfinedRestoreDestination(userDir: string, destinationPath: string): boolean {
+  const relativePath = relative(userDir, destinationPath);
+  return (
+    relativePath !== '' &&
+    relativePath !== '..' &&
+    !relativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(relativePath)
+  );
+}
+
+function planRestoreFiles(
+  userDir: string,
+  stagedFiles: readonly StagedBackupFile[]
+): PlannedRestoreFile[] {
+  const requestedUserDir = resolve(userDir);
+  const rootStats = lstatIfPresent(requestedUserDir);
+  let absoluteUserDir = requestedUserDir;
+  if (rootStats?.isDirectory()) {
+    absoluteUserDir = realpathSync(requestedUserDir);
+  }
+  assertNoLinkedRestorePath(absoluteUserDir, absoluteUserDir, 'directory');
+  const destinationKeys = new Set<string>();
+
+  return stagedFiles.map((staged) => {
+    // The manifest schema has already admitted only fixed-depth canonical Cursor data paths.
+    // Resolve again at the filesystem boundary so a future schema extension cannot accidentally
+    // turn an archive locator into an unconstrained destination.
+    const destinationPath = resolve(absoluteUserDir, ...staged.archiveEntryName.split('/'));
+    if (!isConfinedRestoreDestination(absoluteUserDir, destinationPath)) {
+      throw new Error(`Restore destination escapes the Cursor data directory: ${destinationPath}`);
+    }
+    const destinationKey = destinationPath.normalize('NFC').toLowerCase();
+    if (destinationKeys.has(destinationKey)) {
+      throw new Error(`Backup resolves to a duplicate restore destination: ${destinationPath}`);
+    }
+    destinationKeys.add(destinationKey);
+    assertNoLinkedRestorePath(absoluteUserDir, destinationPath, 'file');
+    return { ...staged, trustedRoot: absoluteUserDir, destinationPath };
+  });
+}
+
+function existingRestoreDestinations(plans: readonly PlannedRestoreFile[]): string[] {
+  return plans
+    .filter(({ trustedRoot, destinationPath }) =>
+      assertNoLinkedRestorePath(trustedRoot, destinationPath, 'file')
+    )
+    .map(({ manifestEntry }) => manifestEntry.path);
+}
+
 // ============================================================================
 // Restore Operations (T040-T045)
 // ============================================================================
@@ -1151,16 +1322,17 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     }
 
     const manifest = validation.manifest!;
-    const userDir = dirname(targetPath);
-    const globalDbPath = join(userDir, 'globalStorage', 'state.vscdb');
-    if (!force && existsSync(globalDbPath)) {
+    const userDir = resolve(dirname(targetPath));
+    const restorePlan = planRestoreFiles(userDir, inspection.stagedFiles);
+    const existingDestinations = existingRestoreDestinations(restorePlan);
+    if (!force && existingDestinations.length > 0) {
       return {
         success: false,
         targetPath,
         filesRestored: 0,
         warnings: [],
         durationMs: Date.now() - startTime,
-        error: `Target already has Cursor data: ${userDir}. Use --force to overwrite.`,
+        error: `Target already has Cursor data at: ${existingDestinations.join(', ')}. Use --force to overwrite.`,
       };
     }
 
@@ -1174,9 +1346,35 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     throwIfAborted(signal);
 
     const warnings = validation.corruptedFiles.map((file) => `Checksum mismatch: ${file}`);
-    for (let index = 0; index < inspection.stagedFiles.length; index++) {
+
+    // Create every required directory and then revalidate the complete target set before the first
+    // file publication. This makes a late-path collision or static link fail with zero file writes.
+    for (const planned of restorePlan) {
+      assertNoLinkedRestorePath(planned.trustedRoot, dirname(planned.destinationPath), 'directory');
+      mkdirSync(dirname(planned.destinationPath), { recursive: true });
+    }
+    const trustedRoot = restorePlan[0]?.trustedRoot ?? resolve(userDir);
+    assertNoLinkedRestorePath(trustedRoot, trustedRoot, 'directory');
+    const postCreationDestinations = existingRestoreDestinations(restorePlan);
+    if (!force && postCreationDestinations.length > 0) {
+      throw new Error(
+        `Target already has Cursor data at: ${postCreationDestinations.join(', ')}. Use --force to overwrite.`
+      );
+    }
+
+    const previousPaths = new Map<string, string>();
+    for (let index = 0; index < restorePlan.length; index++) {
+      const planned = restorePlan[index]!;
+      if (!assertNoLinkedRestorePath(planned.trustedRoot, planned.destinationPath, 'file'))
+        continue;
+      const previousPath = workspace.createFile(`previous-${index}.bin`);
+      copyFileSync(planned.destinationPath, previousPath);
+      previousPaths.set(planned.destinationPath, previousPath);
+    }
+
+    for (let index = 0; index < restorePlan.length; index++) {
       throwIfAborted(signal);
-      const staged = inspection.stagedFiles[index]!;
+      const staged = restorePlan[index]!;
       if (!staged.temporaryPath) {
         throw new Error(`Private restore staging is missing: ${staged.manifestEntry.path}`);
       }
@@ -1191,22 +1389,25 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
       });
       throwIfAborted(signal);
 
-      const platformPath = staged.archiveEntryName.split('/').join(sep);
-      const destPath = join(userDir, platformPath);
       throwIfAborted(signal);
-      mkdirSync(dirname(destPath), { recursive: true });
-      let previousPath: string | undefined;
-      if (existsSync(destPath)) {
-        previousPath = workspace.createFile(`previous-${index}.bin`);
-        copyFileSync(destPath, previousPath);
+      const destinationExists = assertNoLinkedRestorePath(
+        staged.trustedRoot,
+        staged.destinationPath,
+        'file'
+      );
+      if (!force && destinationExists) {
+        throw new Error(
+          `Target already has Cursor data at: ${staged.manifestEntry.path}. Use --force to overwrite.`
+        );
       }
+      const previousPath = previousPaths.get(staged.destinationPath);
       restoredFiles.push({
         manifestPath: staged.manifestEntry.path,
-        destinationPath: destPath,
+        destinationPath: staged.destinationPath,
         ...(previousPath ? { previousPath } : {}),
       });
       throwIfAborted(signal);
-      copyFileSync(staged.temporaryPath, destPath);
+      copyFileSync(staged.temporaryPath, staged.destinationPath);
     }
 
     // Phase: Finalizing

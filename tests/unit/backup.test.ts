@@ -62,6 +62,10 @@ vi.mock('../../src/core/private-temp.js', () => ({
   createPrivateTempWorkspace: createPrivateTempWorkspaceMock,
 }));
 
+vi.mock('../../src/core/backup-publication.js', () => ({
+  enforcePublishedArchiveMode: vi.fn(),
+}));
+
 vi.mock('../../src/core/zip-stream.js', () => {
   class MockZipArchiveFormatError extends Error {
     override readonly name = 'ZipArchiveFormatError';
@@ -75,7 +79,7 @@ vi.mock('../../src/core/zip-stream.js', () => {
   };
 });
 
-import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import {
   getDefaultBackupDir,
   computeChecksum,
@@ -316,9 +320,48 @@ describe('readBackupManifest', () => {
       })
     );
 
-    await expect(readBackupManifest('/backup.zip')).rejects.toBeInstanceOf(
-      ZipArchiveFormatError
+    await expect(readBackupManifest('/backup.zip')).rejects.toBeInstanceOf(ZipArchiveFormatError);
+  });
+
+  it.each([
+    ['settings.json', 'global-db'],
+    ['workspaceStorage/ws/state.vscdb', 'workspace-json'],
+    ['globalStorage/state.vscdb', 'manifest'],
+  ] as const)('rejects unsupported manifest path/type mapping %s as %s', async (path, type) => {
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': Buffer.from(
+          JSON.stringify({
+            version: '1.0.0',
+            files: [{ path, size: 1, checksum: `sha256:${'0'.repeat(64)}`, type }],
+          })
+        ),
+      })
     );
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toThrow(
+      'unsupported path/type combination'
+    );
+  });
+
+  it('rejects duplicate manifest destinations before archive entry reads', async () => {
+    const file = {
+      path: 'globalStorage/state.vscdb',
+      size: 1,
+      checksum: `sha256:${'0'.repeat(64)}`,
+      type: 'global-db',
+    };
+    const archive = mockArchive({
+      'manifest.json': Buffer.from(
+        JSON.stringify({ version: '1.0.0', files: [file, { ...file }] })
+      ),
+    });
+    openBoundedZipArchiveMock.mockResolvedValueOnce(archive);
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toThrow(
+      'duplicate restore destination'
+    );
+    expect(archive.checksumEntry).not.toHaveBeenCalled();
   });
 
   it('propagates immutable source-read options to the bounded ZIP open', async () => {
@@ -399,19 +442,26 @@ describe('validateBackup', () => {
     const checksum = computeChecksum(fileContent);
     const manifest = {
       version: '1.0.0',
-      files: [{ path: 'test.db', size: fileContent.length, checksum, type: 'global-db' }],
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: fileContent.length,
+          checksum,
+          type: 'global-db',
+        },
+      ],
     };
 
     openBoundedZipArchiveMock.mockResolvedValue(
       mockArchive({
         'manifest.json': Buffer.from(JSON.stringify(manifest)),
-        'test.db': fileContent,
+        'globalStorage/state.vscdb': fileContent,
       })
     );
 
     const result = await validateBackup('/valid.zip');
     expect(result.status).toBe('valid');
-    expect(result.validFiles).toContain('test.db');
+    expect(result.validFiles).toContain('globalStorage/state.vscdb');
   });
 });
 
@@ -499,6 +549,11 @@ describe('createBackup', () => {
       ];
     });
     vi.mocked(statSync).mockReturnValue({ size: 1024 } as ReturnType<typeof statSync>);
+    vi.mocked(lstatSync).mockReturnValue({
+      dev: 1n,
+      ino: 2n,
+      isFile: () => true,
+    } as unknown as ReturnType<typeof lstatSync>);
 
     const sourceReadLimits = { zipEntryCount: 10 };
     const result = await createBackup({
@@ -529,6 +584,11 @@ describe('createBackup', () => {
     vi.mocked(existsSync).mockImplementation((path) => !String(path).endsWith('.zip'));
     vi.mocked(readdirSync).mockReturnValue([]);
     vi.mocked(statSync).mockReturnValue({ size: 1 } as ReturnType<typeof statSync>);
+    vi.mocked(lstatSync).mockReturnValue({
+      dev: 1n,
+      ino: 2n,
+      isFile: () => true,
+    } as unknown as ReturnType<typeof lstatSync>);
     const sourceReadLimits = { zipEntryCount: 10 };
 
     const result = await createBackup({
@@ -588,7 +648,31 @@ describe('restoreBackup', () => {
       ],
     };
 
-    vi.mocked(existsSync).mockReturnValue(true); // both backup and target exist
+    vi.mocked(existsSync).mockReturnValue(true); // backup and target exist
+    vi.mocked(mkdirSync).mockImplementation(() => undefined as unknown as string);
+    vi.mocked(lstatSync).mockImplementation((path) => {
+      const value = String(path);
+      if (
+        value === '/' ||
+        value === '/target' ||
+        value === '/target/User' ||
+        value === '/target/User/globalStorage'
+      ) {
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => true,
+          isFile: () => false,
+        } as ReturnType<typeof lstatSync>;
+      }
+      if (value.endsWith('/globalStorage/state.vscdb')) {
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => false,
+          isFile: () => true,
+        } as ReturnType<typeof lstatSync>;
+      }
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
     openBoundedZipArchiveMock.mockResolvedValue(
       mockArchive({
         'manifest.json': Buffer.from(JSON.stringify(manifest)),
@@ -599,6 +683,7 @@ describe('restoreBackup', () => {
     const sourceReadLimits = { zipEntryCount: 8 };
     const result = await restoreBackup({
       backupPath: '/backup.zip',
+      targetPath: '/target/User/workspaceStorage',
       force: false,
       sourceReadLimits,
     });
@@ -626,6 +711,9 @@ describe('restoreBackup', () => {
       ],
     };
     vi.mocked(existsSync).mockReturnValue(false);
+    vi.mocked(lstatSync).mockImplementation(() => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
     openBoundedZipArchiveMock.mockResolvedValue(
       mockArchive({
         'manifest.json': Buffer.from(JSON.stringify(manifest)),

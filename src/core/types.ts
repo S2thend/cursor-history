@@ -821,7 +821,7 @@ export interface RestoreResult {
   targetPath: string;
   /** Number of files restored */
   filesRestored: number;
-  /** Files with integrity warnings (still restored) */
+  /** Integrity warnings for corrupt entries that were reported and skipped */
   warnings: string[];
   /** Duration in milliseconds */
   durationMs: number;

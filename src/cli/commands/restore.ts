@@ -113,7 +113,10 @@ export function registerRestoreCommand(program: Command): void {
       '-t, --target <path>',
       'Target Cursor data path (default: platform-specific Cursor data directory)'
     )
-    .option('-f, --force', 'Overwrite existing data without prompting')
+    .option(
+      '-f, --force',
+      'Overwrite validated Cursor destinations; never bypass integrity or path-safety checks'
+    )
     .action(async (backupArg: string, options: RestoreCommandOptions, command: Command) => {
       const globalOptions = command.parent?.opts() as {
         json?: boolean;

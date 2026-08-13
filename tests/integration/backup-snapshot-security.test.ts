@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from 'node:fs';
@@ -1040,70 +1041,451 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     expect(currentPrivateTempPaths()).toEqual(before);
   });
 
-  it('restores only intact entries from a mixed archive and leaves a corrupt destination untouched', async () => {
-    const validGlobal = Buffer.from('valid global sqlite bytes');
-    const expectedWorkspace = Buffer.from('expected workspace bytes');
-    const corruptWorkspace = Buffer.from('corrupt workspace bytes!');
+  it.each([
+    ['settings.json', 'global-db'],
+    ['workspaceStorage/ws/state.vscdb', 'global-db'],
+    ['globalStorage/state.vscdb', 'workspace-db'],
+  ] as const)(
+    'rejects the non-Cursor or mismatched restore mapping %s as %s without touching its target',
+    async (manifestPath, type) => {
+      const payload = Buffer.from('archive-controlled bytes');
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.18.0',
+        files: [
+          {
+            path: manifestPath,
+            size: payload.length,
+            checksum: computeChecksum(payload),
+            type,
+          },
+        ],
+        stats: { totalSize: payload.length, sessionCount: 0, workspaceCount: 0 },
+      };
+      const path = join(fixtureRoot, `invalid-restore-${type}-${basename(manifestPath)}.zip`);
+      writeFileSync(
+        path,
+        buildZip([
+          { name: manifestPath, data: payload },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const targetPath = join(fixtureRoot, 'invalid-restore', 'User', 'workspaceStorage');
+      const userDir = dirname(targetPath);
+      const victim = join(userDir, manifestPath);
+      mkdirSync(dirname(victim), { recursive: true });
+      const original = Buffer.from('pre-existing target');
+      writeFileSync(victim, original, { mode: 0o600 });
+
+      const validation = await validateBackup(path);
+      expect(validation.status).toBe('invalid');
+      expect(validation.errors.join(' ')).toContain('unsupported path/type combination');
+      const result = await restoreBackup({ backupPath: path, targetPath, force: true });
+
+      expect(result).toMatchObject({ success: false, filesRestored: 0 });
+      expect(readFileSync(victim)).toEqual(original);
+    }
+  );
+
+  it('rejects duplicate manifest destinations before restoring any bytes', async () => {
+    const payload = Buffer.from('duplicate destination bytes');
+    const file = {
+      path: 'globalStorage/state.vscdb',
+      size: payload.length,
+      checksum: computeChecksum(payload),
+      type: 'global-db',
+    };
     const manifest = {
       version: '1.0.0',
       createdAt: new Date(0).toISOString(),
       sourcePlatform: 'linux',
-      cursorHistoryVersion: '0.16.0',
-      files: [
-        {
-          path: 'globalStorage/state.vscdb',
-          size: validGlobal.length,
-          checksum: computeChecksum(validGlobal),
-          type: 'global-db',
-        },
-        {
-          path: 'workspaceStorage/ws/state.vscdb',
-          size: expectedWorkspace.length,
-          checksum: computeChecksum(expectedWorkspace),
-          type: 'workspace-db',
-        },
-      ],
+      cursorHistoryVersion: '0.18.0',
+      files: [file, { ...file }],
+      stats: { totalSize: payload.length * 2, sessionCount: 0, workspaceCount: 0 },
+    };
+    const path = join(fixtureRoot, 'duplicate-restore-destination.zip');
+    writeFileSync(
+      path,
+      buildZip([
+        { name: file.path, data: payload },
+        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+      ]).buffer,
+      { mode: 0o600 }
+    );
+    const targetPath = join(fixtureRoot, 'duplicate-restore', 'User', 'workspaceStorage');
+    const destination = join(dirname(targetPath), file.path);
+
+    const validation = await validateBackup(path);
+    expect(validation.status).toBe('invalid');
+    expect(validation.errors.join(' ')).toContain('duplicate restore destination');
+    const result = await restoreBackup({ backupPath: path, targetPath, force: true });
+
+    expect(result).toMatchObject({ success: false, filesRestored: 0 });
+    expect(existsSync(destination)).toBe(false);
+  });
+
+  it('preflights every valid destination before non-force restore and writes nothing on a later collision', async () => {
+    const global = Buffer.from('new global bytes');
+    const workspace = Buffer.from('new workspace bytes');
+    const files = [
+      {
+        path: 'globalStorage/state.vscdb',
+        size: global.length,
+        checksum: computeChecksum(global),
+        type: 'global-db',
+      },
+      {
+        path: 'workspaceStorage/ws/state.vscdb',
+        size: workspace.length,
+        checksum: computeChecksum(workspace),
+        type: 'workspace-db',
+      },
+    ];
+    const manifest = {
+      version: '1.0.0',
+      createdAt: new Date(0).toISOString(),
+      sourcePlatform: 'linux',
+      cursorHistoryVersion: '0.18.0',
+      files,
       stats: {
-        totalSize: validGlobal.length + expectedWorkspace.length,
+        totalSize: global.length + workspace.length,
         sessionCount: 0,
         workspaceCount: 1,
       },
     };
-    const archivePath = join(fixtureRoot, 'mixed-integrity-restore.zip');
+    const path = join(fixtureRoot, 'later-restore-collision.zip');
     writeFileSync(
-      archivePath,
+      path,
       buildZip([
-        { name: 'globalStorage/state.vscdb', data: validGlobal, method: 8 },
-        { name: 'workspaceStorage/ws/state.vscdb', data: corruptWorkspace, method: 8 },
-        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)), method: 8 },
+        { name: files[0]!.path, data: global },
+        { name: files[1]!.path, data: workspace },
+        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
       ]).buffer,
       { mode: 0o600 }
     );
-    const targetPath = join(fixtureRoot, 'mixed-restore', 'User', 'workspaceStorage');
-    const corruptDestination = join(targetPath, 'ws', 'state.vscdb');
-    const priorDestination = Buffer.from('existing destination must survive');
-    mkdirSync(dirname(corruptDestination), { recursive: true });
-    writeFileSync(corruptDestination, priorDestination, { mode: 0o600 });
+    const targetPath = join(fixtureRoot, 'later-collision', 'User', 'workspaceStorage');
+    const userDir = dirname(targetPath);
+    const globalDestination = join(userDir, files[0]!.path);
+    const workspaceDestination = join(userDir, files[1]!.path);
+    const originalWorkspace = Buffer.from('existing later destination');
+    mkdirSync(dirname(workspaceDestination), { recursive: true });
+    writeFileSync(workspaceDestination, originalWorkspace, { mode: 0o600 });
 
-    const validation = await validateBackup(archivePath);
-    expect(validation).toMatchObject({
-      status: 'warnings',
-      validFiles: ['globalStorage/state.vscdb'],
-      corruptedFiles: ['workspaceStorage/ws/state.vscdb'],
-    });
+    const result = await restoreBackup({ backupPath: path, targetPath, force: false });
 
-    const result = await restoreBackup({ backupPath: archivePath, targetPath });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('already has Cursor data');
+    expect(existsSync(globalDestination)).toBe(false);
+    expect(readFileSync(workspaceDestination)).toEqual(originalWorkspace);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a linked workspaceStorage ancestor without writing outside the Cursor data directory',
+    async () => {
+      const payload = Buffer.from('must remain confined');
+      const file = {
+        path: 'workspaceStorage/ws/state.vscdb',
+        size: payload.length,
+        checksum: computeChecksum(payload),
+        type: 'workspace-db',
+      };
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.18.0',
+        files: [file],
+        stats: { totalSize: payload.length, sessionCount: 0, workspaceCount: 1 },
+      };
+      const path = join(fixtureRoot, 'linked-workspace-restore.zip');
+      writeFileSync(
+        path,
+        buildZip([
+          { name: file.path, data: payload },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const userDir = join(fixtureRoot, 'linked-workspace', 'User');
+      const targetPath = join(userDir, 'workspaceStorage');
+      const outside = join(fixtureRoot, 'outside-workspace');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(outside, { recursive: true });
+      symlinkSync(outside, targetPath, 'dir');
+
+      const result = await restoreBackup({ backupPath: path, targetPath, force: true });
+
+      expect(result).toMatchObject({ success: false, filesRestored: 0 });
+      expect(result.error).toContain('unsafe filesystem link');
+      expect(existsSync(join(outside, 'ws', 'state.vscdb'))).toBe(false);
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts an explicitly selected Cursor user root reached through a link above that trust boundary',
+    async () => {
+      const payload = Buffer.from('valid restore through linked parent');
+      const file = {
+        path: 'globalStorage/state.vscdb',
+        size: payload.length,
+        checksum: computeChecksum(payload),
+        type: 'global-db',
+      };
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.18.0',
+        files: [file],
+        stats: { totalSize: payload.length, sessionCount: 0, workspaceCount: 0 },
+      };
+      const path = join(fixtureRoot, 'linked-parent-restore.zip');
+      writeFileSync(
+        path,
+        buildZip([
+          { name: file.path, data: payload },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const realParent = join(fixtureRoot, 'real-custom-parent');
+      const linkedParent = join(fixtureRoot, 'linked-custom-parent');
+      const realUser = join(realParent, 'User');
+      mkdirSync(realUser, { recursive: true });
+      symlinkSync(realParent, linkedParent, 'dir');
+      const targetPath = join(linkedParent, 'User', 'workspaceStorage');
+
+      const result = await restoreBackup({ backupPath: path, targetPath });
+
+      expect(result).toMatchObject({ success: true, filesRestored: 1 });
+      expect(readFileSync(join(realUser, file.path))).toEqual(payload);
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a linked destination file without modifying the link target',
+    async () => {
+      const payload = Buffer.from('must not replace link target');
+      const file = {
+        path: 'workspaceStorage/ws/state.vscdb',
+        size: payload.length,
+        checksum: computeChecksum(payload),
+        type: 'workspace-db',
+      };
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.18.0',
+        files: [file],
+        stats: { totalSize: payload.length, sessionCount: 0, workspaceCount: 1 },
+      };
+      const path = join(fixtureRoot, 'linked-file-restore.zip');
+      writeFileSync(
+        path,
+        buildZip([
+          { name: file.path, data: payload },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const targetPath = join(fixtureRoot, 'linked-file', 'User', 'workspaceStorage');
+      const destination = join(dirname(targetPath), file.path);
+      const outside = join(fixtureRoot, 'outside-destination.vscdb');
+      const original = Buffer.from('outside file must survive');
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(outside, original, { mode: 0o600 });
+      symlinkSync(outside, destination, 'file');
+
+      const result = await restoreBackup({ backupPath: path, targetPath, force: true });
+
+      expect(result).toMatchObject({ success: false, filesRestored: 0 });
+      expect(result.error).toContain('unsafe filesystem link');
+      expect(readFileSync(outside)).toEqual(original);
+    }
+  );
+
+  it.each([false, true])(
+    'restores only intact entries from a mixed archive and leaves a corrupt destination untouched (force=%s)',
+    async (force) => {
+      const validGlobal = Buffer.from('valid global sqlite bytes');
+      const expectedWorkspace = Buffer.from('expected workspace bytes');
+      const corruptWorkspace = Buffer.from('corrupt workspace bytes!');
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.16.0',
+        files: [
+          {
+            path: 'globalStorage/state.vscdb',
+            size: validGlobal.length,
+            checksum: computeChecksum(validGlobal),
+            type: 'global-db',
+          },
+          {
+            path: 'workspaceStorage/ws/state.vscdb',
+            size: expectedWorkspace.length,
+            checksum: computeChecksum(expectedWorkspace),
+            type: 'workspace-db',
+          },
+        ],
+        stats: {
+          totalSize: validGlobal.length + expectedWorkspace.length,
+          sessionCount: 0,
+          workspaceCount: 1,
+        },
+      };
+      const archivePath = join(fixtureRoot, 'mixed-integrity-restore.zip');
+      writeFileSync(
+        archivePath,
+        buildZip([
+          { name: 'globalStorage/state.vscdb', data: validGlobal, method: 8 },
+          { name: 'workspaceStorage/ws/state.vscdb', data: corruptWorkspace, method: 8 },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)), method: 8 },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const targetPath = join(fixtureRoot, 'mixed-restore', 'User', 'workspaceStorage');
+      const corruptDestination = join(targetPath, 'ws', 'state.vscdb');
+      const priorDestination = Buffer.from('existing destination must survive');
+      mkdirSync(dirname(corruptDestination), { recursive: true });
+      writeFileSync(corruptDestination, priorDestination, { mode: 0o600 });
+
+      const validation = await validateBackup(archivePath);
+      expect(validation).toMatchObject({
+        status: 'warnings',
+        validFiles: ['globalStorage/state.vscdb'],
+        corruptedFiles: ['workspaceStorage/ws/state.vscdb'],
+      });
+
+      const result = await restoreBackup({ backupPath: archivePath, targetPath, force });
+
+      expect(result).toMatchObject({
+        success: true,
+        filesRestored: 1,
+        warnings: ['Checksum mismatch: workspaceStorage/ws/state.vscdb'],
+      });
+      expect(readFileSync(join(dirname(targetPath), 'globalStorage', 'state.vscdb'))).toEqual(
+        validGlobal
+      );
+      expect(readFileSync(corruptDestination)).toEqual(priorDestination);
+    }
+  );
+
+  it('skips a size-only invalid entry from a mixed archive while restoring the intact entry', async () => {
+    const validGlobal = Buffer.from('valid global bytes');
+    const workspace = Buffer.from('workspace checksum is valid but declared size is not');
+    const files = [
+      {
+        path: 'globalStorage/state.vscdb',
+        size: validGlobal.length,
+        checksum: computeChecksum(validGlobal),
+        type: 'global-db',
+      },
+      {
+        path: 'workspaceStorage/ws/state.vscdb',
+        size: workspace.length + 1,
+        checksum: computeChecksum(workspace),
+        type: 'workspace-db',
+      },
+    ];
+    const manifest = {
+      version: '1.0.0',
+      createdAt: new Date(0).toISOString(),
+      sourcePlatform: 'linux',
+      cursorHistoryVersion: '0.18.0',
+      files,
+      stats: {
+        totalSize: validGlobal.length + workspace.length + 1,
+        sessionCount: 0,
+        workspaceCount: 1,
+      },
+    };
+    const archivePath = join(fixtureRoot, 'mixed-size-only-invalid-restore.zip');
+    writeFileSync(
+      archivePath,
+      buildZip([
+        { name: files[0]!.path, data: validGlobal },
+        { name: files[1]!.path, data: workspace },
+        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+      ]).buffer,
+      { mode: 0o600 }
+    );
+    const targetPath = join(fixtureRoot, 'mixed-size-only', 'User', 'workspaceStorage');
+    const workspaceDestination = join(dirname(targetPath), files[1]!.path);
+    const priorWorkspace = Buffer.from('existing workspace survives');
+    mkdirSync(dirname(workspaceDestination), { recursive: true });
+    writeFileSync(workspaceDestination, priorWorkspace, { mode: 0o600 });
+
+    const result = await restoreBackup({ backupPath: archivePath, targetPath, force: true });
 
     expect(result).toMatchObject({
       success: true,
       filesRestored: 1,
       warnings: ['Checksum mismatch: workspaceStorage/ws/state.vscdb'],
     });
-    expect(readFileSync(join(dirname(targetPath), 'globalStorage', 'state.vscdb'))).toEqual(
-      validGlobal
-    );
-    expect(readFileSync(corruptDestination)).toEqual(priorDestination);
+    expect(readFileSync(join(dirname(targetPath), files[0]!.path))).toEqual(validGlobal);
+    expect(readFileSync(workspaceDestination)).toEqual(priorWorkspace);
   });
+
+  it.each(['checksum', 'size'] as const)(
+    'rejects an all-corrupt archive with a %s mismatch without modifying an existing destination',
+    async (mismatch) => {
+      const expected = Buffer.from('expected sqlite bytes');
+      const corrupt = Buffer.from('corrupt sqlite bytes!');
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.16.0',
+        files: [
+          {
+            path: 'globalStorage/state.vscdb',
+            size: mismatch === 'size' ? corrupt.length + 1 : expected.length,
+            checksum: computeChecksum(expected),
+            type: 'global-db',
+          },
+        ],
+        stats: {
+          totalSize: expected.length,
+          sessionCount: 0,
+          workspaceCount: 0,
+        },
+      };
+      const archivePath = join(fixtureRoot, `all-corrupt-${mismatch}-restore.zip`);
+      writeFileSync(
+        archivePath,
+        buildZip([
+          { name: 'globalStorage/state.vscdb', data: corrupt, method: 8 },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)), method: 8 },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const targetPath = join(
+        fixtureRoot,
+        `all-corrupt-${mismatch}-restore`,
+        'User',
+        'workspaceStorage'
+      );
+      const destination = join(dirname(targetPath), 'globalStorage', 'state.vscdb');
+      const priorDestination = Buffer.from('existing global destination must survive');
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(destination, priorDestination, { mode: 0o600 });
+
+      const result = await restoreBackup({ backupPath: archivePath, targetPath, force: true });
+
+      expect(result).toMatchObject({
+        success: false,
+        filesRestored: 0,
+      });
+      expect(result.error).toContain('Corrupted files: globalStorage/state.vscdb');
+      expect(readFileSync(destination)).toEqual(priorDestination);
+    }
+  );
 
   it('rolls back already-published files when a later restore publication fails', async () => {
     const replacementGlobal = Buffer.from('replacement global');
