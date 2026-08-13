@@ -223,6 +223,93 @@ describe.sequential('migration prepared state machine', () => {
     expect(composerIds(sourcePath)).toEqual([targetSession.id]);
   });
 
+  it('requires force for a nonempty session-migration destination in preview and apply', async () => {
+    const value = fixture();
+    const targetSession = session(value);
+    const sourcePath = writeComposerWorkspaceSummary(value, 'workspace-a', value.projectA, [
+      targetSession,
+    ]);
+    writeComposerGlobalSessions(value, [targetSession]);
+    const dest = destination(value);
+    const existingSession = session(value, '99999999-8888-4777-8666-555555555555', dest.path);
+    writeComposerWorkspaceSummary(value, 'workspace-destination', dest.path, [existingSession]);
+    const beforeGlobal = JSON.stringify(globalRows(value));
+
+    const [boundTarget] = await bindMigrationTargets([targetSession.id], {
+      numericBase: 1,
+      treatStringSelectorsAsIds: true,
+      workspacePath: value.projectA,
+      dataPath: value.workspaceStorage,
+    });
+    expect(boundTarget).toBeDefined();
+    await expect(
+      prepareSessionMigration(boundTarget!, dest.path, {
+        mode: 'move',
+        force: false,
+        dataPath: value.workspaceStorage,
+      })
+    ).rejects.toMatchObject({
+      name: 'DestinationHasSessionsError',
+      path: dest.path,
+      sessionCount: 1,
+    });
+    await expect(
+      prepareSessionMigration(boundTarget!, dest.path, {
+        mode: 'move',
+        force: true,
+        dataPath: value.workspaceStorage,
+      })
+    ).resolves.toMatchObject({ destinationWorkspacePath: dest.path, mode: 'move' });
+    expect(composerIds(sourcePath)).toEqual([targetSession.id]);
+    expect(composerIds(dest.databasePath)).toEqual([existingSession.id]);
+    expect(JSON.stringify(globalRows(value))).toBe(beforeGlobal);
+
+    for (const dryRun of [true, false]) {
+      await expect(
+        migrateSession(targetSession.id, {
+          destination: dest.path,
+          mode: 'move',
+          dryRun,
+          force: false,
+          dataPath: value.workspaceStorage,
+          sourceWorkspacePath: value.projectA,
+        })
+      ).rejects.toMatchObject({
+        name: 'DestinationHasSessionsError',
+        path: dest.path,
+        sessionCount: 1,
+      });
+      expect(composerIds(sourcePath)).toEqual([targetSession.id]);
+      expect(composerIds(dest.databasePath)).toEqual([existingSession.id]);
+      expect(JSON.stringify(globalRows(value))).toBe(beforeGlobal);
+    }
+
+    const preview = await migrateSession(targetSession.id, {
+      destination: dest.path,
+      mode: 'move',
+      dryRun: true,
+      force: true,
+      dataPath: value.workspaceStorage,
+      sourceWorkspacePath: value.projectA,
+    });
+    expect(preview).toMatchObject({ success: true, sessionId: targetSession.id, dryRun: true });
+    expect(composerIds(sourcePath)).toEqual([targetSession.id]);
+    expect(composerIds(dest.databasePath)).toEqual([existingSession.id]);
+    expect(JSON.stringify(globalRows(value))).toBe(beforeGlobal);
+
+    const applied = await migrateSession(targetSession.id, {
+      destination: dest.path,
+      mode: 'move',
+      dryRun: false,
+      force: true,
+      dataPath: value.workspaceStorage,
+      sourceWorkspacePath: value.projectA,
+    });
+    expect(applied).toMatchObject({ success: true, sessionId: targetSession.id, dryRun: false });
+    expect(composerIds(sourcePath)).toEqual([]);
+    expect(composerIds(dest.databasePath)).toEqual([existingSession.id, targetSession.id]);
+  });
+
   it('rejects unknown sessions and destinations', async () => {
     const value = fixture();
     const targetSession = session(value);

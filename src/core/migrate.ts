@@ -1555,6 +1555,10 @@ export async function prepareSessionMigration(
     });
     const sourceResult = getComposerDataBounded(sourceDb, readGuard);
     const destinationResult = getComposerDataBounded(destinationDb, readGuard);
+    const destinationSessionCount = destinationResult?.composers.length ?? 0;
+    if (!options.force && destinationSessionCount > 0) {
+      throw new DestinationHasSessionsError(normalizedDest, destinationSessionCount);
+    }
     const globalRows = await readGlobalSessionRows(
       frozenTarget.logicalSessionId,
       dataPath,
@@ -2826,6 +2830,7 @@ function isFatalMigrationFailure(error: unknown): boolean {
     error instanceof WorkspaceNotFoundError ||
     error instanceof SameWorkspaceError ||
     error instanceof NestedPathError ||
+    error instanceof DestinationHasSessionsError ||
     error instanceof AggregateError ||
     (error instanceof Error && error.name === 'AbortError')
   );

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import BetterSqlite3 from 'better-sqlite3';
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -77,6 +78,24 @@ function targetProjection(result: CliMigrationResult) {
     destinationWorkspace: result.destinationWorkspace,
     mode: result.mode,
   };
+}
+
+function composerIds(databasePath: string): string[] {
+  const database = new BetterSqlite3(databasePath, { readonly: true, fileMustExist: true });
+  try {
+    const row = database
+      .prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+      .get() as { value?: unknown } | undefined;
+    if (typeof row?.value !== 'string') return [];
+    const parsed = JSON.parse(row.value) as {
+      allComposers?: Array<{ composerId?: unknown }>;
+    };
+    return (parsed.allComposers ?? []).flatMap(({ composerId }) =>
+      typeof composerId === 'string' ? [composerId] : []
+    );
+  } finally {
+    database.close();
+  }
 }
 
 afterEach(() => {
@@ -344,5 +363,91 @@ describe('built migrate-session workspace integrity', () => {
     expect(applied).toHaveLength(1);
     expect(applied[0]).toMatchObject({ success: true, dryRun: false });
     expect(targetProjection(applied[0]!)).toEqual(targetProjection(preview[0]!));
+  });
+
+  it('requires --force before a batch can enter a nonempty destination', async () => {
+    const fixture = createSessionIntegrityFixtureRoot('cursor-history-cli-force-');
+    fixtures.push(fixture);
+    const sourceSessions: ComposerFixtureSession[] = [
+      {
+        id: 'dddddddd-0000-0000-0000-000000000041',
+        title: 'source-one',
+        workspacePath: fixture.projectA,
+        createdAt: 1_783_000_000_000,
+        messages: [{ role: 'user', content: 'source-one', createdAt: 1_783_000_000_000 }],
+      },
+      {
+        id: 'dddddddd-0000-0000-0000-000000000042',
+        title: 'source-two',
+        workspacePath: fixture.projectA,
+        createdAt: 1_784_000_000_000,
+        messages: [{ role: 'user', content: 'source-two', createdAt: 1_784_000_000_000 }],
+      },
+    ];
+    const destination = join(fixture.root, 'workspaces', 'force-destination');
+    mkdirSync(destination, { recursive: true });
+    const existingDestination: ComposerFixtureSession = {
+      id: 'dddddddd-0000-0000-0000-000000000043',
+      title: 'existing-destination',
+      workspacePath: destination,
+      createdAt: 1_782_000_000_000,
+      messages: [
+        {
+          role: 'user',
+          content: 'existing-destination',
+          createdAt: 1_782_000_000_000,
+        },
+      ],
+    };
+    const sourceDatabase = writeComposerWorkspaceSummary(
+      fixture,
+      'workspace-force-source',
+      fixture.projectA,
+      sourceSessions
+    );
+    const destinationDatabase = writeComposerWorkspaceSummary(
+      fixture,
+      'workspace-force-destination',
+      destination,
+      [existingDestination]
+    );
+    const common = [
+      '--json',
+      '--data-path',
+      fixture.workspaceStorage,
+      '--workspace',
+      fixture.projectA,
+      'migrate-session',
+      '1,2',
+      destination,
+    ] as const;
+    const env = { CURSOR_STORE_ROOT: fixture.storeRoot };
+    const mutationSnapshot = (): Buffer[] => [
+      readFileSync(sourceDatabase),
+      readFileSync(destinationDatabase),
+    ];
+    const before = mutationSnapshot();
+
+    for (const extra of [[], ['--dry-run']] as const) {
+      const rejected = await runBuiltCli([...common, ...extra], { env, timeoutMs: 20_000 });
+      expect(rejected).toMatchObject({ status: 1, stdout: '', timedOut: false });
+      expect(JSON.parse(rejected.stderr)).toMatchObject({
+        error: expect.stringContaining('Destination already has 1 session(s)'),
+      });
+      expect(mutationSnapshot()).toEqual(before);
+    }
+
+    const forced = await runBuiltCli([...common, '--force'], { env, timeoutMs: 20_000 });
+    expect(forced).toMatchObject({ status: 0, stderr: '', timedOut: false });
+    const results = JSON.parse(forced.stdout) as CliMigrationResult[];
+    expect(results).toHaveLength(2);
+    expect(results.every(({ success, dryRun }) => success && !dryRun)).toBe(true);
+    expect(new Set(results.map(({ sessionId }) => sessionId))).toEqual(
+      new Set(sourceSessions.map(({ id }) => id))
+    );
+    expect(composerIds(sourceDatabase)).toEqual([]);
+    expect(new Set(composerIds(destinationDatabase))).toEqual(
+      new Set([existingDestination.id, ...sourceSessions.map(({ id }) => id)])
+    );
   });
 });

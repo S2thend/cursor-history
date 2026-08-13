@@ -951,6 +951,79 @@ describe.sequential('legacy and operation-bound migration regressions', () => {
     );
   });
 
+  it('preflights a nonempty destination for the whole library batch and admits it only with force', async () => {
+    const fixture = newFixture();
+    const sessions = twoComposerSessions(fixture);
+    const sourcePath = writeComposerWorkspaceSummary(
+      fixture,
+      'workspace-a',
+      fixture.projectA,
+      sessions
+    );
+    writeComposerGlobalSessions(fixture, sessions);
+    const destination = addDestination(fixture);
+    const destinationSession = composerSession(
+      fixture,
+      '99999999-0000-4000-8000-000000000016',
+      'Existing destination session',
+      destination
+    );
+    const destinationPath = writeComposerWorkspaceSummary(
+      fixture,
+      'workspace-destination',
+      destination,
+      [destinationSession]
+    );
+    const before = mutationSnapshot(fixture);
+
+    for (const dryRun of [true, false]) {
+      await expect(
+        migrateLibrarySession(
+          sessionConfig(
+            fixture,
+            destination,
+            sessions.map((session) => session.id),
+            { workspace: fixture.projectA, force: false, dryRun }
+          )
+        )
+      ).rejects.toMatchObject({
+        name: 'DestinationHasSessionsError',
+        path: destination,
+        sessionCount: 1,
+      });
+      expect(mutationSnapshot(fixture)).toBe(before);
+      expect(readComposerIds(sourcePath)).toEqual(sessions.map((session) => session.id));
+      expect(readComposerIds(destinationPath)).toEqual([destinationSession.id]);
+    }
+
+    const forcedPreview = await migrateLibrarySession(
+      sessionConfig(
+        fixture,
+        destination,
+        sessions.map((session) => session.id),
+        { workspace: fixture.projectA, force: true, dryRun: true }
+      )
+    );
+    expect(forcedPreview).toHaveLength(2);
+    expect(forcedPreview.every((result) => result.success && result.dryRun)).toBe(true);
+    expect(mutationSnapshot(fixture)).toBe(before);
+
+    const forced = await migrateLibrarySession(
+      sessionConfig(
+        fixture,
+        destination,
+        sessions.map((session) => session.id),
+        { workspace: fixture.projectA, force: true, dryRun: false }
+      )
+    );
+    expect(forced).toHaveLength(2);
+    expect(forced.every((result) => result.success && !result.dryRun)).toBe(true);
+    expect(readComposerIds(sourcePath)).toEqual([]);
+    expect(readComposerIds(destinationPath).sort()).toEqual(
+      [destinationSession.id, ...sessions.map((session) => session.id)].sort()
+    );
+  });
+
   it('returns ordered legacy failure results and performs zero writes when a later ID is missing', async () => {
     const fixture = newFixture();
     const session = composerSession(
