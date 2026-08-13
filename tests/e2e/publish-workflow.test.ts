@@ -224,6 +224,73 @@ function unsafeRuntimeSmoke(source: string): string[] {
   return failures;
 }
 
+function unsafeFullPackageSmoke(source: string): string[] {
+  const failures: string[] = [];
+  const requiredContracts = [
+    [
+      'if (!runtimeOnly) {\n    const schemaReportPath',
+      'full smoke bypasses the frozen schema suite',
+    ],
+    ['CURSOR_HISTORY_SCHEMA_CLI_PATH: cliPath', 'schema suite does not use the installed CLI'],
+    ['tests/e2e/cli-json-schema.test.ts', 'full smoke omits the frozen schema suite'],
+    ['scripts/verify-test-results.mjs', 'schema suite is not verified fail-closed'],
+    [
+      'schemaSummary.passed !== schemaSummary.executed',
+      'schema suite does not require every executed test to pass',
+    ],
+    ['schemaSummary.allowedSkipped !== 0', 'schema suite permits skipped coverage'],
+    ["backup.manifest.version !== '1.0.0'", 'backup result outer manifest version is unchecked'],
+    [
+      "typeof backup.manifest.composerWorkspaceInventory?.schemaVersion !== 'number'",
+      'backup result inventory schema type is unchecked',
+    ],
+    [
+      'backup.manifest.composerWorkspaceInventory.schemaVersion !== 1',
+      'backup result inventory schema value is unchecked',
+    ],
+    [
+      "writeFileSync(targetPath, bytes, { flag: 'wx', mode: 0o600 })",
+      'legacy variants are not private',
+    ],
+    ["legacyManifest.cursorHistoryVersion !== '0.9.2'", 'legacy v0.16 marker is unchecked'],
+    [
+      "Object.hasOwn(legacyManifest, 'composerWorkspaceInventory')",
+      'legacy inventory omission is unchecked',
+    ],
+    ["Object.hasOwn(legacyManifest, 'producer')", 'legacy producer omission is unchecked'],
+    [
+      "if (variantValidation.status !== 'valid')",
+      'manifest variants are not validated for readability',
+    ],
+    [
+      "fail('manifest-only metadata changed the packed library session projection')",
+      'manifest metadata can alter public read projections',
+    ],
+    ['isDeepStrictEqual(state.get(session.id), session)', 'incremental comparison loses shape'],
+    ['state.set(session.id, structuredClone(session))', 'incremental state loses shape'],
+    ['esm.listSessionSummaries({ backupPath })', 'summary projection is not checked'],
+    [
+      "fail('manifest-only metadata changed the packed library summary projection')",
+      'manifest metadata can alter summary projections',
+    ],
+    ['const currentSearch = await esm.searchSessions', 'search projection is not checked'],
+    ['if (currentSearch.length === 0)', 'search projection accepts an empty baseline'],
+    [
+      "fail('manifest-only metadata changed the packed library search projection')",
+      'manifest metadata can alter search projections',
+    ],
+    [
+      "if (initialWrites <= 0) fail('generic first synchronization produced no writes')",
+      'generic first synchronization is not exercised',
+    ],
+    ['if (producerOnlyWrites !== 0)', 'producer-only mutation can cause incremental writes'],
+  ] as const;
+  for (const [contract, failure] of requiredContracts) {
+    if (!source.includes(contract)) failures.push(failure);
+  }
+  return failures;
+}
+
 describe('npm publication workflow', () => {
   it('declares exactly the runtime majors supported by the packaged native dependency', () => {
     const packageDocument = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {
@@ -432,6 +499,40 @@ describe('npm publication workflow', () => {
     expect(unsafeRuntimeSmoke(missingForcedProbe)).toContain(
       "runtime smoke skips esm.setDriver('node:sqlite')"
     );
+  });
+
+  it('locks exact-tarball schema, manifest-version, legacy-read, and producer-neutral gates', () => {
+    const source = readFileSync(runtimeSmokePath, 'utf8');
+    expect(unsafeFullPackageSmoke(source)).toEqual([]);
+
+    for (const [target, expectedFailure] of [
+      [
+        'if (!runtimeOnly) {\n    const schemaReportPath',
+        'full smoke bypasses the frozen schema suite',
+      ],
+      ['scripts/verify-test-results.mjs', 'schema suite is not verified fail-closed'],
+      ["backup.manifest.version !== '1.0.0'", 'backup result outer manifest version is unchecked'],
+      [
+        "typeof backup.manifest.composerWorkspaceInventory?.schemaVersion !== 'number'",
+        'backup result inventory schema type is unchecked',
+      ],
+      [
+        "writeFileSync(targetPath, bytes, { flag: 'wx', mode: 0o600 })",
+        'legacy variants are not private',
+      ],
+      [
+        "if (variantValidation.status !== 'valid')",
+        'manifest variants are not validated for readability',
+      ],
+      ['state.set(session.id, structuredClone(session))', 'incremental state loses shape'],
+      ['esm.listSessionSummaries({ backupPath })', 'summary projection is not checked'],
+      ['const currentSearch = await esm.searchSessions', 'search projection is not checked'],
+      ['if (producerOnlyWrites !== 0)', 'producer-only mutation can cause incremental writes'],
+    ] as const) {
+      const mutated = source.replace(target, 'release-gate-bypassed');
+      expect(mutated, target).not.toBe(source);
+      expect(unsafeFullPackageSmoke(mutated), target).toContain(expectedFailure);
+    }
   });
 
   it('detects removal of either checksum verification', () => {

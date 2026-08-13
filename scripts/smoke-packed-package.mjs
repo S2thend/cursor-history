@@ -18,6 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 function fail(message) {
   throw new Error(`Packed-package smoke failed: ${message}`);
@@ -74,6 +75,74 @@ function typecheckDocumentationFences(markdownPath, markdown, workspace) {
     );
   }
   return examples;
+}
+
+function assertOwnerPrivateFile(path, label) {
+  const stat = lstatSync(path);
+  if (!stat.isFile()) fail(`${label} is not a regular file`);
+  if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600) {
+    fail(`${label} mode is ${(stat.mode & 0o777).toString(8)}; expected 600`);
+  }
+}
+
+function assertUniquePersistenceIdentities(sessions, label) {
+  const sessionIds = new Set();
+  for (const session of sessions) {
+    if (typeof session.id !== 'string' || session.id.length === 0) {
+      fail(`${label} contains a session without a stable ID`);
+    }
+    if (sessionIds.has(session.id)) fail(`${label} contains duplicate session ID ${session.id}`);
+    sessionIds.add(session.id);
+
+    const messageIds = new Set();
+    for (const [messageIndex, message] of session.messages.entries()) {
+      if (typeof message.id !== 'string' || message.id.length === 0) {
+        fail(`${label} session ${session.id} message ${messageIndex} has no stable ID`);
+      }
+      if (messageIds.has(message.id)) {
+        fail(`${label} session ${session.id} contains duplicate message ID ${message.id}`);
+      }
+      messageIds.add(message.id);
+
+      const toolIds = new Set();
+      for (const [toolIndex, toolCall] of (message.toolCalls ?? []).entries()) {
+        if (typeof toolCall.id !== 'string' || toolCall.id.length === 0) {
+          fail(
+            `${label} session ${session.id} message ${message.id} tool ${toolIndex} has no stable ID`
+          );
+        }
+        if (toolIds.has(toolCall.id)) {
+          fail(
+            `${label} session ${session.id} message ${message.id} contains duplicate tool ID ${toolCall.id}`
+          );
+        }
+        toolIds.add(toolCall.id);
+      }
+    }
+  }
+}
+
+function synchronizePublicProjection(state, sessions, label) {
+  assertUniquePersistenceIdentities(sessions, label);
+  const nextIds = new Set();
+  let writes = 0;
+  for (const session of sessions) {
+    nextIds.add(session.id);
+    // This generic consumer projection deliberately covers every public value,
+    // including message/tool order and their identity-to-content/relationship
+    // bindings. It contains no downstream-specific adapter or policy.
+    if (!isDeepStrictEqual(state.get(session.id), session)) {
+      state.set(session.id, structuredClone(session));
+      writes += 1;
+    }
+  }
+  for (const sessionId of [...state.keys()]) {
+    if (!nextIds.has(sessionId)) {
+      state.delete(sessionId);
+      writes += 1;
+    }
+  }
+  return writes;
 }
 
 const requestedTarball = process.argv[2];
@@ -383,10 +452,13 @@ try {
     force: true,
   });
   if (
+    backup.manifest.version !== '1.0.0' ||
     backup.manifest.producer !== installedPackage.version ||
-    backup.manifest.cursorHistoryVersion !== installedPackage.version
+    backup.manifest.cursorHistoryVersion !== installedPackage.version ||
+    typeof backup.manifest.composerWorkspaceInventory?.schemaVersion !== 'number' ||
+    backup.manifest.composerWorkspaceInventory.schemaVersion !== 1
   ) {
-    fail('backup result did not report the running packed-package version');
+    fail('backup result violated the packed-package manifest version contract');
   }
   if (expectedBackupDriver && esm.getActiveDriver() !== expectedBackupDriver) {
     fail(
@@ -399,13 +471,132 @@ try {
   if (!archivedManifestEntry) fail('packed library backup omitted manifest.json');
   const archivedManifest = JSON.parse(await archivedManifestEntry.async('string'));
   if (
+    archivedManifest.version !== '1.0.0' ||
     archivedManifest.producer !== installedPackage.version ||
-    archivedManifest.cursorHistoryVersion !== installedPackage.version
+    archivedManifest.cursorHistoryVersion !== installedPackage.version ||
+    typeof archivedManifest.composerWorkspaceInventory?.schemaVersion !== 'number' ||
+    archivedManifest.composerWorkspaceInventory.schemaVersion !== 1
   ) {
-    fail('archived manifest producer does not match the running packed-package version');
+    fail('archived manifest violated the packed-package manifest version contract');
   }
   const validation = await esm.validateBackup(backupPath);
   if (validation.status !== 'valid') fail('packed library could not validate its synthetic backup');
+
+  const backupBytes = readFileSync(backupPath);
+  const writeManifestVariant = async (targetPath, mutate) => {
+    const variantZip = await JSZip.loadAsync(backupBytes);
+    const manifestEntry = variantZip.file('manifest.json');
+    if (!manifestEntry) fail('manifest variant source omitted manifest.json');
+    const manifest = JSON.parse(await manifestEntry.async('string'));
+    mutate(manifest);
+    variantZip.file('manifest.json', JSON.stringify(manifest, null, 2));
+    const bytes = await variantZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    writeFileSync(targetPath, bytes, { flag: 'wx', mode: 0o600 });
+    assertOwnerPrivateFile(targetPath, 'generated manifest variant');
+    return manifest;
+  };
+
+  // v0.16 wrote the historical cursorHistoryVersion marker but had neither
+  // producer nor the independently versioned workspace inventory.
+  const legacyBackupPath = join(workspace, 'legacy-v1-manifest.zip');
+  const legacyManifest = await writeManifestVariant(legacyBackupPath, (manifest) => {
+    delete manifest.producer;
+    delete manifest.composerWorkspaceInventory;
+    manifest.cursorHistoryVersion = '0.9.2';
+  });
+  if (
+    legacyManifest.version !== '1.0.0' ||
+    Object.hasOwn(legacyManifest, 'producer') ||
+    Object.hasOwn(legacyManifest, 'composerWorkspaceInventory') ||
+    legacyManifest.cursorHistoryVersion !== '0.9.2'
+  ) {
+    fail('generated legacy manifest does not reproduce the v0.16 envelope');
+  }
+
+  const producerOnlyBackupPath = join(workspace, 'producer-only-manifest.zip');
+  const producerOnlyManifest = await writeManifestVariant(producerOnlyBackupPath, (manifest) => {
+    delete manifest.composerWorkspaceInventory;
+    manifest.cursorHistoryVersion = '0.9.2';
+    manifest.producer = installedPackage.version;
+  });
+  const producerNeutralManifest = { ...producerOnlyManifest };
+  delete producerNeutralManifest.producer;
+  if (
+    producerOnlyManifest.producer !== installedPackage.version ||
+    JSON.stringify(producerNeutralManifest) !== JSON.stringify(legacyManifest)
+  ) {
+    fail('producer-only manifest variant changed another manifest field');
+  }
+
+  for (const [label, path] of [
+    ['legacy v1', legacyBackupPath],
+    ['producer-only', producerOnlyBackupPath],
+  ]) {
+    const variantValidation = await esm.validateBackup(path);
+    if (variantValidation.status !== 'valid') {
+      fail(`${label} manifest variant is not readable by the packed library`);
+    }
+  }
+
+  const currentSummaries = (await esm.listSessionSummaries({ backupPath })).data;
+  const legacySummaries = (await esm.listSessionSummaries({ backupPath: legacyBackupPath })).data;
+  const producerOnlySummaries = (
+    await esm.listSessionSummaries({ backupPath: producerOnlyBackupPath })
+  ).data;
+  if (
+    !isDeepStrictEqual(legacySummaries, currentSummaries) ||
+    !isDeepStrictEqual(producerOnlySummaries, currentSummaries)
+  ) {
+    fail('manifest-only metadata changed the packed library summary projection');
+  }
+
+  const currentSessions = (await esm.listSessions({ backupPath })).data;
+  const legacySessions = (await esm.listSessions({ backupPath: legacyBackupPath })).data;
+  const producerOnlySessions = (
+    await esm.listSessions({
+      backupPath: producerOnlyBackupPath,
+    })
+  ).data;
+  if (
+    !isDeepStrictEqual(legacySessions, currentSessions) ||
+    !isDeepStrictEqual(producerOnlySessions, currentSessions)
+  ) {
+    fail('manifest-only metadata changed the packed library session projection');
+  }
+
+  const searchNeedle = currentSessions
+    .flatMap((session) => session.messages)
+    .flatMap((message) => message.content.match(/[A-Za-z][A-Za-z0-9_-]{5,}/gu) ?? [])
+    .at(0);
+  if (!searchNeedle) fail('fictional backup has no deterministic nonempty search needle');
+  const currentSearch = await esm.searchSessions(searchNeedle, { backupPath });
+  if (currentSearch.length === 0) fail('fictional backup search baseline is empty');
+  const legacySearch = await esm.searchSessions(searchNeedle, { backupPath: legacyBackupPath });
+  const producerOnlySearch = await esm.searchSessions(searchNeedle, {
+    backupPath: producerOnlyBackupPath,
+  });
+  if (
+    !isDeepStrictEqual(legacySearch, currentSearch) ||
+    !isDeepStrictEqual(producerOnlySearch, currentSearch)
+  ) {
+    fail('manifest-only metadata changed the packed library search projection');
+  }
+
+  const incrementalState = new Map();
+  const initialWrites = synchronizePublicProjection(
+    incrementalState,
+    legacySessions,
+    'legacy v1 projection'
+  );
+  if (initialWrites <= 0) fail('generic first synchronization produced no writes');
+  const producerOnlyWrites = synchronizePublicProjection(
+    incrementalState,
+    producerOnlySessions,
+    'producer-only projection'
+  );
+  if (producerOnlyWrites !== 0) {
+    fail('changing only backup producer metadata caused incremental writes');
+  }
 
   if (expectedNodeSqliteBackup) {
     esm.setDriver('node:sqlite');
@@ -484,6 +675,43 @@ try {
   }
 
   const cliPath = join(installedRoot, 'dist/cli/index.js');
+  let packedSchemaTestCount = 0;
+  if (!runtimeOnly) {
+    const schemaReportPath = join(workspace, 'packed-cli-schema-results.json');
+    writeFileSync(schemaReportPath, '', { flag: 'wx', mode: 0o600 });
+    run(
+      process.execPath,
+      [
+        join(repositoryRoot, 'node_modules/vitest/vitest.mjs'),
+        'run',
+        join(repositoryRoot, 'tests/e2e/cli-json-schema.test.ts'),
+        '--config',
+        join(repositoryRoot, 'vitest.config.ts'),
+        '--reporter=json',
+        `--outputFile=${schemaReportPath}`,
+      ],
+      {
+        cwd: repositoryRoot,
+        timeout: 300_000,
+        env: { CURSOR_HISTORY_SCHEMA_CLI_PATH: cliPath },
+      }
+    );
+    const schemaVerification = run(
+      process.execPath,
+      [join(repositoryRoot, 'scripts/verify-test-results.mjs'), schemaReportPath],
+      { cwd: repositoryRoot, timeout: 30_000 }
+    );
+    const schemaSummary = JSON.parse(schemaVerification.stdout);
+    if (
+      !Number.isSafeInteger(schemaSummary.executed) ||
+      schemaSummary.executed <= 0 ||
+      schemaSummary.passed !== schemaSummary.executed ||
+      schemaSummary.allowedSkipped !== 0
+    ) {
+      fail('frozen packed-CLI schema suite was empty, incomplete, or skipped');
+    }
+    packedSchemaTestCount = schemaSummary.executed;
+  }
   const documentedList = run(
     process.execPath,
     [cliPath, '--json', '--data-path', storeRoot, '--workspace', '/work/a', 'list', '--all'],
@@ -529,6 +757,10 @@ try {
       runtimeOnly,
       backupDriver: expectedBackupDriver ?? esm.getActiveDriver(),
       nodeSqliteBackup: expectedNodeSqliteBackup,
+      packedSchemaTestCount,
+      manifestCompatibility: true,
+      initialProjectionWrites: initialWrites,
+      producerOnlyProjectionWrites: producerOnlyWrites,
     })}\n`
   );
 } finally {

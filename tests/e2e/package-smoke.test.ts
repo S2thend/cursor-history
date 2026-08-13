@@ -292,7 +292,14 @@ describe('packed-package contract smoke', () => {
     const beforeHash = createHash('sha256').update(readFileSync(tarball)).digest('hex');
     const smoked = runNode([smokeScript, tarball], repositoryRoot, 360_000, npmEnvironment);
     expect(smoked.status, `${smoked.stdout}${smoked.stderr}`).toBe(0);
-    expect(JSON.parse(smoked.stdout)).toMatchObject({ candidate: tarball });
+    expect(JSON.parse(smoked.stdout)).toMatchObject({
+      candidate: tarball,
+      runtimeOnly: false,
+      manifestCompatibility: true,
+      producerOnlyProjectionWrites: 0,
+    });
+    expect(JSON.parse(smoked.stdout).packedSchemaTestCount).toBeGreaterThan(0);
+    expect(JSON.parse(smoked.stdout).initialProjectionWrites).toBeGreaterThan(0);
 
     const runtimeSmoked = runNode(
       [
@@ -312,6 +319,9 @@ describe('packed-package contract smoke', () => {
       runtimeOnly: true,
       backupDriver: 'node:sqlite',
       nodeSqliteBackup: 'supported',
+      packedSchemaTestCount: 0,
+      manifestCompatibility: true,
+      producerOnlyProjectionWrites: 0,
     });
 
     const missingExpectations = runNode(
