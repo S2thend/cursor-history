@@ -56,6 +56,239 @@ const GENERATED_ARTIFACTS = [
   'fixture-manifest.json',
 ] as const;
 
+type TaggedV016ToolCall = {
+  name: string;
+  status: 'completed' | 'cancelled' | 'error';
+  params?: Record<string, unknown>;
+  result?: string;
+  error?: string;
+  files?: string[];
+};
+
+type TaggedV016Message = {
+  id: string | null;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  toolCalls?: TaggedV016ToolCall[];
+  thinking?: string;
+  tokenUsage?: { inputTokens: number; outputTokens: number };
+  model?: string;
+  durationMs?: number;
+  metadata?: { corrupted?: boolean; bubbleType?: number };
+};
+
+type TaggedV016Session = {
+  id: string;
+  createdAt: string;
+  lastUpdatedAt: string;
+  messageCount: number;
+  messages: TaggedV016Message[];
+  source: 'global' | 'workspace-fallback';
+  usage?: Session['usage'];
+  activeBranchBubbleIds?: string[];
+};
+
+interface TaggedV016Output {
+  globalSession: TaggedV016Session;
+  workspaceFallbackSessions: TaggedV016Session[];
+}
+
+interface V016CompatibilityFacts {
+  /** The tagged source had no real workspace path and exposed its internal display sentinel. */
+  pathlessWorkspace?: boolean;
+  /** The tagged source stored no session update time. */
+  missingStoredSessionUpdate?: boolean;
+  /** Message ordinals for which the tagged source stored no direct timestamp. */
+  missingStoredMessageTimestampIndexes?: readonly number[];
+}
+
+const V016_SESSION_ADDITIONS = new Set([
+  'index',
+  'indexScope',
+  'indexWorkspacePath',
+  'sources',
+  'preferredSource',
+  'resolvedSource',
+  'resolution',
+  'resolutionState',
+  'canonicalWorkspacePath',
+  'matchedWorkspacePath',
+  'workspaceMatchKind',
+  'workspaceMemberships',
+  'sourceInstances',
+  'messageIdentityVersion',
+  'createdAtSource',
+  'lastUpdatedAtSource',
+  'transcriptState',
+  'activeBranchMessageIds',
+]);
+const V016_MESSAGE_ADDITIONS = new Set([
+  'messageIdentityVersion',
+  'identityOrigin',
+  'parentMessageId',
+  'isSidechain',
+  'timestampSource',
+  'source',
+]);
+const V016_TOOL_ADDITIONS = new Set(['id', 'identityOrigin']);
+const V016_PATHLESS_WORKSPACE = /^\(workspace: [^)]+\)$/u;
+const V016_INFERRED_TIMESTAMP_SOURCES = new Set([
+  'inferred-next',
+  'inferred-previous',
+  'session-fallback',
+  'unknown',
+]);
+const V016_MISSING_UPDATE_SOURCES = new Set(['direct-message', 'epoch-unknown']);
+
+function readTaggedOutput(): TaggedV016Output {
+  return JSON.parse(
+    readFileSync(join(FIXTURE_ROOT, 'tagged-output.json'), 'utf8')
+  ) as TaggedV016Output;
+}
+
+/**
+ * Apply the released v0.16 public-library converter to the independent tagged core projection.
+ * In particular, v0.16 created every optional Message member and Session.usage as an enumerable
+ * own property even when its value was undefined.
+ */
+function projectTaggedV016LibrarySession(tagged: TaggedV016Session, workspace: string): Session {
+  return {
+    id: tagged.id,
+    workspace,
+    timestamp: tagged.createdAt,
+    messages: tagged.messages.map((message) => ({
+      id: message.id ?? undefined,
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp,
+      toolCalls: message.toolCalls ? structuredClone(message.toolCalls) : undefined,
+      thinking: message.thinking,
+      tokenUsage: message.tokenUsage ? { ...message.tokenUsage } : undefined,
+      model: message.model,
+      durationMs: message.durationMs,
+      metadata: message.metadata ? { ...message.metadata } : undefined,
+    })),
+    messageCount: tagged.messageCount,
+    source: tagged.source,
+    usage: tagged.usage ? { ...tagged.usage } : undefined,
+    ...(tagged.activeBranchBubbleIds
+      ? { activeBranchBubbleIds: [...tagged.activeBranchBubbleIds] }
+      : {}),
+    metadata: { lastModified: tagged.lastUpdatedAt },
+  };
+}
+
+function objectRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label} must be a non-null object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function expectOnlyDocumentedAdditions(
+  legacy: Record<string, unknown>,
+  candidate: Record<string, unknown>,
+  additions: ReadonlySet<string>
+): void {
+  expect(
+    Object.keys(candidate)
+      .filter((key) => !additions.has(key))
+      .sort()
+  ).toEqual(Object.keys(legacy).sort());
+}
+
+function expectV016ToolShape(legacyValue: unknown, candidateValue: unknown): void {
+  if (legacyValue === undefined || candidateValue === undefined) {
+    expect(candidateValue).toBe(legacyValue);
+    return;
+  }
+  if (!Array.isArray(legacyValue) || !Array.isArray(candidateValue)) {
+    throw new TypeError('v0.16 toolCalls must remain an array or undefined');
+  }
+  expect(candidateValue).toHaveLength(legacyValue.length);
+  legacyValue.forEach((legacyTool, index) => {
+    const legacy = objectRecord(legacyTool, `legacy tool ${index}`);
+    const candidate = objectRecord(candidateValue[index], `candidate tool ${index}`);
+    expectOnlyDocumentedAdditions(legacy, candidate, V016_TOOL_ADDITIONS);
+    for (const key of Object.keys(legacy)) expect(candidate[key]).toStrictEqual(legacy[key]);
+  });
+}
+
+/**
+ * Compare every v0.16 public value and enumerable own-property/null/omission shape. Only documented
+ * additive fields, the exact FR-006 identity materialization, and the three predicate-guarded
+ * scalar corrections may differ.
+ */
+function expectV016PublicShapeCompatible(
+  legacySession: Session,
+  candidateSession: Session,
+  facts: V016CompatibilityFacts = {}
+): void {
+  const legacy = objectRecord(legacySession, 'legacy session');
+  const candidate = objectRecord(candidateSession, 'candidate session');
+  expectOnlyDocumentedAdditions(legacy, candidate, V016_SESSION_ADDITIONS);
+
+  for (const key of ['id', 'timestamp', 'messageCount', 'source', 'usage']) {
+    expect(candidate[key]).toStrictEqual(legacy[key]);
+  }
+  if (Object.prototype.hasOwnProperty.call(legacy, 'activeBranchBubbleIds')) {
+    expect(candidate['activeBranchBubbleIds']).toStrictEqual(legacy['activeBranchBubbleIds']);
+  }
+
+  if (candidate['workspace'] !== legacy['workspace']) {
+    expect(facts.pathlessWorkspace).toBe(true);
+    expect(legacy['workspace']).toEqual(expect.stringMatching(V016_PATHLESS_WORKSPACE));
+    expect(candidate['workspace']).toBe('unknown');
+  }
+
+  const legacyMetadata = objectRecord(legacy['metadata'], 'legacy session metadata');
+  const candidateMetadata = objectRecord(candidate['metadata'], 'candidate session metadata');
+  expectOnlyDocumentedAdditions(legacyMetadata, candidateMetadata, new Set());
+  for (const key of Object.keys(legacyMetadata)) {
+    if (key !== 'lastModified' || candidateMetadata[key] === legacyMetadata[key]) {
+      expect(candidateMetadata[key]).toStrictEqual(legacyMetadata[key]);
+      continue;
+    }
+    expect(facts.missingStoredSessionUpdate).toBe(true);
+    expect(V016_MISSING_UPDATE_SOURCES.has(String(candidate['lastUpdatedAtSource']))).toBe(true);
+  }
+
+  const legacyMessages = legacy['messages'];
+  const candidateMessages = candidate['messages'];
+  if (!Array.isArray(legacyMessages) || !Array.isArray(candidateMessages)) {
+    throw new TypeError('v0.16 messages must remain arrays');
+  }
+  expect(candidateMessages).toHaveLength(legacyMessages.length);
+  const timestampExceptions = new Set(facts.missingStoredMessageTimestampIndexes ?? []);
+
+  legacyMessages.forEach((legacyValue, index) => {
+    const legacyMessage = objectRecord(legacyValue, `legacy message ${index}`);
+    const candidateMessage = objectRecord(candidateMessages[index], `candidate message ${index}`);
+    expectOnlyDocumentedAdditions(legacyMessage, candidateMessage, V016_MESSAGE_ADDITIONS);
+
+    const legacyId = legacyMessage['id'];
+    if (typeof legacyId === 'string' && legacyId.length > 0) {
+      expect(candidateMessage['id']).toBe(legacyId);
+    } else {
+      expect(candidateMessage['id']).toBe(`msg:${index}`);
+    }
+
+    for (const key of Object.keys(legacyMessage)) {
+      if (key === 'id' || key === 'timestamp' || key === 'toolCalls') continue;
+      expect(candidateMessage[key]).toStrictEqual(legacyMessage[key]);
+    }
+
+    if (candidateMessage['timestamp'] !== legacyMessage['timestamp']) {
+      expect(timestampExceptions.has(index)).toBe(true);
+      expect(V016_INFERRED_TIMESTAMP_SOURCES.has(String(candidateMessage['timestampSource']))).toBe(
+        true
+      );
+    }
+    expectV016ToolShape(legacyMessage['toolCalls'], candidateMessage['toolCalls']);
+  });
+}
+
 function readManifest(root = FIXTURE_ROOT): V016FixtureManifest {
   return JSON.parse(
     readFileSync(join(root, 'fixture-manifest.json'), 'utf8')
@@ -373,6 +606,10 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
       const tagged = taggedCursorSession();
       const expectedProjection = projectV016DownstreamContract(tagged);
       const currentProjection = projectV016DownstreamContract(current!);
+      expectV016PublicShapeCompatible(
+        projectTaggedV016LibrarySession(readTaggedOutput().globalSession, '/fixture/v016/project'),
+        current!
+      );
       expect(currentProjection).toEqual({ ...expectedProjection, resolvedSource: 'composer' });
       expect(current!.messages.map(({ id }) => id)).toEqual(
         tagged.messages.map((message, index) => message.id || `msg:${index}`)
@@ -400,6 +637,13 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
       const tagged = taggedWorkspaceFallbackSession();
       const expectedProjection = projectV016DownstreamContract(tagged);
       const currentProjection = projectV016DownstreamContract(current);
+      expectV016PublicShapeCompatible(
+        projectTaggedV016LibrarySession(
+          readTaggedOutput().workspaceFallbackSessions[0]!,
+          '/fixture/v016/project'
+        ),
+        current
+      );
 
       expect(current).toMatchObject({
         id: V016_SYNTHETIC_SESSION_ID,
@@ -425,6 +669,39 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
           ...expectedProjection.messages.flatMap(({ tools }) => tools.map(({ key }) => key)),
         ])
       );
+    });
+  });
+
+  it('rejects every non-excepted production-library shape, value, or identity mutation', async () => {
+    await withCurrentWorkspaceFallback(async ({ workspaceStorage }) => {
+      const current = (
+        await listLibrarySessions({
+          dataPath: workspaceStorage,
+          workspace: '/fixture/v016/project',
+          limit: 100,
+        })
+      ).data[0]!;
+      const tagged = projectTaggedV016LibrarySession(
+        readTaggedOutput().workspaceFallbackSessions[0]!,
+        '/fixture/v016/project'
+      );
+      expect(() => expectV016PublicShapeCompatible(tagged, current)).not.toThrow();
+
+      const omittedOptionalProperty = structuredClone(current);
+      delete omittedOptionalProperty.messages[0]!.thinking;
+      expect(() => expectV016PublicShapeCompatible(tagged, omittedOptionalProperty)).toThrow();
+
+      const unrelatedOptionalValueDrift = structuredClone(current);
+      unrelatedOptionalValueDrift.messages[0]!.model = 'synthetic-drifted-model';
+      expect(() => expectV016PublicShapeCompatible(tagged, unrelatedOptionalValueDrift)).toThrow();
+
+      const nativeIdentityDrift = structuredClone(current);
+      nativeIdentityDrift.messages[0]!.id = 'synthetic-rewritten-native-id';
+      expect(() => expectV016PublicShapeCompatible(tagged, nativeIdentityDrift)).toThrow();
+
+      const wrongFallbackOrdinal = structuredClone(current);
+      wrongFallbackOrdinal.messages[1]!.id = 'msg:2';
+      expect(() => expectV016PublicShapeCompatible(tagged, wrongFallbackOrdinal)).toThrow();
     });
   });
 
