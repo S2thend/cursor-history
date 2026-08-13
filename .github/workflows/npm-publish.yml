@@ -188,7 +188,7 @@ jobs:
           node-version: '24.x'
 
       - name: Install declaration-audit toolchain
-        run: npm ci --ignore-scripts
+        run: npm ci
 
       - name: Download preserved candidate
         uses: actions/download-artifact@v4
@@ -212,20 +212,11 @@ jobs:
       - name: Clean-install and smoke exact package
         run: node scripts/smoke-packed-package.mjs "release-candidate/${{ needs.package-candidate.outputs.tarball }}"
 
-  approve-candidate:
-    name: Approve maintainer verification
-    needs: [verify-candidate, runtime-candidate]
-    runs-on: ubuntu-latest
-    environment: npm-release-verification
-
-    steps:
-      - name: Record protected approval
-        run: echo "Exact candidate passed protected maintainer verification."
-
   publish:
     name: Publish preserved candidate
-    needs: [package-candidate, approve-candidate]
+    needs: [package-candidate, verify-candidate, runtime-candidate]
     runs-on: ubuntu-latest
+    environment: npm-release-verification
     permissions:
       contents: read
       id-token: write

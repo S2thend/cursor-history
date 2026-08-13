@@ -67,7 +67,6 @@ function unsafeReleaseBypasses(source: string): string[] {
     failures.push('candidate is not packed once');
 
   const verificationNeeds = jobNeeds(source, 'verify-candidate');
-  const approvalNeeds = jobNeeds(source, 'approve-candidate');
   const publishNeeds = jobNeeds(source, 'publish');
   const sourceQualityJob = jobBlock(source, 'source-quality');
   const packageJob = jobBlock(source, 'package-candidate');
@@ -84,26 +83,50 @@ function unsafeReleaseBypasses(source: string): string[] {
   if (!jobNeeds(source, 'runtime-candidate').includes('package-candidate')) {
     failures.push('runtime matrix bypasses the preserved candidate');
   }
-  if (!approvalNeeds.includes('verify-candidate')) {
-    failures.push('protected approval bypasses verification');
+  for (const dependency of ['package-candidate', 'verify-candidate', 'runtime-candidate']) {
+    if (!publishNeeds.includes(dependency)) {
+      failures.push(`publish bypasses ${dependency}`);
+    }
   }
-  if (!approvalNeeds.includes('runtime-candidate')) {
-    failures.push('protected approval bypasses runtime matrix');
+  if (
+    publishNeeds.length !== 3 ||
+    publishNeeds.some(
+      (dependency) =>
+        !['package-candidate', 'verify-candidate', 'runtime-candidate'].includes(dependency)
+    )
+  ) {
+    failures.push('publish has an indirect or unexpected approval dependency');
   }
-  if (!publishNeeds.includes('approve-candidate')) {
-    failures.push('publish bypasses protected approval');
+  if (approvalJob.length > 0) {
+    failures.push('separate no-op approval job remains');
   }
-  if (!publishNeeds.includes('package-candidate')) {
-    failures.push('publish cannot address the preserved candidate');
+  const releaseEnvironmentPattern = /^    environment:\s*npm-release-verification\s*$/gmu;
+  const releaseEnvironmentCount = source.match(releaseEnvironmentPattern)?.length ?? 0;
+  const publishEnvironmentCount =
+    publishJob.match(/^    environment:\s*npm-release-verification\s*$/gmu)?.length ?? 0;
+  if (publishEnvironmentCount !== 1) {
+    failures.push('publish is not protected by the release environment');
   }
-  if (!/^    environment:\s*npm-release-verification\s*$/mu.test(approvalJob)) {
-    failures.push('approval is not protected by the release environment');
-  }
-  if (/^    if:\s*.*\balways\s*\(\s*\)/mu.test(approvalJob)) {
-    failures.push('protected approval runs after failed verification');
+  if (releaseEnvironmentCount !== publishEnvironmentCount) {
+    failures.push('release environment is attached outside the publish job');
   }
   if (/^    if:\s*.*\balways\s*\(\s*\)/mu.test(publishJob)) {
     failures.push('publish runs after a failed dependency');
+  }
+  if (!/^        run:\s*npm ci\s*$/mu.test(verificationJob)) {
+    failures.push('verification does not install its locked dependency lifecycle');
+  }
+  if (/^        run:\s*npm ci\b[^\n]*--ignore-scripts\b/mu.test(verificationJob)) {
+    failures.push('verification disables dependency lifecycle scripts');
+  }
+  const oidcPermissionCount = source.match(/^      id-token:\s*write\s*$/gmu)?.length ?? 0;
+  const publishOidcPermissionCount =
+    publishJob.match(/^      id-token:\s*write\s*$/gmu)?.length ?? 0;
+  if (publishOidcPermissionCount !== 1) {
+    failures.push('publish lacks OIDC permission');
+  }
+  if (oidcPermissionCount !== publishOidcPermissionCount) {
+    failures.push('OIDC permission is exposed outside the publish job');
   }
   if (!sourceQualityJob.includes("node-version: '24.x'")) {
     failures.push('source quality uses an unsupported development toolchain');
@@ -364,7 +387,7 @@ describe('npm publication workflow', () => {
     expect(source).not.toContain('continue-on-error: true');
   });
 
-  it('packs once, records identity, verifies behind approval, and publishes the same bytes', () => {
+  it('packs once, records identity, verifies behind protected publish, and publishes the same bytes', () => {
     const source = workflow();
 
     expect(source.match(/\bnpm pack\b/g)).toHaveLength(1);
@@ -378,11 +401,16 @@ describe('npm publication workflow', () => {
     expect(jobNeeds(source, 'verify-candidate')).toEqual(['package-candidate']);
     expect(jobNeeds(source, 'package-candidate')).toEqual(['source-quality']);
     expect(jobNeeds(source, 'runtime-candidate')).toEqual(['package-candidate']);
-    expect(jobNeeds(source, 'approve-candidate')).toEqual([
+    expect(jobBlock(source, 'approve-candidate')).toBe('');
+    expect(jobNeeds(source, 'publish')).toEqual([
+      'package-candidate',
       'verify-candidate',
       'runtime-candidate',
     ]);
-    expect(jobNeeds(source, 'publish')).toEqual(['package-candidate', 'approve-candidate']);
+    expect(jobBlock(source, 'publish')).toContain('environment: npm-release-verification');
+    expect(jobBlock(source, 'publish')).toContain('id-token: write');
+    expect(jobBlock(source, 'verify-candidate')).toMatch(/^        run: npm ci$/mu);
+    expect(jobBlock(source, 'verify-candidate')).not.toContain('--ignore-scripts');
     expect(source).toMatch(/npm publish[^\n]*needs\.package-candidate\.outputs\.tarball/);
     expect(source).not.toMatch(/npm publish\s+--/);
     expect(unsafeReleaseBypasses(source)).toEqual([]);
@@ -404,34 +432,82 @@ describe('npm publication workflow', () => {
     expect(unsafeReleaseBypasses(mutated)).toContain('validation failure is swallowed');
   });
 
-  it('detects publish and approval dependency-graph bypass mutations', () => {
+  it('detects publish dependency, environment, and lifecycle bypass mutations', () => {
     const source = workflow();
 
-    const publishSkipsApproval = source.replace(
-      'needs: [package-candidate, approve-candidate]',
-      'needs: [package-candidate, verify-candidate]'
-    );
-    expect(publishSkipsApproval).not.toBe(source);
-    expect(unsafeReleaseBypasses(publishSkipsApproval)).toContain(
-      'publish bypasses protected approval'
-    );
-
-    const approvalSkipsVerification = source.replace(
-      'needs: [verify-candidate, runtime-candidate]',
+    const publishSkipsVerification = source.replace(
+      'needs: [package-candidate, verify-candidate, runtime-candidate]',
       'needs: [package-candidate, runtime-candidate]'
     );
-    expect(approvalSkipsVerification).not.toBe(source);
-    expect(unsafeReleaseBypasses(approvalSkipsVerification)).toContain(
-      'protected approval bypasses verification'
+    expect(publishSkipsVerification).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishSkipsVerification)).toContain(
+      'publish bypasses verify-candidate'
     );
 
-    const approvalSkipsRuntime = source.replace(
-      'needs: [verify-candidate, runtime-candidate]',
-      'needs: verify-candidate'
+    const publishSkipsRuntime = source.replace(
+      'needs: [package-candidate, verify-candidate, runtime-candidate]',
+      'needs: [package-candidate, verify-candidate]'
     );
-    expect(approvalSkipsRuntime).not.toBe(source);
-    expect(unsafeReleaseBypasses(approvalSkipsRuntime)).toContain(
-      'protected approval bypasses runtime matrix'
+    expect(publishSkipsRuntime).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishSkipsRuntime)).toContain(
+      'publish bypasses runtime-candidate'
+    );
+
+    const publishSkipsPackage = source.replace(
+      'needs: [package-candidate, verify-candidate, runtime-candidate]',
+      'needs: [verify-candidate, runtime-candidate]'
+    );
+    expect(publishSkipsPackage).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishSkipsPackage)).toContain(
+      'publish bypasses package-candidate'
+    );
+
+    const publishUsesNoOpApproval = source.replace(
+      'needs: [package-candidate, verify-candidate, runtime-candidate]',
+      'needs: [package-candidate, approve-candidate]'
+    );
+    expect(publishUsesNoOpApproval).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishUsesNoOpApproval)).toContain(
+      'publish has an indirect or unexpected approval dependency'
+    );
+
+    const publishWithoutEnvironment = mutateJob(
+      source,
+      'publish',
+      '    environment: npm-release-verification\n',
+      ''
+    );
+    expect(publishWithoutEnvironment).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishWithoutEnvironment)).toContain(
+      'publish is not protected by the release environment'
+    );
+
+    const environmentOnNoOpApproval = source
+      .replace('    environment: npm-release-verification\n', '')
+      .replace(
+        '  publish:\n',
+        '  approve-candidate:\n    runs-on: ubuntu-latest\n    environment: npm-release-verification\n    steps:\n      - run: echo approved\n\n  publish:\n'
+      );
+    expect(environmentOnNoOpApproval).not.toBe(source);
+    expect(unsafeReleaseBypasses(environmentOnNoOpApproval)).toContain(
+      'publish is not protected by the release environment'
+    );
+    expect(unsafeReleaseBypasses(environmentOnNoOpApproval)).toContain(
+      'release environment is attached outside the publish job'
+    );
+    expect(unsafeReleaseBypasses(environmentOnNoOpApproval)).toContain(
+      'separate no-op approval job remains'
+    );
+
+    const verificationIgnoresLifecycle = mutateJob(
+      source,
+      'verify-candidate',
+      'run: npm ci',
+      'run: npm ci --ignore-scripts'
+    );
+    expect(verificationIgnoresLifecycle).not.toBe(source);
+    expect(unsafeReleaseBypasses(verificationIgnoresLifecycle)).toContain(
+      'verification disables dependency lifecycle scripts'
     );
 
     const publishAfterFailure = source.replace(
