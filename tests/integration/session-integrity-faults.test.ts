@@ -223,16 +223,22 @@ function releaseBypasses(source: string): string[] {
   if (!workflowNeeds(source, 'runtime-candidate').includes('package-candidate')) {
     failures.push('runtime matrix bypasses the preserved candidate');
   }
-  if (!workflowNeeds(source, 'approve-candidate').includes('verify-candidate')) {
-    failures.push('protected approval bypasses verification');
-  }
-  if (!workflowNeeds(source, 'approve-candidate').includes('runtime-candidate')) {
-    failures.push('protected approval bypasses runtime matrix');
-  }
   const publishNeeds = workflowNeeds(source, 'publish');
-  if (!publishNeeds.includes('approve-candidate')) failures.push('publish bypasses approval');
-  if (!publishNeeds.includes('package-candidate')) failures.push('publish bypasses candidate');
-  if (/^ {4}if:\s*.*\balways\s*\(\s*\)/mu.test(workflowJob(source, 'publish'))) {
+  for (const dependency of ['package-candidate', 'verify-candidate', 'runtime-candidate']) {
+    if (!publishNeeds.includes(dependency)) failures.push(`publish bypasses ${dependency}`);
+  }
+  const publishJob = workflowJob(source, 'publish');
+  if (!/^ {4}environment:\s*npm-release-verification\s*$/mu.test(publishJob)) {
+    failures.push('publish is not protected by the release environment');
+  }
+  if (!/^ {6}id-token:\s*write\s*$/mu.test(publishJob)) {
+    failures.push('publish lacks OIDC permission');
+  }
+  const verificationJob = workflowJob(source, 'verify-candidate');
+  if (!/^ {8}run:\s*npm ci\s*$/mu.test(verificationJob)) {
+    failures.push('verification disables its dependency lifecycle');
+  }
+  if (/^ {4}if:\s*.*\balways\s*\(\s*\)/mu.test(publishJob)) {
     failures.push('publish runs after a failed dependency');
   }
   return failures;
@@ -629,13 +635,26 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
       'publish runs after a failed dependency'
     );
 
-    const approvalSkipsRuntime = source.replace(
-      'needs: [verify-candidate, runtime-candidate]',
-      'needs: verify-candidate'
+    const publishSkipsRuntime = source.replace(
+      'needs: [package-candidate, verify-candidate, runtime-candidate]',
+      'needs: [package-candidate, verify-candidate]'
     );
-    expect(approvalSkipsRuntime).not.toBe(source);
-    expect(releaseBypasses(approvalSkipsRuntime)).toContain(
-      'protected approval bypasses runtime matrix'
+    expect(publishSkipsRuntime).not.toBe(source);
+    expect(releaseBypasses(publishSkipsRuntime)).toContain('publish bypasses runtime-candidate');
+
+    const misplacedEnvironment = source.replace('    environment: npm-release-verification\n', '');
+    expect(misplacedEnvironment).not.toBe(source);
+    expect(releaseBypasses(misplacedEnvironment)).toContain(
+      'publish is not protected by the release environment'
+    );
+
+    const disabledLifecycle = source.replace(
+      'run: npm ci\n\n      - name: Download preserved candidate',
+      'run: npm ci --ignore-scripts\n\n      - name: Download preserved candidate'
+    );
+    expect(disabledLifecycle).not.toBe(source);
+    expect(releaseBypasses(disabledLifecycle)).toContain(
+      'verification disables its dependency lifecycle'
     );
   });
 });
