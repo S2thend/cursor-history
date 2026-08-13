@@ -415,6 +415,8 @@ export class BackupPublishedCleanupError extends SessionIntegrityError<
  * Reports owner-private temporary paths that remained after exhaustive cleanup attempts.
  *
  * @param residuePaths - Paths only; conversation content is never included.
+ * @param unverifiedResiduePaths - Paths whose identity could not be established and which callers
+ * must not delete or modify blindly.
  */
 export class TemporaryArtifactCleanupError extends SessionIntegrityError<
   'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
@@ -450,6 +452,10 @@ export class TemporaryArtifactCleanupError extends SessionIntegrityError<
 /**
  * Reports restored entries that could not be returned to their pre-restore state after a later
  * failure. Manifest-relative paths are safe to expose; physical destination locators are omitted.
+ *
+ * @param publishedFileCount - Number of entries published before rollback began.
+ * @param residualFiles - Safe manifest-relative entries whose pre-restore state was not recovered.
+ * @param cause - Original restore or rollback failure, when available.
  */
 export class RestoreRollbackError extends SessionIntegrityError<
   'RESTORE_ROLLBACK_INCOMPLETE',

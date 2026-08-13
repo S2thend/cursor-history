@@ -282,7 +282,7 @@ optional or permit publication before it passes.
 ## Phase 11: Post-Audit Corrective Completion (Blocking Before Re-entering Phase 10)
 
 **Purpose**: Resolve every high-priority/blocking defect discovered after the preliminary freeze.
-T110–T115 above are deliberately reopened and MUST be rerun only after T116–T132 complete; their
+T110–T115 above are deliberately reopened and MUST be rerun only after T116–T134 complete; their
 stable IDs are retained so existing traceability links do not drift.
 
 - [X] T116 [P] Remove size-dependent greedy merge semantics with deterministic exact alignment; freeze Composer message/tool identities before enrichment/backbone choice; resolve parent/branch references through valid alternate source IDs or mark explicit partial state in `src/core/store-stack/merge.ts`, `src/core/session-identity.ts`, `src/core/parser.ts`, `tests/unit/store-stack-merge.test.ts`, `tests/unit/store-stack-mapper.test.ts`, and `tests/unit/parser.test.ts`
@@ -302,6 +302,8 @@ stable IDs are retained so existing traceability links do not drift.
 - [X] T130 [P] Bind every restore publication and rollback decision to the committed device/inode identity: after force-mode rename, track the committed inode and permanently abandon the old staging pathname without probing or unlinking it; after non-force hard-link publication, remove the staging name only if it still matches the staged device/inode; report a concurrently replaced destination as a typed manifest-relative rollback residual without touching the replacement in `src/core/restore-publication.ts`, `src/core/backup.ts`, `src/core/errors.ts`, `src/lib/errors.ts`, `src/cli/errors.ts`, `tests/unit/restore-publication.test.ts`, and `tests/integration/backup-snapshot-security.test.ts`
 - [X] T131 [P] Preserve backup commit-point truth when post-publication staging cleanup fails by exposing typed `BACKUP_PUBLISHED_CLEANUP_FAILED` details with verified/unverified archive and residue identities, exporting and mapping the error through public library/CLI surfaces, and proving transient/persistent cleanup failure, pathname replacement, identity-inspection failure, and no-unsafe-cleanup behavior in `src/core/backup-archive-publication.ts`, `src/core/backup.ts`, `src/core/errors.ts`, `src/core/index.ts`, `src/lib/backup.ts`, `src/lib/errors.ts`, `src/lib/index.ts`, `src/cli/errors.ts`, `src/cli/index.ts`, `tests/unit/backup-archive-publication.test.ts`, `tests/unit/backup-publication.test.ts`, `tests/unit/lib-errors.test.ts`, `tests/unit/cli-errors.test.ts`, `tests/unit/cli-commands.test.ts`, and `tests/integration/backup-snapshot-security.test.ts`
 - [X] T132 [P] Remove the copied proprietary vibe-history adapter/digest/policy/engine/SQLite schema and generated downstream archive from the recurring repository suite; retain only provenance and license classification plus a generic cursor-history-owned key/binding, complete/degraded, replacement, and idempotence contract; reserve exact third-party adapter/digest/SQLite transaction/rollback/repeated-sync verification for the owner-authorized external T113 gate in `tests/helpers/v016-downstream-contract.ts`, `tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json`, `tests/compatibility/fixtures/v016/fixture-manifest.json`, `tests/compatibility/support/generate-v016-fixtures.ts`, `tests/compatibility/v016-consumer-provenance.test.ts`, `tests/compatibility/v016-composer-upgrade.test.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, `tests/compatibility/v017-convergence.test.ts`, and `tests/integration/session-integrity-faults.test.ts`; T132 completes current-tree removal only, while T114 remains blocked until every copied proprietary blob is removed from reachable branch history and that sanitization is verified
+- [X] T133 [P] Prevent conservative stale-temp recovery from interpreting numeric PID/start-token evidence across Linux PID namespaces or host boots: add a boot-scoped namespace token to new markers, retain different/missing/unreadable namespace provenance as `owner-status-uncertain`, preserve same-namespace dead/PID-reuse recovery, and prove the original two-process shared-temp deletion reproducer now leaves the live owner's workspace and file untouched in `src/core/private-temp.ts`, `tests/unit/private-temp.test.ts`, `tests/integration/private-temp-signal-recovery.test.ts`, `specs/016-harden-session-integrity/spec.md`, `specs/016-harden-session-integrity/plan.md`, `specs/016-harden-session-integrity/research.md`, `specs/016-harden-session-integrity/data-model.md`, `specs/016-harden-session-integrity/contracts/internal-resolution.md`, `specs/016-harden-session-integrity/quickstart.md`, `docs/compatibility.md`, and `CHANGELOG.md`
+- [X] T134 [P] Restore the packed public-declaration documentation gate by documenting every constructor parameter of `TemporaryArtifactCleanupError` and `RestoreRollbackError`, and prove the declaration-graph audit accepts both exported classes in `src/core/errors.ts` and `tests/e2e/package-smoke.test.ts`
 
 ---
 
@@ -320,11 +322,11 @@ stable IDs are retained so existing traceability links do not drift.
 - **Phase 9 — US7**: US7 remains P1 and non-deferrable, but its integrated shipped contract depends on the selected P2 replica and memory contracts being frozen; this dependency-driven placement after US5/US6 does not lower its priority or permit release without it. Public formatting can begin after field names stabilize, but release/documentation completion depends on all selected stories. T091–T096 establish failing output/release contracts; T097–T100 then run in order across shared runtime/public surfaces. After T100, T101, T103, and T105–T109 may run in parallel; T102 depends on T101, and T104 depends on both T102 and T103.
 - **Phase 10 — Polish**: Depends on all seven story checkpoints. The preliminary run was invalidated
   by post-audit blockers; T110–T115 are reopened.
-- **Phase 11 — Post-audit corrective completion**: T116–T132 may proceed by independent file group
+- **Phase 11 — Post-audit corrective completion**: T116–T134 may proceed by independent file group
   where marked parallel; T128 waits for the integrated focused tests and reconciled contracts. After T128, re-enter Phase
   10 and execute T110–T113; the final step of T113 refreezes the checklist, then T114–T115 validate
   and preserve that exact revision despite their earlier stable IDs.
-  Any failure returns to its owning T116–T132 task and restarts T110–T115. T132 current-tree
+  Any failure returns to its owning T116–T134 task and restarts T110–T115. T132 current-tree
   cleanup does not satisfy the separate T114 reachable-history sanitization gate.
 
 ### User Story Dependency Graph
@@ -407,7 +409,7 @@ US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Post-audit fixes -> Reopened cross-c
 | FR-050: existing unambiguous migration remains compatible | T048–T055, T110, T124, T127 |
 | FR-051: temporary plaintext privacy is platform-qualified | T004, T020, T057–T064, T110, T114–T115 |
 | FR-052: temporary workspaces are unique/exclusive | T001, T057–T064, T110 |
-| FR-053: exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115, T121, T129–T131 |
+| FR-053: exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115, T121, T129–T131, T133 |
 | FR-054: final archives are private by default where supported | T057, T060, T069, T110, T114–T115, T121, T131 |
 | FR-055: overwrite/parent permissions and publication identity remain safe | T057, T060, T069, T110, T121, T127–T131 |
 | FR-056: provider selection probes requested capabilities | T056, T059, T065, T067–T068, T071, T095 |
@@ -420,16 +422,16 @@ US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Post-audit fixes -> Reopened cross-c
 | FR-063: read context binds immutable source/scope | T006, T083–T089, T110 |
 | FR-064: context misuse returns typed errors | T007–T009, T083–T089 |
 | FR-065: rejected resolution remains retryable/isolated | T083–T090, T110 |
-| FR-066: shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115, T126–T127 |
+| FR-066: shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115, T126–T127, T134 |
 | FR-067: complete changelog and upgrade warnings | T013, T092, T105, T108, T118–T119, T127 |
 | FR-068: actionable empty/ambiguity diagnostics | T007–T009, T030, T032, T034, T047, T079–T080, T099, T105 |
-| FR-069: exact-artifact gates and actual manifest producer | T005, T060, T070, T093–T096, T101–T104, T114–T115, T123, T126–T127 |
+| FR-069: exact-artifact gates and actual manifest producer | T005, T060, T070, T093–T096, T101–T104, T114–T115, T123, T126–T127, T134 |
 | FR-070: runtime capability-boundary validation | T005, T056, T059, T065, T094–T095, T103–T104, T114–T115, T126–T127 |
-| FR-071: stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113, T118–T119, T127–T128, T132 |
+| FR-071: stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113, T118–T119, T127–T128, T132–T134 |
 | FR-072: distributed end-to-end off-scope evidence | T003–T004, T031–T034, T037, T042–T047, T093, T111, T114–T115 |
 | FR-073: locked v0.16/v0.17 backward-compatibility suite | T002, T011–T016, T021–T029, T110, T114, T125, T132 |
 | FR-074: cross-source/layout/runtime validation fixture matrix | T001, T012–T020, T030–T034, T048–T050, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T124, T126 |
-| FR-075: mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110, T123, T130–T132 |
+| FR-075: mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110, T123, T130–T134 |
 | FR-076: tool activity rendering and message filtering | T017–T018, T091, T098, T110–T111 |
 | FR-077: v0.16 identity/completeness/idempotency faults | T002, T005, T012, T015, T017–T018, T021–T029, T110, T114, T125, T132 |
 | FR-078: locked v0.17 corrective convergence | T013, T016, T023–T029, T092, T108, T110, T114–T115 |
@@ -443,14 +445,14 @@ US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Post-audit fixes -> Reopened cross-c
 | SC-004: scoped indices round-trip without global regressions | T003, T032–T034, T038–T043, T046, T048, T052–T053, T110, T117, T119, T124, T127 |
 | SC-005: ambiguity and ineligible migration stop before writes | T048–T055, T072, T079, T110, T124 |
 | SC-006: equivalent/divergent/complementary groups and logical pagination are honest | T034, T043, T072–T082, T110–T111 |
-| SC-007: platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115, T121, T129–T131 |
+| SC-007: platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115, T121, T129–T131, T133 |
 | SC-008: capable driver or one actionable error | T056, T059, T065–T068, T071, T095, T110, T114–T115, T126 |
 | SC-009: context and Source Read Limits v1 boundaries hold | T020, T022, T063, T069, T083–T090, T105, T110, T112, T114, T120 |
 | SC-010: timestamps/provenance are deterministic and honest | T015–T016, T091, T097–T100, T110 |
-| SC-011: shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115, T126–T127 |
-| SC-012: every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115, T123, T126–T127 |
+| SC-011: shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115, T126–T127, T134 |
+| SC-012: every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115, T123, T126–T127, T134 |
 | SC-013: every `required` Compatibility Matrix v1 cell passes | T001, T004, T020, T030–T034, T048, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T126–T127 |
-| SC-014: 100% of feature 016 public changes have evidence | T005, T109, T113, T115–T132 |
+| SC-014: 100% of feature 016 public changes have evidence | T005, T109, T113, T115–T134 |
 | SC-015: structured tools remain visible/filterable | T017–T018, T091, T098, T110–T111 |
 | SC-016: required suite catches specified v0.16 regressions | T002, T005, T011–T015, T017–T018, T021–T029, T110, T114, T132 |
 | SC-017: required suite proves v0.17 one-replacement convergence | T005, T013, T016, T023–T029, T092, T110, T114–T115 |

@@ -30,7 +30,7 @@ before the exact-revision release gates
 
 Those observations are historical evidence only. Subsequent high-priority fixes changed runtime,
 tests, package metadata, contracts, and release workflow behavior. Every `PASS` token in the tables
-below records that prior run and is **not** current release approval. T116–T132 are now
+below records that prior run and is **not** current release approval. T116–T134 are now
 implemented in the current tree; the reopened T110–T115 gates must complete from the corrected 0.18.0
 revision before any table can be refrozen.
 
@@ -93,7 +93,7 @@ the owning tasks are complete and their required test/document evidence passed t
 | FR-050 existing unambiguous migration remains compatible | T048–T055, T110, T124, T127 | PASS |
 | FR-051 temporary plaintext privacy is platform-qualified | T004, T020, T057–T064, T110, T114–T115 | PASS pending exact-tarball repetition in T115 |
 | FR-052 temporary workspaces are unique/exclusive | T001, T057–T064, T110 | PASS |
-| FR-053 exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115, T121, T129–T131 | PASS pending exact-tarball repetition in T115 |
+| FR-053 exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115, T121, T129–T131, T133 | PASS pending exact-tarball repetition in T115 |
 | FR-054 final archives are private by default where supported | T057, T060, T069, T110, T114–T115, T121, T131 | PASS pending exact-tarball repetition in T115 |
 | FR-055 overwrite/parent permissions and publication identity remain safe | T057, T060, T069, T110, T121, T127–T131 | REVALIDATION REQUIRED |
 | FR-056 provider selection probes requested capabilities | T056, T059, T065, T067–T068, T071, T095 | PASS |
@@ -106,16 +106,16 @@ the owning tasks are complete and their required test/document evidence passed t
 | FR-063 read context binds immutable source/scope | T006, T083–T089, T110 | PASS |
 | FR-064 context misuse returns typed errors | T007–T009, T083–T089 | PASS |
 | FR-065 rejected resolution remains retryable/isolated | T083–T090, T110 | PASS |
-| FR-066 shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115, T126–T127 | PASS pending exact-tarball repetition in T115 |
+| FR-066 shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115, T126–T127, T134 | PASS pending exact-tarball repetition in T115 |
 | FR-067 complete changelog and upgrade warnings | T013, T092, T105, T108, T118–T119, T127 | REVALIDATION REQUIRED |
 | FR-068 actionable empty/ambiguity diagnostics | T007–T009, T030, T032, T034, T047, T079–T080, T099, T105 | PASS |
-| FR-069 exact-artifact gates and actual manifest producer | T005, T060, T070, T093–T096, T101–T104, T114–T115, T123, T126–T127 | PASS in contract tests; exact candidate remains T115 |
+| FR-069 exact-artifact gates and actual manifest producer | T005, T060, T070, T093–T096, T101–T104, T114–T115, T123, T126–T127, T134 | PASS in contract tests; exact candidate remains T115 |
 | FR-070 runtime capability-boundary validation | T005, T056, T059, T065, T094–T095, T103–T104, T114–T115, T126–T127 | PASS in workflow contract; hosted runtime matrix remains release gate |
-| FR-071 stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113, T118–T119, T127–T128, T132 | REVALIDATION REQUIRED |
+| FR-071 stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113, T118–T119, T127–T128, T132–T134 | REVALIDATION REQUIRED |
 | FR-072 distributed end-to-end off-scope evidence | T003–T004, T031–T034, T037, T042–T047, T093, T111, T114–T115 | PASS pending exact-tarball repetition in T115 |
 | FR-073 locked v0.16/v0.17 backward-compatibility suite | T002, T011–T016, T021–T029, T110, T114, T125, T132 | PASS |
 | FR-074 cross-source/layout/runtime validation fixture matrix | T001, T012–T020, T030–T034, T048–T050, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T124, T126 | PASS pending hosted/exact-tarball repetition |
-| FR-075 mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110, T123, T130–T132 | PASS |
+| FR-075 mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110, T123, T130–T134 | PASS |
 | FR-076 tool activity rendering and message filtering | T017–T018, T091, T098, T110–T111 | PASS |
 | FR-077 v0.16 identity/completeness/idempotency faults | T002, T005, T012, T015, T017–T018, T021–T029, T110, T114, T125, T132 | PASS |
 | FR-078 locked v0.17 corrective convergence | T013, T016, T023–T029, T092, T108, T110, T114–T115 | PASS pending exact-tarball repetition in T115 |
@@ -134,14 +134,14 @@ the owning tasks are complete and their required test/document evidence passed t
 | SC-004 scoped indices round-trip without global regressions | T003, T032–T034, T038–T043, T046, T048, T052–T053, T110, T117, T119, T124, T127 | PASS |
 | SC-005 ambiguity and ineligible migration stop before writes | T048–T055, T072, T079, T110, T124 | PASS |
 | SC-006 equivalent/divergent/complementary groups and logical pagination are honest | T034, T043, T072–T082, T110–T111 | PASS |
-| SC-007 platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115, T121, T129–T131 | PASS pending exact-tarball repetition |
+| SC-007 platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115, T121, T129–T131, T133 | PASS pending exact-tarball repetition |
 | SC-008 capable driver or one actionable error | T056, T059, T065–T068, T071, T095, T110, T114–T115, T126 | PASS pending hosted matrix |
 | SC-009 context and Source Read Limits v1 boundaries hold | T020, T022, T063, T069, T083–T090, T105, T110, T112, T114, T120 | PASS |
 | SC-010 timestamps/provenance are deterministic and honest | T015–T016, T091, T097–T100, T110 | PASS |
-| SC-011 shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115, T126–T127 | PASS pending exact-tarball repetition |
-| SC-012 every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115, T123, T126–T127 | PASS in contract/fault tests; protected release gate remains |
+| SC-011 shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115, T126–T127, T134 | PASS pending exact-tarball repetition |
+| SC-012 every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115, T123, T126–T127, T134 | PASS in contract/fault tests; protected release gate remains |
 | SC-013 every `required` Compatibility Matrix v1 cell passes | T001, T004, T020, T030–T034, T048, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T126–T127 | REVALIDATION REQUIRED |
-| SC-014 100% of feature 016 public changes have evidence | T005, T109, T113, T115–T132 | REVALIDATION REQUIRED |
+| SC-014 100% of feature 016 public changes have evidence | T005, T109, T113, T115–T134 | REVALIDATION REQUIRED |
 | SC-015 structured tools remain visible/filterable | T017–T018, T091, T098, T110–T111 | PASS |
 | SC-016 required suite catches specified v0.16 regressions | T002, T005, T011–T015, T017–T018, T021–T029, T110, T114, T132 | PASS |
 | SC-017 required suite proves v0.17 one-replacement convergence | T005, T013, T016, T023–T029, T092, T110, T114–T115 | PASS pending exact-tarball repetition |
@@ -232,7 +232,7 @@ successful carrier fixture is permitted.
 
 ## Current Decision
 
-The previous freeze is revoked. T116–T132, including artifact/ledger reconciliation T127–T128,
+The previous freeze is revoked. T116–T134, including artifact/ledger reconciliation T127–T128,
 are implemented in the current tree; T110–T115 remain reopened. Neither freeze nor publication is approved until every
 unchecked gate above is satisfied from one unchanged 0.18.0 revision and the checklist is
 deliberately refrozen.
