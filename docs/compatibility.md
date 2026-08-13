@@ -380,8 +380,12 @@ failure is fatal and is never swallowed into an empty/partial session or transcr
 Temporary plaintext SQLite snapshots and staging files live in an exclusive private workspace. On
 POSIX, the directory is `0700` and files are `0600`; cleanup runs through normal, exceptional,
 cancellation, and handled-signal paths. Conservative stale recovery only removes proven-dead,
-owned cursor-history workspaces. `SIGKILL`, power loss, and kernel termination cannot guarantee
-immediate cleanup, so the private directory protects any residue until the next safe recovery.
+owned cursor-history workspaces. On Linux, the marker and recovering process must also have readable,
+equal boot-scoped PID-namespace identities (boot ID plus namespace inode) before numeric PID or
+process-start evidence is interpreted; a different host boot or namespace, a legacy marker without
+that identity, or an unreadable identity is retained as uncertain. `SIGKILL`, power loss, and kernel
+termination cannot guarantee immediate cleanup, so the private directory protects any residue until
+the next safe recovery.
 
 New final backup archives default to `0600` on POSIX. Force-overwriting an archive preserves its
 existing mode unless sharing is explicitly requested. `--shared` or

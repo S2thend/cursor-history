@@ -445,9 +445,12 @@ priority or permit publication without it.
   exclusive files (`0600`), idempotent all-artifact cleanup, and typed residue reporting. Use it for
   backup creation/extraction and Store snapshots.
 - Register active private workspaces for graceful `SIGINT`/`SIGTERM`/`SIGHUP` cleanup and cooperative
-  cancellation. Mark each workspace with owner/pid/process-start/version metadata and conservatively
-  recover only proven-dead, current-owner stale directories on the next operation; document that
-  `SIGKILL` and power loss cannot guarantee immediate cleanup.
+  cancellation. Mark each workspace with owner/pid/process-start/version metadata plus Linux
+  boot-scoped PID-namespace identity (boot ID plus namespace inode) when procfs exposes it. Before
+  interpreting numeric PID evidence on Linux, require equal readable namespace identities; retain a
+  different host boot or namespace and legacy, missing, or unreadable provenance as uncertain. Recover
+  only same-namespace proven-dead, current-owner stale directories on the next operation; document
+  that `SIGKILL` and power loss cannot guarantee immediate cleanup.
 - Stage final archives privately and publish only a complete archive. New archives are `0600` by
   default; force-overwrite never broadens existing permissions; broader access requires `--shared`
   or the additive library option. Rename/link to the final path is the publication commit point. A

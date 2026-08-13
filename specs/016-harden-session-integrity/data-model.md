@@ -961,6 +961,7 @@ interface PrivateTempMarker {
   formatVersion: 1;
   uid?: number;
   pid: number;
+  pidNamespaceToken?: string; // Linux boot ID + namespace inode; absence is uncertain
   processStartToken: string;
   createdAt: string;
 }
@@ -1016,9 +1017,12 @@ Rules:
   `SIGINT`, `SIGTERM`, and `SIGHUP` perform synchronous best-effort disposal once, then preserve the
   platform's signal termination semantics. Cooperative cancellation still uses normal `finally`.
 - Before a new operation, stale recovery considers only exact application-prefix directories owned
-  by the current user with a valid marker. It removes a candidate only when the marker's PID/start
-  token proves that the creating process is dead or the PID has been reused; uncertain candidates
-  are left untouched and reported safely.
+  by the current user with a valid marker. On Linux it first requires a readable marker and current
+  boot-scoped PID-namespace token (boot ID plus namespace inode) with an exact match; a host-boot or
+  namespace mismatch, a legacy marker without the token, or an unreadable identity is retained as
+  owner-status-uncertain. Only within that verified namespace may the marker's PID/start token prove
+  that the creating process is dead or the PID has been reused. Non-Linux platforms retain their
+  platform-specific owner-process proof without claiming Linux PID-namespace validation.
 - `SIGKILL`, power loss, and kernel termination cannot run handlers, so immediate cleanup is not
   guaranteed. The `0700`/`0600` boundary contains residue until conservative next-run recovery.
 - A possible residue produces `TEMPORARY_ARTIFACT_CLEANUP_FAILED` with paths only.

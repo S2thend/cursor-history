@@ -29,6 +29,11 @@ interface ChildReadyMessage {
   readonly umask: number;
 }
 
+interface RecoveryChildMessage {
+  readonly recoveredPaths: string[];
+  readonly retained: Array<{ readonly path: string; readonly reason: string }>;
+}
+
 const childScript = String.raw`
 const [moduleUrl, parent, prefix, countText] = process.argv.slice(1);
 const { createPrivateTempWorkspace } = await import(moduleUrl);
@@ -56,6 +61,14 @@ process.on('message', (message) => {
   setImmediate(() => process.exit(0));
 });
 setInterval(() => {}, 1_000);
+`;
+
+const recoveryChildScript = String.raw`
+const [moduleUrl, parent, prefix] = process.argv.slice(1);
+const { recoverStalePrivateTempWorkspaces } = await import(moduleUrl);
+if (!process.send) throw new Error('IPC recovery channel is unavailable.');
+const result = recoverStalePrivateTempWorkspaces({ prefix, parent });
+process.send(result, () => process.exit(0));
 `;
 
 let compiledRoot = '';
@@ -134,12 +147,22 @@ function startChild(parent: string, prefix: string, count: number): ChildProcess
   return child;
 }
 
-function waitForReady(child: ChildProcess): Promise<ChildReadyMessage> {
+function startRecoveryChild(parent: string, prefix: string): ChildProcess {
+  const child = spawn(
+    process.execPath,
+    ['--input-type=module', '--eval', recoveryChildScript, compiledModuleUrl, parent, prefix],
+    { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }
+  );
+  liveChildren.add(child);
+  return child;
+}
+
+function waitForMessage<T>(child: ChildProcess, description: string): Promise<T> {
   return new Promise((resolveReady, rejectReady) => {
     let stderr = '';
     const timeout = setTimeout(() => {
       cleanup();
-      rejectReady(new Error(`Child readiness timed out (stderr=${JSON.stringify(stderr)}).`));
+      rejectReady(new Error(`Child ${description} timed out (stderr=${JSON.stringify(stderr)}).`));
     }, 5_000);
 
     const cleanup = () => {
@@ -153,7 +176,7 @@ function waitForReady(child: ChildProcess): Promise<ChildReadyMessage> {
     };
     const onMessage = (message: unknown) => {
       cleanup();
-      resolveReady(message as ChildReadyMessage);
+      resolveReady(message as T);
     };
     const onEarlyExit = (code: number | null, signal: NodeJS.Signals | null) => {
       cleanup();
@@ -168,6 +191,10 @@ function waitForReady(child: ChildProcess): Promise<ChildReadyMessage> {
     child.stderr?.on('data', onStderr);
     child.once('exit', onEarlyExit);
   });
+}
+
+function waitForReady(child: ChildProcess): Promise<ChildReadyMessage> {
+  return waitForMessage<ChildReadyMessage>(child, 'readiness');
 }
 
 function waitForExit(
@@ -257,6 +284,13 @@ describe.runIf(process.platform !== 'win32')(
         processStartToken: expect.any(String),
         createdAt: expect.any(String),
       });
+      if (process.platform === 'linux') {
+        expect(marker.pidNamespaceToken).toMatch(
+          /^linux-pidns:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9]\d*$/u
+        );
+      } else {
+        expect(marker.pidNamespaceToken).toBeUndefined();
+      }
 
       const nextOperation = createPrivateTempWorkspace({ prefix, parent });
       try {
@@ -267,6 +301,52 @@ describe.runIf(process.platform !== 'win32')(
       }
       expect(existsSync(nextOperation.path)).toBe(false);
     }, 10_000);
+
+    it.runIf(process.platform === 'linux')(
+      'a second process retains a live first-process workspace carrying foreign PID-namespace identity',
+      async () => {
+        const parent = createParent();
+        const prefix = 'foreign-pidns-two-process-';
+        const owner = startChild(parent, prefix, 1);
+        const ready = await waitForReady(owner);
+        const ownerPath = ready.paths[0]!;
+        const ownerFile = ready.files[0]!;
+        const markerPath = ready.markerPaths[0]!;
+        const originalMarker = JSON.parse(readFileSync(markerPath, 'utf8')) as PrivateTempMarker;
+        const injectedMarker: PrivateTempMarker = {
+          ...originalMarker,
+          // Simulate how the owner's numeric PID and start token are interpreted from a different
+          // PID namespace: the local pair appears reused even though the real owner remains live.
+          pid: process.pid,
+          processStartToken: 'foreign-namespace-start-token',
+          pidNamespaceToken: 'linux-pidns:00000000-0000-4000-8000-000000000000:999999999999999999',
+        };
+        writeFileSync(markerPath, `${JSON.stringify(injectedMarker)}\n`, { mode: 0o600 });
+
+        try {
+          const recovery = startRecoveryChild(parent, prefix);
+          const recoveryExit = waitForExit(recovery);
+          const result = await waitForMessage<RecoveryChildMessage>(recovery, 'recovery result');
+
+          expect(await recoveryExit).toEqual({ code: 0, signal: null });
+          expect(result.recoveredPaths).toEqual([]);
+          expect(result.retained).toEqual([{ path: ownerPath, reason: 'owner-status-uncertain' }]);
+          expect(owner.exitCode).toBeNull();
+          expect(existsSync(ownerPath)).toBe(true);
+          expect(existsSync(ownerFile)).toBe(true);
+          expect(readFileSync(ownerFile, 'utf8')).toBe('');
+        } finally {
+          if (owner.exitCode === null && owner.signalCode === null) {
+            const ownerExit = waitForExit(owner);
+            expect(owner.send?.('abort')).not.toBe(false);
+            expect(await ownerExit).toEqual({ code: 0, signal: null });
+          }
+        }
+
+        expect(existsSync(ownerPath)).toBe(false);
+      },
+      10_000
+    );
   }
 );
 

@@ -594,6 +594,7 @@ interface PrivateTempWorkspace {
     formatVersion: 1;
     uid?: number;
     pid: number;
+    pidNamespaceToken?: string; // Linux boot ID + namespace inode when procfs is verifiable
     processStartToken: string;
     createdAt: string;
   };
@@ -633,11 +634,15 @@ residue in structured details; never report cleanup success.
 Every live workspace is registered in one process-level registry. Coordinated `SIGINT`,
 `SIGTERM`, and `SIGHUP` handlers perform synchronous best-effort disposal once and then preserve
 normal platform signal termination semantics. Before new temporary work, stale recovery examines
-only exact-prefix directories owned by the current user with a valid private marker and removes one
-only when PID plus process-start token proves the owner dead (including PID reuse); uncertain
-candidates remain untouched. `SIGKILL`, power loss, and kernel termination cannot run cleanup, so
-immediate deletion is not guaranteed; `0700`/`0600` privacy plus conservative next-run recovery
-is the explicit limit.
+only exact-prefix directories owned by the current user with a valid private marker. On Linux, the
+marker records a boot-scoped PID-namespace token (boot ID plus namespace inode) when procfs exposes
+one. Recovery interprets PID plus process-start token only after the marker and recovering process
+have readable, equal namespace tokens; a different host boot or namespace and missing or unreadable
+namespace provenance remain owner-status-uncertain and are never deleted. Same-namespace death and
+PID reuse remain recoverable. Non-Linux platforms retain their existing process-liveness proof
+without claiming Linux namespace validation. `SIGKILL`, power loss, and kernel termination cannot
+run cleanup, so immediate deletion is not guaranteed; `0700`/`0600` privacy plus conservative
+next-run recovery is the explicit limit.
 
 ### Backup manifest producer contract
 

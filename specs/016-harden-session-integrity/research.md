@@ -445,11 +445,17 @@ Register every active workspace in one process-level cleanup registry. A single 
 `SIGINT`, `SIGTERM`, and `SIGHUP` handler performs synchronous best-effort cleanup and then preserves
 the platform's signal termination semantics; cooperative `AbortSignal` cancellation still exits
 through normal `finally`. Each directory contains a private marker with format version, current uid
-where available, pid, a process-start token, and creation time. Before a new operation, recover only
+where available, pid, a process-start token, creation time, and on Linux a boot-scoped PID-namespace
+token (boot ID plus namespace inode) when procfs exposes one. Before a new operation, recover only
 directories with the exact application prefix, current owner, a valid marker, and an owner process
-proven dead (including start-token mismatch); uncertain candidates are never deleted. `SIGKILL`,
-power loss, and kernel termination cannot guarantee immediate cleanup, so privacy comes from the
-private directory and the next operation performs conservative stale recovery.
+proven dead (including start-token mismatch). Linux PID/start-token evidence is interpreted only
+after marker and current namespace tokens are both readable and equal; a different host boot or
+namespace and missing or unreadable namespace identity remain uncertain and are never deleted. This
+prevents a numeric PID from another namespace or host using a shared temporary parent from being
+mistaken for a dead or reused local PID. Non-Linux behavior remains based on its available
+process-liveness evidence without claiming namespace validation. `SIGKILL`, power loss, and kernel
+termination cannot guarantee immediate cleanup, so privacy comes from the private directory and the
+next operation performs conservative stale recovery.
 
 Backup creation writes a complete private sibling staging archive and then publishes it. New final
 archives default to `0600`; force-overwrite cannot broaden the existing mode; broader permissions

@@ -370,10 +370,14 @@ signaling the Vitest worker itself:
   claimed: any residue remains inside a current-owner `0700` directory with `0600` files and a valid
   private marker;
 - start the next operation and verify conservative stale recovery removes that directory only after
-  checking the exact application prefix, marker version, current owner, PID, and process-start token
-  and proving the owner process dead; and
-- include malformed markers, live-owner markers, wrong-owner candidates where testable, and symlink
-  traps. Uncertain or unrelated paths must remain untouched and must never be followed recursively.
+  checking the exact application prefix, marker version, current owner, and, on Linux, matching
+  readable PID-namespace tokens before PID/process-start evidence proves the owner process dead;
+- inject a different Linux PID-namespace token while reusing a locally meaningful numeric PID and a
+  mismatched start token, and verify the directory is retained as owner-status-uncertain; likewise
+  retain a legacy Linux marker without namespace identity; and
+- include malformed namespace/other markers, live-owner markers, wrong-owner candidates where
+  testable, and symlink traps. Uncertain or unrelated paths must remain untouched and must never be
+  followed recursively.
 
 The catchable-signal children must leave zero plaintext residue. The `SIGKILL` child must demonstrate
 privacy containment followed by next-run recovery, not an impossible immediate-cleanup guarantee.

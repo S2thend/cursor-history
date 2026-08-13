@@ -16,6 +16,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   rmdirSync,
@@ -47,6 +48,8 @@ export interface PrivateTempMarker {
   readonly formatVersion: 1;
   readonly uid?: number;
   readonly pid: number;
+  /** Boot-scoped Linux PID-namespace identity; absent where procfs cannot verify it. */
+  readonly pidNamespaceToken?: string;
   readonly processStartToken: string;
   readonly createdAt: string;
 }
@@ -165,6 +168,18 @@ function resolveParent(parent?: string): string {
   return parentPath;
 }
 
+function readLinuxBootId(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(bootId)
+      ? bootId.toLowerCase()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function readLinuxProcessStartToken(pid: number): string | undefined {
   if (process.platform !== 'linux') return undefined;
   try {
@@ -177,9 +192,28 @@ function readLinuxProcessStartToken(pid: number): string | undefined {
       .split(/\s+/u);
     const startTicks = fieldsFromState[19];
     if (!startTicks || !/^\d+$/u.test(startTicks)) return undefined;
-    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-    if (!/^[0-9a-f-]{16,64}$/iu.test(bootId)) return undefined;
+    const bootId = readLinuxBootId();
+    if (!bootId) return undefined;
     return `linux:${bootId}:${startTicks}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Identify the Linux PID namespace in which numeric process identifiers have meaning.
+ *
+ * Absence is intentional when procfs does not expose a trustworthy namespace identity. Callers
+ * must treat that state as unverifiable rather than comparing a numeric PID across namespaces.
+ */
+function readLinuxPidNamespaceToken(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const bootId = readLinuxBootId();
+    if (!bootId) return undefined;
+    const target = readlinkSync('/proc/self/ns/pid');
+    const match = /^pid:\[([1-9]\d*)\]$/u.exec(target);
+    return match?.[1] ? `linux-pidns:${bootId}:${match[1]}` : undefined;
   } catch {
     return undefined;
   }
@@ -194,10 +228,12 @@ export function getProcessStartToken(pid = process.pid): string | undefined {
 }
 
 function createMarker(): PrivateTempMarker {
+  const pidNamespaceToken = readLinuxPidNamespaceToken();
   return {
     formatVersion: 1,
     ...(CURRENT_UID === undefined ? {} : { uid: CURRENT_UID }),
     pid: process.pid,
+    ...(pidNamespaceToken === undefined ? {} : { pidNamespaceToken }),
     processStartToken: getProcessStartToken() ?? FALLBACK_CURRENT_PROCESS_TOKEN,
     createdAt: new Date().toISOString(),
   };
@@ -310,6 +346,15 @@ function validateMarkerValue(value: unknown): PrivateTempMarker | undefined {
   if (marker['formatVersion'] !== 1) return undefined;
   if (!Number.isSafeInteger(marker['pid']) || Number(marker['pid']) <= 0) return undefined;
   if (
+    marker['pidNamespaceToken'] !== undefined &&
+    (typeof marker['pidNamespaceToken'] !== 'string' ||
+      !/^linux-pidns:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9]\d*$/iu.test(
+        marker['pidNamespaceToken']
+      ))
+  ) {
+    return undefined;
+  }
+  if (
     typeof marker['processStartToken'] !== 'string' ||
     !/^[A-Za-z0-9._:-]{1,512}$/u.test(marker['processStartToken'])
   ) {
@@ -334,6 +379,9 @@ function validateMarkerValue(value: unknown): PrivateTempMarker | undefined {
     formatVersion: 1,
     ...(marker['uid'] === undefined ? {} : { uid: Number(marker['uid']) }),
     pid: Number(marker['pid']),
+    ...(marker['pidNamespaceToken'] === undefined
+      ? {}
+      : { pidNamespaceToken: marker['pidNamespaceToken'] }),
     processStartToken: marker['processStartToken'],
     createdAt: marker['createdAt'],
   };
@@ -380,6 +428,20 @@ function readMarker(candidatePath: string): MarkerReadResult {
 type OwnerProcessStatus = 'dead' | 'live' | 'reused' | 'uncertain';
 
 function ownerProcessStatus(marker: PrivateTempMarker): OwnerProcessStatus {
+  if (process.platform === 'linux') {
+    const currentPidNamespaceToken = readLinuxPidNamespaceToken();
+    if (
+      !marker.pidNamespaceToken ||
+      !currentPidNamespaceToken ||
+      marker.pidNamespaceToken !== currentPidNamespaceToken
+    ) {
+      return 'uncertain';
+    }
+  } else if (marker.pidNamespaceToken !== undefined) {
+    // A marker carrying Linux PID-namespace provenance cannot be interpreted safely elsewhere.
+    return 'uncertain';
+  }
+
   try {
     process.kill(marker.pid, 0);
   } catch (error) {
@@ -401,7 +463,9 @@ function ownerProcessStatus(marker: PrivateTempMarker): OwnerProcessStatus {
 
 /**
  * Recover exact-prefix private workspaces whose current-owner process is proven dead or reused.
- * Symlinks, malformed markers, ownership mismatches, live owners, and uncertain states are retained.
+ * Linux recovery first proves that the marker belongs to the current PID namespace. Symlinks,
+ * malformed markers, ownership or namespace mismatches, live owners, and uncertain states are
+ * retained.
  */
 export function recoverStalePrivateTempWorkspaces(
   options: Pick<PrivateTempWorkspaceOptions, 'prefix' | 'parent'>

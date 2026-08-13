@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readlinkSync,
   closeSync,
   readFileSync,
   readdirSync,
@@ -52,14 +53,30 @@ function writeMarker(directory: string, marker: PrivateTempMarker | string): voi
 }
 
 function makeMarker(overrides: Partial<PrivateTempMarker> = {}): PrivateTempMarker {
+  const pidNamespaceToken = currentPidNamespaceToken();
   return {
     formatVersion: 1,
     ...(typeof process.getuid === 'function' ? { uid: process.getuid() } : {}),
     pid: process.pid,
+    ...(pidNamespaceToken === undefined ? {} : { pidNamespaceToken }),
     processStartToken: getProcessStartToken() ?? `test:${process.pid}`,
     createdAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function currentPidNamespaceToken(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim().toLowerCase();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(bootId)) {
+      return undefined;
+    }
+    const match = /^pid:\[([1-9]\d*)\]$/u.exec(readlinkSync('/proc/self/ns/pid'));
+    return match?.[1] ? `linux-pidns:${bootId}:${match[1]}` : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 afterEach(() => {
@@ -80,6 +97,11 @@ describe('PrivateTempWorkspace creation and cleanup', () => {
       expect(workspace.path.startsWith(parent)).toBe(true);
       expect(workspace.marker.formatVersion).toBe(1);
       expect(workspace.marker.pid).toBe(process.pid);
+      if (process.platform === 'linux' && currentPidNamespaceToken()) {
+        expect(workspace.marker.pidNamespaceToken).toBe(currentPidNamespaceToken());
+      } else {
+        expect(workspace.marker.pidNamespaceToken).toBeUndefined();
+      }
       expect(
         readFileSync(join(workspace.path, PRIVATE_TEMP_MARKER_FILENAME), 'utf8')
       ).not.toContain('snapshot');
@@ -334,6 +356,68 @@ describe('conservative stale workspace recovery', () => {
     expect(result.recoveredPaths).toEqual([candidate]);
     expect(result.retained).toEqual([]);
     expect(existsSync(candidate)).toBe(false);
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'retains a different PID namespace even when the local PID/start-token pair looks reused',
+    () => {
+      const parent = createParent();
+      const prefix = 'foreign-pidns-';
+      const candidate = join(parent, `${prefix}candidate`);
+      mkdirSync(candidate, { mode: 0o700 });
+      chmodSync(candidate, 0o700);
+      writeMarker(
+        candidate,
+        makeMarker({
+          pid: process.pid,
+          pidNamespaceToken: 'linux-pidns:00000000-0000-4000-8000-000000000000:999999999999999999',
+          processStartToken: 'different-namespace-start-token',
+        })
+      );
+      writeFileSync(join(candidate, 'plaintext.db'), 'private', { mode: 0o600 });
+
+      const result = recoverStalePrivateTempWorkspaces({ prefix, parent });
+
+      expect(result.recoveredPaths).toEqual([]);
+      expect(result.retained).toEqual([{ path: candidate, reason: 'owner-status-uncertain' }]);
+      expect(existsSync(candidate)).toBe(true);
+    }
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'retains a legacy or unverifiable marker without PID namespace identity',
+    () => {
+      const parent = createParent();
+      const prefix = 'missing-pidns-';
+      const candidate = join(parent, `${prefix}candidate`);
+      mkdirSync(candidate, { mode: 0o700 });
+      chmodSync(candidate, 0o700);
+      const marker = makeMarker({ processStartToken: 'apparently-reused-process' });
+      const { pidNamespaceToken: _omitted, ...markerWithoutNamespace } = marker;
+      writeMarker(candidate, markerWithoutNamespace);
+      writeFileSync(join(candidate, 'plaintext.db'), 'private', { mode: 0o600 });
+
+      const result = recoverStalePrivateTempWorkspaces({ prefix, parent });
+
+      expect(result.recoveredPaths).toEqual([]);
+      expect(result.retained).toEqual([{ path: candidate, reason: 'owner-status-uncertain' }]);
+      expect(existsSync(candidate)).toBe(true);
+    }
+  );
+
+  it('rejects a malformed PID namespace marker instead of attempting recovery', () => {
+    const parent = createParent();
+    const prefix = 'invalid-pidns-';
+    const candidate = join(parent, `${prefix}candidate`);
+    mkdirSync(candidate, { mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(candidate, 0o700);
+    writeMarker(candidate, makeMarker({ pidNamespaceToken: 'linux-pidns:not-an-inode' }));
+
+    const result = recoverStalePrivateTempWorkspaces({ prefix, parent });
+
+    expect(result.recoveredPaths).toEqual([]);
+    expect(result.retained).toEqual([{ path: candidate, reason: 'invalid-marker' }]);
+    expect(existsSync(candidate)).toBe(true);
   });
 });
 

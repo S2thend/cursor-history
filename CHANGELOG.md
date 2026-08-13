@@ -108,6 +108,11 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
 - **SQLite capability selection**: Driver selection checks the capability required by each
   operation. Automatic mode can fall back to a capable provider, while an explicitly forced
   incapable driver fails with an actionable typed error rather than silently degrading Store data.
+- **PID-namespace-safe stale cleanup**: Linux temporary-workspace markers carry boot-scoped
+  PID-namespace identity (boot ID plus namespace inode) when procfs exposes it. Recovery interprets
+  numeric PID/start-token evidence only in the same verified namespace; a different host boot or
+  namespace and legacy, missing, or unreadable identity are retained as uncertain instead of risking
+  deletion of another namespace's live private workspace.
 - **Restore integrity and confinement**: Restore now publishes only entries whose manifest size and
   checksum pass, rejects empty inventories and unmanifested file payloads, skips corrupt entries
   without touching their destinations, rejects unsafe type/path combinations and duplicate targets,
