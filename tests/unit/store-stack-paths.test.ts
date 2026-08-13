@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
-import { hashWorkspaceCwd, chatsDir, projectsDir } from '../../src/core/store-stack/paths.js';
+import {
+  hashWorkspaceCwd,
+  chatsDir,
+  projectsDir,
+  storeProjectDirectoryName,
+} from '../../src/core/store-stack/paths.js';
 
 describe('store-stack paths', () => {
   it('hashWorkspaceCwd returns MD5(cwd) — WSL-verified samples', () => {
@@ -15,6 +20,14 @@ describe('store-stack paths', () => {
     const h = hashWorkspaceCwd('/foo/bar');
     expect(h).toMatch(/^[0-9a-f]{32}$/);
     expect(hashWorkspaceCwd('/foo/bar')).toBe(h);
+  });
+
+  it('projects POSIX and Windows cwd values to Cursor project-directory hints', () => {
+    expect(storeProjectDirectoryName('/Users/x/proj')).toBe('Users-x-proj');
+    expect(storeProjectDirectoryName('D:\\1\\Backend')).toBe('d-1-Backend');
+    expect(storeProjectDirectoryName('/workspaces/patcomm/cursor-history/')).toBe(
+      'workspaces-patcomm-cursor-history'
+    );
   });
 
   it('chatsDir / projectsDir join under root', () => {

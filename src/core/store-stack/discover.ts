@@ -35,7 +35,7 @@ import type {
   WorkspaceMembership,
 } from '../types.js';
 import { normalizeWorkspacePath } from '../workspace-scope.js';
-import { acpSessionsDir, chatsDir, projectsDir } from './paths.js';
+import { acpSessionsDir, chatsDir, projectsDir, storeProjectDirectoryName } from './paths.js';
 import { parseStoreDb, type StoreDbData } from './store-db.js';
 import {
   parseTranscriptFile,
@@ -434,7 +434,15 @@ function occurrenceIsAllowed(
   return allowed === undefined || allowed.has(value.instanceKey);
 }
 
-function uniqueMetadataWorkspacePath(candidates: readonly StoreSession[]): string | undefined {
+/**
+ * Associate a transcript project directory only with a uniquely matching,
+ * reliable metadata cwd. The project name is lossy and therefore serves as a
+ * forward-match hint only; it is never reverse-decoded into a guessed path.
+ */
+function transcriptWorkspacePath(
+  projectDirectory: string,
+  candidates: readonly StoreSession[]
+): string | undefined {
   const paths = [
     ...new Set(
       candidates.flatMap(({ workspacePath }) =>
@@ -442,6 +450,12 @@ function uniqueMetadataWorkspacePath(candidates: readonly StoreSession[]): strin
       )
     ),
   ];
+  const matched = paths.filter(
+    (workspacePath) => storeProjectDirectoryName(workspacePath) === projectDirectory
+  );
+  if (matched.length === 1) return matched[0];
+  // Timestamp/special project directories are not forward projections. A
+  // single same-UUID metadata cwd remains the only reliable association.
   return paths.length === 1 ? paths[0] : undefined;
 }
 
@@ -688,7 +702,7 @@ export async function discoverStoreSessions(
               uuid,
               'store-transcript',
               nested,
-              uniqueMetadataWorkspacePath(metadataCandidates.get(uuid) ?? [])
+              transcriptWorkspacePath(sanitized, metadataCandidates.get(uuid) ?? [])
             );
             if (!evidence.transcriptOccurrences.some(({ path }) => path === nested)) {
               evidence.transcriptOccurrences.push(transcriptOccurrence);
@@ -719,7 +733,7 @@ export async function discoverStoreSessions(
             uuid,
             'store-transcript',
             transcriptPath,
-            uniqueMetadataWorkspacePath(metadataCandidates.get(uuid) ?? [])
+            transcriptWorkspacePath(sanitized, metadataCandidates.get(uuid) ?? [])
           );
           if (!evidence.transcriptOccurrences.some(({ path }) => path === transcriptPath)) {
             evidence.transcriptOccurrences.push(transcriptOccurrence);

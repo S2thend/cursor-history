@@ -14,6 +14,20 @@ export function hashWorkspaceCwd(cwd: string): string {
   return createHash('md5').update(cwd).digest('hex');
 }
 
+/**
+ * Project-directory hint written by Cursor for an absolute workspace path.
+ * This mapping is deliberately forward-only: collisions are possible, so a
+ * directory name must never be reverse-decoded into an absolute path.
+ */
+export function storeProjectDirectoryName(cwd: string): string {
+  const normalized = cwd.replace(/\\/gu, '/');
+  const drive = normalized.match(/^([A-Za-z]):(?:\/|$)/u);
+  const withCanonicalDrive = drive
+    ? `${drive[1]!.toLowerCase()}${normalized.slice(2)}`
+    : normalized;
+  return withCanonicalDrive.replace(/^\/+|\/+$/gu, '').replace(/[/:]+/gu, '-');
+}
+
 /** `~/.cursor/chats/` — contains `<hash>/<uuid>/{meta.json,store.db}`. */
 export function chatsDir(storeRoot: string): string {
   return join(storeRoot, 'chats');

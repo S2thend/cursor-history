@@ -7,6 +7,7 @@ import { readBackupManifest } from '../../src/core/backup.js';
 import { SessionAmbiguityError } from '../../src/core/errors.js';
 import * as storage from '../../src/core/storage.js';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
+import { storeProjectDirectoryName } from '../../src/core/store-stack/paths.js';
 import {
   createFixtureBackup,
   createSessionIntegrityFixtureRoot,
@@ -20,6 +21,11 @@ import {
   type ComposerFixtureSession,
   type SessionIntegrityFixtureRoot,
 } from '../helpers/session-integrity-fixtures.js';
+import {
+  combineIoObservers,
+  createIoEventRecorder,
+  createPoisonIoObserver,
+} from '../helpers/io-probe.js';
 import { runBuiltCli } from '../helpers/run-cli.js';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -91,11 +97,21 @@ const MATRIX_V1 = Object.freeze([
     expected: 'Degraded transcript fallback',
   },
   {
-    scenario: 'Usable Store database coexists with a Store transcript',
+    scenario:
+      'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted',
     'Live default path': 'Required',
     'Custom data path': 'Required',
     'Supported backup': 'N/A',
     expected: 'Complete Store database backbone; transcript retained as superseded provenance',
+  },
+  {
+    scenario:
+      'Workspace-scoped Store UUID has a known database or transcript occurrence outside the default I/O boundary',
+    'Live default path': 'Required',
+    'Custom data path': 'Required',
+    'Supported backup': 'N/A',
+    expected:
+      'Explicit partial Store view; off-scope representation omitted and never opened, even when otherwise superseded',
   },
   {
     scenario: 'Complete Composer/Store merge, Composer-preferred ordering',
@@ -187,7 +203,7 @@ function notApplicable(evidenceId: string): MatrixCellEvidence {
   return Object.freeze({ classification: 'N/A', evidenceId });
 }
 
-/** Explicit executable-evidence assignment for every one of the 16 x 3 Matrix v1 cells. */
+/** Explicit executable-evidence assignment for every one of the 17 x 3 Matrix v1 cells. */
 const MATRIX_EVIDENCE = Object.freeze({
   'Composer global': {
     'Live default path': required('composer-global/live-default'),
@@ -214,11 +230,18 @@ const MATRIX_EVIDENCE = Object.freeze({
     'Custom data path': required('transcript-fallback/custom-data-path'),
     'Supported backup': notApplicable('backup-exclusion/store-transcript-fallback'),
   },
-  'Usable Store database coexists with a Store transcript': {
-    'Live default path': required('usable-database-with-transcript/live-default'),
-    'Custom data path': required('usable-database-with-transcript/custom-data-path'),
-    'Supported backup': notApplicable('backup-exclusion/store-representation-selection'),
-  },
+  'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted':
+    {
+      'Live default path': required('usable-database-with-transcript/live-default'),
+      'Custom data path': required('usable-database-with-transcript/custom-data-path'),
+      'Supported backup': notApplicable('backup-exclusion/store-representation-selection'),
+    },
+  'Workspace-scoped Store UUID has a known database or transcript occurrence outside the default I/O boundary':
+    {
+      'Live default path': required('scoped-store-representation/live-default'),
+      'Custom data path': required('scoped-store-representation/custom-data-path'),
+      'Supported backup': notApplicable('backup-exclusion/scoped-store-representation'),
+    },
   'Complete Composer/Store merge, Composer-preferred ordering': {
     'Live default path': required('merged-composer-backbone/live-default'),
     'Custom data path': required('merged-composer-backbone/custom-data-path'),
@@ -463,7 +486,7 @@ type StoreScenario =
   | 'Store database conversation'
   | 'Store transcript with no discovered or expected database'
   | 'Store transcript after an expected database fails'
-  | 'Usable Store database coexists with a Store transcript'
+  | 'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted'
   | 'Store metadata indicating a possible conversation but no usable payload';
 
 async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Promise<void> {
@@ -473,7 +496,8 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
     const transcriptContent = 'matrix-store-transcript';
     if (
       scenario === 'Store database conversation' ||
-      scenario === 'Usable Store database coexists with a Store transcript'
+      scenario ===
+        'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted'
     ) {
       const dbPath = writeStoreDb(
         fixture,
@@ -491,7 +515,8 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
     if (
       scenario === 'Store transcript with no discovered or expected database' ||
       scenario === 'Store transcript after an expected database fails' ||
-      scenario === 'Usable Store database coexists with a Store transcript'
+      scenario ===
+        'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted'
     ) {
       writeStoreTranscript(fixture, 'matrix-project', id, [
         {
@@ -540,7 +565,10 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
           reasonCodes: expect.arrayContaining(['expected-store-db-unavailable']),
         },
       });
-    } else if (scenario === 'Usable Store database coexists with a Store transcript') {
+    } else if (
+      scenario ===
+      'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted'
+    ) {
       expect(resolved).toMatchObject({
         source: 'global',
         resolvedSource: 'store-db',
@@ -585,7 +613,10 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
         expect(hydrated?.messages.map(({ content }) => content)).toEqual(
           resolved!.messages.map(({ content }) => content)
         );
-        if (scenario === 'Usable Store database coexists with a Store transcript') {
+        if (
+          scenario ===
+          'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted'
+        ) {
           expect(hydrated).toMatchObject({
             source: 'global',
             resolution: { state: 'complete' },
@@ -603,6 +634,245 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
       }
     } finally {
       await context.dispose();
+    }
+  });
+}
+
+interface ScopedStoreOrientation {
+  readonly label: string;
+  readonly id: string;
+  readonly dbWorkspace: 'a' | 'b';
+  readonly transcriptWorkspace: 'a' | 'b';
+}
+
+const SCOPED_STORE_ORIENTATIONS = Object.freeze([
+  {
+    label: 'database-in-scope',
+    id: '3a3a3a3a-3333-4333-8333-333333333333',
+    dbWorkspace: 'a',
+    transcriptWorkspace: 'b',
+  },
+  {
+    label: 'transcript-in-scope',
+    id: '3b3b3b3b-3333-4333-8333-333333333333',
+    dbWorkspace: 'b',
+    transcriptWorkspace: 'a',
+  },
+] as const satisfies readonly ScopedStoreOrientation[]);
+
+async function executeScopedStoreBoundaryCell(carrier: Carrier): Promise<void> {
+  await withFixture('ch-matrix-scoped-store-', async (fixture) => {
+    if (carrier === 'Live default path') process.env['CURSOR_DATA_PATH'] = fixture.workspaceStorage;
+    const dataPath = carrier === 'Custom data path' ? fixture.workspaceStorage : undefined;
+    const workspacePath = (workspace: 'a' | 'b'): string =>
+      workspace === 'a' ? fixture.projectA : fixture.projectB;
+
+    for (const orientation of SCOPED_STORE_ORIENTATIONS) {
+      const dbWorkspacePath = workspacePath(orientation.dbWorkspace);
+      const transcriptWorkspacePath = workspacePath(orientation.transcriptWorkspace);
+      const dbContent = `matrix-scoped-store-db:${orientation.label}`;
+      const transcriptContent = `matrix-scoped-store-transcript:${orientation.label}`;
+      const dbSessionDir = join(
+        fixture.storeRoot,
+        'chats',
+        `${orientation.label}-db`,
+        orientation.id
+      );
+      const transcriptSessionDir = join(
+        fixture.storeRoot,
+        'chats',
+        `${orientation.label}-transcript`,
+        orientation.id
+      );
+      writeStoreDbAtPath(
+        join(dbSessionDir, 'store.db'),
+        orientation.id,
+        [{ role: 'assistant', content: dbContent }],
+        `Matrix scoped Store DB ${orientation.label}`
+      );
+      writeStoreMeta(dbSessionDir, {
+        cwd: dbWorkspacePath,
+        title: `Matrix scoped Store DB ${orientation.label}`,
+        hasConversation: true,
+        createdAtMs: 1_783_000_000_000,
+      });
+      // A metadata-only occurrence supplies the transcript's reliable absolute
+      // cwd. The lossy projects/ directory is used only for a unique forward
+      // match and is never reverse-decoded into a guessed path.
+      writeStoreMeta(transcriptSessionDir, {
+        cwd: transcriptWorkspacePath,
+        title: `Matrix scoped Store transcript ${orientation.label}`,
+        hasConversation: true,
+        createdAtMs: 1_783_000_000_000,
+      });
+      writeStoreTranscript(
+        fixture,
+        storeProjectDirectoryName(transcriptWorkspacePath),
+        orientation.id,
+        [
+          {
+            role: 'user',
+            message: { content: [{ type: 'text', text: transcriptContent }] },
+          },
+        ]
+      );
+
+      const permittedRepresentation =
+        orientation.dbWorkspace === 'a' ? ('store-db' as const) : ('store-transcript' as const);
+      const omittedRepresentation =
+        orientation.dbWorkspace === 'a' ? ('store-transcript' as const) : ('store-db' as const);
+      const permittedContent = orientation.dbWorkspace === 'a' ? dbContent : transcriptContent;
+      const omittedContent = orientation.dbWorkspace === 'a' ? transcriptContent : dbContent;
+      const scopedRecorder = createIoEventRecorder();
+      const scopedContext = storage.createSessionReadContext({
+        dataPath,
+        workspacePath: fixture.projectA,
+        ioObserver: combineIoObservers(
+          scopedRecorder.observer,
+          createPoisonIoObserver(
+            {
+              classification: 'conversation-payload',
+              logicalSessionId: orientation.id,
+              representation: omittedRepresentation,
+            },
+            `${orientation.label} off-scope ${omittedRepresentation}`
+          )
+        ),
+      });
+      try {
+        const rows = await storage.listSessions(
+          { all: true, limit: 0, workspacePath: fixture.projectA },
+          dataPath,
+          undefined,
+          scopedContext
+        );
+        const row = rows.find(({ id }) => id === orientation.id);
+        expect(
+          row,
+          `${orientation.label}/${carrier} must remain addressable in scope`
+        ).toMatchObject({
+          source: 'workspace-fallback',
+          resolution: {
+            state: 'partial',
+            reasonCodes: expect.arrayContaining(['workspace-scope-omitted']),
+          },
+          sourceInstances: expect.arrayContaining([
+            expect.objectContaining({
+              representation: permittedRepresentation,
+              workspacePaths: [fixture.projectA],
+              state: 'contributed',
+            }),
+            expect.objectContaining({
+              representation: omittedRepresentation,
+              workspacePaths: [fixture.projectB],
+              state: 'omitted-by-scope',
+            }),
+          ]),
+        });
+        const resolved = await storage.getSession(
+          orientation.id,
+          dataPath,
+          undefined,
+          scopedContext,
+          row!.index
+        );
+        expect(resolved).toMatchObject({
+          id: orientation.id,
+          source: 'workspace-fallback',
+          resolution: {
+            state: 'partial',
+            reasonCodes: expect.arrayContaining(['workspace-scope-omitted']),
+          },
+        });
+        expect(resolved!.messages.map(({ content }) => content)).toContain(permittedContent);
+        expect(resolved!.messages.map(({ content }) => content)).not.toContain(omittedContent);
+        scopedRecorder.assertNone(
+          {
+            classification: 'conversation-payload',
+            logicalSessionId: orientation.id,
+            representation: omittedRepresentation,
+          },
+          `${orientation.label}/${carrier} must not open the off-scope Store representation`
+        );
+        expect(
+          scopedRecorder.count({
+            classification: 'conversation-payload',
+            logicalSessionId: orientation.id,
+            representation: permittedRepresentation,
+          })
+        ).toBeGreaterThan(0);
+      } finally {
+        await scopedContext.dispose();
+      }
+
+      const optInRecorder = createIoEventRecorder();
+      const optInContext = storage.createSessionReadContext({
+        dataPath,
+        workspacePath: fixture.projectA,
+        includeCrossWorkspaceSources: true,
+        ioObserver: optInRecorder.observer,
+      });
+      try {
+        const rows = await storage.listSessions(
+          {
+            all: true,
+            limit: 0,
+            workspacePath: fixture.projectA,
+            includeCrossWorkspaceSources: true,
+          },
+          dataPath,
+          undefined,
+          optInContext
+        );
+        const row = rows.find(({ id }) => id === orientation.id);
+        expect(
+          row,
+          `${orientation.label}/${carrier} opt-in must retain the selected UUID`
+        ).toBeDefined();
+        const resolved = await storage.getSession(
+          orientation.id,
+          dataPath,
+          undefined,
+          optInContext,
+          row!.index
+        );
+        expect(resolved).toMatchObject({
+          id: orientation.id,
+          source: 'global',
+          resolvedSource: 'store-db',
+          resolution: { state: 'complete', reasonCodes: [] },
+          workspaceMemberships: expect.arrayContaining([
+            expect.objectContaining({ workspacePath: fixture.projectA, sourceRoles: ['store'] }),
+            expect.objectContaining({ workspacePath: fixture.projectB, sourceRoles: ['store'] }),
+          ]),
+          sourceInstances: expect.arrayContaining([
+            expect.objectContaining({
+              representation: 'store-db',
+              workspacePaths: [dbWorkspacePath],
+              state: 'contributed',
+            }),
+            expect.objectContaining({
+              representation: 'store-transcript',
+              workspacePaths: [transcriptWorkspacePath],
+              state: 'superseded',
+            }),
+          ]),
+        });
+        expect(resolved!.messages.map(({ content }) => content)).toContain(dbContent);
+        expect(resolved!.messages.map(({ content }) => content)).not.toContain(transcriptContent);
+        for (const representation of ['store-db', 'store-transcript'] as const) {
+          expect(
+            optInRecorder.count({
+              classification: 'conversation-payload',
+              logicalSessionId: orientation.id,
+              representation,
+            }),
+            `${orientation.label}/${carrier} opt-in must open and disclose ${representation}`
+          ).toBeGreaterThan(0);
+        }
+      } finally {
+        await optInContext.dispose();
+      }
     }
   });
 }
@@ -925,10 +1195,16 @@ async function executeCellEvidence(cell: ReturnType<typeof cells>[number]): Prom
     scenario === 'Store database conversation' ||
     scenario === 'Store transcript with no discovered or expected database' ||
     scenario === 'Store transcript after an expected database fails' ||
-    scenario === 'Usable Store database coexists with a Store transcript' ||
+    scenario ===
+      'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted' ||
     scenario === 'Store metadata indicating a possible conversation but no usable payload'
   ) {
     await executeStoreCell(scenario, cell.carrier);
+  } else if (
+    scenario ===
+    'Workspace-scoped Store UUID has a known database or transcript occurrence outside the default I/O boundary'
+  ) {
+    await executeScopedStoreBoundaryCell(cell.carrier);
   } else if (
     scenario === 'Complete Composer/Store merge, Composer-preferred ordering' ||
     scenario === 'Complete Composer/Store merge, Store-preferred ordering'
@@ -998,7 +1274,7 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
     expect(() => assertFrozenMatrixV1(newCarrier)).toThrow('matrix-version update');
   });
 
-  it('maps all 48 cells exactly once to classification-matched executable evidence', () => {
+  it('maps all 51 cells exactly once to classification-matched executable evidence', () => {
     const mapped = cells();
     expect(mapped).toHaveLength(MATRIX_V1.length * CARRIERS.length);
     expect(new Set(mapped.map(({ evidence }) => evidence.evidenceId)).size).toBe(mapped.length);
@@ -1006,9 +1282,9 @@ describe.sequential('Compatibility Matrix v1 finite executable contract', () => 
       expect(cell.evidence.classification, cell.evidence.evidenceId).toBe(cell.classification);
       expect(cell.evidence.evidenceId).toMatch(/^[a-z0-9-]+\/[a-z0-9-]+$/u);
     }
-    expect(mapped.filter(({ classification }) => classification === 'Required')).toHaveLength(34);
+    expect(mapped.filter(({ classification }) => classification === 'Required')).toHaveLength(36);
     expect(mapped.filter(({ classification }) => classification === 'Unsupported')).toHaveLength(3);
-    expect(mapped.filter(({ classification }) => classification === 'N/A')).toHaveLength(11);
+    expect(mapped.filter(({ classification }) => classification === 'N/A')).toHaveLength(12);
   });
 
   it('executes every Required cell and every Unsupported rejection', async () => {
