@@ -191,11 +191,7 @@ export function getBoundedComposerMetadataByKey(
   return metadata;
 }
 
-/**
- * Iterate finite row-ID-keyset metadata pages. The query page remains fixed at
- * the v1 default so a lowered per-operation bound is enforced rather than
- * silently changing the parser's page shape.
- */
+/** Iterate finite row-ID-keyset metadata pages using the operation's page bound. */
 export function forEachBoundedComposerMetadata(
   db: Database,
   table: ComposerKeyValueTable,
@@ -204,7 +200,7 @@ export function forEachBoundedComposerMetadata(
   visit: (metadata: ComposerSqliteMetadata) => void,
   signal?: AbortSignal
 ): void {
-  const fixedPageRows = SOURCE_READ_LIMITS_V1_DEFAULTS.sqlitePageRows;
+  const pageRows = budget.limits.sqlitePageRows;
   let afterRowId: number | bigint | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -212,7 +208,7 @@ export function forEachBoundedComposerMetadata(
       .prepare(
         `SELECT CAST(${table}.rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key LIKE ? ESCAPE '\\' AND value IS NOT NULL AND (? IS NULL OR ${table}.rowid > ?) ORDER BY ${table}.rowid ASC LIMIT ?`
       )
-      .all(keyPattern, afterRowId, afterRowId, fixedPageRows) as Array<Record<string, unknown>>;
+      .all(keyPattern, afterRowId, afterRowId, pageRows) as Array<Record<string, unknown>>;
     if (rawPage.length === 0) break;
 
     const fallbackBase: number =
@@ -232,7 +228,7 @@ export function forEachBoundedComposerMetadata(
     const legacyInlinePage = rawPage.some(
       (row) => row['rowId'] === undefined && row['byteLength'] === undefined
     );
-    if (legacyInlinePage || rawPage.length < fixedPageRows) break;
+    if (legacyInlinePage || rawPage.length < pageRows) break;
     afterRowId = page[page.length - 1]!.rowId;
   }
 }
@@ -249,7 +245,7 @@ export function forEachBoundedComposerBubbleMetadata(
   visit: (metadata: ComposerSqliteBubbleMetadata) => void,
   signal?: AbortSignal
 ): void {
-  const fixedPageRows = SOURCE_READ_LIMITS_V1_DEFAULTS.sqlitePageRows;
+  const pageRows = budget.limits.sqlitePageRows;
   let afterRowId: number | bigint | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -257,7 +253,7 @@ export function forEachBoundedComposerBubbleMetadata(
       .prepare(
         `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE key LIKE ? ESCAPE '\\' AND (? IS NULL OR cursorDiskKV.rowid > ?) ORDER BY cursorDiskKV.rowid ASC LIMIT ?`
       )
-      .all(keyPattern, afterRowId, afterRowId, fixedPageRows) as Array<Record<string, unknown>>;
+      .all(keyPattern, afterRowId, afterRowId, pageRows) as Array<Record<string, unknown>>;
     if (rawPage.length === 0) break;
 
     const fallbackBase: number =
@@ -274,7 +270,7 @@ export function forEachBoundedComposerBubbleMetadata(
     const legacyInlinePage = rawPage.some(
       (row) => row['rowId'] === undefined && row['byteLength'] === undefined
     );
-    if (legacyInlinePage || rawPage.length < fixedPageRows) break;
+    if (legacyInlinePage || rawPage.length < pageRows) break;
     afterRowId = page[page.length - 1]!.rowId;
   }
 }

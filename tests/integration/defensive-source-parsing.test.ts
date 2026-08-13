@@ -423,13 +423,13 @@ describe('bounded streaming JSONL', () => {
   });
 
   it('charges a completed record before contiguous allocation or UTF-8 decoding', () => {
-    const path = writeTranscript(Buffer.from('abcde'));
+    const path = writeTranscript(Buffer.from('abcdefgh'));
     const concat = vi.spyOn(Buffer, 'concat');
     try {
       expect(() =>
         parseTranscriptFile(
           path,
-          limits({ jsonlRecordBytes: 4, jsonlSourceBytes: 5, jsonlRecordCount: 1 })
+          limits({ jsonlRecordBytes: 4, jsonlSourceBytes: 8, jsonlRecordCount: 1 })
         )
       ).toThrowError(
         expect.objectContaining({
@@ -573,6 +573,10 @@ describe('bounded SQLite Store hydration', () => {
     } satisfies SourceReadLimitsOverride;
     await expect(parseStoreDb(fixture.path, { limits: limits(below) })).resolves.not.toBeNull();
     await expect(parseStoreDb(fixture.path, { limits: limits(base) })).resolves.not.toBeNull();
+    const oneRowPages = await parseStoreDb(fixture.path, {
+      limits: limits({ ...base, sqlitePageRows: 1 }),
+    });
+    expect(oneRowPages?.messages).toHaveLength(2);
 
     const failures: Array<{
       override: SourceReadLimitsOverride;
@@ -580,12 +584,6 @@ describe('bounded SQLite Store hydration', () => {
       limit: number;
       observedAtLeast: number;
     }> = [
-      {
-        override: { ...base, sqlitePageRows: largestPageRows - 1 },
-        bound: 'sqlite-page-rows',
-        limit: largestPageRows - 1,
-        observedAtLeast: largestPageRows,
-      },
       {
         override: { ...base, sqlitePageBytes: largestPage - 1 },
         bound: 'sqlite-page-bytes',

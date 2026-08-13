@@ -189,8 +189,14 @@ function enforceRatioLimit(
   limits: Readonly<SourceReadLimitsV1>
 ): void {
   if (uncompressed === 0n) return;
+  if (compressed === 0n) {
+    // A nonempty representation divided by zero has an infinite ratio. Report
+    // it through the same typed source-limit contract as every finite ratio
+    // exceedance, before any entry is selected or extracted.
+    throwZipLimit('zip-compression-ratio', limits.zipCompressionRatio + 1, limits);
+  }
   const limit = limits.zipCompressionRatio;
-  const denominator = compressed > 0n ? compressed : 1n;
+  const denominator = compressed;
   const threshold = denominator * BigInt(limit);
   if (uncompressed > threshold) {
     const firstFailingNumerator = threshold + 1n;

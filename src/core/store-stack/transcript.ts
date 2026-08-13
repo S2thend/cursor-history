@@ -101,6 +101,14 @@ export function parseTranscriptFile(
 
     // Enforce the raw record bound before materializing a contiguous Buffer or
     // decoding attacker-controlled input.
+    if (effectiveBytes > limits.jsonlRecordBytes) {
+      assertSourceReadLimit(
+        'jsonl-record-bytes',
+        limits.jsonlRecordBytes + 1,
+        limits.jsonlRecordBytes,
+        failureOutcome
+      );
+    }
     budget.admitRecordBytes(effectiveBytes);
     let raw = Buffer.concat(recordChunks, recordRawBytes);
     recordChunks.length = 0;
@@ -141,10 +149,26 @@ export function parseTranscriptFile(
     throwIfAborted(signal);
     if (segmentView.byteLength === 0) return;
     const projected = recordRawBytes + segmentView.byteLength;
-    // Before the line closes, only a byte-zero BOM and one possible trailing
-    // CR may later be excluded from the record bound.
-    const maximumRaw = limits.jsonlRecordBytes + (physicalLine === 1 ? 3 : 0) + 1;
-    if (projected > maximumRaw) {
+    const projectedByteAt = (index: number): number | undefined =>
+      index < recordRawBytes
+        ? chunkByteAt(recordChunks, index)
+        : segmentView[index - recordRawBytes];
+    let possibleLeadingBomBytes = 0;
+    if (physicalLine === 1) {
+      const prefixLength = Math.min(projected, 3);
+      const bom = [0xef, 0xbb, 0xbf] as const;
+      let matches = true;
+      for (let index = 0; index < prefixLength; index++) {
+        if (projectedByteAt(index) !== bom[index]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) possibleLeadingBomBytes = prefixLength;
+    }
+    const possibleTrailingCrBytes = projectedByteAt(projected - 1) === 0x0d ? 1 : 0;
+    const minimumEffectiveBytes = projected - possibleLeadingBomBytes - possibleTrailingCrBytes;
+    if (minimumEffectiveBytes > limits.jsonlRecordBytes) {
       assertSourceReadLimit(
         'jsonl-record-bytes',
         limits.jsonlRecordBytes + 1,

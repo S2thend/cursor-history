@@ -382,9 +382,8 @@ interface BlobMetadata {
 
 /**
  * Finite metadata-page reader for reachable Store blobs. Metadata is fetched
- * in fixed v1 pages, admitted as a complete page, and payloads are then fetched
- * sequentially by row ID. A lowered per-operation page bound therefore remains
- * an observable defensive limit rather than silently changing parser shape.
+ * in operation-bounded pages, admitted as a complete page, and payloads are
+ * then fetched sequentially by row ID.
  */
 class BoundedBlobReader {
   private readonly metadata = new Map<string, BlobMetadata | null>();
@@ -398,10 +397,10 @@ class BoundedBlobReader {
   prefetch(ids: readonly string[]): void {
     throwIfAborted(this.signal);
     const unresolved = [...new Set(ids)].filter((id) => !this.metadata.has(id));
-    const fixedPageRows = SOURCE_READ_LIMITS_V1_DEFAULTS.sqlitePageRows;
-    for (let start = 0; start < unresolved.length; start += fixedPageRows) {
+    const pageRows = this.budget.limits.sqlitePageRows;
+    for (let start = 0; start < unresolved.length; start += pageRows) {
       throwIfAborted(this.signal);
-      const pageIds = unresolved.slice(start, start + fixedPageRows);
+      const pageIds = unresolved.slice(start, start + pageRows);
       if (pageIds.length === 0) continue;
       const placeholders = pageIds.map(() => '?').join(', ');
       const rows = this.db

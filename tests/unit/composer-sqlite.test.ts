@@ -105,34 +105,74 @@ describe('bounded Composer SQLite reads', () => {
     ]);
   });
 
-  it('enforces the fixed metadata-page bound before visiting any row', () => {
+  it('uses a lowered per-operation row bound as the actual metadata page size', () => {
     const { raw, adapter } = database();
     const insert = raw.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)');
     insert.run('composerData:a', 'a');
     insert.run('composerData:b', 'b');
     const visited: string[] = [];
-
-    expect(() =>
-      forEachBoundedComposerValue(
-        adapter,
-        'cursorDiskKV',
-        'composerData:%',
-        createComposerSqliteBudget(
-          resolveSourceReadLimits({ sqlitePageRows: 1, sqliteRowCount: 2 })
-        ),
-        ({ key }) => visited.push(key)
-      )
-    ).toThrowError(
-      expect.objectContaining({
-        code: 'SOURCE_LIMIT_EXCEEDED',
-        details: expect.objectContaining({
-          bound: 'sqlite-page-rows',
-          limit: 1,
-          observedAtLeast: 2,
-        }),
-      })
+    const queryPageSizes: unknown[] = [];
+    const observed: Database = {
+      ...adapter,
+      prepare(sql) {
+        const statement = adapter.prepare(sql);
+        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+          return {
+            ...statement,
+            all(...params: unknown[]) {
+              queryPageSizes.push(params.at(-1));
+              return statement.all(...params);
+            },
+          };
+        }
+        return statement;
+      },
+    };
+    const budget = createComposerSqliteBudget(
+      resolveSourceReadLimits({ sqlitePageRows: 1, sqliteRowCount: 2 })
     );
-    expect(visited).toEqual([]);
+
+    forEachBoundedComposerValue(observed, 'cursorDiskKV', 'composerData:%', budget, ({ key }) =>
+      visited.push(key)
+    );
+
+    expect(visited).toEqual(['composerData:a', 'composerData:b']);
+    expect(budget.rowCount).toBe(2);
+    expect(queryPageSizes).toEqual([1, 1, 1]);
+  });
+
+  it('uses a raised per-operation row bound as the actual metadata page size', () => {
+    const { raw, adapter } = database();
+    raw
+      .prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)')
+      .run('composerData:raised', 'raised');
+    const queryPageSizes: unknown[] = [];
+    const observed: Database = {
+      ...adapter,
+      prepare(sql) {
+        const statement = adapter.prepare(sql);
+        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+          return {
+            ...statement,
+            all(...params: unknown[]) {
+              queryPageSizes.push(params.at(-1));
+              return statement.all(...params);
+            },
+          };
+        }
+        return statement;
+      },
+    };
+
+    forEachBoundedComposerValue(
+      observed,
+      'cursorDiskKV',
+      'composerData:%',
+      createComposerSqliteBudget(resolveSourceReadLimits({ sqlitePageRows: 512 })),
+      () => undefined
+    );
+
+    expect(queryPageSizes).toEqual([512]);
   });
 
   it('rejects invalid UTF-8 instead of replacement-decoding Composer values', () => {
@@ -364,7 +404,7 @@ describe('bounded Composer SQLite reads', () => {
     expect(budget.decodedBytes).toBe(3);
   });
 
-  it('counts NULL bubbles against SQLite page and aggregate row limits before visiting', () => {
+  it('counts NULL bubbles against the aggregate row limit across bounded pages', () => {
     const { raw, adapter } = database({ nullableValue: true });
     const insert = raw.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, NULL)');
     insert.run('bubbleId:nullable:a');
@@ -385,13 +425,13 @@ describe('bounded Composer SQLite reads', () => {
       expect.objectContaining({
         code: 'SOURCE_LIMIT_EXCEEDED',
         details: expect.objectContaining({
-          bound: 'sqlite-page-rows',
+          bound: 'sqlite-row-count',
           limit: 2,
           observedAtLeast: 3,
         }),
       })
     );
-    expect(visited).toEqual([]);
+    expect(visited).toEqual([null, null]);
   });
 
   it('returns a NULL first bubble instead of skipping to a later value', () => {
