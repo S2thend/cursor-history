@@ -39,6 +39,12 @@ function textFence(section: string): string | undefined {
   return /```text\s*\n([\s\S]*?)\n```/u.exec(section)?.[1];
 }
 
+function shellFences(section: string): string[] {
+  return [...section.matchAll(/```(?:bash|sh|shell)\s*\n([\s\S]*?)\n```/gu)].map(
+    (match) => match[1] ?? ''
+  );
+}
+
 function attestationFields(section: string): Map<string, string> {
   const block = textFence(section);
   if (!block) return new Map();
@@ -175,6 +181,13 @@ function validateReleaseVerificationDocument(
       'official handoff',
       errors
     );
+    const executableFences = shellFences(handoff);
+    if (executableFences.length === 0) errors.push('official handoff has no executable procedure');
+    for (const fence of executableFences) {
+      if ((fence.split(/\r?\n/u)[0] ?? '') !== 'set -euo pipefail') {
+        errors.push('official handoff executable procedure is not fail-fast');
+      }
+    }
   }
 
   if ((workflow.match(/\bnpm pack\b/gu) ?? []).length !== 1) {
@@ -217,12 +230,16 @@ function validateReleaseVerificationDocument(
       'T115 tarball-only verification',
       errors
     );
-    const executableFences = [...t115.matchAll(/```(?:bash|sh|shell)\s*\n([\s\S]*?)\n```/gu)];
+    const executableFences = shellFences(t115);
+    if (executableFences.length === 0) errors.push('T115 has no executable bootstrap');
     for (const fence of executableFences) {
-      if (/^\s*npm\s+(?:pack|link|run\s+build)\b/mu.test(fence[1]!)) {
+      if ((fence.split(/\r?\n/u)[0] ?? '') !== 'set -euo pipefail') {
+        errors.push('T115 executable bootstrap is not fail-fast');
+      }
+      if (/^\s*npm\s+(?:pack|link|run\s+build)\b/mu.test(fence)) {
         errors.push('T115 executable instructions rebuild, repack, or link the candidate');
       }
-      if (/\b(?:src|dist)\//u.test(fence[1]!)) {
+      if (/\b(?:src|dist)\//u.test(fence)) {
         errors.push('T115 executable instructions invoke repository source or build output');
       }
     }
@@ -385,6 +402,24 @@ describe('private release-verification documentation contract', () => {
     ).toContain(
       'T115 tarball-only verification is missing npm install --omit=dev --no-audit --no-fund --save-exact "$CANDIDATE_TARBALL"'
     );
+  });
+
+  it('rejects artifact handoff or tarball bootstrap instructions that can continue after failure', () => {
+    const noHandoffFailFast = documentation.replace(
+      '```sh\nset -euo pipefail\numask 077',
+      '```sh\numask 077'
+    );
+    expect(
+      validateReleaseVerificationDocument(noHandoffFailFast, workflow, packageVersion)
+    ).toContain('official handoff executable procedure is not fail-fast');
+
+    const noBootstrapFailFast = documentation.replace(
+      '```sh\nset -euo pipefail\nCANDIDATE_TARBALL=',
+      '```sh\nCANDIDATE_TARBALL='
+    );
+    expect(
+      validateReleaseVerificationDocument(noBootstrapFailFast, workflow, packageVersion)
+    ).toContain('T115 executable bootstrap is not fail-fast');
   });
 
   it('rejects merged or missing T113 and T115 attestation boundaries', () => {

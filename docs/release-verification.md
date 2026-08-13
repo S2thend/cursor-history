@@ -70,6 +70,7 @@ including private-data paths. From the clean frozen T114 checkout, use this sequ
 angle brackets are mandatory operator inputs, not defaults:
 
 ```sh
+set -euo pipefail
 umask 077
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 FROZEN_REVISION="$(git rev-parse HEAD)"
@@ -208,6 +209,7 @@ Continue from the verified absolute tarball path and private root above. This bo
 entry points resolve from the production-only install before any private-data operation begins:
 
 ```sh
+set -euo pipefail
 CANDIDATE_TARBALL="$(cd "$(dirname "$CANDIDATE_TARBALL")" && pwd)/$(basename "$CANDIDATE_TARBALL")"
 install -d -m 700 "$PRIVATE_RELEASE_ROOT/runner"
 cd "$PRIVATE_RELEASE_ROOT/runner"
