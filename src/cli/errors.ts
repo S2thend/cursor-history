@@ -136,6 +136,7 @@ export function mapSessionIntegrityError(error: SessionIntegrityError): CliError
           error.code === 'SOURCE_LIMIT_EXCEEDED' ||
           error.code === 'TEMPORARY_ARTIFACT_CLEANUP_FAILED' ||
           error.code === 'RESTORE_ROLLBACK_INCOMPLETE' ||
+          error.code === 'BACKUP_PUBLISHED_CLEANUP_FAILED' ||
           error.code === 'BACKUP_PUBLISHED_PERMISSION_FAILED' ||
           error.code === 'DATABASE_CAPABILITY_MISSING' ||
           error.code === 'NO_CAPABLE_DATABASE_DRIVER'
@@ -185,6 +186,7 @@ export const CLI_FATAL_CATEGORY_REGISTRY = Object.freeze({
   sourceLimitExceeded: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   databaseCapability: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   backupPublishedPermission: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  backupPublishedCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   temporaryArtifactCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   restoreRollbackIncomplete: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
 });
@@ -270,6 +272,33 @@ export function handleError(error: unknown, options: HandleErrorOptions = {}): n
       const candidates = error.details?.['candidates'];
       if (Array.isArray(candidates) && candidates.every((value) => typeof value === 'string')) {
         console.error(`Candidates:\n${candidates.map((value) => `  ${value}`).join('\n')}`);
+      }
+      const residualFiles = error.details?.['residualFiles'];
+      if (
+        Array.isArray(residualFiles) &&
+        residualFiles.every((value) => typeof value === 'string')
+      ) {
+        console.error(
+          `Restore residual files:\n${residualFiles.map((value) => `  ${value}`).join('\n')}`
+        );
+      }
+      const residuePaths = error.details?.['residuePaths'];
+      if (Array.isArray(residuePaths) && residuePaths.every((value) => typeof value === 'string')) {
+        console.error(
+          `Private residue paths:\n${residuePaths.map((value) => `  ${value}`).join('\n')}`
+        );
+      }
+      const unverifiedResiduePaths = error.details?.['unverifiedResiduePaths'];
+      if (
+        Array.isArray(unverifiedResiduePaths) &&
+        unverifiedResiduePaths.every((value) => typeof value === 'string') &&
+        unverifiedResiduePaths.length > 0
+      ) {
+        console.error(
+          `Unverified residue paths (do not delete blindly):\n${unverifiedResiduePaths
+            .map((value) => `  ${value}`)
+            .join('\n')}`
+        );
       }
       const remedy = error.details?.['remedy'];
       if (typeof remedy === 'string' && remedy.length > 0) {

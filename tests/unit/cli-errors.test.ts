@@ -13,6 +13,7 @@ import {
 } from '../../src/cli/errors.js';
 import {
   BackupPublishedPermissionError,
+  BackupPublishedCleanupError,
   RestoreRollbackError,
   SessionAmbiguityError,
   SourceLimitConfigurationError,
@@ -258,6 +259,21 @@ describe('feature-016 typed error mapping', () => {
       requestedMode: 0o640,
       actualMode: 0o600,
       pathIdentityVerified: true,
+    });
+
+    const publishedCleanup = mapSessionIntegrityError(
+      new BackupPublishedCleanupError('/backups/published.zip', true, ['/backups/.private-stage'])
+    );
+    expect(publishedCleanup.code).toBe('BACKUP_PUBLISHED_CLEANUP_FAILED');
+    expect(publishedCleanup.exitCode).toBe(ExitCode.IO_ERROR);
+    expect(publishedCleanup.details).toMatchObject({
+      published: true,
+      outputPath: '/backups/published.zip',
+      pathIdentityVerified: true,
+      residueCount: 1,
+      residuePaths: ['/backups/.private-stage'],
+      unverifiedResidueCount: 0,
+      unverifiedResiduePaths: [],
     });
 
     const rollback = mapSessionIntegrityError(

@@ -18,14 +18,12 @@ import {
   fchmodSync,
   fstatSync,
   fsyncSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readSync,
   readdirSync,
   realpathSync,
-  renameSync,
   statSync,
   unlinkSync,
   writeSync,
@@ -65,6 +63,8 @@ import {
   enforcePublishedArchiveMode,
   type PublishedArchiveIdentity,
 } from './backup-publication.js';
+import { publishBackupArchiveStage } from './backup-archive-publication.js';
+import { commitRestorePublication } from './restore-publication.js';
 import type {
   BackupManifest,
   BackupFileEntry,
@@ -436,6 +436,7 @@ async function writeAndPublishBackupArchive(
 
   const stagePath = join(dirname(outputPath), `.cursor-history-backup-${randomUUID()}.tmp`);
   let operationError: unknown;
+  let publicationCommitted = false;
   try {
     await writeBoundedZipArchive(stagePath, entries, {
       ...(config.sourceReadLimits ? { sourceReadLimits: config.sourceReadLimits } : {}),
@@ -455,14 +456,15 @@ async function writeAndPublishBackupArchive(
       inode: stagedArchive.ino,
     };
 
-    if (config.force) {
-      renameSync(stagePath, outputPath);
-    } else {
-      // A same-directory hard link publishes without replacing a target created by a racing
-      // process. Unlinking the private sibling leaves the final path on the complete inode.
-      linkSync(stagePath, outputPath);
-      unlinkSync(stagePath);
-    }
+    publishBackupArchiveStage(
+      stagePath,
+      outputPath,
+      Boolean(config.force),
+      publishedIdentity,
+      () => {
+        publicationCommitted = true;
+      }
+    );
     // Rename/link is the publication commit point. Keep the unpublished sibling owner-only and
     // apply broader or inherited permissions only after the complete inode is visible. A redundant
     // chmod is skipped; a post-publication failure reports that the valid archive already exists.
@@ -479,7 +481,9 @@ async function writeAndPublishBackupArchive(
     operationError = error;
     throw error;
   } finally {
-    removePrivateArchiveStage(stagePath, operationError);
+    // Once rename/link commits, `stagePath` either no longer exists or is owned by the publication
+    // helper's identity-bound cleanup. Never remove a later pathname occupant by name alone.
+    if (!publicationCommitted) removePrivateArchiveStage(stagePath, operationError);
   }
 }
 
@@ -1358,7 +1362,7 @@ function publishRestoreFile(
   sourcePath: string,
   destinationPath: string,
   replaceExisting: boolean,
-  onCommit?: () => void,
+  onCommit?: (identity: PublishedArchiveIdentity) => void,
   mode = 0o600
 ): void {
   assertNoLinkedRestorePath(trustedRoot, dirname(destinationPath), 'directory');
@@ -1370,6 +1374,8 @@ function publishRestoreFile(
   );
   let sourceDescriptor: number | undefined;
   let publicationDescriptor: number | undefined;
+  let publicationIdentity: PublishedArchiveIdentity | undefined;
+  let publicationCommitted = false;
   let operationError: unknown;
   let cleanupError: TemporaryArtifactCleanupError | undefined;
   try {
@@ -1378,6 +1384,11 @@ function publishRestoreFile(
       throw new Error('Private restore staging is not a regular file.');
     }
     publicationDescriptor = openSync(publicationPath, restoreStageFlags(), mode);
+    const publicationStats = fstatSync(publicationDescriptor, { bigint: true });
+    if (!publicationStats.isFile()) {
+      throw new Error('Private restore publication staging is not a regular file.');
+    }
+    publicationIdentity = { device: publicationStats.dev, inode: publicationStats.ino };
     if (process.platform !== 'win32') fchmodSync(publicationDescriptor, mode);
 
     copyOpenFileContents(sourceDescriptor, publicationDescriptor);
@@ -1392,17 +1403,16 @@ function publishRestoreFile(
     // owner-controlled-tree limitation is documented on the public restore contract.
     assertNoLinkedRestorePath(trustedRoot, dirname(destinationPath), 'directory');
     assertNoLinkedRestorePath(trustedRoot, destinationPath, 'file');
-    if (replaceExisting) {
-      renameSync(publicationPath, destinationPath);
-    } else {
-      // Publish by no-clobber hard link so a destination created after the preflight wins with
-      // EEXIST instead of being overwritten. Removing the private sibling leaves one complete
-      // inode at the requested destination.
-      linkSync(publicationPath, destinationPath);
-      onCommit?.();
-      unlinkSync(publicationPath);
-    }
-    if (replaceExisting) onCommit?.();
+    commitRestorePublication(
+      publicationPath,
+      destinationPath,
+      replaceExisting,
+      publicationIdentity!,
+      () => {
+        publicationCommitted = true;
+        onCommit?.(publicationIdentity!);
+      }
+    );
     syncParentDirectory(destinationPath);
   } catch (error) {
     operationError = error;
@@ -1415,12 +1425,14 @@ function publishRestoreFile(
         // Preserve the publication failure; the private path cleanup below remains mandatory.
       }
     }
-    try {
-      unlinkSync(publicationPath);
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') {
-        cleanupError = new TemporaryArtifactCleanupError([publicationPath]);
-        attachCleanupCause(cleanupError, operationError ?? error);
+    if (!publicationCommitted) {
+      try {
+        unlinkSync(publicationPath);
+      } catch (error) {
+        if (errorCode(error) !== 'ENOENT') {
+          cleanupError = new TemporaryArtifactCleanupError([publicationPath]);
+          attachCleanupCause(cleanupError, operationError ?? error);
+        }
       }
     }
   }
@@ -1464,6 +1476,7 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     manifestPath: string;
     trustedRoot: string;
     destinationPath: string;
+    publishedIdentity: PublishedArchiveIdentity;
     previousPath?: string;
     previousMode?: number;
   }> = [];
@@ -1578,11 +1591,12 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
         staged.temporaryPath,
         staged.destinationPath,
         force,
-        () => {
+        (publishedIdentity) => {
           restoredFiles.push({
             manifestPath: staged.manifestEntry.path,
             trustedRoot: staged.trustedRoot,
             destinationPath: staged.destinationPath,
+            publishedIdentity,
             ...(previousPath ? { previousPath } : {}),
             ...(previousMode === undefined ? {} : { previousMode }),
           });
@@ -1613,6 +1627,15 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     for (const restored of [...restoredFiles].reverse()) {
       let rollbackCommitted = false;
       try {
+        const current = lstatSync(restored.destinationPath, { bigint: true });
+        if (
+          !current.isFile() ||
+          current.dev !== restored.publishedIdentity.device ||
+          current.ino !== restored.publishedIdentity.inode
+        ) {
+          residualFiles.push(restored.manifestPath);
+          continue;
+        }
         if (restored.previousPath) {
           publishRestoreFile(
             restored.trustedRoot,

@@ -32,14 +32,19 @@ import {
 } from '../../src/core/errors.js';
 import type { SourceReadLimitsOverride, ZipSourceBoundKind } from '../../src/core/types.js';
 
-const { backupDatabaseMock, openDatabaseMock, openSyncMock, publicationModeFault } = vi.hoisted(
-  () => ({
-    backupDatabaseMock: vi.fn(),
-    openDatabaseMock: vi.fn(),
-    openSyncMock: vi.fn(),
-    publicationModeFault: { enabled: false },
-  })
-);
+const {
+  backupDatabaseMock,
+  openDatabaseMock,
+  openSyncMock,
+  publicationModeFault,
+  restorePublicationCleanupFault,
+} = vi.hoisted(() => ({
+  backupDatabaseMock: vi.fn(),
+  openDatabaseMock: vi.fn(),
+  openSyncMock: vi.fn(),
+  publicationModeFault: { enabled: false },
+  restorePublicationCleanupFault: { enabled: false },
+}));
 
 vi.mock('../../src/core/database/registry.js', () => ({
   registry: {
@@ -98,6 +103,42 @@ vi.mock('../../src/core/backup-publication.js', async () => {
         requestedMode,
         expectedIdentity,
         descriptorOperations
+      );
+    },
+  };
+});
+
+vi.mock('../../src/core/restore-publication.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/core/restore-publication.js')>(
+    '../../src/core/restore-publication.js'
+  );
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return {
+    ...actual,
+    commitRestorePublication: (
+      ...args: Parameters<typeof actual.commitRestorePublication>
+    ): ReturnType<typeof actual.commitRestorePublication> => {
+      const [publicationPath, destinationPath, replaceExisting, identity, onCommit, operations] =
+        args;
+      if (!restorePublicationCleanupFault.enabled || replaceExisting || operations !== undefined) {
+        return actual.commitRestorePublication(...args);
+      }
+      return actual.commitRestorePublication(
+        publicationPath,
+        destinationPath,
+        replaceExisting,
+        identity,
+        onCommit,
+        {
+          rename: (sourcePath, targetPath) => fs.renameSync(sourcePath, targetPath),
+          link: (sourcePath, targetPath) => fs.linkSync(sourcePath, targetPath),
+          unlink: () => {
+            throw Object.assign(new Error('synthetic restore publication cleanup failure'), {
+              code: 'EACCES',
+            });
+          },
+          statPathNoFollow: (path) => fs.lstatSync(path, { bigint: true }),
+        }
       );
     },
   };
@@ -409,6 +450,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     publicationModeFault.enabled = false;
+    restorePublicationCleanupFault.enabled = false;
     backupDatabaseMock.mockResolvedValue(undefined);
     openSyncMock.mockImplementation(() => databaseWithClose(vi.fn()));
     openDatabaseMock.mockImplementation(() => databaseWithClose(vi.fn()));
@@ -1680,6 +1722,70 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     expect(currentPrivateTempPaths()).toEqual(before);
   });
 
+  it('rolls back a committed non-force restore before reporting private publication residue', async () => {
+    const replacementGlobal = Buffer.from('replacement global');
+    const file = {
+      path: 'globalStorage/state.vscdb',
+      size: replacementGlobal.length,
+      checksum: computeChecksum(replacementGlobal),
+      type: 'global-db',
+    };
+    const manifest = {
+      version: '1.0.0',
+      createdAt: new Date(0).toISOString(),
+      sourcePlatform: 'linux',
+      cursorHistoryVersion: '0.18.0',
+      files: [file],
+      stats: {
+        totalSize: replacementGlobal.length,
+        sessionCount: 0,
+        workspaceCount: 0,
+      },
+    };
+    const path = join(fixtureRoot, 'restore-publication-cleanup-failure.zip');
+    writeFileSync(
+      path,
+      buildZip([
+        { name: file.path, data: replacementGlobal },
+        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+      ]).buffer,
+      { mode: 0o600 }
+    );
+    const targetPath = join(
+      fixtureRoot,
+      'restore-publication-cleanup-failure',
+      'User',
+      'workspaceStorage'
+    );
+    const destinationPath = join(dirname(targetPath), file.path);
+
+    let caught: unknown;
+    restorePublicationCleanupFault.enabled = true;
+    try {
+      await restoreBackup({ backupPath: path, targetPath, force: false });
+    } catch (error) {
+      caught = error;
+    } finally {
+      restorePublicationCleanupFault.enabled = false;
+    }
+
+    expect(caught).toBeInstanceOf(TemporaryArtifactCleanupError);
+    expect(caught).toMatchObject({
+      code: 'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
+      details: {
+        residueCount: 1,
+        residuePaths: [expect.stringMatching(/\.cursor-history-restore-[^/]+\.tmp$/u)],
+      },
+      cause: expect.objectContaining({
+        message: 'synthetic restore publication cleanup failure',
+      }),
+    });
+    const [residuePath] = (caught as TemporaryArtifactCleanupError).details.residuePaths;
+    expect(residuePath).toBeDefined();
+    expect(existsSync(residuePath!)).toBe(true);
+    expect(existsSync(destinationPath)).toBe(false);
+  });
+
   it.skipIf(process.platform === 'win32')(
     'throws a typed honest result when a published file cannot be rolled back',
     async () => {
@@ -1763,6 +1869,102 @@ describe.sequential('backup plaintext snapshot isolation', () => {
         }),
       });
       expect(readFileSync(movedGlobalPath)).toEqual(replacementGlobal);
+      expect(currentPrivateTempPaths()).toEqual(before);
+    }
+  );
+
+  it.each([false, true])(
+    'preserves a concurrently replaced restore leaf and reports it as rollback residue (prior=%s)',
+    async (hadPriorDestination) => {
+      const replacementGlobal = Buffer.from('replacement global');
+      const replacementWorkspace = Buffer.from('replacement workspace');
+      const files = [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: replacementGlobal.length,
+          checksum: computeChecksum(replacementGlobal),
+          type: 'global-db',
+        },
+        {
+          path: 'workspaceStorage/ws/state.vscdb',
+          size: replacementWorkspace.length,
+          checksum: computeChecksum(replacementWorkspace),
+          type: 'workspace-db',
+        },
+      ];
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.18.0',
+        files,
+        stats: {
+          totalSize: replacementGlobal.length + replacementWorkspace.length,
+          sessionCount: 0,
+          workspaceCount: 1,
+        },
+      };
+      const path = join(
+        fixtureRoot,
+        `rollback-leaf-replacement-${hadPriorDestination ? 'prior' : 'new'}.zip`
+      );
+      writeFileSync(
+        path,
+        buildZip([
+          { name: files[0]!.path, data: replacementGlobal },
+          { name: files[1]!.path, data: replacementWorkspace },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+
+      const targetPath = join(
+        fixtureRoot,
+        `rollback-leaf-replacement-${hadPriorDestination ? 'prior' : 'new'}`,
+        'User',
+        'workspaceStorage'
+      );
+      const globalPath = join(dirname(targetPath), files[0]!.path);
+      mkdirSync(dirname(globalPath), { recursive: true });
+      if (hadPriorDestination) {
+        writeFileSync(globalPath, Buffer.from('prior global bytes'), { mode: 0o640 });
+      }
+      const concurrentBytes = Buffer.from('concurrent owner bytes');
+      const concurrentPath = join(dirname(globalPath), 'concurrent-state.vscdb');
+      const before = currentPrivateTempPaths();
+
+      let caught: unknown;
+      try {
+        await restoreBackup({
+          backupPath: path,
+          targetPath,
+          force: true,
+          onProgress: (progress) => {
+            if (progress.phase === 'extracting' && progress.filesCompleted === 1) {
+              expect(readFileSync(globalPath)).toEqual(replacementGlobal);
+              writeFileSync(concurrentPath, concurrentBytes, { mode: 0o600 });
+              renameSync(concurrentPath, globalPath);
+              throw new Error('synthetic failure after concurrent leaf replacement');
+            }
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(RestoreRollbackError);
+      expect(caught).toMatchObject({
+        code: 'RESTORE_ROLLBACK_INCOMPLETE',
+        details: {
+          publishedFileCount: 1,
+          residualFileCount: 1,
+          residualFiles: ['globalStorage/state.vscdb'],
+        },
+        cause: expect.objectContaining({
+          message: 'synthetic failure after concurrent leaf replacement',
+        }),
+      });
+      expect(readFileSync(globalPath)).toEqual(concurrentBytes);
       expect(currentPrivateTempPaths()).toEqual(before);
     }
   );

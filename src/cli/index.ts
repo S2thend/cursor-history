@@ -50,6 +50,7 @@ export const CLI_COMMAND_REGISTRY = Object.freeze({
       'usage',
       'notFound',
       'io',
+      'backupPublishedCleanup',
       'backupPublishedPermission',
       'unexpected',
     ] as const),

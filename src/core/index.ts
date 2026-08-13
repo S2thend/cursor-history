@@ -75,6 +75,8 @@ export {
   DatabaseCapabilityMissingError,
   NoCapableDatabaseDriverError,
   BackupPublishedPermissionError,
+  BackupPublishedCleanupError,
+  RestoreRollbackError,
   TemporaryArtifactCleanupError,
   ReadContextError,
   ReadContextSourceMismatchError,

@@ -7,6 +7,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Command } from 'commander';
 import {
   BackupPublishedPermissionError,
+  BackupPublishedCleanupError,
+  RestoreRollbackError,
   SessionAmbiguityError,
   SessionNotFoundError,
 } from '../../src/lib/errors.js';
@@ -2105,6 +2107,26 @@ describe('backup command', () => {
     expect(output).toContain('requested 0o640, actual 0o600');
     expect(output).toContain('Do not retry with --force');
   });
+
+  it('reports committed archive cleanup residue without suggesting a blind retry', async () => {
+    mockCreateBackup.mockRejectedValue(
+      new BackupPublishedCleanupError('/backups/published.zip', true, [
+        '/backups/.cursor-history-backup-private.tmp',
+      ])
+    );
+
+    const program = createProgram();
+    registerBackupCommand(program);
+
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+    const output = consoleErrorSpy.mock.calls.map(([value]) => String(value)).join('\n');
+    expect(output).toContain('Backup archive was published at /backups/published.zip');
+    expect(output).toContain('Private residue paths:');
+    expect(output).toContain('/backups/.cursor-history-backup-private.tmp');
+    expect(output).toContain('Do not retry with --force');
+  });
 });
 
 // ==================== RESTORE COMMAND ====================
@@ -2138,6 +2160,32 @@ describe('restore command source-read options', () => {
       sourceReadLimits,
     });
     expect(mockRestoreBackup).toHaveBeenCalledWith(expect.objectContaining({ sourceReadLimits }));
+  });
+
+  it('prints safe rollback residual paths for a human-readable fatal restore', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockValidateBackup.mockResolvedValue({
+      status: 'valid',
+      validFiles: ['globalStorage/state.vscdb'],
+      corruptedFiles: [],
+      missingFiles: [],
+      errors: [],
+      manifest: { files: [{ path: 'globalStorage/state.vscdb' }] },
+    });
+    mockRestoreBackup.mockRejectedValue(new RestoreRollbackError(1, ['globalStorage/state.vscdb']));
+
+    const program = createProgram();
+    registerRestoreCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'test', 'restore', '/backups/test.zip'])
+    ).rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+    const output = consoleErrorSpy.mock.calls.map(([value]) => String(value)).join('\n');
+    expect(output).toContain('Restore residual files:');
+    expect(output).toContain('globalStorage/state.vscdb');
+    expect(output).toContain('known-good backup');
   });
 });
 

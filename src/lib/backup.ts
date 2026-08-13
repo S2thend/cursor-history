@@ -30,9 +30,10 @@ import type {
  * @returns Promise resolving to backup result
  * @throws {BackupError} If source discovery, output validation, or archive creation fails.
  * @throws {SessionIntegrityError} If a driver, source limit, cancellation, cleanup, or final archive
- * permission contract fails. A `BACKUP_PUBLISHED_PERMISSION_FAILED` error means publication crossed
- * its commit point; trust and inspect `details.outputPath` only when
- * `details.pathIdentityVerified` is true, and never retry blindly.
+ * permission contract fails. `BACKUP_PUBLISHED_PERMISSION_FAILED` and
+ * `BACKUP_PUBLISHED_CLEANUP_FAILED` both mean publication crossed its commit point; trust and
+ * inspect `details.outputPath` only when `details.pathIdentityVerified` is true, delete only paths
+ * in verified `details.residuePaths`, and never retry blindly.
  *
  * @example
  * ```typescript

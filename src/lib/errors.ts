@@ -7,6 +7,7 @@
 
 import {
   BackupPublishedPermissionError,
+  BackupPublishedCleanupError,
   DatabaseCapabilityError,
   MigrationTargetChangedError,
   NoCapableDriverError,
@@ -698,6 +699,7 @@ export {
   DatabaseCapabilityError as DatabaseCapabilityMissingError,
   NoCapableDriverError as NoCapableDatabaseDriverError,
   BackupPublishedPermissionError,
+  BackupPublishedCleanupError,
   RestoreRollbackError,
   TemporaryArtifactCleanupError,
   ReadContextError,
@@ -795,6 +797,18 @@ export function isBackupPublishedPermissionError(
   error: unknown
 ): error is BackupPublishedPermissionError {
   return error instanceof BackupPublishedPermissionError;
+}
+
+/**
+ * Test whether archive publication committed but an owner-private sibling could not be removed.
+ *
+ * @param error - Unknown caught value.
+ * @returns True when the value is a {@link BackupPublishedCleanupError}.
+ */
+export function isBackupPublishedCleanupError(
+  error: unknown
+): error is BackupPublishedCleanupError {
+  return error instanceof BackupPublishedCleanupError;
 }
 
 /**

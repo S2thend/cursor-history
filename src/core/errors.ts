@@ -8,6 +8,7 @@ export type SessionIntegrityErrorCode =
   | 'DATABASE_CAPABILITY_MISSING'
   | 'NO_CAPABLE_DATABASE_DRIVER'
   | 'BACKUP_PUBLISHED_PERMISSION_FAILED'
+  | 'BACKUP_PUBLISHED_CLEANUP_FAILED'
   | 'RESTORE_ROLLBACK_INCOMPLETE'
   | 'TEMPORARY_ARTIFACT_CLEANUP_FAILED'
   | 'READ_CONTEXT_SOURCE_MISMATCH'
@@ -340,6 +341,76 @@ export class BackupPublishedPermissionError extends SessionIntegrityError<
   }
 }
 
+/** Safe structured details for private archive names left after successful publication. */
+export type BackupPublishedCleanupErrorDetails = {
+  published: true;
+  outputPath: string;
+  /** True only when the final path still names the completed private-stage inode. */
+  pathIdentityVerified: boolean;
+  /** Paths proven to remain bound to the published archive inode. */
+  residueCount: number;
+  residuePaths: string[];
+  /** Paths whose final identity could not be established and must not be deleted blindly. */
+  unverifiedResidueCount: number;
+  unverifiedResiduePaths: string[];
+  remedy: string;
+};
+
+/**
+ * Reports that archive publication committed but its owner-private sibling could not be removed.
+ *
+ * `pathIdentityVerified` governs whether callers may trust `outputPath`; residue paths identify only
+ * private publication names that were still bound to the completed archive inode after retries.
+ *
+ * @param outputPath - Requested final archive path.
+ * @param pathIdentityVerified - Whether the final path still names the published archive inode.
+ * @param residuePaths - Sibling paths verified to remain bound to the published archive inode.
+ * @param cause - Last filesystem cleanup or inspection failure.
+ * @param unverifiedResiduePaths - Sibling paths whose final identity could not be established.
+ */
+export class BackupPublishedCleanupError extends SessionIntegrityError<
+  'BACKUP_PUBLISHED_CLEANUP_FAILED',
+  BackupPublishedCleanupErrorDetails
+> {
+  override readonly name = 'BackupPublishedCleanupError';
+
+  constructor(
+    outputPath: string,
+    pathIdentityVerified: boolean,
+    residuePaths: string[],
+    cause?: unknown,
+    unverifiedResiduePaths: string[] = []
+  ) {
+    const ordered = [...new Set(residuePaths)].sort(compareCodePoints);
+    const unverified = [...new Set(unverifiedResiduePaths)].sort(compareCodePoints);
+    const message = pathIdentityVerified
+      ? `Backup archive was published at ${outputPath}, but cleanup of its private publication staging could not be completed.`
+      : `Backup publication crossed its commit point, but the final archive identity at ${outputPath} could not be verified and cleanup of private publication staging could not be completed.`;
+    const residueRemedy =
+      unverified.length > 0
+        ? ' Do not delete unverified residue paths until their identity has been established.'
+        : '';
+    const remedy =
+      (pathIdentityVerified
+        ? 'Keep or inspect the verified published archive and remove only verified private staging paths after confirming no backup operation is active.'
+        : 'Treat the output path as untrusted, establish which file is the completed archive, and remove only verified private staging paths after confirming no backup operation is active.') +
+      `${residueRemedy} Do not retry with --force.`;
+    super('BACKUP_PUBLISHED_CLEANUP_FAILED', message, {
+      published: true,
+      outputPath,
+      pathIdentityVerified,
+      residueCount: ordered.length,
+      residuePaths: ordered,
+      unverifiedResidueCount: unverified.length,
+      unverifiedResiduePaths: unverified,
+      remedy,
+    });
+    if (cause !== undefined) {
+      Object.defineProperty(this, 'cause', { configurable: true, value: cause });
+    }
+  }
+}
+
 /**
  * Reports owner-private temporary paths that remained after exhaustive cleanup attempts.
  *
@@ -347,20 +418,30 @@ export class BackupPublishedPermissionError extends SessionIntegrityError<
  */
 export class TemporaryArtifactCleanupError extends SessionIntegrityError<
   'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
-  { residueCount: number; residuePaths: string[]; remedy: string }
+  {
+    residueCount: number;
+    residuePaths: string[];
+    unverifiedResidueCount: number;
+    unverifiedResiduePaths: string[];
+    remedy: string;
+  }
 > {
   override readonly name = 'TemporaryArtifactCleanupError';
 
-  constructor(residuePaths: string[]) {
+  constructor(residuePaths: string[], unverifiedResiduePaths: string[] = []) {
     const ordered = [...new Set(residuePaths)].sort(compareCodePoints);
+    const unverified = [...new Set(unverifiedResiduePaths)].sort(compareCodePoints);
     super(
       'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
       'Private temporary artifacts could not be removed.',
       {
         residueCount: ordered.length,
         residuePaths: ordered,
+        unverifiedResidueCount: unverified.length,
+        unverifiedResiduePaths: unverified,
         remedy:
-          'Remove the listed private temporary paths after confirming no operation is active.',
+          'Remove only verified private temporary paths after confirming no operation is active. ' +
+          'Do not delete unverified residue paths until their identity has been established.',
       }
     );
   }

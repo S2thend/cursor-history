@@ -24,6 +24,8 @@ import {
   isBackupError,
   BackupPublishedPermissionError,
   isBackupPublishedPermissionError,
+  BackupPublishedCleanupError,
+  isBackupPublishedCleanupError,
   RestoreRollbackError,
   isRestoreRollbackError,
   NoDataError,
@@ -173,6 +175,28 @@ describe('BackupPublishedPermissionError', () => {
     expect(err.message).toContain('requested 0o640, actual 0o600');
     expect(isBackupPublishedPermissionError(err)).toBe(true);
     expect(isBackupPublishedPermissionError(new Error('other'))).toBe(false);
+  });
+});
+
+describe('BackupPublishedCleanupError', () => {
+  it('exposes the committed publication and owner-private residue paths', () => {
+    const err = new BackupPublishedCleanupError('/backup.zip', true, [
+      '/backups/.private-b',
+      '/backups/.private-a',
+    ]);
+    expect(err.name).toBe('BackupPublishedCleanupError');
+    expect(err.code).toBe('BACKUP_PUBLISHED_CLEANUP_FAILED');
+    expect(err.details).toMatchObject({
+      published: true,
+      outputPath: '/backup.zip',
+      pathIdentityVerified: true,
+      residueCount: 2,
+      residuePaths: ['/backups/.private-a', '/backups/.private-b'],
+      unverifiedResidueCount: 0,
+      unverifiedResiduePaths: [],
+    });
+    expect(isBackupPublishedCleanupError(err)).toBe(true);
+    expect(isBackupPublishedCleanupError(new Error('other'))).toBe(false);
   });
 });
 
@@ -362,6 +386,11 @@ describe('type guards', () => {
       guard: isBackupPublishedPermissionError,
       instance: new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600, undefined, true),
       name: 'isBackupPublishedPermissionError',
+    },
+    {
+      guard: isBackupPublishedCleanupError,
+      instance: new BackupPublishedCleanupError('/backup.zip', true, ['/backups/.private']),
+      name: 'isBackupPublishedCleanupError',
     },
     {
       guard: isRestoreRollbackError,
