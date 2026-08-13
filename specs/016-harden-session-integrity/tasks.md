@@ -5,7 +5,7 @@
 **Input**: Design documents from `/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/`
 **Prerequisites**: `plan.md`, `spec.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
 
-**Tests**: Tests are required by FR-066, FR-069, and FR-072–FR-080. In every story, create the listed failing tests and locked evidence before changing the corresponding production behavior.
+**Tests**: Tests are required by FR-066, FR-069, FR-072–FR-082, and SC-018–SC-020. In every story, create the listed failing tests and locked evidence before changing the corresponding production behavior.
 
 **Organization**: Tasks are grouped by user story and ordered so each story has an independently runnable acceptance slice. Paths are repository-relative unless shown as absolute.
 
@@ -28,7 +28,7 @@ optional or permit publication before it passes.
 **Purpose**: Add reusable test infrastructure without changing production resolution behavior.
 
 - [X] T001 Create deterministic Composer, Store DB, transcript, backup, duplicate-UUID, and workspace A/B fixture builders in `tests/helpers/session-integrity-fixtures.ts`
-- [X] T002 Create the unchanged v0.16 vibe-history identity, digest, parent, and real SQLite atomic-replacement harness—where cursor-history supplies one complete replacement-safe view and compatibility signal while the unchanged consumer owns persistence, transaction, and rollback—pinned to `S2thend/vibe-history` revision `698701775144f7d8875330e1f8caec9ddfc27744`; record and verify the copied adapter/type/digest/policy/engine/SQLite-target/schema source-path and Git-blob inventory plus archive schema/migration assumptions without a live adjacent-repository dependency in `tests/helpers/v016-consumer.ts`, `tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json`, and `tests/compatibility/v016-consumer-provenance.test.ts`
+- [X] T002 Create a generic cursor-history-owned downstream contract harness for v0.16-compatible session/message/tool keys and bindings, complete-versus-degraded replacement eligibility, and repeated-sync idempotence without copying or claiming any third-party digest, persistence policy, schema, transaction, or rollback implementation; retain only the authorized external revision/source-blob/license inventory and explicit T113-only certification boundary in `tests/helpers/v016-downstream-contract.ts`, `tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json`, and `tests/compatibility/v016-consumer-provenance.test.ts`
 - [X] T003 [P] Create a built-CLI subprocess helper that captures stdout bytes, stderr bytes, exit status, signals, and temporary roots in `tests/helpers/run-cli.ts`
 - [X] T004 [P] Create low-level filesystem/SQLite/key-value event recording and poison-canary helpers in `tests/helpers/io-probe.ts`
 - [X] T005 [P] Add explicit compatibility, e2e, package-smoke, and required-gate scripts while retaining Vitest discovery of every required suite in `package.json` and `vitest.config.ts`
@@ -57,17 +57,17 @@ optional or permit publication before it passes.
 
 **Goal**: Preserve every v0.16 Composer-derived key while complete Composer/Store views gain new content through one replacement and become idempotent.
 
-**Independent Test**: Import a locked v0.16 Composer fixture through the unchanged consumer, resolve it as a complete merged session, synchronize twice, and prove every old key is byte-identical, new content exists once, failure is atomic, and the third synchronization performs zero writes.
+**Independent Test**: Project a locked v0.16 Composer fixture through the recurring generic downstream contract, resolve it as a complete merged session, and prove legacy keys and bindings are byte-identical, complete content replaces once, degraded content cannot overwrite it, and repeated application is idempotent. Exact unchanged-consumer adapter/digest behavior, SQLite transaction atomicity/rollback, and repeated synchronization are certified only by the owner-authorized external T113 gate.
 
 ### Tests and Locked Evidence for User Story 1
 
 > Write and run these tests before production identity or merge changes; they must fail for the documented regressions.
 
 - [X] T011 [US1] Create the provenance-recorded test-only v0.16 projector from tag `v0.16.0` commit `e8a7abf8cea3419a9dda911e174a05f82a9b260e` in `tests/compatibility/support/v016-projector.ts` and record source paths/blob hashes in `tests/compatibility/fixtures/v016/projector-manifest.json`
-- [X] T012 [US1] Create reproducible generation and recurring safety validation for a locked, deterministic, wholly synthetic Composer-only v0.16 raw-layout SQLite database, workspace-fallback JSON, tagged projection, real pinned-schema vibe-history SQLite archive, and Store enrichment/gap/collision fixtures; forbid the generator from reading live Cursor roots, user archives, environment-derived identity/content, the adjacent vibe-history checkout, or other user data; record logical generator inputs, cursor-history source-format provenance, the separately pinned vibe-history consumer manifest reference, and SHA-256 hashes; regenerate into a private temporary directory and compare logical inventory plus hashes on every required run; scan generated and committed bytes for real content, paths, machine data, credentials, and real/user-derived Cursor IDs; and add a poison mutation proving that the scanner rejects a contaminated fixture in `tests/compatibility/support/generate-v016-fixtures.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, `tests/compatibility/fixtures/v016/composer-global-state.vscdb`, `tests/compatibility/fixtures/v016/workspace-fallback.json`, `tests/compatibility/fixtures/v016/tagged-output.json`, `tests/compatibility/fixtures/v016/legacy-consumer-archive.sqlite`, `tests/compatibility/fixtures/v016/merged-store-source.json`, and `tests/compatibility/fixtures/v016/fixture-manifest.json`
+- [X] T012 [US1] Create reproducible generation and recurring safety validation for locked, deterministic, wholly synthetic cursor-history inputs and outputs: Composer-only v0.16 raw-layout SQLite, workspace-fallback JSON, tagged projection, and Store enrichment/gap/collision fixtures; forbid the generator from reading live Cursor roots, user archives, environment-derived identity/content, the adjacent vibe-history checkout, or other user data; record logical generator inputs, cursor-history source-format provenance, and SHA-256 hashes; regenerate into a private temporary directory and compare logical inventory plus hashes on every required run; scan generated and committed bytes for real content, paths, machine data, credentials, and real/user-derived Cursor IDs; and add a poison mutation proving that the scanner rejects a contaminated fixture in `tests/compatibility/support/generate-v016-fixtures.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, `tests/compatibility/fixtures/v016/composer-global-state.vscdb`, `tests/compatibility/fixtures/v016/workspace-fallback.json`, `tests/compatibility/fixtures/v016/tagged-output.json`, `tests/compatibility/fixtures/v016/merged-store-source.json`, and `tests/compatibility/fixtures/v016/fixture-manifest.json`
 - [X] T013 [P] [US1] Record v0.17 tag/commit/source provenance and add locked complete/degraded merged baselines, complete transcript-to-Store-DB inputs, and tagged legacy CLI fatal-output stream bytes in `tests/compatibility/fixtures/v017/provenance.json`, `tests/compatibility/fixtures/v017/complete-merged.json`, `tests/compatibility/fixtures/v017/degraded-store.json`, `tests/compatibility/fixtures/v017/transcript-complete.json`, `tests/compatibility/fixtures/v017/store-db-complete.json`, and `tests/compatibility/fixtures/v017/cli-fatal-output.json`
 - [X] T014 [P] [US1] Add provenance, `rowid ASC`, placeholder, filtering, branch, bubble-ID, global, and workspace-fallback oracle tests in `tests/compatibility/v016-projector-provenance.test.ts`
-- [X] T015 [P] [US1] Add native/null-ID, both-backbone, enrichment, parent, tool, collision, pinned unchanged-consumer provenance/conformance, real SQLite replacement, forced failure between delete/insert, close/reopen old-or-new completeness, degraded-non-overwrite, third-sync, and identity/fidelity/append-only faults, including start/middle Store insertions whose direct or inferred timestamps are below the archived maximum, in `tests/compatibility/v016-consumer-provenance.test.ts` and `tests/compatibility/v016-composer-upgrade.test.ts`
+- [X] T015 [P] [US1] Add native/null-ID, both-backbone, enrichment, parent, tool, collision, generic downstream key/binding, complete-view replacement, degraded-non-overwrite, repeated-sync idempotence, and identity/fidelity/append-only faults—including start/middle Store insertions whose direct or inferred timestamps are below the archived maximum—without claiming third-party digest, SQLite transaction, rollback, or exact adapter behavior in `tests/compatibility/v016-consumer-provenance.test.ts` and `tests/compatibility/v016-composer-upgrade.test.ts`
 - [X] T016 [P] [US1] Add one-replacement, no-duplicate, native-Composer-ID, complete transcript-to-Store-DB replacement, degraded-pin/retry, second-sync-no-op, and transition-fault tests in `tests/compatibility/v017-convergence.test.ts`
 - [X] T017 [P] [US1] Add failing pure identity, canonical hash, occurrence, collision, relationship, and tool-call tests plus consumed-field attachment projection, unsupported-raw partial fidelity, ignored standalone `codeBlocks`/`ToolCall.files`, and poison-URI no-dereference cases in `tests/unit/message-identity.test.ts`
 - [X] T018 [P] [US1] Extend merge regressions and deliberate failing fault switches for preferred-backbone pairing drift and Composer-tool reordering, plus standalone-files exclusion and Store-native append order, in `tests/unit/store-stack-merge.test.ts`
@@ -82,9 +82,9 @@ optional or permit publication before it passes.
 - [X] T024 [US1] Rewrite parent, branch, leaf, sidechain, `activeBranchBubbleIds`, and additive `activeBranchMessageIds` through resolved identities in `src/core/store-stack/merge.ts` and `src/core/storage.ts`
 - [X] T025 [US1] Implement Store DB expectation and complete/partial/metadata-only representation selection without unsafe transcript fallback, returning typed partial/fatal diagnostics rather than guessing invalid or mixed encodings in `src/core/store-stack/discover.ts`, `src/core/store-stack/store-db.ts`, and `src/core/store-stack/transcript.ts`
 - [X] T026 [US1] Map complete views to legacy `source: "global"`, degraded views to `workspace-fallback`, and actual provenance to additive resolution fields in `src/core/storage.ts`
-- [X] T027 [US1] Retain raw attachment evidence through source decoding, project supported evidence only into unchanged-consumer `content` or `name/status/params/result/error`, mark unsupported raw evidence partial, and never dereference external targets in `src/core/store-stack/store-db.ts`, `src/core/store-stack/transcript.ts`, `src/core/store-stack/types.ts`, `src/core/parser.ts`, and `src/core/store-stack/merge.ts`
+- [X] T027 [US1] Retain raw attachment evidence through source decoding, project supported evidence only into legacy-consumed `content` or `name/status/params/result/error`, mark unsupported raw evidence partial, and never dereference external targets in `src/core/store-stack/store-db.ts`, `src/core/store-stack/transcript.ts`, `src/core/store-stack/types.ts`, `src/core/parser.ts`, and `src/core/store-stack/merge.ts`
 - [X] T028 [US1] Emit nonempty resolved message/tool identities, origins, deterministic relationship references, and compatibility signals through `src/core/parser.ts` and `src/core/types.ts`
-- [X] T029 [US1] Preserve existing library return shapes and aliases while emitting one complete replacement-safe merged view and legacy comparison signal; leave atomic persistence, transaction, and rollback to the unchanged consumer exercised by T002/T015 in `src/lib/index.ts` and `src/lib/types.ts`
+- [X] T029 [US1] Preserve existing library return shapes and aliases while emitting one complete replacement-safe merged view and legacy comparison signal; recurring T002/T015 evidence covers only the generic cursor-history-owned contract, while exact consumer persistence, transaction, and rollback remain external T113 evidence, in `src/lib/index.ts` and `src/lib/types.ts`
 
 **Checkpoint**: `tests/compatibility/v016-projector-provenance.test.ts`, `v016-composer-upgrade.test.ts`, `v017-convergence.test.ts`, and identity/merge unit tests pass; fixture regeneration is not an accepted fix.
 
@@ -255,7 +255,7 @@ optional or permit publication before it passes.
 - [X] T101 [P] [US7] Add the NodeNext CommonJS build tree and generated `.cjs` wrapper in `tsconfig.cjs.json` and `scripts/build-cjs.mjs`
 - [X] T102 [US7] Make build/package scripts produce ESM, CJS, declarations, and CLI and include `README.md`, `LICENSE`, `CHANGELOG.md`, and `docs/compatibility.md` in the declared package contents in `package.json` and `package-lock.json`
 - [X] T103 [P] [US7] Implement a documented per-platform skip allowlist and machine-verifiable rejection of zero tests, unexpected skips, failures, timeout, and cancellation in `scripts/verify-test-results.mjs`
-- [X] T104 [US7] Remove test-failure swallowing; require install/typecheck/lint/nonzero-test/build success; validate the Node 20.0.0 project-compatibility floor despite upstream EOL, 22.15.1/22.16.0, 23.7.0/23.8.0, current 24 LTS, and latest 26 Current capability boundaries; then have the staged release workflow pack once, preserve a checksum-addressed candidate, pause behind the protected verification approval, and publish those exact bytes without rebuild or repack in `.github/workflows/npm-publish.yml`
+- [X] T104 [US7] Remove test-failure swallowing; run install/typecheck/lint/nonzero-test/build on the Node 24 toolchain supported by Vite 7; declare the exact `20.x || 22.x || 23.x || 24.x || 25.x || 26.x` product range (excluding unsupported Node 21); pack once; run that checksum-addressed candidate through a production install without repository devDependencies on Node 20.0.0, 22.15.1/22.16.0, 23.7.0/23.8.0, 24.x, 25.x, and 26.x while allowing native dependencies to use host build tooling when no prebuild exists and asserting automatic/forced SQLite backup capability outcomes; require both full package verification and the runtime matrix before protected approval; and publish those exact bytes without rebuild or repack in `.github/workflows/npm-publish.yml`, `scripts/smoke-packed-package.mjs`, and `tests/e2e/publish-workflow.test.ts`
 - [X] T105 [P] [US7] Write the canonical logical-ID, physical-instance, fixed CLI/core/library/migration index-base and scope, workspace-I/O, fidelity/provenance, defensive text-decoding, exact inclusive Source Read Limits v1 default table/reset/error semantics, per-operation CLI/library override examples and increased-exposure warning, v0.16 safe-upgrade, v0.17 fatal-stream migration, and the packaged Compatibility Matrix v1 projection copied from the normative spec table, including built-CLI-tested and typechecked/runnable public-library examples, in `docs/compatibility.md`
 - [X] T106 [P] [US7] Document the same shipped addressing, source, timestamp, platform-qualified backup-permission, upgrade, and executable-example guidance in `README.md`
 - [X] T107 [P] [US7] Synchronize or canonically link the compatibility contract and its verified examples from `docs/readme_es.md`, `docs/readme_fr.md`, and `docs/readme_zh.md`
@@ -270,12 +270,38 @@ optional or permit publication before it passes.
 
 **Purpose**: Prove the integrated implementation, distributed artifact, and release evidence satisfy every story together.
 
-- [X] T110 [P] Aggregate and rerun the owning-story fault switches for wrong index/ID/path, off-scope hydration, bypassed recording with armed DB/transcript/KV/blob canaries, identity/backbone drift, tool reorder, unsafe fidelity, timestamp watermark, source-limit bypass/counter-not-reset/automatic-raise, temp leakage, memory overflow, and publish-after-failure in `tests/integration/session-integrity-faults.test.ts`
-- [X] T111 [P] Treat the Matrix v1 table in `spec.md` as normative, fail on any row/cell drift in both its design-time `contracts/compatibility-matrix-v1.md` and packaged `docs/compatibility.md` projections, execute every `Required` cell and verify every `Unsupported`/`N/A` declaration across live/backup/custom-path, both-backbone, scoped-partial/opt-in-complete, duplicate/complementary-source, and structured-output cases, and require an explicit matrix-version update for a new representation or carrier in `tests/e2e/compatibility-matrix-contract.test.ts`, `tests/e2e/cli-session-integrity.test.ts`, and `tests/helpers/session-integrity-fixtures.ts`
-- [X] T112 Implement and test a metadata-only, content-nonretaining Source Read Limits v1 preflight and exact-policy artifact-drift check in `scripts/preflight-source-limits.mjs` and `tests/unit/preflight-source-limits.test.ts`; create the non-sensitive instructions/evidence template in `docs/release-verification.md`; run the preflight only over authorized Cursor source carriers actually readable by v0.16—live/custom Composer roots and cursor-history backup ZIP/SQLite inputs, never the downstream vibe-history database/archive—and record outside the repository only maximum counts/sizes/ratios; require raising any exceeded legitimate default before release so unchanged consumers need no override; any raised default must update and re-lock `spec.md`, `research.md`, `data-model.md`, `contracts/internal-resolution.md`, `contracts/library-api.md`, `contracts/cli-json.md`, `quickstart.md`, `tasks.md`, implementation constants, tests, and packaged `docs/compatibility.md`, pass the exact-policy drift check, and restart T020, T022, T057, T060, T063, T069, T085, T088, T092, T099, T105, and T110–T112 before continuing
-- [X] T113 Before freezing artifacts, perform a one-time maintainer-authorized full-corpus differential outside the repository between the official `v0.16.0` tag and the candidate over the same Composer-only source: compare every pre-existing library session/message/tool value and own-property/null/omission shape separately from allowlisted additive fields and documented versioned exceptions, with no sampling, record cap, time budget, or early-success exit; run an independent exhaustive all-candidate association pass even if its straightforward implementation is quadratic, and pass every session through the pinned unchanged vibe-history adapter and real sync policy/SQLite transaction to prove all old session/message/tool keys retain their original bindings, the upgraded complete view converges without loss or duplication, and a repeated sync writes nothing. Raw source, outputs, IDs, hashes, paths, titles, content, timestamps, and downstream databases MUST remain in owner-private temporary storage and be deleted after certification; retain only aggregate pass/fail/category counts outside the repository. Real data MAY identify structural coverage gaps but MUST NOT be transformed, copied, redacted, hashed, or otherwise used to generate committed fixtures: reproduce each applicable gap manually with fixed fictional values in the wholly synthetic generator, pass regeneration/hash/sensitive-scan/poison tests, rerun the new regression, and then restart T112–T113. After that differential and the preliminary full required validation both pass, create the frozen item-level FR-001–FR-080/SC-001–SC-017 traceability, Compatibility Matrix v1 result map, and compatibility disposition/evidence for 100% of feature-016 public returned-value changes, plus contract, quickstart, runtime, and constitution gates with no unresolved exception, allowing only this planned checklist write before T114 in `specs/016-harden-session-integrity/checklists/implementation.md`
-- [X] T114 After all repository artifacts are frozen, run `npm ci`, typecheck, lint, format check, standard tests—including executable v0.16 fixture regeneration/hash/sensitive-scan/poison and preflight-policy suites—and build through the required scripts without modifying tracked inputs in `package.json`, fixing any failure only by returning to the owning task and then rerunning T112–T114 from the start
+- [ ] T110 [P] Aggregate and rerun the owning-story fault switches for wrong index/ID/path, off-scope hydration, bypassed recording with armed DB/transcript/KV/blob canaries, identity/backbone drift, tool reorder, unsafe fidelity, timestamp watermark, source-limit bypass/counter-not-reset/automatic-raise, temp leakage, memory overflow, and publish-after-failure in `tests/integration/session-integrity-faults.test.ts`
+- [ ] T111 [P] Treat the Matrix v1 table in `spec.md` as normative, fail on any row/cell drift in both its design-time `contracts/compatibility-matrix-v1.md` and packaged `docs/compatibility.md` projections, execute every `Required` cell and verify every `Unsupported`/`N/A` declaration across live/backup/custom-path, both-backbone, scoped-partial/opt-in-complete, duplicate/complementary-source, and structured-output cases, and require an explicit matrix-version update for a new representation or carrier in `tests/e2e/compatibility-matrix-contract.test.ts`, `tests/e2e/cli-session-integrity.test.ts`, and `tests/helpers/session-integrity-fixtures.ts`
+- [ ] T112 Implement and test a metadata-only, content-nonretaining Source Read Limits v1 preflight and exact-policy artifact-drift check in `scripts/preflight-source-limits.mjs` and `tests/unit/preflight-source-limits.test.ts`; create the non-sensitive instructions/evidence template in `docs/release-verification.md`; run the preflight only over authorized Cursor source carriers actually readable by v0.16—live/custom Composer roots and cursor-history backup ZIP/SQLite inputs, never the downstream vibe-history database/archive—and record outside the repository only maximum counts/sizes/ratios; require raising any exceeded legitimate default before release so unchanged consumers need no override; any raised default must update and re-lock `spec.md`, `research.md`, `data-model.md`, `contracts/internal-resolution.md`, `contracts/library-api.md`, `contracts/cli-json.md`, `quickstart.md`, `tasks.md`, implementation constants, tests, and packaged `docs/compatibility.md`, pass the exact-policy drift check, and restart T020, T022, T057, T060, T063, T069, T085, T088, T092, T099, T105, and T110–T112 before continuing
+- [ ] T113 Before freezing artifacts, perform a one-time maintainer-authorized full-corpus differential outside the repository between the official `v0.16.0` tag and the candidate over the same Composer-only source: compare every pre-existing library session/message/tool value and own-property/null/omission shape separately from allowlisted additive fields and documented versioned exceptions, with no sampling, record cap, time budget, or early-success exit; run an independent exhaustive all-candidate association pass even if its straightforward implementation is quadratic, and pass every session through the pinned unchanged vibe-history adapter and real sync policy/SQLite transaction to prove all old session/message/tool keys retain their original bindings, the upgraded complete view converges without loss or duplication, and a repeated sync writes nothing. Raw source, outputs, IDs, hashes, paths, titles, content, timestamps, and downstream databases MUST remain in owner-private temporary storage and be deleted after certification; retain only aggregate pass/fail/category counts outside the repository. Real data MAY identify structural coverage gaps but MUST NOT be transformed, copied, redacted, hashed, or otherwise used to generate committed fixtures: reproduce each applicable gap manually with fixed fictional values in the wholly synthetic generator, pass regeneration/hash/sensitive-scan/poison tests, rerun the new regression, and then restart T112–T113. After that differential and the preliminary full required validation both pass, create the frozen item-level FR-001–FR-082/SC-001–SC-020 traceability, Compatibility Matrix v1 result map, and compatibility disposition/evidence for 100% of feature-016 public returned-value changes, plus contract, quickstart, runtime, and constitution gates with no unresolved exception, allowing only this planned checklist write before T114 in `specs/016-harden-session-integrity/checklists/implementation.md`
+- [ ] T114 After all repository artifacts are frozen, verify that no copied proprietary third-party implementation or generated downstream database remains anywhere in reachable branch history, then run `npm ci`, typecheck, lint, format check, standard tests—including executable v0.16 fixture regeneration/hash/sensitive-scan/poison and preflight-policy suites—and build through the required scripts without modifying tracked inputs in `package.json`, fixing any sanitization or validation failure only by returning to the owning task and then rerunning T112–T114 from the start
 - [ ] T115 Run the staged release gate from the exact T114 revision so it packs once and preserves a checksum-addressed candidate; execute clean-install ESM/CJS/declaration/CLI/JSDoc/documentation-example and frozen-schema smoke tests against that exact tarball; then perform maintainer-owned live, JSON/Markdown export, backup create/read, and custom-path verification using only that tarball and owner-private storage, retaining only an external non-repository attestation with revision/tarball hash/platform/capabilities, abstract operations, aggregate limit measurements, salted nonretained ID hashes, low-level event totals, modes/residue counts, and pass/fail; any validation, pack/checksum, clean-install, smoke, approval, or manual-stage failure must block publication, discard the candidate, return to the owning task, and rerun T112–T115 from the start; only a passing approval may publish the preserved bytes without rebuild/repack; delete raw artifacts, leave the tracked tree/revision unchanged, and prohibit raw repository/CI evidence using `tests/e2e/package-smoke.test.ts`, `tests/e2e/cli-json-schema.test.ts`, and `docs/release-verification.md`
+
+---
+
+## Phase 11: Post-Audit Corrective Completion (Blocking Before Re-entering Phase 10)
+
+**Purpose**: Resolve every high-priority/blocking defect discovered after the preliminary freeze.
+T110–T115 above are deliberately reopened and MUST be rerun only after T116–T132 complete; their
+stable IDs are retained so existing traceability links do not drift.
+
+- [X] T116 [P] Remove size-dependent greedy merge semantics with deterministic exact alignment; freeze Composer message/tool identities before enrichment/backbone choice; resolve parent/branch references through valid alternate source IDs or mark explicit partial state in `src/core/store-stack/merge.ts`, `src/core/session-identity.ts`, `src/core/parser.ts`, `tests/unit/store-stack-merge.test.ts`, `tests/unit/store-stack-mapper.test.ts`, and `tests/unit/parser.test.ts`
+- [X] T117 [P] Bind selected physical Composer contributors in scoped read contexts, hydrate only the bound occurrence, preserve canonical/matched workspace paths, and return explicit partial state if a selected contributor disappears in `src/core/storage.ts`, `src/core/types.ts`, `src/cli/formatters/json.ts`, `tests/integration/composer-source-arbitration.test.ts`, and `tests/integration/workspace-index-roundtrip.test.ts`
+- [X] T118 [P] Correct existing public search `messageIndex`, UTF-16 `offset`, complete-line `match`, and line-context values; lock v0.16/v0.17 affected output and non-search invariance across non-first/multiline/mixed-case/astral/lowercase-expansion cases in `src/core/parser.ts`, `src/lib/index.ts`, `src/lib/types.ts`, `tests/compatibility/fixtures/v017/search-coordinate-correction.json`, `tests/compatibility/v017-fixture-provenance.test.ts`, and `tests/unit/lib-index.test.ts`
+- [X] T119 [P] Add zero-based public-library JSON export `index` without mutating shared core sessions; prove tagged v0.16/v0.17 exports omitted the field and single/bulk projection agree in `src/lib/index.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, `tests/compatibility/v017-fixture-provenance.test.ts`, and `tests/unit/lib-index.test.ts`
+- [X] T120 [P] Enforce effective SQLite page limits in every Composer/Store/catalog scan, account transcript BOM/trailing-CR bytes exactly, and reject zero-compressed/nonempty ZIP claims with typed Source Read Limits v1 errors before extraction in `src/core/composer-sqlite.ts`, `src/core/storage.ts`, `src/core/store-stack/store-db.ts`, `src/core/store-stack/transcript.ts`, `src/core/zip-stream.ts`, `tests/unit/composer-sqlite.test.ts`, and `tests/integration/defensive-source-parsing.test.ts`
+- [X] T121 [P] Implement rename/link as backup publication commit point and bind every post-publication permission observation/adjustment to that exact open inode with no-follow descriptor access, bigint device/inode identity, and final-path revalidation; skip redundant chmod; expose `actualMode: number | null` plus `pathIdentityVerified` so only a verified path may be described as the published archive or receive mode-correction guidance; and prove verified/unverified replacement-race, typed/nonzero/no-rollback/no-staging behavior in `src/core/backup-publication.ts`, `src/core/backup.ts`, `src/core/errors.ts`, `src/lib/backup.ts`, `src/lib/errors.ts`, `src/cli/errors.ts`, `tests/unit/backup-publication.test.ts`, and `tests/integration/backup-snapshot-security.test.ts`
+- [X] T122 [P] Classify usable permitted Store DB plus transcript as a Required coexistence case with DB-only backbone and `superseded` transcript provenance; add DB-in-workspace-A/transcript-in-B and inverse live/custom fixtures with low-level open canaries proving default scoped resolution is explicit partial and never opens the off-scope representation while selected-UUID cross-workspace opt-in is complete and disclosed; retain positive scoped backup list/show/search/export paths in `tests/e2e/compatibility-matrix-contract.test.ts`, `tests/e2e/cli-session-integrity.test.ts`, `tests/helpers/session-integrity-fixtures.ts`, `tests/integration/store-expectation-state.test.ts`, and `tests/integration/workspace-io-boundary.test.ts`
+- [X] T123 [P] Make low-level I/O evidence fail closed for payload-bearing workspace queries and require direct trusted-output digest/revision binding for the one addressed package candidate; mutation-test checksum, revision, tarball, and candidate substitution in `src/core/database/observed.ts`, `tests/integration/workspace-io-boundary.test.ts`, `.github/workflows/npm-publish.yml`, and `tests/e2e/publish-workflow.test.ts`
+- [X] T124 [P] Preserve workspace-scoped migrate targeting, resolve both numeric and direct-ID selectors through an ambiguity-inclusive logical catalog so no divergent occurrence is silently dropped or selected, expand literal home paths consistently, and correct multi-selector help/error text in `src/core/migrate.ts`, `src/cli/commands/migrate.ts`, `src/cli/commands/migrate-session.ts`, `src/cli/index.ts`, `tests/e2e/cli-session-integrity.test.ts`, `tests/integration/migrate-session-scope.test.ts`, and `tests/unit/cli-commands.test.ts`
+- [X] T125 [P] Exercise the current production library directly over the synthetic v0.16 workspace-fallback SQLite layout and prove its complete Composer session/message/tool keys and own-property shape match the tagged projector in `tests/compatibility/v016-fixture-safety.test.ts`
+- [X] T126 [P] Set package/runtime/manifest metadata to 0.18.0, advertise only exact supported majors `20.x || 22.x || 23.x || 24.x || 25.x || 26.x`, include every linked localized document/logo in the packed package, and smoke their presence and checksum-addressed artifact identity in `package.json`, `package-lock.json`, `src/core/package-version.generated.ts`, `scripts/smoke-packed-package.mjs`, and `tests/e2e/package-smoke.test.ts`
+- [X] T127 [P] Synchronize the 0.18.0 search/export exception, backup publication and restore-integrity contracts, Required DB/transcript coexistence, migration guidance, exact runtime matrix, and affected-release evidence across `specs/016-harden-session-integrity/spec.md`, `specs/016-harden-session-integrity/plan.md`, `specs/016-harden-session-integrity/research.md`, `specs/016-harden-session-integrity/data-model.md`, `specs/016-harden-session-integrity/contracts/library-api.md`, `specs/016-harden-session-integrity/contracts/internal-resolution.md`, `specs/016-harden-session-integrity/contracts/cli-json.md`, `specs/016-harden-session-integrity/contracts/compatibility-matrix-v1.md`, `specs/016-harden-session-integrity/quickstart.md`, `README.md`, `docs/compatibility.md`, `docs/release-verification.md`, `docs/readme_es.md`, `docs/readme_fr.md`, `docs/readme_zh.md`, and `CHANGELOG.md`
+- [X] T128 Reopen the implementation checklist, add FR-081–FR-082/SC-018–SC-020 and every post-audit public returned-value disposition, remove stale frozen/pass claims, and keep all final gates open; T113 performs the one planned evidence/refreeze write after T110–T113 pass, before T114 validates that frozen revision, in `specs/016-harden-session-integrity/checklists/implementation.md`
+- [X] T129 [P] Admit restore entries only after manifest size/checksum and exact type/path validation; reject empty/no-intact inventories, unmanifested file payloads, duplicate/aliased targets, and observed descendant links; preflight every non-forced destination; publish non-force entries with atomic no-clobber and force/rollback entries through new private same-directory inodes so static hard-linked peers are never truncated; expose typed `RESTORE_ROLLBACK_INCOMPLETE` residuals instead of a false zero-change result; document the Node-20 owner-controlled-tree ancestor-race limitation; and prove mixed/all-corrupt, path-confusion, hidden/duplicate/collision, symlink/hardlink, linked-parent, truthful warning, actual post-publication rollback, rollback-failure, zero-write, and cleanup behavior in `src/core/backup.ts`, `src/core/errors.ts`, `src/core/types.ts`, `src/lib/backup.ts`, `src/lib/errors.ts`, `src/lib/index.ts`, `src/lib/types.ts`, `src/cli/errors.ts`, `src/cli/index.ts`, `src/cli/commands/restore.ts`, `tests/unit/backup.test.ts`, `tests/unit/backup-publication.test.ts`, `tests/unit/lib-errors.test.ts`, `tests/unit/cli-errors.test.ts`, `tests/unit/cli-commands.test.ts`, and `tests/integration/backup-snapshot-security.test.ts`
+- [X] T130 [P] Bind every restore publication and rollback decision to the committed device/inode identity: after force-mode rename, track the committed inode and permanently abandon the old staging pathname without probing or unlinking it; after non-force hard-link publication, remove the staging name only if it still matches the staged device/inode; report a concurrently replaced destination as a typed manifest-relative rollback residual without touching the replacement in `src/core/restore-publication.ts`, `src/core/backup.ts`, `src/core/errors.ts`, `src/lib/errors.ts`, `src/cli/errors.ts`, `tests/unit/restore-publication.test.ts`, and `tests/integration/backup-snapshot-security.test.ts`
+- [X] T131 [P] Preserve backup commit-point truth when post-publication staging cleanup fails by exposing typed `BACKUP_PUBLISHED_CLEANUP_FAILED` details with verified/unverified archive and residue identities, exporting and mapping the error through public library/CLI surfaces, and proving transient/persistent cleanup failure, pathname replacement, identity-inspection failure, and no-unsafe-cleanup behavior in `src/core/backup-archive-publication.ts`, `src/core/backup.ts`, `src/core/errors.ts`, `src/core/index.ts`, `src/lib/backup.ts`, `src/lib/errors.ts`, `src/lib/index.ts`, `src/cli/errors.ts`, `src/cli/index.ts`, `tests/unit/backup-archive-publication.test.ts`, `tests/unit/backup-publication.test.ts`, `tests/unit/lib-errors.test.ts`, `tests/unit/cli-errors.test.ts`, `tests/unit/cli-commands.test.ts`, and `tests/integration/backup-snapshot-security.test.ts`
+- [X] T132 [P] Remove the copied proprietary vibe-history adapter/digest/policy/engine/SQLite schema and generated downstream archive from the recurring repository suite; retain only provenance and license classification plus a generic cursor-history-owned key/binding, complete/degraded, replacement, and idempotence contract; reserve exact third-party adapter/digest/SQLite transaction/rollback/repeated-sync verification for the owner-authorized external T113 gate in `tests/helpers/v016-downstream-contract.ts`, `tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json`, `tests/compatibility/fixtures/v016/fixture-manifest.json`, `tests/compatibility/support/generate-v016-fixtures.ts`, `tests/compatibility/v016-consumer-provenance.test.ts`, `tests/compatibility/v016-composer-upgrade.test.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, `tests/compatibility/v017-convergence.test.ts`, and `tests/integration/session-integrity-faults.test.ts`; T132 completes current-tree removal only, while T114 remains blocked until every copied proprietary blob is removed from reachable branch history and that sanitization is verified
 
 ---
 
@@ -292,7 +318,14 @@ optional or permit publication before it passes.
 - **Phase 7 — US5**: Depends on US1 identity/fidelity and US2 metadata-only catalog/scope/equivalence primitives. It completes read-side reconciliation and provenance without changing US3's conservative mutation refusal.
 - **Phase 8 — US6**: Depends on US2 lazy inventory/hydration; it may use US5 logical rows without retaining their payloads.
 - **Phase 9 — US7**: US7 remains P1 and non-deferrable, but its integrated shipped contract depends on the selected P2 replica and memory contracts being frozen; this dependency-driven placement after US5/US6 does not lower its priority or permit release without it. Public formatting can begin after field names stabilize, but release/documentation completion depends on all selected stories. T091–T096 establish failing output/release contracts; T097–T100 then run in order across shared runtime/public surfaces. After T100, T101, T103, and T105–T109 may run in parallel; T102 depends on T101, and T104 depends on both T102 and T103.
-- **Phase 10 — Polish**: Depends on all seven story checkpoints.
+- **Phase 10 — Polish**: Depends on all seven story checkpoints. The preliminary run was invalidated
+  by post-audit blockers; T110–T115 are reopened.
+- **Phase 11 — Post-audit corrective completion**: T116–T132 may proceed by independent file group
+  where marked parallel; T128 waits for the integrated focused tests and reconciled contracts. After T128, re-enter Phase
+  10 and execute T110–T113; the final step of T113 refreezes the checklist, then T114–T115 validate
+  and preserve that exact revision despite their earlier stable IDs.
+  Any failure returns to its owning T116–T132 task and restarts T110–T115. T132 current-tree
+  cleanup does not satisfy the separate T114 reachable-history sanitization gate.
 
 ### User Story Dependency Graph
 
@@ -302,7 +335,7 @@ Setup -> Foundation -> US1 -> US2 -> US3 -> US4 completion
                    \             └──> US6
                     └──> US4 private-temp/driver-specific probe preparation
 
-US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Cross-cutting gates
+US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Post-audit fixes -> Reopened cross-cutting gates
 ```
 
 ### Within Each User Story
@@ -323,26 +356,26 @@ US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Cross-cutting gates
 | Requirement or outcome | Owning tasks |
 |---|---|
 | FR-001: native UUID is the sole public logical session ID | T006, T021, T028, T041, T043, T082, T100, T110 |
-| FR-002: physical identity is separate from logical identity | T006, T038–T040, T043, T046, T076, T079–T081, T100, T105 |
-| FR-003: fixed interface-specific index bases and scopes | T006, T032–T034, T041, T043, T046, T048, T053, T099–T100, T105–T107 |
-| FR-004: v0.16 Composer projection precedes merging | T002, T011–T015, T021, T110 |
-| FR-005: native Composer message IDs remain unchanged | T012, T014–T017, T021, T023, T028, T110 |
-| FR-006: null-ID Composer compatibility IDs remain unchanged | T002, T011–T015, T017, T021, T110 |
-| FR-007: matched messages inherit Composer identity | T015, T018, T023, T110 |
+| FR-002: physical identity is separate from logical identity | T006, T038–T040, T043, T046, T076, T079–T081, T100, T105, T117 |
+| FR-003: fixed interface-specific index bases and scopes | T006, T032–T034, T041, T043, T046, T048, T053, T099–T100, T105–T107, T119, T124, T127 |
+| FR-004: v0.16 Composer projection precedes merging | T002, T011–T015, T021, T110, T116, T125, T132 |
+| FR-005: native Composer message IDs remain unchanged | T012, T014–T017, T021, T023, T028, T110, T116, T125, T132 |
+| FR-006: null-ID Composer compatibility IDs remain unchanged | T002, T011–T015, T017, T021, T110, T116, T125, T132 |
+| FR-007: matched messages inherit Composer identity | T015, T018, T023, T110, T116 |
 | FR-008: Store synthetic identity and collision policy | T012, T015, T017, T021–T023, T110 |
 | FR-009: occurrence and transcript canonical-input policy | T017, T021–T022, T110 |
-| FR-010: stable tool identity and Composer tool ordering | T002, T015, T017–T018, T021, T023, T027–T028, T110 |
-| FR-011: resolved relationship references | T002, T015, T017, T024, T028, T110 |
+| FR-010: stable tool identity and Composer tool ordering | T002, T015, T017–T018, T021, T023, T027–T028, T110, T116, T125, T132 |
+| FR-011: resolved relationship references | T002, T015, T017, T024, T028, T110, T116 |
 | FR-012: identity version and origin metadata | T006, T017, T021, T028, T100 |
-| FR-013: semantic merge order remains independent of identity | T015, T018, T023, T110 |
+| FR-013: semantic merge order remains independent of identity | T015, T018, T023, T110, T116 |
 | FR-014: move/copy UUID semantics | T049, T051, T055 |
-| FR-015: compatibility source signal | T002, T015–T016, T026, T029, T105, T108 |
+| FR-015: compatibility source signal | T002, T015–T016, T026, T029, T105, T108, T125 |
 | FR-016: additive actual source provenance | T006, T013, T016, T026, T028, T100, T105 |
-| FR-017: completeness-sensitive replacement projection | T002, T012, T015, T017–T018, T027, T029, T110 |
-| FR-018: degraded data cannot overwrite complete data | T002, T015–T016, T019, T025–T026, T029, T110 |
-| FR-019: replacement-safe producer and unchanged-consumer atomicity | T002, T015–T016, T029, T110 |
-| FR-020: repeated synchronization is idempotent | T002, T015–T016, T029, T110 |
-| FR-021: Store database/transcript backbone selection | T013, T016, T019, T022, T025, T078, T111 |
+| FR-017: completeness-sensitive replacement projection | T002, T012, T015, T017–T018, T027, T029, T110, T116, T125, T132 |
+| FR-018: degraded data cannot overwrite complete data | T002, T015–T016, T019, T025–T026, T029, T110, T132 |
+| FR-019: replacement-safe producer and unchanged-consumer atomicity | T002, T015–T016, T029, T110, T113, T125, T132 |
+| FR-020: repeated synchronization is idempotent | T002, T015–T016, T029, T110, T113, T132 |
+| FR-021: Store database/transcript backbone selection and Required coexistence | T013, T016, T019, T022, T025, T078, T111, T122, T127–T128 |
 | FR-022: complete Store representation replacement boundary | T013, T016, T019, T021–T025, T029, T078, T110 |
 | FR-023: failed/partial Store representation handling | T013, T015–T016, T019, T025–T027, T029, T071, T078, T110 |
 | FR-024: deterministic timestamp shape and source anchor | T015–T016, T091, T097, T100, T110 |
@@ -350,75 +383,80 @@ US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Cross-cutting gates
 | FR-026: inferred human timestamps are approximate | T091, T098, T105–T107 |
 | FR-027: complete-view updates do not use a timestamp watermark | T002, T015–T016, T029, T110 |
 | FR-028: older middle insertions remain present | T012, T015, T023, T029, T110 |
-| FR-029: exact-first/unambiguous-suffix workspace matching | T030, T035, T047, T099, T105–T107 |
-| FR-030: scoped membership and default payload-I/O boundary | T001, T004, T031–T033, T037–T040, T042, T045, T110–T111 |
-| FR-031: metadata/payload read classification | T004, T031, T036–T039, T045, T110–T111 |
-| FR-032: scoped numeric round-trip and stable-ID reload | T003, T032–T034, T038–T043, T048, T052–T053, T110 |
-| FR-033: scoped content has the correct ID/path | T003, T032–T034, T040–T047, T110–T111 |
-| FR-034: scope-limited results are explicitly partial | T006–T009, T031, T034, T039, T043, T047, T071, T079–T080, T100, T110 |
-| FR-035: cross-workspace source loading is explicit | T031, T045, T099, T105 |
-| FR-036: canonical/matched/source workspace-path fields | T006, T033–T034, T040, T043, T046, T081–T082, T100, T110 |
-| FR-037: canonical path is stable across filter/preference | T033, T040, T043, T046, T081–T082, T110 |
+| FR-029: exact-first/unambiguous-suffix workspace matching | T030, T035, T047, T099, T105–T107, T124 |
+| FR-030: scoped membership and default payload-I/O boundary | T001, T004, T031–T033, T037–T040, T042, T045, T110–T111, T117, T122 |
+| FR-031: metadata/payload read classification | T004, T031, T036–T039, T045, T110–T111, T122–T123 |
+| FR-032: scoped numeric round-trip and stable-ID reload | T003, T032–T034, T038–T043, T048, T052–T053, T110, T117, T124 |
+| FR-033: scoped content has the correct ID/path | T003, T032–T034, T040–T047, T110–T111, T117 |
+| FR-034: scope-limited results are explicitly partial | T006–T009, T031, T034, T039, T043, T047, T071, T079–T080, T100, T110, T117, T122 |
+| FR-035: cross-workspace source loading is explicit | T031, T045, T099, T105, T122 |
+| FR-036: canonical/matched/source workspace-path fields | T006, T033–T034, T040, T043, T046, T081–T082, T100, T110, T117 |
+| FR-037: canonical path is stable across filter/preference | T033, T040, T043, T046, T081–T082, T110, T117 |
 | FR-038: workspace discovery/list counts agree | T001, T033, T038, T044, T111 |
-| FR-039: structured numeric rows declare their scope | T006, T032, T034, T041, T043, T046, T096, T100, T105 |
-| FR-040: live/backup/custom-path parity | T001, T032–T034, T111, T115 |
-| FR-041: complementary sources remain merge contributors | T001, T018–T019, T033, T038–T039, T072–T078, T110–T111 |
+| FR-039: structured numeric rows declare their scope | T006, T032, T034, T041, T043, T046, T096, T100, T105, T119, T127 |
+| FR-040: live/backup/custom-path parity | T001, T032–T034, T111, T115, T122 |
+| FR-041: complementary sources remain merge contributors | T001, T018–T019, T033, T038–T039, T072–T078, T110–T111, T116, T122 |
 | FR-042: versioned same-role equivalence contract | T010, T017–T019, T033, T039, T072–T078, T110 |
 | FR-043: equivalent collapse and divergent ambiguity | T001, T033–T034, T038–T039, T043, T072–T082, T110–T111 |
 | FR-044: ambiguous rows never hydrate or resolve silently | T007–T009, T033–T034, T039, T043, T047, T072, T079–T080, T110 |
 | FR-045: opaque diagnostic occurrence references | T006–T010, T033, T039, T043, T048, T079, T100 |
-| FR-046: migration consumes active workspace scope | T003, T032, T048, T050–T053, T110 |
-| FR-047: preview/apply bind and revalidate one target | T048–T055, T110 |
-| FR-048: divergent destructive targets are refused | T048–T055, T072, T079, T110 |
-| FR-049: Store-only/merged migration is refused | T048, T054, T110 |
-| FR-050: existing unambiguous migration remains compatible | T048–T055, T110 |
+| FR-046: migration consumes active workspace scope | T003, T032, T048, T050–T053, T110, T124, T127 |
+| FR-047: preview/apply bind and revalidate one target | T048–T055, T110, T124 |
+| FR-048: divergent destructive targets are refused | T048–T055, T072, T079, T110, T124 |
+| FR-049: Store-only/merged migration is refused | T048, T054, T110, T124, T127 |
+| FR-050: existing unambiguous migration remains compatible | T048–T055, T110, T124, T127 |
 | FR-051: temporary plaintext privacy is platform-qualified | T004, T020, T057–T064, T110, T114–T115 |
 | FR-052: temporary workspaces are unique/exclusive | T001, T057–T064, T110 |
-| FR-053: exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115 |
-| FR-054: final archives are private by default where supported | T057, T060, T069, T110, T114–T115 |
-| FR-055: overwrite/parent permissions remain safe | T057, T060, T069, T110 |
+| FR-053: exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115, T121, T129–T131 |
+| FR-054: final archives are private by default where supported | T057, T060, T069, T110, T114–T115, T121, T131 |
+| FR-055: overwrite/parent permissions and publication identity remain safe | T057, T060, T069, T110, T121, T127–T131 |
 | FR-056: provider selection probes requested capabilities | T056, T059, T065, T067–T068, T071, T095 |
 | FR-057: automatic selection falls back to a capable provider | T056, T059, T065, T067–T068, T071, T095 |
 | FR-058: forced incapable providers fail actionably | T007–T009, T056, T059, T065, T067–T068, T071 |
 | FR-059: capability failures never become false partial success | T019, T025, T056, T059–T060, T064–T065, T067–T068, T071, T110 |
-| FR-060: supported runtimes succeed or fail explicitly | T005, T056, T059, T065–T068, T094–T095, T103–T104, T114–T115 |
+| FR-060: supported runtimes succeed or fail explicitly | T005, T056, T059, T065–T068, T094–T095, T103–T104, T114–T115, T126–T127 |
 | FR-061: decoded-session retention is bounded by `C+A` | T006, T010, T083–T090, T110 |
 | FR-062: bulk operations stream and release payloads | T031, T083, T085, T089–T090, T110 |
 | FR-063: read context binds immutable source/scope | T006, T083–T089, T110 |
 | FR-064: context misuse returns typed errors | T007–T009, T083–T089 |
 | FR-065: rejected resolution remains retryable/isolated | T083–T090, T110 |
-| FR-066: shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115 |
-| FR-067: complete changelog and upgrade warnings | T013, T092, T105, T108 |
+| FR-066: shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115, T126–T127 |
+| FR-067: complete changelog and upgrade warnings | T013, T092, T105, T108, T118–T119, T127 |
 | FR-068: actionable empty/ambiguity diagnostics | T007–T009, T030, T032, T034, T047, T079–T080, T099, T105 |
-| FR-069: exact-artifact gates and actual manifest producer | T005, T060, T070, T093–T096, T101–T104, T114–T115 |
-| FR-070: runtime capability-boundary validation | T005, T056, T059, T065, T094–T095, T103–T104, T114–T115 |
-| FR-071: stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113 |
+| FR-069: exact-artifact gates and actual manifest producer | T005, T060, T070, T093–T096, T101–T104, T114–T115, T123, T126–T127 |
+| FR-070: runtime capability-boundary validation | T005, T056, T059, T065, T094–T095, T103–T104, T114–T115, T126–T127 |
+| FR-071: stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113, T118–T119, T127–T128, T132 |
 | FR-072: distributed end-to-end off-scope evidence | T003–T004, T031–T034, T037, T042–T047, T093, T111, T114–T115 |
-| FR-073: locked v0.16/v0.17 backward-compatibility suite | T002, T011–T016, T021–T029, T110, T114 |
-| FR-074: cross-source/layout/runtime validation fixture matrix | T001, T012–T020, T030–T034, T048–T050, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115 |
-| FR-075: mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110 |
+| FR-073: locked v0.16/v0.17 backward-compatibility suite | T002, T011–T016, T021–T029, T110, T114, T125, T132 |
+| FR-074: cross-source/layout/runtime validation fixture matrix | T001, T012–T020, T030–T034, T048–T050, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T124, T126 |
+| FR-075: mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110, T123, T130–T132 |
 | FR-076: tool activity rendering and message filtering | T017–T018, T091, T098, T110–T111 |
-| FR-077: v0.16 identity/completeness/idempotency faults | T002, T005, T012, T015, T017–T018, T021–T029, T110, T114 |
+| FR-077: v0.16 identity/completeness/idempotency faults | T002, T005, T012, T015, T017–T018, T021–T029, T110, T114, T125, T132 |
 | FR-078: locked v0.17 corrective convergence | T013, T016, T023–T029, T092, T108, T110, T114–T115 |
 | FR-079: unknown fields and deterministic UTF-8/BOM policy | T007–T009, T020, T022, T025, T105, T110 |
-| FR-080: versioned bounded JSONL, SQLite, and ZIP source parsing | T004, T006–T009, T020, T022, T037, T060, T063, T069, T088, T099, T105, T110–T112, T114 |
-| SC-001: v0.16 session/message/tool identities remain stable | T002, T011–T015, T017–T018, T021–T024, T027–T029, T110 |
-| SC-002: upgraded complete replacement is lossless/idempotent | T002, T012, T015–T016, T023–T029, T110 |
-| SC-003: scoped reads hydrate zero unrelated payloads | T001, T004, T031–T047, T110–T111 |
-| SC-004: scoped indices round-trip without global regressions | T003, T032–T034, T038–T043, T046, T048, T052–T053, T110 |
-| SC-005: ambiguity and ineligible migration stop before writes | T048–T055, T072, T079, T110 |
+| FR-080: versioned bounded JSONL, SQLite, and ZIP source parsing | T004, T006–T009, T020, T022, T037, T060, T063, T069, T088, T099, T105, T110–T112, T114, T120 |
+| FR-081: corrected complete-message public search coordinates | T118, T127–T128, T110, T113–T115 |
+| FR-082: integrity-gated and confined restore publication | T127–T130, T110, T114–T115 |
+| SC-001: v0.16 session/message/tool identities remain stable | T002, T011–T015, T017–T018, T021–T024, T027–T029, T110, T116, T125, T132 |
+| SC-002: upgraded complete replacement is lossless/idempotent | T002, T012, T015–T016, T023–T029, T110, T113, T132 |
+| SC-003: scoped reads hydrate zero unrelated payloads | T001, T004, T031–T047, T110–T111, T117, T122–T123 |
+| SC-004: scoped indices round-trip without global regressions | T003, T032–T034, T038–T043, T046, T048, T052–T053, T110, T117, T119, T124, T127 |
+| SC-005: ambiguity and ineligible migration stop before writes | T048–T055, T072, T079, T110, T124 |
 | SC-006: equivalent/divergent/complementary groups and logical pagination are honest | T034, T043, T072–T082, T110–T111 |
-| SC-007: platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115 |
-| SC-008: capable driver or one actionable error | T056, T059, T065–T068, T071, T095, T110, T114–T115 |
-| SC-009: context and Source Read Limits v1 boundaries hold | T020, T022, T063, T069, T083–T090, T105, T110, T112, T114 |
+| SC-007: platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115, T121, T129–T131 |
+| SC-008: capable driver or one actionable error | T056, T059, T065–T068, T071, T095, T110, T114–T115, T126 |
+| SC-009: context and Source Read Limits v1 boundaries hold | T020, T022, T063, T069, T083–T090, T105, T110, T112, T114, T120 |
 | SC-010: timestamps/provenance are deterministic and honest | T015–T016, T091, T097–T100, T110 |
-| SC-011: shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115 |
-| SC-012: every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115 |
-| SC-013: every `required` Compatibility Matrix v1 cell passes | T001, T004, T020, T030–T034, T048, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115 |
-| SC-014: 100% of feature 016 public changes have evidence | T005, T109, T113, T115 |
+| SC-011: shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115, T126–T127 |
+| SC-012: every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115, T123, T126–T127 |
+| SC-013: every `required` Compatibility Matrix v1 cell passes | T001, T004, T020, T030–T034, T048, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T126–T127 |
+| SC-014: 100% of feature 016 public changes have evidence | T005, T109, T113, T115–T132 |
 | SC-015: structured tools remain visible/filterable | T017–T018, T091, T098, T110–T111 |
-| SC-016: required suite catches specified v0.16 regressions | T002, T005, T011–T015, T017–T018, T021–T029, T110, T114 |
+| SC-016: required suite catches specified v0.16 regressions | T002, T005, T011–T015, T017–T018, T021–T029, T110, T114, T132 |
 | SC-017: required suite proves v0.17 one-replacement convergence | T005, T013, T016, T023–T029, T092, T110, T114–T115 |
+| SC-018: search coordinates exactly identify complete returned data | T118, T127–T128, T110, T113–T115 |
+| SC-019: post-publication permission failure reports final-path identity honestly | T121, T127–T128, T131, T110, T114–T115 |
+| SC-020: corrupt or unsafe restore entries never reach a destination | T127–T130, T110, T114–T115 |
 
 ---
 
@@ -426,7 +464,7 @@ US1 + US2 + US3 + US4 + US5 + US6 -> US7 -> Cross-cutting gates
 
 ### User Story 1
 
-After T011–T013 establish the oracle inputs, run T014, T015, T016, T017, and T018 in parallel, then complete T019–T020. Execute the implementation sequence T021–T029 in listed order so the frozen identity and parsing contracts precede merge, relationship, fidelity, and public projection work.
+After T011–T013 establish the tagged and generic contract inputs, run T014, T015, T016, T017, and T018 in parallel, then complete T019–T020. Execute the implementation sequence T021–T029 in listed order so the frozen identity and parsing contracts precede merge, relationship, fidelity, and public projection work.
 
 ### User Story 2
 
@@ -460,8 +498,8 @@ Run T091–T096 in parallel as failing release/output contracts. Execute T097–
 
 1. Complete Setup and Foundational Contracts.
 2. Lock v0.16/v0.17 evidence before production changes.
-3. Complete US1 and run its independent unchanged-consumer synchronization test.
-4. Stop if any pre-existing Composer session/message/tool key changes or the third sync writes.
+3. Complete US1 and run its independent generic key/binding, complete/degraded, and idempotence contract test.
+4. Stop if any pre-existing Composer session/message/tool key changes or generic repeated application is not idempotent; reserve exact unchanged-consumer synchronization/rollback proof for T113.
 
 The MVP is **US1 only** because it prevents irreversible archive-key drift. It is not a release candidate until the remaining P1 security, scope, migration, shipped-contract, and fail-closed release-safety stories also pass; US7 cannot be deferred.
 
@@ -480,7 +518,7 @@ The MVP is **US1 only** because it prevents irreversible archive-key drift. It i
 
 After Phase 2, use separate owners for:
 
-- compatibility oracle and identity/merge work;
+- compatibility evidence and identity/merge work;
 - workspace catalog/scope/I/O observation;
 - private temporary storage and SQLite capability selection;
 - release scripts/package smoke and documentation skeletons.
@@ -494,8 +532,15 @@ Merge those lanes only through the serialized hotspots listed above. A task mark
 - Tests are release-blocking deliverables, not optional examples.
 - Core/CLI indices remain one-based; public library read indices remain zero-based; public migration selectors remain one-based. These are documented interface contracts, not runtime boolean options, and numeric indices remain ephemeral within their listing scope.
 - Public `Session.id` remains the native Cursor UUID; physical locators never become public IDs.
-- The unchanged-consumer compatibility contract excludes standalone `codeBlocks` and tool `files`; semantically required evidence must be projected into consumed fields or mark the view partial. Cursor-history owns the complete replacement-safe view and signal; the unchanged consumer owns atomic persistence and rollback.
+- The recurring generic downstream compatibility contract excludes standalone `codeBlocks` and tool `files`; semantically required evidence must be projected into consumed fields or mark the view partial. Cursor-history owns the complete replacement-safe view and signal. Exact third-party adapter/digest/persistence/transaction/rollback behavior is not vendored or emulated and is verified only in the owner-authorized external T113 gate.
 - Fatal JSON errors migrate from v0.17 legacy stream placement to `stderr` in this corrective release; for the same fixture every pre-existing field name/type/value and exit category remains stable while documented additive fields are allowed. Nonfatal results remain on `stdout`, and T092/T108 provide regression evidence and migration guidance.
+- 0.18.0 directly corrects released public search coordinates under locked v0.16/v0.17 fixtures;
+  consumers must recompute persisted search coordinates. Public JSON export `index` is additive
+  zero-based metadata because tagged v0.16/v0.17 exports omitted it.
+- Rename/link is the backup publication commit point. A later permission/identity failure is a typed
+  nonzero post-commit failure, not proof of rollback or a blind-force retry case. Only
+  `pathIdentityVerified: true` permits the final path to be described as the published archive or
+  receive manual mode-correction guidance.
 - Owner-only mode assertions apply on permission-aware platforms. Windows coverage verifies system-temporary-directory ACL inheritance, exclusive creation, cleanup, and typed failure without claiming independently unverified cross-user isolation.
 - The Matrix v1 table in `spec.md` is normative; `specs/016-harden-session-integrity/contracts/compatibility-matrix-v1.md` is its design projection and packaged `docs/compatibility.md` is its shipped projection. T111 fails on any row/cell drift in either, and new representations or carriers require an explicit matrix-version update.
 - The constitution v1.2.0 amendment already exists; T109 enforces 100% feature 016 evidence coverage in review rather than redefining it.
