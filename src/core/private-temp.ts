@@ -30,6 +30,7 @@ import { performance } from 'node:perf_hooks';
 
 import { TemporaryArtifactCleanupError } from './errors.js';
 
+/** Stable discovery filename; the JSON formatVersion is the schema and deletion-safety boundary. */
 export const PRIVATE_TEMP_MARKER_FILENAME = '.cursor-history-private-temp-v1.json';
 const PRIVATE_TEMP_MARKER_MAX_BYTES = 4 * 1024;
 const CATCHABLE_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
@@ -45,7 +46,7 @@ const CURRENT_UID = typeof process.getuid === 'function' ? process.getuid() : un
 const FALLBACK_CURRENT_PROCESS_TOKEN = `process:${process.pid}:${Math.trunc(performance.timeOrigin * 1_000)}`;
 
 export interface PrivateTempMarker {
-  readonly formatVersion: 1;
+  readonly formatVersion: 2;
   readonly uid?: number;
   readonly pid: number;
   /** Boot-scoped Linux PID-namespace identity; absent where procfs cannot verify it. */
@@ -53,6 +54,16 @@ export interface PrivateTempMarker {
   readonly processStartToken: string;
   readonly createdAt: string;
 }
+
+interface LegacyPrivateTempMarker {
+  readonly formatVersion: 1;
+  readonly uid?: number;
+  readonly pid: number;
+  readonly processStartToken: string;
+  readonly createdAt: string;
+}
+
+type RecoverablePrivateTempMarker = PrivateTempMarker | LegacyPrivateTempMarker;
 
 export interface PrivateTempWorkspaceOptions {
   readonly prefix: string;
@@ -94,7 +105,7 @@ export interface StalePrivateTempRecoveryResult {
 }
 
 interface MarkerReadResult {
-  readonly marker?: PrivateTempMarker;
+  readonly marker?: RecoverablePrivateTempMarker;
   readonly reason?: StalePrivateTempRetentionReason;
 }
 
@@ -230,7 +241,9 @@ export function getProcessStartToken(pid = process.pid): string | undefined {
 function createMarker(): PrivateTempMarker {
   const pidNamespaceToken = readLinuxPidNamespaceToken();
   return {
-    formatVersion: 1,
+    // Version 2 is a deletion-safety boundary, not merely descriptive metadata. A v1 reader that
+    // does not understand PID namespaces rejects this marker before probing a namespace-local PID.
+    formatVersion: 2,
     ...(CURRENT_UID === undefined ? {} : { uid: CURRENT_UID }),
     pid: process.pid,
     ...(pidNamespaceToken === undefined ? {} : { pidNamespaceToken }),
@@ -340,12 +353,14 @@ function isDirectChildPath(directoryPath: string, candidatePath: string): boolea
   );
 }
 
-function validateMarkerValue(value: unknown): PrivateTempMarker | undefined {
+function validateMarkerValue(value: unknown): RecoverablePrivateTempMarker | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const marker = value as Record<string, unknown>;
-  if (marker['formatVersion'] !== 1) return undefined;
+  const formatVersion = marker['formatVersion'];
+  if (formatVersion !== 1 && formatVersion !== 2) return undefined;
   if (!Number.isSafeInteger(marker['pid']) || Number(marker['pid']) <= 0) return undefined;
   if (
+    formatVersion === 2 &&
     marker['pidNamespaceToken'] !== undefined &&
     (typeof marker['pidNamespaceToken'] !== 'string' ||
       !/^linux-pidns:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9]\d*$/iu.test(
@@ -375,15 +390,23 @@ function validateMarkerValue(value: unknown): PrivateTempMarker | undefined {
     return undefined;
   }
 
-  return {
-    formatVersion: 1,
+  const commonFields = {
     ...(marker['uid'] === undefined ? {} : { uid: Number(marker['uid']) }),
     pid: Number(marker['pid']),
-    ...(marker['pidNamespaceToken'] === undefined
-      ? {}
-      : { pidNamespaceToken: marker['pidNamespaceToken'] }),
     processStartToken: marker['processStartToken'],
     createdAt: marker['createdAt'],
+  };
+  if (formatVersion === 1) {
+    // v1 predates PID-namespace provenance. Unknown fields are intentionally ignored, including
+    // the field briefly emitted without a version bump, so Linux recovery can recognize the
+    // marker only as legacy and retain it conservatively.
+    return { formatVersion: 1, ...commonFields };
+  }
+  const pidNamespaceToken = marker['pidNamespaceToken'];
+  return {
+    formatVersion: 2,
+    ...commonFields,
+    ...(typeof pidNamespaceToken === 'string' ? { pidNamespaceToken } : {}),
   };
 }
 
@@ -427,8 +450,11 @@ function readMarker(candidatePath: string): MarkerReadResult {
 
 type OwnerProcessStatus = 'dead' | 'live' | 'reused' | 'uncertain';
 
-function ownerProcessStatus(marker: PrivateTempMarker): OwnerProcessStatus {
+function ownerProcessStatus(marker: RecoverablePrivateTempMarker): OwnerProcessStatus {
   if (process.platform === 'linux') {
+    // A v1 marker can be read for compatibility but cannot prove the PID namespace in which its
+    // numeric PID and start token were recorded. Never use those values to authorize deletion.
+    if (marker.formatVersion === 1) return 'uncertain';
     const currentPidNamespaceToken = readLinuxPidNamespaceToken();
     if (
       !marker.pidNamespaceToken ||
@@ -437,7 +463,7 @@ function ownerProcessStatus(marker: PrivateTempMarker): OwnerProcessStatus {
     ) {
       return 'uncertain';
     }
-  } else if (marker.pidNamespaceToken !== undefined) {
+  } else if (marker.formatVersion === 2 && marker.pidNamespaceToken !== undefined) {
     // A marker carrying Linux PID-namespace provenance cannot be interpreted safely elsewhere.
     return 'uncertain';
   }

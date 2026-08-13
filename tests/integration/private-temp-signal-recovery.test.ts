@@ -51,7 +51,7 @@ process.send({
   paths: workspaces.map(({ workspace }) => workspace.path),
   files: workspaces.map(({ file }) => file),
   markerPaths: workspaces.map(({ workspace }) =>
-    workspace.path + '/.cursor-history-private-temp-v1.json'
+    workspace.path + '/${PRIVATE_TEMP_MARKER_FILENAME}'
   ),
   umask: process.umask(),
 });
@@ -279,7 +279,7 @@ describe.runIf(process.platform !== 'win32')(
       expect(fileMode(staleFile)).toBe(0o600);
       expect(fileMode(markerPath)).toBe(0o600);
       expect(marker).toMatchObject({
-        formatVersion: 1,
+        formatVersion: 2,
         pid: child.pid,
         processStartToken: expect.any(String),
         createdAt: expect.any(String),

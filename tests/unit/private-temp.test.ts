@@ -41,7 +41,18 @@ function mode(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
-function writeMarker(directory: string, marker: PrivateTempMarker | string): void {
+interface LegacyTestMarker {
+  readonly formatVersion: 1;
+  readonly uid?: number;
+  readonly pid: number;
+  readonly pidNamespaceToken?: string;
+  readonly processStartToken: string;
+  readonly createdAt: string;
+}
+
+type TestMarker = PrivateTempMarker | LegacyTestMarker;
+
+function writeMarker(directory: string, marker: TestMarker | string): void {
   const markerPath = join(directory, PRIVATE_TEMP_MARKER_FILENAME);
   const descriptor = openSync(markerPath, 'wx', 0o600);
   try {
@@ -55,7 +66,7 @@ function writeMarker(directory: string, marker: PrivateTempMarker | string): voi
 function makeMarker(overrides: Partial<PrivateTempMarker> = {}): PrivateTempMarker {
   const pidNamespaceToken = currentPidNamespaceToken();
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     ...(typeof process.getuid === 'function' ? { uid: process.getuid() } : {}),
     pid: process.pid,
     ...(pidNamespaceToken === undefined ? {} : { pidNamespaceToken }),
@@ -63,6 +74,43 @@ function makeMarker(overrides: Partial<PrivateTempMarker> = {}): PrivateTempMark
     createdAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function makeLegacyMarker(overrides: Partial<LegacyTestMarker> = {}): LegacyTestMarker {
+  return {
+    formatVersion: 1,
+    ...(typeof process.getuid === 'function' ? { uid: process.getuid() } : {}),
+    pid: process.pid,
+    processStartToken: getProcessStartToken() ?? `test:${process.pid}`,
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/** Emulate the pre-v2 reader's format gate, which intentionally ignores unknown fields. */
+function oldV1ReaderReachesLivenessProbe(value: unknown, livenessProbe: () => void): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const marker = value as Record<string, unknown>;
+  if (marker['formatVersion'] !== 1) return false;
+  if (!Number.isSafeInteger(marker['pid']) || Number(marker['pid']) <= 0) return false;
+  if (
+    typeof marker['processStartToken'] !== 'string' ||
+    !/^[A-Za-z0-9._:-]{1,512}$/u.test(marker['processStartToken'])
+  ) {
+    return false;
+  }
+  if (typeof marker['createdAt'] !== 'string') return false;
+  const parsedCreatedAt = new Date(marker['createdAt']);
+  if (
+    !Number.isFinite(parsedCreatedAt.getTime()) ||
+    parsedCreatedAt.toISOString() !== marker['createdAt']
+  ) {
+    return false;
+  }
+  if (typeof process.getuid === 'function' && !Number.isSafeInteger(marker['uid'])) return false;
+
+  livenessProbe();
+  return true;
 }
 
 function currentPidNamespaceToken(): string | undefined {
@@ -95,7 +143,7 @@ describe('PrivateTempWorkspace creation and cleanup', () => {
     try {
       const filePath = workspace.createFile('snapshot.vscdb');
       expect(workspace.path.startsWith(parent)).toBe(true);
-      expect(workspace.marker.formatVersion).toBe(1);
+      expect(workspace.marker.formatVersion).toBe(2);
       expect(workspace.marker.pid).toBe(process.pid);
       if (process.platform === 'linux' && currentPidNamespaceToken()) {
         expect(workspace.marker.pidNamespaceToken).toBe(currentPidNamespaceToken());
@@ -138,6 +186,38 @@ describe('PrivateTempWorkspace creation and cleanup', () => {
     }
 
     expect(workspaces.every((workspace) => !existsSync(workspace.path))).toBe(true);
+  });
+
+  it('uses a v2 format gate that an older v1 reader rejects before probing liveness', () => {
+    const parent = createParent();
+    const workspace = createPrivateTempWorkspace({ prefix: 'version-boundary-', parent });
+    let livenessProbeCount = 0;
+
+    try {
+      const serializedMarker = JSON.parse(
+        readFileSync(join(workspace.path, PRIVATE_TEMP_MARKER_FILENAME), 'utf8')
+      ) as unknown;
+      expect(
+        oldV1ReaderReachesLivenessProbe(serializedMarker, () => {
+          livenessProbeCount += 1;
+        })
+      ).toBe(false);
+      expect(livenessProbeCount).toBe(0);
+
+      // This control proves the emulated reader has its released unknown-field behavior: merely
+      // adding pidNamespaceToken to a v1 payload would still reach the dangerous liveness step.
+      expect(
+        oldV1ReaderReachesLivenessProbe(
+          { ...(serializedMarker as Record<string, unknown>), formatVersion: 1 },
+          () => {
+            livenessProbeCount += 1;
+          }
+        )
+      ).toBe(true);
+      expect(livenessProbeCount).toBe(1);
+    } finally {
+      workspace.dispose();
+    }
   });
 
   it('tracks caller-created artifacts, rejects external paths, and never follows symlinks', () => {
@@ -289,14 +369,11 @@ describe('conservative stale workspace recovery', () => {
     const wrongMarkerOwner = join(parent, `${prefix}wrong-marker-owner`);
     mkdirSync(wrongMarkerOwner, { mode: 0o700 });
     if (process.platform !== 'win32') chmodSync(wrongMarkerOwner, 0o700);
-    writeMarker(
-      wrongMarkerOwner,
-      makeMarker(
-        typeof process.getuid === 'function'
-          ? { uid: process.getuid() + 1 }
-          : { formatVersion: 2 as 1 }
-      )
-    );
+    if (typeof process.getuid === 'function') {
+      writeMarker(wrongMarkerOwner, makeMarker({ uid: process.getuid() + 1 }));
+    } else {
+      writeMarker(wrongMarkerOwner, '{"formatVersion":3}');
+    }
 
     const symlinkTarget = join(parent, 'symlink-target');
     mkdirSync(symlinkTarget, { mode: 0o700 });
@@ -385,16 +462,14 @@ describe('conservative stale workspace recovery', () => {
   );
 
   it.runIf(process.platform === 'linux')(
-    'retains a legacy or unverifiable marker without PID namespace identity',
+    'retains a valid v1 legacy marker even when its PID/start pair appears reused',
     () => {
       const parent = createParent();
       const prefix = 'missing-pidns-';
       const candidate = join(parent, `${prefix}candidate`);
       mkdirSync(candidate, { mode: 0o700 });
       chmodSync(candidate, 0o700);
-      const marker = makeMarker({ processStartToken: 'apparently-reused-process' });
-      const { pidNamespaceToken: _omitted, ...markerWithoutNamespace } = marker;
-      writeMarker(candidate, markerWithoutNamespace);
+      writeMarker(candidate, makeLegacyMarker({ processStartToken: 'apparently-reused-process' }));
       writeFileSync(join(candidate, 'plaintext.db'), 'private', { mode: 0o600 });
 
       const result = recoverStalePrivateTempWorkspaces({ prefix, parent });
@@ -404,6 +479,58 @@ describe('conservative stale workspace recovery', () => {
       expect(existsSync(candidate)).toBe(true);
     }
   );
+
+  it.runIf(process.platform === 'linux')(
+    'treats a v1 marker carrying an unknown namespace field as legacy and uncertain',
+    () => {
+      const parent = createParent();
+      const prefix = 'legacy-extra-pidns-';
+      const candidate = join(parent, `${prefix}candidate`);
+      mkdirSync(candidate, { mode: 0o700 });
+      chmodSync(candidate, 0o700);
+      writeMarker(
+        candidate,
+        makeLegacyMarker({
+          pidNamespaceToken: currentPidNamespaceToken(),
+          processStartToken: 'apparently-reused-process',
+        })
+      );
+      writeFileSync(join(candidate, 'plaintext.db'), 'private', { mode: 0o600 });
+
+      const result = recoverStalePrivateTempWorkspaces({ prefix, parent });
+
+      expect(result.recoveredPaths).toEqual([]);
+      expect(result.retained).toEqual([{ path: candidate, reason: 'owner-status-uncertain' }]);
+      expect(existsSync(candidate)).toBe(true);
+    }
+  );
+
+  it('rejects malformed v2 and unknown-version markers before attempting recovery', () => {
+    const parent = createParent();
+    const prefix = 'invalid-versioned-';
+    const malformedV2 = join(parent, `${prefix}malformed-v2`);
+    const unknownV3 = join(parent, `${prefix}unknown-v3`);
+    for (const candidate of [malformedV2, unknownV3]) {
+      mkdirSync(candidate, { mode: 0o700 });
+      if (process.platform !== 'win32') chmodSync(candidate, 0o700);
+      writeFileSync(join(candidate, 'plaintext.db'), 'private', { mode: 0o600 });
+    }
+    writeMarker(malformedV2, {
+      ...makeMarker(),
+      pidNamespaceToken: 'linux-pidns:not-an-inode',
+    });
+    writeMarker(unknownV3, `${JSON.stringify({ ...makeMarker(), formatVersion: 3 })}\n`);
+
+    const result = recoverStalePrivateTempWorkspaces({ prefix, parent });
+
+    expect(result.recoveredPaths).toEqual([]);
+    expect(result.retained).toEqual([
+      { path: malformedV2, reason: 'invalid-marker' },
+      { path: unknownV3, reason: 'invalid-marker' },
+    ]);
+    expect(existsSync(malformedV2)).toBe(true);
+    expect(existsSync(unknownV3)).toBe(true);
+  });
 
   it('rejects a malformed PID namespace marker instead of attempting recovery', () => {
     const parent = createParent();
