@@ -160,15 +160,46 @@ owner-authorized external checkout must resolve to the recorded authorized revis
 third-party adapter, digest, policy, SQLite schema/transaction, rollback, or downstream archive is
 copied into recurring CI.
 
+Create the certification workspace as a fresh owner-private directory. Verify the source archive
+against the maintainer-approved digest in memory, reject unsafe archive members, and extract it with
+owner-only permissions. Before any parser or consumer lane runs, inventory the entire extracted tree
+with a private path/type/mode/size/content manifest; compare the exact same inventory again from a
+`finally` path after every handled success or failure. An uncatchable process termination invalidates
+the run; keep any residue owner-private, explicitly refuse to reuse it, and delete it before a fresh
+run. No formal result is valid if the tree changed, if the archive or extracted tree was reused from
+an earlier exploratory run, if a non-owner-accessible artifact was created, or if any private
+manifest/digest was retained in the external aggregate attestation. Delete the fresh extracted tree
+and every private intermediate after certification.
+
+Bind the run before dynamic imports or data access to the candidate revision and one checksum-
+addressed pre-freeze packed candidate, the official v0.16 revision/tree/distribution digest, the ARR
+revision and authorized source-blob inventory, the validation-harness manifest, the runtime and
+resolved production-dependency tree, and the exact policy version. Any mismatch aborts before source
+content is opened. The pre-freeze candidate is T113 evidence only; it is not the final T115 release
+tarball, and any repository edit invalidates it and restarts T112–T113.
+
 The private differential must cover every discovered session, not a sample. Compare every
 pre-existing public library field, optional own-property, ordering rule, null/omission shape, message
 binding, and tool binding separately from allowlisted additive fields and individually documented
-versioned exceptions. Then, in that owner-authorized external ARR checkout, pass every normalized
-session through the unchanged vibe-history adapter and its real sync policy/SQLite transaction:
-import the v0.16 view, apply the candidate view, and apply it again. All old keys must retain their
-original message/tool bindings, no row may be lost or duplicated, and the final repeated
-synchronization must write nothing. Force one transaction failure and reopen the real external
-database to prove complete rollback before the successful retry.
+versioned exceptions. T113 then runs two separately reported, mandatory external-consumer lanes from
+the same pinned owner-authorized ARR checkout:
+
+1. The **real-corpus lane** keeps Store provably empty and passes every normalized Composer-only
+   session through the unchanged vibe-history adapter and its real sync policy/SQLite persistence
+   path. Import the v0.16 view, repeat it with zero writes, apply the candidate view, compare every
+   non-excepted durable old value and every key/relationship/binding, separately count each allowed
+   predicate-guarded scalar correction, and apply the unchanged candidate again with zero writes. No
+   row may be lost, duplicated, or rebound.
+2. The **fictional-transaction lane** uses only fixed fictional Composer and Store values with that
+   same unchanged adapter, comparison policy, digest, and real SQLite transaction. Perform one
+   complete replacement, force a late transaction failure, reopen the database to prove exact
+   pre-transaction rollback, retry successfully, and repeat with zero writes. This lane must not
+   copy, transform, hash into, or otherwise derive any ID, path, title, content, timestamp, ordering,
+   or tool value from the real corpus. Its result must never be described as a Store transition
+   observed in the real corpus.
+
+Both lanes must pass before T113 passes. Evidence must distinguish the real-corpus compatibility
+result from the fictional transaction result; neither lane substitutes for the other.
 
 The structural synthetic regressions run before this private pass and cover v0.16
 `String.localeCompare()` equal-time workspace discovery, canonical UUID lookup versus exact
@@ -186,14 +217,17 @@ tool bindings, even when the straightforward validation is quadratic in corpus s
 Never retain or print raw errors or diffs that can contain IDs, paths, titles, content, timestamps,
 or stable hashes. Raw source, full outputs, comparison intermediates, and the downstream database
 remain `0700`/`0600` private temporary artifacts and are deleted after certification. The retained
-external record may contain only aggregate counts and named compatibility categories.
+external record may contain only non-private code/artifact bindings, aggregate counts, named
+compatibility categories, and pass/fail assertions. It must not retain the source-archive digest,
+raw-tree manifest, or any content-derived per-session digest.
 
-Real data is discovery evidence only. It must never be copied, transformed, redacted, hashed, or
-used as generator input for a committed regression fixture. When it reveals a missing structural
-case, hand-author the analogous case with fixed fictional values in the no-input synthetic fixture
-generator, run deterministic regeneration/hash/sensitive-scan/poison checks, and rerun the focused
-regression. Any resulting repository change invalidates the previous preflight/differential and
-restarts T112–T113.
+Real data is discovery evidence only. Apart from the ephemeral owner-private archive/tree integrity
+digests required above—which must be deleted and must not enter aggregate evidence—it must never be
+copied, transformed, redacted, hashed into, or otherwise used as input to a committed regression
+fixture or the fictional lane. When it reveals a missing structural case, hand-author the analogous
+case with fixed fictional values in the no-input synthetic fixture generator, run deterministic
+regeneration/hash/sensitive-scan/poison checks, and rerun the focused regression. Any resulting
+repository change invalidates the previous preflight/differential and restarts T112–T113.
 
 ## Exact-tarball maintainer verification (T115)
 
@@ -253,8 +287,8 @@ delete the maintainer's original source archive without separate authorization.
 ## External aggregate attestations
 
 Keep both records outside the repository. Replace every bracketed item with aggregate or abstract
-information only. They are separate gates: T113 runs before the final checklist freeze and therefore
-has no official tarball hash, while T115 binds the later frozen revision to the formal workflow
+information only. They are separate gates: T113 binds its one pre-freeze candidate artifact but has
+no final release-tarball hash, while T115 binds the later frozen revision to the formal workflow
 artifact. Delete private raw inputs and working artifacts according to the maintainer's local
 secure-data procedure after verification.
 
@@ -263,23 +297,40 @@ secure-data procedure after verification.
 ```text
 task: T113
 candidate_source_revision: [pre-freeze candidate revision]
+candidate_artifact_sha256: [single pre-freeze packed candidate digest]
+candidate_artifact_verified_before_import: [pass/fail]
 v016_oracle_revision: [official v0.16.0 revision]
+v016_oracle_tree: [official source tree]
+v016_oracle_distribution_sha256: [built distribution digest]
 external_consumer_arr: [authorized external revision]
 external_consumer_provenance: [license and source-blob verification pass/fail]
+validation_harness_manifest_sha256: [non-private harness manifest digest]
+runtime_dependency_tree_sha256: [non-private resolved production tree digest]
+source_archive_maintainer_digest_verified: [pass/fail; do not retain the digest]
+fresh_safe_extraction: [pass/fail]
+raw_tree_before_after_identical: [pass/fail and aggregate entry count; do not retain manifests]
+owner_only_artifacts: [pass/fail]
 platform: [OS/architecture]
 node: [version]
-corpus_counts: [aggregate sessions/messages/tools]
+corpus_counts: [aggregate sessions/messages/code-blocks/tools]
 public_value_shape_differential: [pass/fail and aggregate category counts]
 all_candidate_association: [pass/fail and aggregate association counts]
-unchanged_consumer_initial_import: [pass/fail and aggregate writes]
-forced_transaction_failure: [pass/fail]
-transaction_rollback_reopen: [pass/fail with exact pre-transaction state restored]
-candidate_retry: [pass/fail and aggregate writes]
-old_key_binding_preservation: [pass/fail and aggregate session/message/tool counts]
-repeated_sync_writes: 0
+real_corpus_initial_import: [pass/fail and aggregate writes]
+real_corpus_v016_repeat_writes: 0
+real_corpus_candidate_upgrade: [pass/fail and aggregate writes]
+real_corpus_old_binding_preservation: [pass/fail and aggregate session/message/code-block/tool counts]
+real_corpus_durable_exception_counts: [aggregate FR-024/FR-036 predicate category counts]
+real_corpus_candidate_repeat_writes: 0
+fictional_transaction_complete_replacement: [pass/fail and aggregate writes]
+fictional_transaction_forced_failure: [pass/fail]
+fictional_transaction_rollback_reopen: [pass/fail with exact pre-transaction state restored]
+fictional_transaction_retry: [pass/fail and aggregate writes]
+fictional_transaction_final_repeat_writes: 0
+fictional_transaction_real_values_derived: 0
 documented_drift_categories: [aggregate additive/exception counts]
 private_modes: [aggregate mode results]
 temporary_residue_count: 0
+private_material_deleted: [pass/fail]
 overall_result: [pass/fail]
 ```
 

@@ -16,7 +16,12 @@ overwrite complete data. cursor-history owns the complete replacement-safe proje
 Recurring repository CI validates only a generic cursor-history-owned downstream key/binding plus
 complete/degraded/idempotence contract. The exact unchanged-consumer adapter, comparison policy,
 digest, persistence transaction, rollback, and repeat synchronization remain a release-blocking T113
-certification from an owner-authorized external checkout at the recorded upstream revision.
+certification from an owner-authorized external checkout at the recorded upstream revision. T113 has
+two mandatory lanes: the real Composer-only corpus, with Store empty, proves v0.16 import/repeat and
+candidate upgrade/repeat preserve every non-excepted durable old value and every key/binding while
+counting each allowed predicate-guarded scalar correction separately; a separate wholly fictional
+Composer-plus-Store corpus proves complete replacement, late-failure rollback/reopen, retry, and final
+zero-write synchronization without deriving any value from the real corpus.
 
 The same increment also binds destructive migration to an eligible Composer occurrence, centralizes
 private temporary-file handling, selects SQLite drivers by required capability, bounds decoded
@@ -279,9 +284,15 @@ priority or permit publication without it.
   and repeated-sync idempotence. Do not copy, vendor, or emulate the third party's adapter, digest,
   policy, schema, transaction, rollback, or downstream archive. Record the authorized upstream
   revision as an external-certification reference. T113 checks out that revision outside the
-  repository with owner authorization and alone executes its exact adapter, comparison/digest,
-  real SQLite import and replacement, forced rollback and reopen, successful retry, and repeated
-  synchronization. Publication remains blocked until both the recurring generic gate and T113 pass.
+  repository with owner authorization and alone executes its exact adapter, comparison/digest, and
+  real SQLite persistence in two separately reported lanes. The real Composer-only lane keeps Store
+  empty and passes the entire authorized corpus through v0.16 import/repeat and candidate
+  upgrade/repeat with exact non-excepted durable old-value and every key/relationship/binding check,
+  plus separate counts for the allowed predicate-guarded scalar corrections. The wholly fictional
+  Composer-plus-Store lane performs complete replacement, a late forced rollback and reopen,
+  successful retry, and repeated zero-write synchronization. It copies or derives no value from the
+  real corpus. Publication remains blocked until both the recurring generic gate and both T113 lanes
+  pass.
 - Preserve v0.16's Composer discovery order when session `createdAt` values tie, including the
   exact `String.localeCompare()` workspace-path precedence used before the stable timestamp sort.
   Capture that legacy Composer position before replica reconciliation, keep it for merged or
@@ -555,7 +566,7 @@ priority or permit publication without it.
 
 | Area | Required evidence |
 |------|-------------------|
-| v0.16 compatibility | Recurring CI: native and missing Composer IDs, exact legacy `localeCompare()` discovery precedence, old tool ordinals, Store insertions at start/middle/end, both preferred sources, resolved active-branch parents/leaf with sidechains excluded, enrichment/tool changes, supported attachment evidence projected into public compatibility fields, ignored standalone attachment/code-block/tool-file fields, collisions, generic complete/degraded/idempotence. External T113 only: exact unchanged adapter/digest/policy, real SQLite replacement/rollback/reopen, and repeat-sync no-op at the recorded authorized upstream revision |
+| v0.16 compatibility | Recurring CI: native and missing Composer IDs, exact legacy `localeCompare()` discovery precedence, old tool ordinals, Store insertions at start/middle/end, both preferred sources, resolved active-branch parents/leaf with sidechains excluded, enrichment/tool changes, supported attachment evidence projected into public compatibility fields, ignored standalone attachment/code-block/tool-file fields, collisions, generic complete/degraded/idempotence. External T113 only: exact unchanged adapter/digest/policy; a real Composer-only, empty-Store full-corpus import/repeat and candidate upgrade/repeat with exact non-excepted durable old-value plus every key/relationship/binding check and separate allowed-scalar-correction counts; and a separate wholly fictional real-SQLite replacement/late-rollback/reopen/retry/final-no-op lane that derives no real value |
 | v0.17 convergence | Locked complete Store/merged baselines converge through one full replacement, produce no duplicate logical content, preserve native Composer IDs, then no-op; degraded transition explicitly excluded |
 | Public search coordinates | Tagged v0.16/v0.17 baselines plus the 0.18.0 correction: complete-array message index, complete-content UTF-16 offset, complete source line/context; non-first/multiline/mixed-case/astral/lowercase-expansion cases; identities and non-search fields unchanged |
 | Public JSON export | Tagged v0.16/v0.17 absence plus additive 0.18.0 zero-based library `index`; single and bulk exports agree without mutating the resolved source object |

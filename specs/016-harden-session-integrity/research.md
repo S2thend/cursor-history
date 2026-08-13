@@ -44,13 +44,21 @@ those deleted test-harness revisions.
 
 The exact no-vibe-history-change guarantee is a separate release-blocking T113 certification. With
 owner authorization, T113 uses an external checkout at the recorded upstream revision and runs that
-project's unchanged adapter, exact comparison policy and digest, and real SQLite persistence path.
-It imports the v0.16 view, applies the complete candidate view, forces a mid-transaction failure,
-reopens the database to prove full old-state rollback, retries successfully, and repeats the sync to
-prove zero further writes. The revision/license reference may be recorded in the repository, but no
-third-party implementation or downstream database is copied into recurring CI. cursor-history owns
-only the complete, replacement-safe projection and compatibility signal supplied to that consumer;
-it does not claim an arbitrary consumer's transactional persistence.
+project's unchanged adapter, exact comparison policy and digest, and real SQLite persistence path in
+two mandatory lanes. The real-corpus lane keeps Store provably empty, imports every authorized
+Composer-only v0.16 session, repeats with zero writes, applies the candidate, compares every
+non-excepted durable old value and every key/relationship/binding, separately counts only the
+allowed predicate-guarded scalar corrections, and repeats the candidate with zero writes. The
+fictional-transaction lane uses only fixed fictional Composer and Store values with the same
+consumer: it performs a complete
+replacement, forces a late transaction failure, reopens the database to prove full old-state
+rollback, retries successfully, and repeats with zero writes. The fictional lane never copies or
+derives a real ID, path, title, content, timestamp, ordering, or tool value, and its result is never
+presented as a Store transition observed in the real corpus. The revision/license reference may be
+recorded in the repository, but no third-party implementation or downstream database is copied into
+recurring CI. cursor-history owns only the complete, replacement-safe projection and compatibility
+signal supplied to that consumer; it does not claim an arbitrary consumer's transactional
+persistence.
 
 **Rationale**: The compatibility promise concerns durable keys and actual replacement behavior in
 the existing archive. A repository-owned generic model provides deterministic recurring regression

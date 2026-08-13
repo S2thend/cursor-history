@@ -63,10 +63,15 @@ current implementation. The projector-provenance test must:
 
 Recurring CI MUST NOT copy, vendor, emulate, or execute a third-party adapter, digest, policy,
 SQLite schema/transaction, rollback, or downstream archive. Before release, T113 uses the
-owner-authorized external checkout at the recorded revision to run those exact behaviors: import the
-v0.16 view, apply the complete candidate, force a mid-transaction failure and reopen the database,
-retry successfully, then repeat synchronization and require zero writes. The no-consumer-change
-guarantee is not approved until T113 passes.
+owner-authorized external checkout at the recorded revision to run those exact behaviors in two
+mandatory lanes. The real-corpus lane keeps Store empty, imports every authorized Composer-only
+v0.16 session, repeats with zero writes, applies the candidate, compares every non-excepted durable
+old value and every key/relationship/binding, separately counts only the allowed predicate-guarded
+scalar corrections, and repeats the candidate with zero writes. The separate fictional-transaction
+lane uses only fixed fictional Composer and Store values to perform complete replacement, force a
+late transaction failure, reopen to prove exact rollback, retry, and repeat with zero writes. It
+MUST NOT derive any value from the real corpus, and its result MUST NOT be described as a real-corpus
+Store transition. The no-consumer-change guarantee is not approved until both lanes pass.
 
 The committed raw-layout SQLite fixture is generated deterministically from wholly synthetic
 values. Its manifest records reproducible generation instructions, logical content, and SHA-256;
@@ -110,9 +115,11 @@ resolves the upgraded complete merge, applies it, then repeats the same input. I
 - cursor-history emits one complete replacement-safe projection and compatibility signal;
 - the next unchanged generic application performs zero writes.
 
-T113 separately proves the unchanged external consumer's exact key/digest comparison and real
-SQLite replacement/rollback/reopen/retry/repeat-sync behavior. Repository results must not be
-described as proving that external transaction.
+T113 separately proves the unchanged external consumer's exact key/digest comparison over the real
+Composer-only corpus and real SQLite replacement/rollback/reopen/retry/repeat-sync behavior over the
+wholly fictional transaction corpus. Repository results must not be described as proving that
+external transaction, and the fictional transition must not be described as occurring in the real
+corpus.
 
 ## 3. Locked v0.17 convergence
 
@@ -716,11 +723,14 @@ revision and the packed bytes never change afterward:
    test, and document, then restart the affected implementation and preflight work.
 3. Before freezing, run the documented owner-private full-corpus differential between the official
    v0.16.0 tag and the candidate over the same Composer-only source, including every released
-   library value/shape and the pinned unchanged-consumer SQLite transition. Real input may reveal a
+   library value/shape. Run both pinned unchanged-consumer lanes: the real Composer-only,
+   empty-Store import/repeat/upgrade/repeat compatibility lane and the separately reported wholly
+   fictional complete-replacement/late-rollback/reopen/retry/no-op lane. Real input may reveal a
    structural class, but no real value, redaction, hash, ordering, or derived artifact may enter a
-   committed fixture; reproduce the class manually with fixed fictional values, rerun its regression
-   and fixture safety gates, and restart the preflight. Do not sample, cap, time-limit, or stop after
-   an early success; use exhaustive all-candidate association even if that manual pass is quadratic.
+   committed fixture or the fictional lane; reproduce the class manually with fixed fictional
+   values, rerun its regression and fixture safety gates, and restart the preflight. Do not sample,
+   cap, time-limit, or stop after an early success; use exhaustive all-candidate association even if
+   that manual pass is quadratic.
 4. Run the preliminary full validation. Any failure or unplanned tracked edit returns to its owning
    task and restarts at the preflight and private differential. After a clean pass, write the one
    planned implementation checklist and make no other repository change.

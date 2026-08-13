@@ -702,8 +702,10 @@ Compatibility aliases:
 - cursor-history's ownership ends at this complete replacement-safe projection and signal. Recurring
   CI models only its public key/binding and complete/degraded/idempotence contract. The unchanged
   compatibility consumer owns its exact adapter, digest, policy, persistence transaction, and
-  rollback; only owner-authorized external T113 at the recorded upstream revision claims exact
-  downstream replacement and repeated-sync behavior.
+  rollback; only owner-authorized external T113 at the recorded upstream revision makes exact
+  downstream claims. Its real Composer-only, empty-Store lane claims v0.16 upgrade compatibility;
+  its separate wholly fictional Composer-plus-Store lane claims complete replacement,
+  rollback/reopen/retry, and repeated-sync behavior. Neither claim substitutes for the other.
 - For merged sessions, `activeBranchBubbleIds` and `activeBranchMessageIds` contain the same
   resolved selected-branch sequence. Leading, middle, and trailing Store-only active turns appear
   once; Store sidechains do not. Parent and leaf references use those resolved IDs.
