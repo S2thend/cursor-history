@@ -10,10 +10,9 @@ import { existsSync, readdirSync, statSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  findWorkspaceByPath,
-  findWorkspaces,
   createSessionReadContext,
   listSessions,
+  listSessionSummaries,
   openDatabase,
   openDatabaseReadWrite,
   updateComposerData,
@@ -48,13 +47,17 @@ import { ensureDriver, selectDatabaseDriver, type DriverName } from './database/
 import type { Database } from './database/types.js';
 import { resolveSourceReadLimits, SqliteSourceReadBudget } from './source-read-limits.js';
 import {
+  forEachBoundedComposerBubbleMetadata,
+  forEachBoundedComposerMetadata,
   forEachBoundedComposerValue,
+  getBoundedComposerMetadataByKey,
   readBoundedComposerValueByKey,
-  sqliteLikeLiteralPrefix,
 } from './composer-sqlite.js';
 import { resolveWorkspaceScope } from './workspace-scope.js';
+import { isNativeCursorUuid, logicalSessionIdKey, sessionIdsEqual } from './session-id.js';
 import type {
   ChatSessionSummary,
+  LogicalSessionSummary,
   MigrateSessionOptions,
   MigrateWorkspaceOptions,
   MigrationMode,
@@ -392,6 +395,8 @@ export interface InternalComposerLocator {
   /** Compatibility alias retained for internal callers written against the original draft. */
   readonly dbPath: string;
   readonly sessionId: string;
+  /** Exact case-preserving ID spelling bound in global cursorDiskKV, when present. */
+  readonly globalSessionId?: string;
   /** Position in the decoded workspace Composer array, or -1 for a global-only record. */
   readonly composerIndex: number;
   /** Fingerprint of the exact Composer record at composerIndex. */
@@ -467,6 +472,14 @@ interface ComposerOccurrence {
   readonly composerIndex: number;
   readonly composer: Record<string, unknown>;
   readonly fingerprint: string;
+}
+
+interface ComposerOccurrenceMetadata {
+  readonly workspaceId: string;
+  readonly workspacePath: string;
+  readonly databasePath: string;
+  readonly composerIndex: number;
+  readonly sessionId: string;
 }
 
 interface GlobalSessionRow {
@@ -732,19 +745,15 @@ async function findMigrationWorkspaceByPath(
   requested: string,
   dataPath: string | undefined,
   guard: MigrationReadGuard
-): Promise<Awaited<ReturnType<typeof findWorkspaceByPath>>> {
+): Promise<{
+  workspace: { id: string; path: string; dbPath: string; sessionCount: number };
+  dbPath: string;
+} | null> {
   throwIfMigrationAborted(guard.signal);
   const normalizedRequest = normalizePath(requested);
-  const workspaces = await findWorkspaces(dataPath, undefined, {
-    sqliteDriver: guard.sqliteDriver,
-    sourceReadLimits: guard.limits,
-    signal: guard.signal,
-  });
-  const workspace = workspaces.find((candidate) => pathsEqual(candidate.path, normalizedRequest));
-  if (workspace) return { workspace, dbPath: workspace.dbPath };
-
-  // Empty destinations are intentionally absent from findWorkspaces(), so
-  // locate their database using only workspace metadata and the captured root.
+  // Destructive target discovery is deliberately workspace.json-only. Calling
+  // findWorkspaces() here would decode every Composer catalog before the active
+  // scope is bound, including unrelated conversation metadata.
   const basePath = getCursorDataPath(dataPath);
   if (!existsSync(basePath)) return null;
   for (const entry of readdirSync(basePath, { withFileTypes: true })) {
@@ -768,59 +777,156 @@ async function findMigrationWorkspaceByPath(
   return null;
 }
 
-/**
- * Validate and enforce migration's Composer catalog value bounds before the
- * ordinary listing path decodes those values.
- */
-async function preflightComposerSourceLimits(
-  dataPath: string | undefined,
-  limits: Readonly<SourceReadLimitsV1>,
-  signal?: AbortSignal,
-  sqliteDriver?: DriverName
-): Promise<void> {
-  throwIfMigrationAborted(signal);
-  const basePath = getCursorDataPath(dataPath);
-  if (!existsSync(basePath)) return;
-  const databasePaths: string[] = [];
-  for (const entry of readdirSync(basePath, { withFileTypes: true })) {
-    throwIfMigrationAborted(signal);
-    if (!entry.isDirectory()) continue;
-    const databasePath = join(basePath, entry.name, 'state.vscdb');
-    if (existsSync(databasePath)) databasePaths.push(databasePath);
+interface WorkspaceComposerAddressInventory {
+  readonly materialized: Array<{ sessionId: string; composerIndex: number }>;
+  readonly selectedIds: string[];
+}
+
+/** Project only Composer IDs/array positions from a workspace catalog. */
+function loadWorkspaceComposerAddressInventory(
+  db: Database,
+  budget: SqliteSourceReadBudget,
+  signal?: AbortSignal
+): WorkspaceComposerAddressInventory {
+  const source = getBoundedComposerMetadataByKey(
+    db,
+    'ItemTable',
+    'composer.composerData',
+    budget,
+    signal
+  );
+  if (!source) return { materialized: [], selectedIds: [] };
+
+  const root = db
+    .prepare('SELECT json_type(value) AS rootType FROM ItemTable WHERE rowid = ?')
+    .get(source.rowId) as { rootType?: unknown } | undefined;
+  const rootType = root?.rootType;
+  if (rootType !== 'array' && rootType !== 'object') {
+    throw new TypeError('Composer workspace catalog is not a JSON array or object.');
   }
 
-  for (const databasePath of databasePaths.sort()) {
-    throwIfMigrationAborted(signal);
-    // SQLite aggregate counters reset for each independent workspace catalog;
-    // a batch never consumes one corpus-wide budget.
-    const budget = new SqliteSourceReadBudget(limits, 'fatal');
-    const db = await openDatabase(databasePath, { sqliteDriver, signal });
-    try {
-      try {
-        readBoundedComposerValueByKey(db, 'ItemTable', 'composer.composerData', budget, signal);
-      } catch (error) {
-        if (!isMissingMigrationTableError(error, 'ItemTable')) throw error;
+  const scanIds = (
+    path: '$' | '$.allComposers' | '$.selectedComposerIds',
+    objectIds: boolean
+  ): Array<{ sessionId: string; itemIndex: number }> => {
+    // Each independently addressable JSON catalog has its own aggregate
+    // budget, matching the established per-catalog source-limit contract.
+    // The enclosing row was separately admitted above before any projection.
+    const scanBudget = new SqliteSourceReadBudget(budget.limits, budget.outcome);
+    const results: Array<{ sessionId: string; itemIndex: number }> = [];
+    const pageRows = scanBudget.limits.sqlitePageRows;
+    let afterIndex = -1;
+    const valueExpression = objectIds ? "json_extract(j.value, '$.composerId')" : 'j.value';
+    const typePredicate = objectIds
+      ? "json_type(j.value, '$.composerId') = 'text'"
+      : "j.type = 'text'";
+    while (true) {
+      throwIfMigrationAborted(signal);
+      const rows = db
+        .prepare(
+          `SELECT CAST(j.key AS INTEGER) AS itemIndex,
+             length(CAST(${valueExpression} AS BLOB)) AS byteLength
+           FROM ItemTable AS i, json_each(i.value, '${path}') AS j
+           WHERE i.rowid = ?
+             AND ${typePredicate}
+             AND CAST(j.key AS INTEGER) > ?
+           ORDER BY itemIndex ASC LIMIT ?`
+        )
+        .all(source.rowId, afterIndex, pageRows) as Array<{
+        itemIndex?: number | bigint;
+        byteLength?: number | bigint;
+      }>;
+      if (rows.length === 0) break;
+      const metadata = rows.map((row) => {
+        const itemIndex = Number(row.itemIndex);
+        const byteLength = Number(row.byteLength);
+        if (
+          !Number.isSafeInteger(itemIndex) ||
+          itemIndex < 0 ||
+          !Number.isSafeInteger(byteLength) ||
+          byteLength < 0
+        ) {
+          throw new TypeError('SQLite returned invalid Composer ID projection metadata.');
+        }
+        return { itemIndex, byteLength };
+      });
+      scanBudget.admitMetadataPage(metadata.map(({ byteLength }) => byteLength));
+      for (const item of metadata) {
+        throwIfMigrationAborted(signal);
+        const projected = db
+          .prepare(
+            `SELECT ${valueExpression} AS sessionId
+             FROM ItemTable AS i, json_each(i.value, '${path}') AS j
+             WHERE i.rowid = ? AND CAST(j.key AS INTEGER) = ?`
+          )
+          .get(source.rowId, item.itemIndex) as { sessionId?: unknown } | undefined;
+        if (typeof projected?.sessionId !== 'string') {
+          throw new Error('Composer ID projection changed after metadata admission.');
+        }
+        const actualBytes = Buffer.byteLength(projected.sessionId);
+        if (actualBytes !== item.byteLength) {
+          throw new Error('Composer ID projection length changed after metadata admission.');
+        }
+        scanBudget.admitDecodedValue(actualBytes);
+        results.push({ sessionId: projected.sessionId, itemIndex: item.itemIndex });
       }
-    } finally {
-      db.close();
+      afterIndex = metadata[metadata.length - 1]!.itemIndex;
+      if (rows.length < pageRows) break;
+    }
+    return results;
+  };
+
+  const materialized = scanIds(rootType === 'array' ? '$' : '$.allComposers', true).map(
+    ({ sessionId, itemIndex }) => ({ sessionId, composerIndex: itemIndex })
+  );
+  const selectedIds =
+    rootType === 'object'
+      ? scanIds('$.selectedComposerIds', false).map(({ sessionId }) => sessionId)
+      : [];
+  return { materialized, selectedIds };
+}
+
+function pointerReferencesSession(key: string, value: string, sessionId: string): boolean {
+  for (const text of [key, value]) {
+    for (const candidate of text.match(
+      /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/gu
+    ) ?? []) {
+      if (sessionIdsEqual(candidate, sessionId)) return true;
     }
   }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      typeof (parsed as { composerId?: unknown }).composerId === 'string'
+    ) {
+      return sessionIdsEqual((parsed as { composerId: string }).composerId, sessionId);
+    }
+  } catch {
+    // Pointer UI state is often not JSON; canonical UUIDs in the key/value remain sufficient.
+  }
+  return false;
 }
 
 async function collectComposerOccurrences(
   sessionId: string,
   dataPath?: string,
-  guard: MigrationReadGuard = createMigrationReadGuard(resolveSourceReadLimits())
+  guard: MigrationReadGuard = createMigrationReadGuard(resolveSourceReadLimits()),
+  hydrationWorkspacePath?: string
 ): Promise<{
   occurrences: ComposerOccurrence[];
+  physicalOccurrences: ComposerOccurrenceMetadata[];
   pointerMembershipPaths: string[];
   complete: boolean;
 }> {
   const occurrences: ComposerOccurrence[] = [];
+  const physicalOccurrences: ComposerOccurrenceMetadata[] = [];
   const pointerMembershipPaths = new Set<string>();
   const basePath = getCursorDataPath(dataPath);
   if (!existsSync(basePath)) {
-    return { occurrences, pointerMembershipPaths: [], complete: true };
+    return { occurrences, physicalOccurrences, pointerMembershipPaths: [], complete: true };
   }
 
   let entries: Dirent<string>[];
@@ -830,7 +936,7 @@ async function collectComposerOccurrences(
     if (isSessionIntegrityError(error) || (error instanceof Error && error.name === 'AbortError')) {
       throw error;
     }
-    return { occurrences, pointerMembershipPaths: [], complete: false };
+    return { occurrences, physicalOccurrences, pointerMembershipPaths: [], complete: false };
   }
 
   let complete = true;
@@ -852,40 +958,73 @@ async function collectComposerOccurrences(
         sourceReadLimits: guard.limits,
         signal: guard.signal,
       });
-      let result: ComposerDataResult | null;
+      const inventoryBudget = new SqliteSourceReadBudget(guard.limits, 'fatal');
+      let inventory: WorkspaceComposerAddressInventory;
       try {
-        result = getComposerDataBounded(db, guard);
+        inventory = loadWorkspaceComposerAddressInventory(db, inventoryBudget, guard.signal);
       } catch (error) {
         if (isMissingMigrationTableError(error, 'ItemTable')) continue;
         throw error;
       }
-      const pointerBudget = new SqliteSourceReadBudget(guard.limits, 'fatal');
-      result?.composers.forEach((composer, composerIndex) => {
-        if (composer.composerId !== sessionId) return;
-        const record = composer as Record<string, unknown>;
-        occurrences.push({
+      const matchingMetadata = inventory.materialized.filter(({ sessionId: candidate }) =>
+        sessionIdsEqual(candidate, sessionId)
+      );
+      for (const candidate of matchingMetadata) {
+        physicalOccurrences.push({
           workspaceId: entry.name,
           workspacePath,
           databasePath,
-          composerIndex,
-          composer: structuredClone(record),
-          fingerprint: migrationFingerprint(record),
+          composerIndex: candidate.composerIndex,
+          sessionId: candidate.sessionId,
         });
-      });
+      }
+      if (inventory.selectedIds.some((candidate) => sessionIdsEqual(candidate, sessionId))) {
+        pointerMembershipPaths.add(workspacePath);
+      }
 
+      const pointerBudget = new SqliteSourceReadBudget(guard.limits, 'fatal');
       forEachBoundedComposerValue(
         db,
         'ItemTable',
         '%composerChatViewPane%',
         pointerBudget,
         (row) => {
-          const pointerText = `${row.key}\n${row.value}`.toLowerCase();
-          if (pointerText.includes(sessionId.toLowerCase())) {
+          if (pointerReferencesSession(row.key, row.value, sessionId)) {
             pointerMembershipPaths.add(workspacePath);
           }
         },
         guard.signal
       );
+
+      const hydrateWorkspace =
+        matchingMetadata.length > 0 &&
+        (!hydrationWorkspacePath || pathsEqual(workspacePath, hydrationWorkspacePath));
+      if (hydrateWorkspace) {
+        const result = getComposerDataBounded(
+          db,
+          createMigrationReadGuard(guard.limits, guard.signal, guard.sqliteDriver)
+        );
+        for (const metadata of matchingMetadata) {
+          const composer = result?.composers[metadata.composerIndex];
+          if (
+            !composer?.composerId ||
+            composer.composerId !== metadata.sessionId ||
+            !sessionIdsEqual(composer.composerId, sessionId)
+          ) {
+            complete = false;
+            continue;
+          }
+          const record = composer as Record<string, unknown>;
+          occurrences.push({
+            workspaceId: entry.name,
+            workspacePath,
+            databasePath,
+            composerIndex: metadata.composerIndex,
+            composer: structuredClone(record),
+            fingerprint: migrationFingerprint(record),
+          });
+        }
+      }
     } catch (error) {
       if (
         isSessionIntegrityError(error) ||
@@ -904,13 +1043,14 @@ async function collectComposerOccurrences(
   }
   return {
     occurrences,
+    physicalOccurrences,
     pointerMembershipPaths: [...pointerMembershipPaths].sort(),
     complete,
   };
 }
 
 async function readGlobalSessionRows(
-  sessionId: string,
+  exactSessionId: string,
   dataPath?: string,
   guard: MigrationReadGuard = createMigrationReadGuard(resolveSourceReadLimits())
 ): Promise<GlobalSessionRow[]> {
@@ -924,11 +1064,62 @@ async function readGlobalSessionRows(
   });
   try {
     try {
-      return readGlobalSessionRowsFromDatabase(sessionId, db, guard);
+      return readGlobalSessionRowsFromDatabase(exactSessionId, db, guard);
     } catch (error) {
       if (isMissingMigrationTableError(error, 'cursorDiskKV')) return [];
       throw error;
     }
+  } finally {
+    db.close();
+  }
+}
+
+/** Discover exact global key spellings without reading any Composer payload value. */
+async function findGlobalSessionIdSpellings(
+  sessionId: string,
+  dataPath?: string,
+  guard: MigrationReadGuard = createMigrationReadGuard(resolveSourceReadLimits())
+): Promise<string[]> {
+  throwIfMigrationAborted(guard.signal);
+  const globalDbPath = join(getGlobalStoragePath(dataPath), 'state.vscdb');
+  if (!existsSync(globalDbPath)) return [];
+  const db = await openDatabase(globalDbPath, {
+    sqliteDriver: guard.sqliteDriver,
+    sourceReadLimits: guard.limits,
+    signal: guard.signal,
+  });
+  try {
+    const spellings = new Set<string>();
+    const budget = new SqliteSourceReadBudget(guard.limits, 'fatal');
+    try {
+      forEachBoundedComposerMetadata(
+        db,
+        'cursorDiskKV',
+        'composerData:%',
+        budget,
+        ({ key }) => {
+          const candidate = key.startsWith('composerData:')
+            ? key.slice('composerData:'.length)
+            : '';
+          if (candidate && sessionIdsEqual(candidate, sessionId)) spellings.add(candidate);
+        },
+        guard.signal
+      );
+      forEachBoundedComposerBubbleMetadata(
+        db,
+        'bubbleId:%',
+        budget,
+        ({ key }) => {
+          const candidate = key.split(':')[1] ?? '';
+          if (candidate && sessionIdsEqual(candidate, sessionId)) spellings.add(candidate);
+        },
+        guard.signal
+      );
+    } catch (error) {
+      if (isMissingMigrationTableError(error, 'cursorDiskKV')) return [];
+      throw error;
+    }
+    return [...spellings].sort();
   } finally {
     db.close();
   }
@@ -942,14 +1133,15 @@ function readGlobalSessionRowsFromDatabase(
   const rows: GlobalSessionRow[] = [];
   const budget = new SqliteSourceReadBudget(guard.limits, 'fatal');
   let afterKey = '';
-  const bubblePattern = `bubbleId:${sqliteLikeLiteralPrefix(sessionId)}:%`;
+  const composerKey = `composerData:${sessionId}`;
+  const bubblePrefix = `bubbleId:${sessionId}:`;
   while (true) {
     throwIfMigrationAborted(guard.signal);
     const metadata = db
       .prepare(
-        `SELECT key FROM cursorDiskKV WHERE (key = ? OR key LIKE ? ESCAPE '\\') AND key > ? ORDER BY key LIMIT 1`
+        `SELECT key FROM cursorDiskKV WHERE (CAST(key AS BLOB) = CAST(? AS BLOB) OR (key IS NOT NULL AND substr(CAST(key AS BLOB), 1, length(CAST(? AS BLOB))) = CAST(? AS BLOB))) AND CAST(key AS BLOB) > CAST(? AS BLOB) ORDER BY CAST(key AS BLOB) LIMIT 1`
       )
-      .get(`composerData:${sessionId}`, bubblePattern, afterKey) as { key: string } | undefined;
+      .get(composerKey, bubblePrefix, bubblePrefix, afterKey) as { key: string } | undefined;
     if (!metadata) break;
     throwIfMigrationAborted(guard.signal);
     const value = readBoundedComposerValueByKey(
@@ -1018,6 +1210,7 @@ function sourceFingerprint(
       : null;
   return migrationFingerprint({
     logicalSessionId: target.logicalSessionId,
+    globalSessionId: target.composerLocator.globalSessionId ?? null,
     workspaceId: target.composerLocator.workspaceId,
     workspacePath: normalizedPathKey(target.sourceWorkspacePath),
     databasePath: normalizedPathKey(target.composerLocator.databasePath),
@@ -1025,6 +1218,11 @@ function sourceFingerprint(
     record,
     globalRows,
   });
+}
+
+/** Exact physical global-key spelling captured while the logical target is bound. */
+function targetGlobalSessionId(target: BoundMigrationTarget): string {
+  return target.composerLocator.globalSessionId ?? target.logicalSessionId;
 }
 
 function destinationFingerprint(result: ComposerDataResult | null): string {
@@ -1064,7 +1262,7 @@ function assertExactBoundOccurrence(
     target.dataSourceIdentity !==
       currentDataSourceIdentity(dataPath, locator.databasePath, target.storeRootPath) ||
     locator.databasePath !== locator.dbPath ||
-    locator.sessionId !== target.logicalSessionId ||
+    !sessionIdsEqual(locator.sessionId, target.logicalSessionId) ||
     !Number.isSafeInteger(locator.composerIndex) ||
     locator.composerIndex < -1
   ) {
@@ -1073,7 +1271,9 @@ function assertExactBoundOccurrence(
 
   const matchingIndices: number[] = [];
   sourceResult?.composers.forEach((composer, index) => {
-    if (composer.composerId === target.logicalSessionId) matchingIndices.push(index);
+    if (composer.composerId && sessionIdsEqual(composer.composerId, target.logicalSessionId)) {
+      matchingIndices.push(index);
+    }
   });
 
   let record: Record<string, unknown>;
@@ -1082,9 +1282,9 @@ function assertExactBoundOccurrence(
     if (matchingIndices.length !== 0 || globalRows.length === 0) {
       throw new MigrationTargetChangedError(target.logicalSessionId);
     }
-    record = { composerId: target.logicalSessionId };
+    record = { composerId: locator.sessionId };
     recordFingerprint = migrationFingerprint({
-      composerId: target.logicalSessionId,
+      composerId: locator.sessionId,
       globalOnly: true,
     });
   } else {
@@ -1092,7 +1292,11 @@ function assertExactBoundOccurrence(
       throw new MigrationTargetChangedError(target.logicalSessionId);
     }
     const candidate = sourceResult?.composers[locator.composerIndex];
-    if (!candidate || candidate.composerId !== target.logicalSessionId) {
+    if (
+      !candidate?.composerId ||
+      candidate.composerId !== locator.sessionId ||
+      !sessionIdsEqual(candidate.composerId, target.logicalSessionId)
+    ) {
       throw new MigrationTargetChangedError(target.logicalSessionId);
     }
     record = candidate as Record<string, unknown>;
@@ -1127,13 +1331,17 @@ async function assertBoundInventoryStillExclusive(
   const composerInventory = await collectComposerOccurrences(
     target.logicalSessionId,
     dataPath,
-    guard
+    guard,
+    target.sourceWorkspacePath
   );
   if (!composerInventory.complete) {
     throw new MigrationTargetChangedError(target.logicalSessionId);
   }
   const expectedComposerOccurrences = target.composerLocator.composerIndex === -1 ? 0 : 1;
-  if (composerInventory.occurrences.length !== expectedComposerOccurrences) {
+  if (
+    composerInventory.physicalOccurrences.length !== expectedComposerOccurrences ||
+    composerInventory.occurrences.length !== expectedComposerOccurrences
+  ) {
     throw new MigrationTargetChangedError(target.logicalSessionId);
   }
   if (expectedComposerOccurrences === 1) {
@@ -1154,11 +1362,28 @@ async function assertBoundInventoryStillExclusive(
       normalizedPathKey(occurrence.workspacePath)
     ),
     ...composerInventory.pointerMembershipPaths.map(normalizedPathKey),
-    ...globalWorkspaceMembershipPaths(target.logicalSessionId, globalRows),
+    ...(target.composerLocator.globalSessionId
+      ? globalWorkspaceMembershipPaths(target.composerLocator.globalSessionId, globalRows)
+      : []),
   ]);
   if (
     membershipPaths.size !== 1 ||
     !membershipPaths.has(normalizedPathKey(target.sourceWorkspacePath))
+  ) {
+    throw new MigrationTargetChangedError(target.logicalSessionId);
+  }
+
+  const globalSpellings = await findGlobalSessionIdSpellings(
+    target.logicalSessionId,
+    dataPath,
+    guard
+  );
+  const expectedGlobalSpellings = target.composerLocator.globalSessionId
+    ? [target.composerLocator.globalSessionId]
+    : [];
+  if (
+    globalSpellings.length !== expectedGlobalSpellings.length ||
+    globalSpellings.some((value, index) => value !== expectedGlobalSpellings[index])
   ) {
     throw new MigrationTargetChangedError(target.logicalSessionId);
   }
@@ -1184,12 +1409,15 @@ function inspectStoreSessionIdMetadataOnly(
   try {
     const chats = join(storeRoot, 'chats');
     if (existsSync(chats)) {
-      const compactSessionId = sessionId.replaceAll('-', '').toLowerCase();
+      const compactSessionId = isNativeCursorUuid(sessionId)
+        ? sessionId.replaceAll('-', '').toLowerCase()
+        : undefined;
       for (const hash of readdirSync(chats, { withFileTypes: true })) {
         throwIfMigrationAborted(signal);
         if (!hash.isDirectory()) continue;
         const hashPath = join(chats, hash.name);
         if (
+          compactSessionId !== undefined &&
           /^[0-9a-f]{32}$/iu.test(hash.name) &&
           hash.name.toLowerCase() === compactSessionId &&
           existsSync(join(hashPath, 'store.db'))
@@ -1197,7 +1425,11 @@ function inspectStoreSessionIdMetadataOnly(
           return { exists: true, complete: true };
         }
         const sessionEntries = readdirSync(hashPath, { withFileTypes: true });
-        if (sessionEntries.some((entry) => entry.isDirectory() && entry.name === sessionId)) {
+        if (
+          sessionEntries.some(
+            (entry) => entry.isDirectory() && sessionIdsEqual(entry.name, sessionId)
+          )
+        ) {
           return { exists: true, complete: true };
         }
       }
@@ -1206,7 +1438,11 @@ function inspectStoreSessionIdMetadataOnly(
     const acp = join(storeRoot, 'acp-sessions');
     if (existsSync(acp)) {
       const sessionEntries = readdirSync(acp, { withFileTypes: true });
-      if (sessionEntries.some((entry) => entry.isDirectory() && entry.name === sessionId)) {
+      if (
+        sessionEntries.some(
+          (entry) => entry.isDirectory() && sessionIdsEqual(entry.name, sessionId)
+        )
+      ) {
         return { exists: true, complete: true };
       }
     }
@@ -1220,10 +1456,13 @@ function inspectStoreSessionIdMetadataOnly(
         if (!existsSync(transcripts)) continue;
         const transcriptEntries = readdirSync(transcripts, { withFileTypes: true });
         const direct = transcriptEntries.some(
-          (entry) => entry.isFile() && entry.name === `${sessionId}.jsonl`
+          (entry) =>
+            entry.isFile() &&
+            entry.name.endsWith('.jsonl') &&
+            sessionIdsEqual(entry.name.slice(0, -'.jsonl'.length), sessionId)
         );
         const nested = transcriptEntries.some(
-          (entry) => entry.isDirectory() && entry.name === sessionId
+          (entry) => entry.isDirectory() && sessionIdsEqual(entry.name, sessionId)
         );
         if (direct || nested) {
           return { exists: true, complete: true };
@@ -1253,8 +1492,12 @@ async function sessionIdExistsForCopy(
   }
   if (storeInventory.exists) return true;
   if (
-    sourceResult?.composers.some((composer) => composer.composerId === sessionId) ||
-    destinationResult?.composers.some((composer) => composer.composerId === sessionId)
+    sourceResult?.composers.some(
+      (composer) => composer.composerId && sessionIdsEqual(composer.composerId, sessionId)
+    ) ||
+    destinationResult?.composers.some(
+      (composer) => composer.composerId && sessionIdsEqual(composer.composerId, sessionId)
+    )
   ) {
     return true;
   }
@@ -1262,10 +1505,10 @@ async function sessionIdExistsForCopy(
   if (!composerInventory.complete) {
     throw new UnsupportedSessionMigrationError(owningSessionId, 'incomplete-composer-inventory');
   }
-  if (composerInventory.occurrences.length > 0) {
+  if (composerInventory.physicalOccurrences.length > 0) {
     return true;
   }
-  return (await readGlobalSessionRows(sessionId, dataPath, guard)).length > 0;
+  return (await findGlobalSessionIdSpellings(sessionId, dataPath, guard)).length > 0;
 }
 
 async function allocateUniqueCopySessionId(
@@ -1314,8 +1557,7 @@ export async function bindMigrationTargets(
   const signal = options.signal ?? contextOptions.signal;
   const sourceReadLimitsOverride = options.sourceReadLimits ?? contextOptions.sourceReadLimits;
   // Policy validation and cancellation are intentionally the first operations
-  // that can fail. Workspace resolution calls findWorkspaces(), which may read
-  // both workspace and global catalog data.
+  // that can fail. Workspace resolution itself is workspace.json-only.
   const sourceReadLimits = resolveSourceReadLimits(sourceReadLimitsOverride);
   throwIfMigrationAborted(signal);
   const storeRootPath = normalizePath(options.storeRootPath ?? getStoreStackRoot(dataPath));
@@ -1327,7 +1569,6 @@ export async function bindMigrationTargets(
       : {}),
   });
   const sqliteDriver = selectedDriver.name as DriverName;
-  await preflightComposerSourceLimits(dataPath, sourceReadLimits, signal, sqliteDriver);
   const readGuard = createMigrationReadGuard(sourceReadLimits, signal, sqliteDriver);
   const workspacePath = await resolveMigrationWorkspacePath(
     options.workspacePath ?? contextOptions.workspacePath,
@@ -1362,7 +1603,8 @@ export async function bindMigrationTargets(
   };
   const ambiguityOccurrenceRefs = async (sessionId: string): Promise<string[] | undefined> => {
     const row = (await logicalCatalog()).find(
-      (candidate) => candidate.id === sessionId && candidate.resolutionState === 'ambiguous'
+      (candidate) =>
+        sessionIdsEqual(candidate.id, sessionId) && candidate.resolutionState === 'ambiguous'
     );
     return row?.resolutionState === 'ambiguous' ? [...row.diagnosticOccurrenceRefs] : undefined;
   };
@@ -1382,7 +1624,17 @@ export async function bindMigrationTargets(
           : undefined;
       let sessionId: string;
       if (numeric === undefined) {
-        sessionId = String(selector);
+        const requestedId = String(selector);
+        const logicalRow = (await logicalCatalog()).find((candidate) =>
+          sessionIdsEqual(candidate.id, requestedId)
+        );
+        if (logicalRow?.resolutionState === 'ambiguous') {
+          throw new SessionAmbiguityError(logicalRow.id, logicalRow.diagnosticOccurrenceRefs);
+        }
+        if (workspacePath && !logicalRow) {
+          throw new SessionScopeMismatchError(requestedId, workspacePath);
+        }
+        sessionId = logicalRow?.id ?? requestedId;
       } else {
         const summary = (await logicalCatalog()).find(
           (candidate) => candidate.index === numeric + (numericBase === 0 ? 1 : 0)
@@ -1394,16 +1646,30 @@ export async function bindMigrationTargets(
         sessionId = summary.id;
       }
 
-      const composerInventory = await collectComposerOccurrences(sessionId, dataPath, readGuard);
+      const composerInventory = await collectComposerOccurrences(
+        sessionId,
+        dataPath,
+        readGuard,
+        workspacePath
+      );
       if (!composerInventory.complete) {
         throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-composer-inventory');
       }
       const occurrences = [...composerInventory.occurrences];
-      const globalRows = await readGlobalSessionRows(sessionId, dataPath, readGuard);
+      const globalSpellings = await findGlobalSessionIdSpellings(sessionId, dataPath, readGuard);
+      if (globalSpellings.length > 1) {
+        throw new UnsupportedSessionMigrationError(sessionId, 'multiple-composer-occurrences');
+      }
+      const globalSessionId = globalSpellings[0];
+      const globalRows = globalSessionId
+        ? await readGlobalSessionRows(globalSessionId, dataPath, readGuard)
+        : [];
       const membershipPaths = new Set([
-        ...occurrences.map((occurrence) => normalizedPathKey(occurrence.workspacePath)),
+        ...composerInventory.physicalOccurrences.map((occurrence) =>
+          normalizedPathKey(occurrence.workspacePath)
+        ),
         ...composerInventory.pointerMembershipPaths.map(normalizedPathKey),
-        ...globalWorkspaceMembershipPaths(sessionId, globalRows),
+        ...(globalSessionId ? globalWorkspaceMembershipPaths(globalSessionId, globalRows) : []),
       ]);
 
       const fallbackSource =
@@ -1429,9 +1695,12 @@ export async function bindMigrationTargets(
       if (membershipPaths.size > 1) {
         throw new UnsupportedSessionMigrationError(sessionId, 'shared-membership');
       }
-      if (occurrences.length > 1) {
+      if (composerInventory.physicalOccurrences.length > 1) {
         const fingerprints = new Set(occurrences.map((occurrence) => occurrence.fingerprint));
-        if (fingerprints.size > 1) {
+        if (
+          occurrences.length === composerInventory.physicalOccurrences.length &&
+          fingerprints.size > 1
+        ) {
           throw new SessionAmbiguityError(
             sessionId,
             (await ambiguityOccurrenceRefs(sessionId)) ?? opaqueOccurrenceRefs(occurrences)
@@ -1467,7 +1736,11 @@ export async function bindMigrationTargets(
         workspaceId: occurrence.workspaceId,
         databasePath: occurrence.databasePath,
         dbPath: occurrence.databasePath,
-        sessionId,
+        sessionId:
+          typeof occurrence.composer['composerId'] === 'string'
+            ? occurrence.composer['composerId']
+            : sessionId,
+        ...(globalSessionId ? { globalSessionId } : {}),
         composerIndex: occurrence.composerIndex,
         recordFingerprint: occurrence.fingerprint,
       });
@@ -1529,12 +1802,6 @@ export async function prepareSessionMigration(
     throw new NestedPathError(frozenTarget.sourceWorkspacePath, normalizedDest);
   }
 
-  await preflightComposerSourceLimits(
-    dataPath,
-    sourceReadLimits,
-    signal,
-    frozenTarget.sqliteDriver
-  );
   await ensureDriver({
     operation: 'migrate',
     required: new Set(['readWrite']),
@@ -1560,7 +1827,7 @@ export async function prepareSessionMigration(
       throw new DestinationHasSessionsError(normalizedDest, destinationSessionCount);
     }
     const globalRows = await readGlobalSessionRows(
-      frozenTarget.logicalSessionId,
+      targetGlobalSessionId(frozenTarget),
       dataPath,
       readGuard
     );
@@ -1610,10 +1877,11 @@ interface StagedGlobalMutation {
 
 function hydrateComposerFromGlobalRows(
   composer: Record<string, unknown>,
-  composerId: string,
+  exactGlobalSessionId: string,
+  outputSessionId: string,
   rows: readonly GlobalSessionRow[]
 ): Record<string, unknown> {
-  const row = rows.find((candidate) => candidate.key === `composerData:${composerId}`);
+  const row = rows.find((candidate) => candidate.key === `composerData:${exactGlobalSessionId}`);
   if (!row) return composer;
   const globalComposer = JSON.parse(row.value) as {
     name?: string;
@@ -1625,7 +1893,7 @@ function hydrateComposerFromGlobalRows(
   const lastUpdatedAt = globalComposer.lastUpdatedAt ?? globalComposer.updatedAt;
   return {
     ...composer,
-    composerId,
+    composerId: outputSessionId,
     ...(typeof globalComposer.name === 'string' ? { name: globalComposer.name } : {}),
     ...(globalComposer.createdAt !== undefined && globalComposer.createdAt !== null
       ? { createdAt: globalComposer.createdAt }
@@ -1814,10 +2082,11 @@ async function restoreGlobalSessionRows(
   const db = await openDatabaseReadWrite(globalDbPath, { sqliteDriver });
   try {
     db.runSQL('BEGIN IMMEDIATE');
-    db.prepare('DELETE FROM cursorDiskKV WHERE key = ? OR key LIKE ?').run(
-      `composerData:${sessionId}`,
-      `bubbleId:${sessionId}:%`
-    );
+    const composerKey = `composerData:${sessionId}`;
+    const bubblePrefix = `bubbleId:${sessionId}:`;
+    db.prepare(
+      'DELETE FROM cursorDiskKV WHERE CAST(key AS BLOB) = CAST(? AS BLOB) OR (key IS NOT NULL AND substr(CAST(key AS BLOB), 1, length(CAST(? AS BLOB))) = CAST(? AS BLOB))'
+    ).run(composerKey, bubblePrefix, bubblePrefix);
     const insert = db.prepare('INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)');
     for (const row of rows) insert.run(row.key, row.value);
     db.runSQL('COMMIT');
@@ -2052,7 +2321,7 @@ async function revalidatePreparedMigration(
     const sourceResult = getComposerDataBounded(sourceDb, guard);
     const destinationResult = getComposerDataBounded(destinationDb, guard);
     const globalRows = await readGlobalSessionRows(
-      prepared.target.logicalSessionId,
+      targetGlobalSessionId(prepared.target),
       prepared.dataPath,
       guard
     );
@@ -2156,7 +2425,7 @@ async function applyPreparedMigrationBatch(
   for (const sessionId of [
     ...new Set(
       prepared.flatMap((item) => [
-        item.target.logicalSessionId,
+        targetGlobalSessionId(item.target),
         ...(item.proposedCopySessionId ? [item.proposedCopySessionId] : []),
       ])
     ),
@@ -2236,7 +2505,7 @@ async function applyPreparedMigrationBatch(
     }
     const sourceResult = sourceState.result;
     const destinationResult = destinationState.result;
-    const globalRows = globalSnapshots.get(item.target.logicalSessionId) ?? [];
+    const globalRows = globalSnapshots.get(targetGlobalSessionId(item.target)) ?? [];
     const sourceComposer = assertExactBoundOccurrence(
       item.target,
       item.dataPath,
@@ -2249,6 +2518,7 @@ async function applyPreparedMigrationBatch(
 
     const hydrated = hydrateComposerFromGlobalRows(
       sourceComposer,
+      targetGlobalSessionId(item.target),
       item.target.logicalSessionId,
       globalRows
     );
@@ -2261,12 +2531,14 @@ async function applyPreparedMigrationBatch(
     if (item.mode === 'move') {
       destinationNext = [
         ...destinationOriginal.filter(
-          (composer) => composer.composerId !== item.target.logicalSessionId
+          (composer) =>
+            !composer.composerId ||
+            !sessionIdsEqual(composer.composerId, item.target.logicalSessionId)
         ),
         hydrated,
       ];
       globalMutation = stageMoveGlobalMutation(
-        item.target.logicalSessionId,
+        targetGlobalSessionId(item.target),
         globalRows,
         item.target.sourceWorkspacePath,
         item.destinationWorkspacePath,
@@ -2282,7 +2554,7 @@ async function applyPreparedMigrationBatch(
       copied['composerId'] = copyId;
       destinationNext = [...destinationOriginal, copied];
       globalMutation = stageCopyGlobalMutation(
-        item.target.logicalSessionId,
+        targetGlobalSessionId(item.target),
         copyId,
         globalRows,
         item.target.sourceWorkspacePath,
@@ -2400,7 +2672,7 @@ async function applyPreparedMigrationBatch(
       await assertBoundInventoryStillExclusive(
         item.target,
         item.dataPath,
-        globalSnapshots.get(item.target.logicalSessionId) ?? [],
+        globalSnapshots.get(targetGlobalSessionId(item.target)) ?? [],
         createMigrationReadGuard(item.sourceReadLimits, item.signal, item.target.sqliteDriver)
       );
     }
@@ -2456,7 +2728,7 @@ async function applyPreparedMigrationBatch(
       await assertBoundInventoryStillExclusive(
         item.target,
         item.dataPath,
-        globalSnapshots.get(item.target.logicalSessionId) ?? [],
+        globalSnapshots.get(targetGlobalSessionId(item.target)) ?? [],
         createMigrationReadGuard(item.sourceReadLimits, item.signal, item.target.sqliteDriver)
       );
       assertMigrationPhysicalIdentity(item);
@@ -2537,7 +2809,7 @@ async function applySessionMigrationInternal(
       throw new MigrationTargetChangedError(target.logicalSessionId);
     }
     const globalRows = await readGlobalSessionRows(
-      target.logicalSessionId,
+      targetGlobalSessionId(target),
       prepared.dataPath,
       readGuard
     );
@@ -2559,6 +2831,7 @@ async function applySessionMigrationInternal(
     const sourceOriginal = sourceResult?.composers ?? [];
     const hydrated = hydrateComposerFromGlobalRows(
       sourceComposer,
+      targetGlobalSessionId(target),
       target.logicalSessionId,
       globalRows
     );
@@ -2587,7 +2860,9 @@ async function applySessionMigrationInternal(
       prepared.mode === 'move'
         ? [
             ...destinationOriginal.filter(
-              (composer) => composer.composerId !== target.logicalSessionId
+              (composer) =>
+                !composer.composerId ||
+                !sessionIdsEqual(composer.composerId, target.logicalSessionId)
             ),
             hydrated,
           ]
@@ -2603,7 +2878,7 @@ async function applySessionMigrationInternal(
     const stagedGlobalMutation =
       prepared.mode === 'move'
         ? stageMoveGlobalMutation(
-            target.logicalSessionId,
+            targetGlobalSessionId(target),
             globalRows,
             target.sourceWorkspacePath,
             prepared.destinationWorkspacePath,
@@ -2613,7 +2888,7 @@ async function applySessionMigrationInternal(
             prepared.signal
           )
         : stageCopyGlobalMutation(
-            target.logicalSessionId,
+            targetGlobalSessionId(target),
             copyId!,
             globalRows,
             target.sourceWorkspacePath,
@@ -2672,7 +2947,11 @@ async function applySessionMigrationInternal(
         throw new MigrationTargetChangedError(target.logicalSessionId);
       }
       const lockedGlobalRows = globalDatabase
-        ? readGlobalSessionRowsFromDatabase(target.logicalSessionId, globalDatabase, readGuard)
+        ? readGlobalSessionRowsFromDatabase(
+            targetGlobalSessionId(target),
+            globalDatabase,
+            readGuard
+          )
         : [];
       if (migrationFingerprint(lockedGlobalRows) !== migrationFingerprint(globalRows)) {
         throw new MigrationTargetChangedError(target.logicalSessionId);
@@ -2757,7 +3036,7 @@ async function applySessionMigrationInternal(
             label: 'source global state',
             restore: () =>
               restoreGlobalSessionRows(
-                target.logicalSessionId,
+                targetGlobalSessionId(target),
                 oldGlobalRows,
                 prepared.dataPath,
                 target.sqliteDriver
@@ -2930,8 +3209,9 @@ export async function migrateSessions(
     });
     const duplicateTarget = targets.find(
       (target, index) =>
-        targets.findIndex((candidate) => candidate.logicalSessionId === target.logicalSessionId) !==
-        index
+        targets.findIndex((candidate) =>
+          sessionIdsEqual(candidate.logicalSessionId, target.logicalSessionId)
+        ) !== index
     );
     if (duplicateTarget) {
       throw new UnsupportedSessionMigrationError(
@@ -2955,7 +3235,12 @@ export async function migrateSessions(
     if (options.dryRun) return prepared.map(previewPreparedMigration);
     return await applyPreparedMigrationBatch(prepared);
   } catch (error) {
-    if (isFatalMigrationFailure(error)) throw error;
+    if (
+      isFatalMigrationFailure(error) &&
+      !(legacyIds && error instanceof SessionScopeMismatchError)
+    ) {
+      throw error;
+    }
     // The package-root selector API historically resolved every selector
     // before migration. Preserve a fatal lookup/preflight failure when binding
     // never completed, but keep ordinary post-bind database/write failures in
@@ -3015,8 +3300,6 @@ export async function migrateWorkspace(
   });
   const sqliteDriver = selectedDriver.name as DriverName;
   const readGuard = createMigrationReadGuard(sourceReadLimits, signal, sqliteDriver);
-  await preflightComposerSourceLimits(dataPath, sourceReadLimits, signal, sqliteDriver);
-
   // Normalize paths
   const normalizedSource = normalizePath(source);
   const normalizedDest = normalizePath(destination);
@@ -3055,9 +3338,9 @@ export async function migrateWorkspace(
       sourceReadLimits,
       signal,
     });
-    let summaries: ChatSessionSummary[];
+    let summaries: LogicalSessionSummary[];
     try {
-      summaries = await listSessions(
+      summaries = await listSessionSummaries(
         {
           limit: 0,
           all: true,
@@ -3070,21 +3353,21 @@ export async function migrateWorkspace(
     } finally {
       await context.dispose();
     }
-    const sessionIds = [...new Set(summaries.map((summary) => summary.id))];
+    const ambiguous = summaries.find((summary) => summary.resolutionState === 'ambiguous');
+    if (ambiguous?.resolutionState === 'ambiguous') {
+      throw new SessionAmbiguityError(ambiguous.id, ambiguous.diagnosticOccurrenceRefs);
+    }
+    const sessionIdsByLogicalId = new Map<string, string>();
+    for (const summary of summaries) {
+      const key = logicalSessionIdKey(summary.id);
+      if (!sessionIdsByLogicalId.has(key)) sessionIdsByLogicalId.set(key, summary.id);
+    }
+    const sessionIds = [...sessionIdsByLogicalId.values()];
     if (sessionIds.length === 0) throw new NoSessionsFoundError(normalizedSource);
 
-    if (!force) {
-      const destDb = await openDatabaseReadWrite(destInfo.dbPath, { sqliteDriver, signal });
-      try {
-        const destResult = getComposerDataBounded(destDb, readGuard);
-        if (destResult && destResult.composers.length > 0) {
-          throw new DestinationHasSessionsError(normalizedDest, destResult.composers.length);
-        }
-      } finally {
-        destDb.close();
-      }
-    }
-
+    // Bind every source target before reading destination conversation payload.
+    // Any ambiguous, Store-only, merged, or multiply-addressed row rejects the
+    // complete workspace operation before a writable destination is opened.
     const targets = await bindMigrationTargets(sessionIds, {
       numericBase: 1,
       treatStringSelectorsAsIds: true,
@@ -3160,10 +3443,11 @@ export async function migrateWorkspace(
         .map((s) => s.composerId)
         .filter((id): id is string => typeof id === 'string')
     : [];
-  const sessionIdSet = new Set(sessionIds);
+  const sessionIdSet = new Set(sessionIds.map(logicalSessionIdKey));
   for (const linkedId of await getWorkspaceLinkedComposerIds(sourceInfo.workspace, dataPath)) {
-    if (!sessionIdSet.has(linkedId)) {
-      sessionIdSet.add(linkedId);
+    const logicalId = logicalSessionIdKey(linkedId);
+    if (!sessionIdSet.has(logicalId)) {
+      sessionIdSet.add(logicalId);
       sessionIds.push(linkedId);
     }
   }

@@ -239,8 +239,41 @@ function readComposerIds(databasePath: string): string[] {
   }
 }
 
+function readGlobalComposerMetadata(
+  fixture: SessionIntegrityFixtureRoot,
+  sessionId: string
+): Record<string, unknown> | undefined {
+  const path = join(fixture.globalStorage, 'state.vscdb');
+  const db = new BetterSqlite3(path, { readonly: true, fileMustExist: true });
+  try {
+    const row = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ? COLLATE BINARY')
+      .get(`composerData:${sessionId}`) as { value?: string } | undefined;
+    return row?.value ? (JSON.parse(row.value) as Record<string, unknown>) : undefined;
+  } finally {
+    db.close();
+  }
+}
+
+function readGlobalKeys(fixture: SessionIntegrityFixtureRoot, sessionId: string): string[] {
+  const path = join(fixture.globalStorage, 'state.vscdb');
+  const db = new BetterSqlite3(path, { readonly: true, fileMustExist: true });
+  try {
+    return (
+      db
+        .prepare(
+          'SELECT key FROM cursorDiskKV WHERE key = ? COLLATE BINARY OR key LIKE ? ORDER BY key'
+        )
+        .all(`composerData:${sessionId}`, `bubbleId:${sessionId}:%`) as Array<{ key: string }>
+    ).map(({ key }) => key);
+  } finally {
+    db.close();
+  }
+}
+
 function hookedBetterSqliteDriver(hooks: {
   beforeOpen?: (path: string, readonly: boolean) => void;
+  beforeGet?: (path: string, sql: string, params: readonly unknown[]) => void;
   beforeAll?: (path: string, sql: string) => void;
   beforeRun?: (path: string, sql: string, params: readonly unknown[]) => void;
 }): DatabaseDriver {
@@ -266,7 +299,10 @@ function hookedBetterSqliteDriver(hooks: {
         prepare(sql) {
           const statement = db.prepare(sql);
           return {
-            get: (...params: unknown[]) => statement.get(...params),
+            get: (...params: unknown[]) => {
+              hooks.beforeGet?.(path, sql, params);
+              return statement.get(...params);
+            },
             all: (...params: unknown[]) => {
               hooks.beforeAll?.(path, sql);
               return statement.all(...params) as unknown[];
@@ -314,6 +350,90 @@ afterEach(() => {
 });
 
 describe.sequential('workspace-scoped migration selection', () => {
+  it.each(['session', 'workspace'] as const)(
+    'keeps off-scope Composer values unread while %s migration traverses preflight and workspace lookup',
+    async (route) => {
+      const fixture = newFixture();
+      const selected = composerSession(
+        fixture,
+        '10101010-0000-4000-8000-000000000016',
+        'Selected migration target'
+      );
+      const offScope = composerSession(
+        fixture,
+        '20202020-0000-4000-8000-000000000016',
+        'Off-scope value must remain unread',
+        fixture.projectB
+      );
+      writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [selected]);
+      const offScopeDbPath = writeComposerWorkspaceSummary(
+        fixture,
+        'workspace-b',
+        fixture.projectB,
+        [offScope]
+      );
+      writeComposerGlobalSessions(fixture, [selected, offScope]);
+      const destination = addDestination(fixture);
+      const before = mutationSnapshot(fixture);
+      const safeOffScopeQueries: string[] = [];
+      const assertOffScopeQueryIsMetadataOnly = (path: string, sql: string): void => {
+        if (path !== offScopeDbPath) return;
+        const readsDecodedValue =
+          /CAST\(value AS BLOB\)\s+AS\s+value\b/iu.test(sql) ||
+          /^\s*SELECT\s+(?:key\s*,\s*)?value\s+FROM\s+ItemTable\b/iu.test(sql);
+        if (readsDecodedValue) {
+          throw new Error(`off-scope Composer payload read: ${sql.replace(/\s+/gu, ' ').trim()}`);
+        }
+        safeOffScopeQueries.push(sql);
+      };
+      const driver = hookedBetterSqliteDriver({
+        beforeGet: assertOffScopeQueryIsMetadataOnly,
+        beforeAll: assertOffScopeQueryIsMetadataOnly,
+      });
+      registry.reset();
+      registry.register(driver);
+      registry.setDriver('better-sqlite3');
+
+      if (route === 'session') {
+        await expect(
+          migrateLibrarySession(
+            sessionConfig(fixture, destination, selected.id, {
+              workspace: fixture.projectA,
+              dryRun: true,
+            })
+          )
+        ).resolves.toEqual([
+          expect.objectContaining({
+            success: true,
+            sessionId: selected.id,
+            sourceWorkspace: fixture.projectA,
+            dryRun: true,
+          }),
+        ]);
+      } else {
+        await expect(
+          migrateLibraryWorkspace({
+            source: fixture.projectA,
+            destination,
+            dataPath: fixture.workspaceStorage,
+            dryRun: true,
+          })
+        ).resolves.toMatchObject({
+          success: true,
+          totalSessions: 1,
+          successCount: 1,
+          dryRun: true,
+        });
+      }
+
+      // Metadata-only inventory reads are permitted but must never advance to
+      // materializing the off-scope Composer JSON value.
+      expect(safeOffScopeQueries.length).toBeGreaterThan(0);
+      expect(safeOffScopeQueries.every((sql) => !/\bAS\s+value\b/iu.test(sql))).toBe(true);
+      expect(mutationSnapshot(fixture)).toBe(before);
+    }
+  );
+
   it('uses one-based public migration selectors inside the active workspace for preview and apply', async () => {
     const fixture = newFixture();
     const { sessionA, sessionB } = seedConflictingWorkspaceCorpus(fixture);
@@ -596,9 +716,141 @@ describe.sequential('workspace-scoped migration selection', () => {
     expect(readComposerIds(sourceDbPath)).toEqual([]);
     expect(readComposerIds(destinationDbPath)).toEqual([globalOnly.id]);
   });
+
+  it.each(['move', 'copy'] as const)(
+    'binds the sole opposite-case global carrier exactly for %s preview and apply',
+    async (mode) => {
+      const fixture = newFixture();
+      const publicId = 'ABABABAB-0000-4000-8000-000000000016';
+      const physicalGlobalId = publicId.toLowerCase();
+      const workspaceSession = composerSession(fixture, publicId, 'Workspace spelling authority');
+      const globalCarrier = {
+        ...workspaceSession,
+        id: physicalGlobalId,
+        title: 'Opposite-case global carrier',
+        messages: [
+          {
+            id: 'opposite-case-bubble',
+            role: 'user' as const,
+            content: 'opposite-case-global-payload',
+          },
+        ],
+      };
+      const sourceDbPath = writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [
+        workspaceSession,
+      ]);
+      writeComposerGlobalSessions(fixture, [globalCarrier]);
+      const destination = addDestination(fixture);
+      const destinationDbPath = join(
+        fixture.workspaceStorage,
+        'workspace-destination',
+        'state.vscdb'
+      );
+      const physicalKeysBefore = readGlobalKeys(fixture, physicalGlobalId);
+      const beforePreview = mutationSnapshot(fixture);
+      const config = sessionConfig(fixture, destination, physicalGlobalId, {
+        workspace: fixture.projectA,
+        mode,
+      });
+
+      const preview = await migrateLibrarySession({ ...config, dryRun: true });
+      expect(preview).toEqual([
+        expect.objectContaining({
+          success: true,
+          sessionId: publicId,
+          sourceWorkspace: fixture.projectA,
+          mode,
+          dryRun: true,
+        }),
+      ]);
+      expect(mutationSnapshot(fixture)).toBe(beforePreview);
+
+      const applied = await migrateLibrarySession({ ...config, dryRun: false });
+      expect(applied).toEqual([
+        expect.objectContaining({
+          success: true,
+          sessionId: publicId,
+          sourceWorkspace: fixture.projectA,
+          mode,
+          dryRun: false,
+          targetFingerprint: preview[0]!.targetFingerprint,
+        }),
+      ]);
+      expect(readGlobalKeys(fixture, physicalGlobalId)).toEqual(physicalKeysBefore);
+
+      if (mode === 'move') {
+        expect(readComposerIds(sourceDbPath)).toEqual([]);
+        expect(readComposerIds(destinationDbPath)).toEqual([publicId]);
+        expect(readGlobalComposerMetadata(fixture, physicalGlobalId)).toMatchObject({
+          workspaceIdentifier: { uri: { fsPath: destination } },
+        });
+      } else {
+        const copyId = applied[0]!.newSessionId;
+        expect(copyId).toMatch(/^[0-9a-f-]{36}$/iu);
+        expect(readComposerIds(sourceDbPath)).toEqual([publicId]);
+        expect(readComposerIds(destinationDbPath)).toEqual([copyId]);
+        expect(readGlobalKeys(fixture, copyId!)).not.toEqual([]);
+        expect(readGlobalComposerMetadata(fixture, copyId!)).toMatchObject({
+          composerId: copyId,
+          workspaceIdentifier: { uri: { fsPath: destination } },
+        });
+      }
+    }
+  );
 });
 
 describe.sequential('atomic multi-target migration', () => {
+  it('refuses a workspace batch atomically when a later logical row has divergent case variants', async () => {
+    const fixture = newFixture();
+    const eligible = composerSession(
+      fixture,
+      '30303030-0000-4000-8000-000000000016',
+      'Eligible workspace member'
+    );
+    const ambiguousUpper = composerSession(
+      fixture,
+      'CDCDCDCD-0000-4000-8000-000000000016',
+      'Ambiguous upper member'
+    );
+    const ambiguousLower: ComposerFixtureSession = {
+      ...ambiguousUpper,
+      id: ambiguousUpper.id.toLowerCase(),
+      title: 'Ambiguous lower carrier',
+      messages: [
+        {
+          id: 'divergent-lower-bubble',
+          role: 'assistant',
+          content: 'divergent lower global payload',
+        },
+      ],
+    };
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [
+      eligible,
+      ambiguousUpper,
+    ]);
+    writeComposerGlobalSessions(fixture, [eligible, ambiguousUpper, ambiguousLower]);
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    for (const dryRun of [true, false]) {
+      await expect(
+        migrateLibraryWorkspace({
+          source: fixture.projectA,
+          destination,
+          dataPath: fixture.workspaceStorage,
+          dryRun,
+        })
+      ).rejects.toMatchObject({
+        code: 'SESSION_AMBIGUOUS',
+        details: expect.objectContaining({
+          sessionId: ambiguousUpper.id,
+          occurrenceCount: 2,
+        }),
+      });
+      expect(mutationSnapshot(fixture)).toBe(before);
+    }
+  });
+
   it('applies two bound sessions to one destination without invalidating the second plan', async () => {
     const fixture = newFixture();
     const sessions = twoComposerSessions(fixture);
@@ -2080,9 +2332,73 @@ describe.sequential('migration preparation policy', () => {
       await (context as { dispose?: () => Promise<void> }).dispose?.();
     }
   });
+
+  it('keeps 32-hex non-UUID Store directory case variants exact during migration', async () => {
+    const fixture = newFixture();
+    // This is deliberately not canonical UUID syntax: arbitrary legacy IDs
+    // remain byte-sensitive even when their shape resembles a compact UUID.
+    const legacyId = 'ABCDEFABCDEFABCDEFABCDEFABCDEFAB';
+    const session = composerSession(fixture, legacyId, 'Case-sensitive legacy migration target');
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [session]);
+    writeComposerGlobalSessions(fixture, [session]);
+    const destination = addDestination(fixture);
+    const lowerCaseStoreDir = join(fixture.storeRoot, 'chats', legacyId.toLowerCase());
+    mkdirSync(lowerCaseStoreDir, { recursive: true });
+    writeFileSync(join(lowerCaseStoreDir, 'store.db'), 'distinct lower-case metadata marker');
+    const before = mutationSnapshot(fixture);
+
+    const result = await migrateLibrarySession(
+      sessionConfig(fixture, destination, legacyId, {
+        workspace: fixture.projectA,
+        dryRun: true,
+      })
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        success: true,
+        sessionId: legacyId,
+        sourceWorkspace: fixture.projectA,
+        dryRun: true,
+      }),
+    ]);
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
 });
 
 describe.sequential('ambiguous and unsupported migration targets', () => {
+  it('refuses equivalent case-only global physical spellings before preview or apply writes', async () => {
+    const fixture = newFixture();
+    const upper = composerSession(
+      fixture,
+      'EFEFEFEF-0000-4000-8000-000000000016',
+      'Equivalent case variants'
+    );
+    const lower: ComposerFixtureSession = { ...upper, id: upper.id.toLowerCase() };
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [upper]);
+    writeComposerGlobalSessions(fixture, [lower, upper]);
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    for (const dryRun of [true, false]) {
+      await expect(
+        migrateLibrarySession(
+          sessionConfig(fixture, destination, lower.id, {
+            workspace: fixture.projectA,
+            dryRun,
+          })
+        )
+      ).rejects.toMatchObject({
+        code: 'UNSUPPORTED_SESSION_MIGRATION',
+        details: expect.objectContaining({
+          sessionId: upper.id,
+          eligibility: 'multiple-composer-occurrences',
+        }),
+      });
+      expect(mutationSnapshot(fixture)).toBe(before);
+    }
+  });
+
   it.each([
     {
       name: 'multiple equivalent Composer locators in one workspace',
@@ -2239,6 +2555,32 @@ describe.sequential('ambiguous and unsupported migration targets', () => {
         dataPath: fixture.workspaceStorage,
         sourceWorkspacePath: fixture.projectA,
       })
+    ).rejects.toMatchObject({
+      code: 'UNSUPPORTED_SESSION_MIGRATION',
+      details: expect.objectContaining({ eligibility: 'merged' }),
+    });
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
+  it('rejects a Composer target when a nested Store occurrence uses opposite UUID case', async () => {
+    const fixture = newFixture();
+    const session = composerSession(
+      fixture,
+      'abcdefab-1111-4000-8000-000000000016',
+      'Case-folded Store counterpart'
+    );
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [session]);
+    writeComposerGlobalSessions(fixture, [session]);
+    mkdirSync(join(fixture.storeRoot, 'chats', 'fixture-hash', session.id.toUpperCase()), {
+      recursive: true,
+    });
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    await expect(
+      migrateLibrarySession(
+        sessionConfig(fixture, destination, session.id, { workspace: fixture.projectA })
+      )
     ).rejects.toMatchObject({
       code: 'UNSUPPORTED_SESSION_MIGRATION',
       details: expect.objectContaining({ eligibility: 'merged' }),
