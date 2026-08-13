@@ -13,29 +13,21 @@ permissions:
   contents: read
 
 jobs:
-  validate:
-    name: Validate on Node ${{ matrix.node-version }}
+  source-quality:
+    name: Validate source on supported tooling
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version:
-          - '20.0.0'
-          - '22.15.1'
-          - '22.16.0'
-          - '23.7.0'
-          - '23.8.0'
-          - '24.x'
-          - '26.x'
 
     steps:
       - name: Checkout exact tag revision
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup supported development toolchain
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          # Vite 7 requires Node 20.19+; use the packaging runtime for all
+          # source-level tools while preserving Node 20.0 product support via
+          # the exact-candidate runtime matrix below.
+          node-version: '24.x'
           cache: npm
 
       - name: Show toolchain versions
@@ -58,7 +50,7 @@ jobs:
 
   package-candidate:
     name: Pack one immutable candidate
-    needs: validate
+    needs: source-quality
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.identity.outputs.version }}
@@ -109,6 +101,78 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  runtime-candidate:
+    name: Runtime ${{ matrix.node-version }} (${{ matrix.node-sqlite-backup }})
+    needs: package-candidate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node-version: '20.0.0'
+            backup-driver: better-sqlite3
+            node-sqlite-backup: unavailable
+          - node-version: '22.15.1'
+            backup-driver: better-sqlite3
+            node-sqlite-backup: missing
+          - node-version: '22.16.0'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '23.7.0'
+            backup-driver: better-sqlite3
+            node-sqlite-backup: missing
+          - node-version: '23.8.0'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '24.x'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '25.x'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '26.x'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+
+    steps:
+      - name: Checkout exact tag revision
+        uses: actions/checkout@v4
+
+      - name: Setup product runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Show runtime versions
+        run: node -v && npm -v
+
+      - name: Download checksum-addressed candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-candidate-${{ needs.package-candidate.outputs.sha256 }}
+          path: release-candidate
+
+      - name: Verify candidate checksum and revision
+        shell: bash
+        working-directory: release-candidate
+        run: |
+          sha256sum -c candidate.sha256
+          ACTUAL_SHA256=$(sha256sum "${{ needs.package-candidate.outputs.tarball }}" | cut -d ' ' -f 1)
+          test "$ACTUAL_SHA256" = "${{ needs.package-candidate.outputs.sha256 }}"
+          test "$(node -p 'require("./candidate-metadata.json").revision')" = "$GITHUB_SHA"
+          test "$(node -p 'require("./candidate-metadata.json").version')" = "${{ needs.package-candidate.outputs.version }}"
+          test "$(node -p 'require("./candidate-metadata.json").tag')" = "v${{ needs.package-candidate.outputs.version }}"
+          test "$(node -p 'require("./candidate-metadata.json").sha256')" = "${{ needs.package-candidate.outputs.sha256 }}"
+          test "$(node -p 'require("./candidate-metadata.json").tarball')" = "${{ needs.package-candidate.outputs.tarball }}"
+
+      - name: Smoke exact candidate and SQLite boundary
+        run: >-
+          node scripts/smoke-packed-package.mjs
+          "release-candidate/${{ needs.package-candidate.outputs.tarball }}"
+          --runtime-only
+          --expected-backup-driver=${{ matrix.backup-driver }}
+          --expected-node-sqlite-backup=${{ matrix.node-sqlite-backup }}
+
   verify-candidate:
     name: Verify exact packed bytes
     needs: package-candidate
@@ -137,14 +201,20 @@ jobs:
         working-directory: release-candidate
         run: |
           sha256sum -c candidate.sha256
+          ACTUAL_SHA256=$(sha256sum "${{ needs.package-candidate.outputs.tarball }}" | cut -d ' ' -f 1)
+          test "$ACTUAL_SHA256" = "${{ needs.package-candidate.outputs.sha256 }}"
           test "$(node -p 'require("./candidate-metadata.json").revision')" = "$GITHUB_SHA"
+          test "$(node -p 'require("./candidate-metadata.json").version')" = "${{ needs.package-candidate.outputs.version }}"
+          test "$(node -p 'require("./candidate-metadata.json").tag')" = "v${{ needs.package-candidate.outputs.version }}"
+          test "$(node -p 'require("./candidate-metadata.json").sha256')" = "${{ needs.package-candidate.outputs.sha256 }}"
+          test "$(node -p 'require("./candidate-metadata.json").tarball')" = "${{ needs.package-candidate.outputs.tarball }}"
 
       - name: Clean-install and smoke exact package
         run: node scripts/smoke-packed-package.mjs "release-candidate/${{ needs.package-candidate.outputs.tarball }}"
 
   approve-candidate:
     name: Approve maintainer verification
-    needs: verify-candidate
+    needs: [verify-candidate, runtime-candidate]
     runs-on: ubuntu-latest
     environment: npm-release-verification
 
@@ -173,10 +243,18 @@ jobs:
           name: npm-candidate-${{ needs.package-candidate.outputs.sha256 }}
           path: release-candidate
 
-      - name: Recheck preserved checksum
+      - name: Recheck preserved checksum and identity
         shell: bash
         working-directory: release-candidate
-        run: sha256sum -c candidate.sha256
+        run: |
+          sha256sum -c candidate.sha256
+          ACTUAL_SHA256=$(sha256sum "${{ needs.package-candidate.outputs.tarball }}" | cut -d ' ' -f 1)
+          test "$ACTUAL_SHA256" = "${{ needs.package-candidate.outputs.sha256 }}"
+          test "$(node -p 'require("./candidate-metadata.json").revision')" = "$GITHUB_SHA"
+          test "$(node -p 'require("./candidate-metadata.json").version')" = "${{ needs.package-candidate.outputs.version }}"
+          test "$(node -p 'require("./candidate-metadata.json").tag')" = "v${{ needs.package-candidate.outputs.version }}"
+          test "$(node -p 'require("./candidate-metadata.json").sha256')" = "${{ needs.package-candidate.outputs.sha256 }}"
+          test "$(node -p 'require("./candidate-metadata.json").tarball')" = "${{ needs.package-candidate.outputs.tarball }}"
 
       - name: Remove token-based npm configuration
         run: npm config delete //registry.npmjs.org/:_authToken

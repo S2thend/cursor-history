@@ -3,6 +3,17 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflowPath = resolve('.github/workflows/npm-publish.yml');
+const runtimeSmokePath = resolve('scripts/smoke-packed-package.mjs');
+const runtimeProfiles = [
+  ['20.0.0', 'better-sqlite3', 'unavailable'],
+  ['22.15.1', 'better-sqlite3', 'missing'],
+  ['22.16.0', 'node:sqlite', 'supported'],
+  ['23.7.0', 'better-sqlite3', 'missing'],
+  ['23.8.0', 'node:sqlite', 'supported'],
+  ['24.x', 'node:sqlite', 'supported'],
+  ['25.x', 'node:sqlite', 'supported'],
+  ['26.x', 'node:sqlite', 'supported'],
+] as const;
 
 function workflow(): string {
   return readFileSync(workflowPath, 'utf8');
@@ -38,6 +49,12 @@ function jobNeeds(source: string, jobName: string): string[] {
     .filter((item): item is string => item !== undefined);
 }
 
+function mutateJob(source: string, jobName: string, target: string, replacement: string): string {
+  const block = jobBlock(source, jobName);
+  if (!block.includes(target)) return source;
+  return source.replace(block, block.replace(target, replacement));
+}
+
 function unsafeReleaseBypasses(source: string): string[] {
   const failures: string[] = [];
   if (
@@ -52,13 +69,26 @@ function unsafeReleaseBypasses(source: string): string[] {
   const verificationNeeds = jobNeeds(source, 'verify-candidate');
   const approvalNeeds = jobNeeds(source, 'approve-candidate');
   const publishNeeds = jobNeeds(source, 'publish');
+  const sourceQualityJob = jobBlock(source, 'source-quality');
+  const packageJob = jobBlock(source, 'package-candidate');
+  const runtimeJob = jobBlock(source, 'runtime-candidate');
+  const verificationJob = jobBlock(source, 'verify-candidate');
   const approvalJob = jobBlock(source, 'approve-candidate');
   const publishJob = jobBlock(source, 'publish');
   if (!verificationNeeds.includes('package-candidate')) {
     failures.push('verification bypasses the preserved candidate');
   }
+  if (!jobNeeds(source, 'package-candidate').includes('source-quality')) {
+    failures.push('packaging bypasses source quality');
+  }
+  if (!jobNeeds(source, 'runtime-candidate').includes('package-candidate')) {
+    failures.push('runtime matrix bypasses the preserved candidate');
+  }
   if (!approvalNeeds.includes('verify-candidate')) {
     failures.push('protected approval bypasses verification');
+  }
+  if (!approvalNeeds.includes('runtime-candidate')) {
+    failures.push('protected approval bypasses runtime matrix');
   }
   if (!publishNeeds.includes('approve-candidate')) {
     failures.push('publish bypasses protected approval');
@@ -75,6 +105,96 @@ function unsafeReleaseBypasses(source: string): string[] {
   if (/^    if:\s*.*\balways\s*\(\s*\)/mu.test(publishJob)) {
     failures.push('publish runs after a failed dependency');
   }
+  if (!sourceQualityJob.includes("node-version: '24.x'")) {
+    failures.push('source quality uses an unsupported development toolchain');
+  }
+  for (const command of [
+    'npm ci',
+    'npm run typecheck',
+    'npm run lint',
+    'npm test',
+    'npm run build',
+  ]) {
+    if (!sourceQualityJob.includes(command)) failures.push(`source quality skips ${command}`);
+  }
+  if (/\bnpm\s+(?:ci|test|run\s+(?:typecheck|lint|build))\b/u.test(runtimeJob)) {
+    failures.push('minimum runtime executes unsupported source tooling');
+  }
+  for (const flag of [
+    '--runtime-only',
+    '--expected-backup-driver=${{ matrix.backup-driver }}',
+    '--expected-node-sqlite-backup=${{ matrix.node-sqlite-backup }}',
+  ]) {
+    if (!runtimeJob.includes(flag)) failures.push(`runtime matrix skips ${flag}`);
+  }
+  for (const [version, driver, capability] of runtimeProfiles) {
+    const profile =
+      `          - node-version: '${version}'\n` +
+      `            backup-driver: ${driver}\n` +
+      `            node-sqlite-backup: ${capability}`;
+    if (!runtimeJob.includes(profile)) failures.push(`runtime matrix changes ${version} profile`);
+  }
+
+  for (const [label, block] of [
+    ['runtime', runtimeJob],
+    ['verification', verificationJob],
+    ['publish', publishJob],
+  ] as const) {
+    if (!/^\s*sha256sum -c candidate\.sha256\s*$/mu.test(block)) {
+      failures.push(`${label} skips candidate checksum`);
+    }
+  }
+  for (const [label, block] of [
+    ['runtime', runtimeJob],
+    ['verification', verificationJob],
+    ['publish', publishJob],
+  ] as const) {
+    if (
+      !block.includes(
+        'ACTUAL_SHA256=$(sha256sum "${{ needs.package-candidate.outputs.tarball }}"'
+      ) ||
+      !block.includes('test "$ACTUAL_SHA256" = "${{ needs.package-candidate.outputs.sha256 }}"')
+    ) {
+      failures.push(`${label} does not bind candidate bytes to the trusted sha256 output`);
+    }
+    if (!block.includes('candidate-metadata.json").revision\')" = "$GITHUB_SHA"')) {
+      failures.push(`${label} skips candidate revision identity`);
+    }
+    if (
+      !block.includes(
+        'candidate-metadata.json").version\')" = "${{ needs.package-candidate.outputs.version }}"'
+      )
+    ) {
+      failures.push(`${label} skips candidate version identity`);
+    }
+    if (
+      !block.includes(
+        'candidate-metadata.json").tag\')" = "v${{ needs.package-candidate.outputs.version }}"'
+      )
+    ) {
+      failures.push(`${label} skips candidate tag identity`);
+    }
+    if (
+      !block.includes(
+        'candidate-metadata.json").sha256\')" = "${{ needs.package-candidate.outputs.sha256 }}"'
+      )
+    ) {
+      failures.push(`${label} skips candidate sha256 identity`);
+    }
+    if (
+      !block.includes(
+        'candidate-metadata.json").tarball\')" = "${{ needs.package-candidate.outputs.tarball }}"'
+      )
+    ) {
+      failures.push(`${label} skips candidate tarball identity`);
+    }
+    if (!block.includes('name: npm-candidate-${{ needs.package-candidate.outputs.sha256 }}')) {
+      failures.push(`${label} downloads an unaddressed candidate`);
+    }
+  }
+  if (!packageJob.includes('name: npm-candidate-${{ steps.identity.outputs.sha256 }}')) {
+    failures.push('package upload is not checksum-addressed');
+  }
 
   if (!/npm publish[^\n]*needs\.package-candidate\.outputs\.tarball/.test(publishJob)) {
     failures.push('publish does not consume the tarball');
@@ -85,13 +205,72 @@ function unsafeReleaseBypasses(source: string): string[] {
   return failures;
 }
 
+function unsafeRuntimeSmoke(source: string): string[] {
+  const failures: string[] = [];
+  for (const contract of [
+    'process.argv.slice(3)',
+    'fail(`unknown argument: ${name}`)',
+    'esm.getActiveDriver() !== expectedBackupDriver',
+    "esm.setDriver('node:sqlite')",
+    "expectedNodeSqliteBackup === 'supported'",
+    'forcedBackupError instanceof esm.DriverNotAvailableError',
+    'esm.isDatabaseCapabilityError(forcedBackupError)',
+    "forcedBackupError.details?.operation !== 'backup'",
+    "JSON.stringify(['onlineBackup'])",
+    "forcedBackupError.details?.alternatives?.includes('better-sqlite3')",
+  ]) {
+    if (!source.includes(contract)) failures.push(`runtime smoke skips ${contract}`);
+  }
+  return failures;
+}
+
 describe('npm publication workflow', () => {
+  it('declares exactly the runtime majors supported by the packaged native dependency', () => {
+    const packageDocument = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {
+      engines?: { node?: string };
+    };
+    const lockDocument = JSON.parse(readFileSync(resolve('package-lock.json'), 'utf8')) as {
+      packages?: Record<string, { engines?: { node?: string } }>;
+    };
+    const supported = '20.x || 22.x || 23.x || 24.x || 25.x || 26.x';
+
+    expect(packageDocument.engines?.node).toBe(supported);
+    expect(lockDocument.packages?.['']?.engines?.node).toBe(supported);
+    expect(supported).not.toContain('21.x');
+    expect(supported).not.toMatch(/>=\s*20/u);
+  });
+
+  it('builds current sources before plain npm test can execute built-CLI coverage', () => {
+    const packageDocument = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+
+    expect(packageDocument.scripts?.pretest).toBe('npm run build');
+
+    const missingPreparation = JSON.stringify({
+      ...packageDocument,
+      scripts: { ...packageDocument.scripts, pretest: 'echo skipped' },
+    });
+    expect(JSON.parse(missingPreparation).scripts.pretest).not.toBe('npm run build');
+  });
+
+  it('does not encode supported-runtime SQLite capability boundaries as skipped tests', () => {
+    const driverIntegration = readFileSync(resolve('tests/integration/drivers.test.ts'), 'utf8');
+
+    expect(driverIntegration).not.toMatch(/(?:describe|it|test)\.skip/u);
+    expect(driverIntegration).toContain('node:sqlite unavailable runtime profile');
+    expect(driverIntegration).toContain('better-sqlite3 unavailable runtime profile');
+  });
+
   it('runs every required runtime boundary without swallowing validation failures', () => {
     const source = workflow();
+    const sourceQuality = jobBlock(source, 'source-quality');
+    const runtimeCandidate = jobBlock(source, 'runtime-candidate');
 
-    for (const version of ['20.0.0', '22.15.1', '22.16.0', '23.7.0', '23.8.0', '24.x', '26.x']) {
-      expect(source).toContain(`'${version}'`);
+    for (const [version] of runtimeProfiles) {
+      expect(runtimeCandidate).toContain(`'${version}'`);
     }
+    expect(runtimeCandidate).not.toContain("node-version: '21.x'");
     for (const command of [
       'npm ci',
       'npm run typecheck',
@@ -99,8 +278,21 @@ describe('npm publication workflow', () => {
       'npm test',
       'npm run build',
     ]) {
-      expect(source).toContain(command);
+      expect(sourceQuality).toContain(command);
     }
+    expect(sourceQuality).toContain("node-version: '24.x'");
+    expect(sourceQuality).not.toContain("node-version: '20.0.0'");
+    expect(runtimeCandidate).not.toMatch(/\bnpm\s+(?:ci|test|run\s+(?:typecheck|lint|build))\b/u);
+    expect(runtimeCandidate).toContain('--runtime-only');
+    expect(runtimeCandidate).toContain('--expected-backup-driver=${{ matrix.backup-driver }}');
+    expect(runtimeCandidate).toContain(
+      '--expected-node-sqlite-backup=${{ matrix.node-sqlite-backup }}'
+    );
+    expect(runtimeCandidate.match(/backup-driver: better-sqlite3/gu)).toHaveLength(3);
+    expect(runtimeCandidate.match(/backup-driver: node:sqlite/gu)).toHaveLength(5);
+    expect(runtimeCandidate.match(/node-sqlite-backup: unavailable/gu)).toHaveLength(1);
+    expect(runtimeCandidate.match(/node-sqlite-backup: missing/gu)).toHaveLength(2);
+    expect(runtimeCandidate.match(/node-sqlite-backup: supported/gu)).toHaveLength(5);
     expect(source).not.toMatch(/npm test\s*\|\|/);
     expect(source).not.toContain('continue-on-error: true');
   });
@@ -117,7 +309,12 @@ describe('npm publication workflow', () => {
     expect(source).toContain('scripts/smoke-packed-package.mjs');
     expect(source).toContain('environment: npm-release-verification');
     expect(jobNeeds(source, 'verify-candidate')).toEqual(['package-candidate']);
-    expect(jobNeeds(source, 'approve-candidate')).toEqual(['verify-candidate']);
+    expect(jobNeeds(source, 'package-candidate')).toEqual(['source-quality']);
+    expect(jobNeeds(source, 'runtime-candidate')).toEqual(['package-candidate']);
+    expect(jobNeeds(source, 'approve-candidate')).toEqual([
+      'verify-candidate',
+      'runtime-candidate',
+    ]);
     expect(jobNeeds(source, 'publish')).toEqual(['package-candidate', 'approve-candidate']);
     expect(source).toMatch(/npm publish[^\n]*needs\.package-candidate\.outputs\.tarball/);
     expect(source).not.toMatch(/npm publish\s+--/);
@@ -153,12 +350,21 @@ describe('npm publication workflow', () => {
     );
 
     const approvalSkipsVerification = source.replace(
-      'approve-candidate:\n    name: Approve maintainer verification\n    needs: verify-candidate',
-      'approve-candidate:\n    name: Approve maintainer verification\n    needs: package-candidate'
+      'needs: [verify-candidate, runtime-candidate]',
+      'needs: [package-candidate, runtime-candidate]'
     );
     expect(approvalSkipsVerification).not.toBe(source);
     expect(unsafeReleaseBypasses(approvalSkipsVerification)).toContain(
       'protected approval bypasses verification'
+    );
+
+    const approvalSkipsRuntime = source.replace(
+      'needs: [verify-candidate, runtime-candidate]',
+      'needs: verify-candidate'
+    );
+    expect(approvalSkipsRuntime).not.toBe(source);
+    expect(unsafeReleaseBypasses(approvalSkipsRuntime)).toContain(
+      'protected approval bypasses runtime matrix'
     );
 
     const publishAfterFailure = source.replace(
@@ -168,6 +374,184 @@ describe('npm publication workflow', () => {
     expect(publishAfterFailure).not.toBe(source);
     expect(unsafeReleaseBypasses(publishAfterFailure)).toContain(
       'publish runs after a failed dependency'
+    );
+  });
+
+  it('detects unsupported-tooling and unasserted-runtime mutations', () => {
+    const source = workflow();
+
+    const sourceOnMinimum = source.replace(
+      "node-version: '24.x'\n          cache: npm",
+      "node-version: '20.0.0'\n          cache: npm"
+    );
+    expect(sourceOnMinimum).not.toBe(source);
+    expect(unsafeReleaseBypasses(sourceOnMinimum)).toContain(
+      'source quality uses an unsupported development toolchain'
+    );
+
+    const runtimeRunsVitest = source.replace(
+      '      - name: Smoke exact candidate and SQLite boundary',
+      '      - name: Unsupported source test\n        run: npm test\n\n      - name: Smoke exact candidate and SQLite boundary'
+    );
+    expect(runtimeRunsVitest).not.toBe(source);
+    expect(unsafeReleaseBypasses(runtimeRunsVitest)).toContain(
+      'minimum runtime executes unsupported source tooling'
+    );
+
+    const runtimeSkipsCapability = source.replace(
+      '          --expected-node-sqlite-backup=${{ matrix.node-sqlite-backup }}',
+      '          --capability-check-skipped'
+    );
+    expect(runtimeSkipsCapability).not.toBe(source);
+    expect(unsafeReleaseBypasses(runtimeSkipsCapability)).toContain(
+      'runtime matrix skips --expected-node-sqlite-backup=${{ matrix.node-sqlite-backup }}'
+    );
+
+    const wrongMinimumProfile = source.replace(
+      "          - node-version: '20.0.0'\n            backup-driver: better-sqlite3\n            node-sqlite-backup: unavailable",
+      "          - node-version: '20.0.0'\n            backup-driver: node:sqlite\n            node-sqlite-backup: supported"
+    );
+    expect(wrongMinimumProfile).not.toBe(source);
+    expect(unsafeReleaseBypasses(wrongMinimumProfile)).toContain(
+      'runtime matrix changes 20.0.0 profile'
+    );
+  });
+
+  it('locks strict runtime-smoke parsing and observable SQLite capability assertions', () => {
+    const source = readFileSync(runtimeSmokePath, 'utf8');
+    expect(unsafeRuntimeSmoke(source)).toEqual([]);
+
+    const ignoredArguments = source.replace('process.argv.slice(3)', '[]');
+    expect(ignoredArguments).not.toBe(source);
+    expect(unsafeRuntimeSmoke(ignoredArguments)).toContain(
+      'runtime smoke skips process.argv.slice(3)'
+    );
+
+    const missingForcedProbe = source.replace("esm.setDriver('node:sqlite')", 'void 0');
+    expect(missingForcedProbe).not.toBe(source);
+    expect(unsafeRuntimeSmoke(missingForcedProbe)).toContain(
+      "runtime smoke skips esm.setDriver('node:sqlite')"
+    );
+  });
+
+  it('detects removal of either checksum verification', () => {
+    const source = workflow();
+    for (const [jobName, label] of [
+      ['runtime-candidate', 'runtime'],
+      ['verify-candidate', 'verification'],
+      ['publish', 'publish'],
+    ] as const) {
+      const mutated = mutateJob(
+        source,
+        jobName,
+        'sha256sum -c candidate.sha256',
+        'echo checksum-skipped'
+      );
+      expect(mutated).not.toBe(source);
+      expect(unsafeReleaseBypasses(mutated)).toContain(`${label} skips candidate checksum`);
+    }
+  });
+
+  it('detects coordinated tarball and sidecar replacement that is not bound to trusted output', () => {
+    const source = workflow();
+    const directBinding = 'test "$ACTUAL_SHA256" = "${{ needs.package-candidate.outputs.sha256 }}"';
+
+    const verificationBypass = mutateJob(
+      source,
+      'verify-candidate',
+      directBinding,
+      'test "$ACTUAL_SHA256" = "$ACTUAL_SHA256"'
+    );
+    expect(verificationBypass).not.toBe(source);
+    expect(unsafeReleaseBypasses(verificationBypass)).toContain(
+      'verification does not bind candidate bytes to the trusted sha256 output'
+    );
+
+    const publishBypass = mutateJob(
+      source,
+      'publish',
+      directBinding,
+      'test "$ACTUAL_SHA256" = "$ACTUAL_SHA256"'
+    );
+    expect(publishBypass).not.toBe(source);
+    expect(unsafeReleaseBypasses(publishBypass)).toContain(
+      'publish does not bind candidate bytes to the trusted sha256 output'
+    );
+  });
+
+  it('detects candidate metadata and checksum-address mutations', () => {
+    const source = workflow();
+    for (const [field, identity] of [
+      ['revision', 'candidate-metadata.json").revision\')" = "$GITHUB_SHA"'],
+      [
+        'version',
+        'candidate-metadata.json").version\')" = "${{ needs.package-candidate.outputs.version }}"',
+      ],
+      [
+        'tag',
+        'candidate-metadata.json").tag\')" = "v${{ needs.package-candidate.outputs.version }}"',
+      ],
+      [
+        'sha256',
+        'candidate-metadata.json").sha256\')" = "${{ needs.package-candidate.outputs.sha256 }}"',
+      ],
+      [
+        'tarball',
+        'candidate-metadata.json").tarball\')" = "${{ needs.package-candidate.outputs.tarball }}"',
+      ],
+    ] as const) {
+      const verificationBypass = mutateJob(
+        source,
+        'verify-candidate',
+        identity,
+        `candidate-${field}-identity-bypassed`
+      );
+      expect(verificationBypass).not.toBe(source);
+      expect(unsafeReleaseBypasses(verificationBypass)).toContain(
+        `verification skips candidate ${field} identity`
+      );
+
+      const publishBypass = mutateJob(
+        source,
+        'publish',
+        identity,
+        `candidate-${field}-identity-bypassed`
+      );
+      expect(publishBypass).not.toBe(source);
+      expect(unsafeReleaseBypasses(publishBypass)).toContain(
+        `publish skips candidate ${field} identity`
+      );
+    }
+
+    const unaddressedVerification = mutateJob(
+      source,
+      'verify-candidate',
+      'name: npm-candidate-${{ needs.package-candidate.outputs.sha256 }}',
+      'name: npm-candidate-latest'
+    );
+    expect(unaddressedVerification).not.toBe(source);
+    expect(unsafeReleaseBypasses(unaddressedVerification)).toContain(
+      'verification downloads an unaddressed candidate'
+    );
+
+    const unaddressedPublish = mutateJob(
+      source,
+      'publish',
+      'name: npm-candidate-${{ needs.package-candidate.outputs.sha256 }}',
+      'name: npm-candidate-latest'
+    );
+    expect(unaddressedPublish).not.toBe(source);
+    expect(unsafeReleaseBypasses(unaddressedPublish)).toContain(
+      'publish downloads an unaddressed candidate'
+    );
+
+    const unaddressedUpload = source.replace(
+      'name: npm-candidate-${{ steps.identity.outputs.sha256 }}',
+      'name: npm-candidate-latest'
+    );
+    expect(unaddressedUpload).not.toBe(source);
+    expect(unsafeReleaseBypasses(unaddressedUpload)).toContain(
+      'package upload is not checksum-addressed'
     );
   });
 });

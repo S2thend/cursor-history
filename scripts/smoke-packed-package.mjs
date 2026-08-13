@@ -75,7 +75,44 @@ function typecheckDocumentationFences(markdownPath, markdown, workspace) {
 }
 
 const requestedTarball = process.argv[2];
-if (!requestedTarball) fail('usage: smoke-packed-package.mjs <package.tgz>');
+const smokeArguments = new Map();
+for (const argument of process.argv.slice(3)) {
+  const separator = argument.indexOf('=');
+  const name = separator < 0 ? argument : argument.slice(0, separator);
+  const value = separator < 0 ? 'true' : argument.slice(separator + 1);
+  if (
+    !['--runtime-only', '--expected-backup-driver', '--expected-node-sqlite-backup'].includes(name)
+  ) {
+    fail(`unknown argument: ${name}`);
+  }
+  if (smokeArguments.has(name)) fail(`duplicate argument: ${name}`);
+  if (name === '--runtime-only' && argument !== '--runtime-only') {
+    fail('--runtime-only does not accept a value');
+  }
+  if (name !== '--runtime-only' && (separator < 0 || value.length === 0)) {
+    fail(`${name} requires a nonempty value`);
+  }
+  smokeArguments.set(name, value);
+}
+const runtimeOnly = smokeArguments.get('--runtime-only') === 'true';
+const expectedBackupDriver = smokeArguments.get('--expected-backup-driver');
+const expectedNodeSqliteBackup = smokeArguments.get('--expected-node-sqlite-backup');
+if (!requestedTarball) {
+  fail(
+    'usage: smoke-packed-package.mjs <package.tgz> [--runtime-only ' +
+      '--expected-backup-driver=<driver> --expected-node-sqlite-backup=<profile>]'
+  );
+}
+if (!runtimeOnly && (expectedBackupDriver || expectedNodeSqliteBackup)) {
+  fail('SQLite runtime expectations require --runtime-only');
+}
+if (
+  runtimeOnly &&
+  (!['better-sqlite3', 'node:sqlite'].includes(expectedBackupDriver ?? '') ||
+    !['unavailable', 'missing', 'supported'].includes(expectedNodeSqliteBackup ?? ''))
+) {
+  fail('runtime-only smoke requires recognized SQLite driver and capability expectations');
+}
 
 const tarball = resolve(requestedTarball);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -98,6 +135,13 @@ try {
 
   const installedRoot = join(workspace, 'node_modules', 'cursor-history');
   const installedPackage = JSON.parse(readFileSync(join(installedRoot, 'package.json'), 'utf8'));
+  const supportedNodeMajors = '20.x || 22.x || 23.x || 24.x || 25.x || 26.x';
+  if (installedPackage.engines?.node !== supportedNodeMajors) {
+    fail(
+      `package declares Node ${String(installedPackage.engines?.node)}; ` +
+        `expected ${supportedNodeMajors}`
+    );
+  }
   const requiredFiles = [
     'dist/lib/index.js',
     'dist/lib/index.cjs',
@@ -107,6 +151,10 @@ try {
     'LICENSE',
     'CHANGELOG.md',
     'docs/compatibility.md',
+    'docs/logo.png',
+    'docs/readme_es.md',
+    'docs/readme_fr.md',
+    'docs/readme_zh.md',
   ];
   for (const relativePath of requiredFiles) {
     if (!existsSync(join(installedRoot, relativePath))) fail(`missing ${relativePath}`);
@@ -133,6 +181,7 @@ try {
     'isMigrationTargetChangedError',
     'isDatabaseCapabilityError',
     'isNoCapableDriverError',
+    'isBackupPublishedPermissionError',
     'isTemporaryArtifactCleanupError',
     'isReadContextError',
     'isReadContextSourceMismatchError',
@@ -163,14 +212,16 @@ try {
       fail(`public declarations are missing contract: ${declarationContract}`);
     }
   }
-  const audit = run(
-    process.execPath,
-    [join(repositoryRoot, 'scripts/audit-public-api-docs.mjs'), installedRoot],
-    { cwd: repositoryRoot }
-  );
-  const declarationAudit = JSON.parse(audit.stdout);
-  if (JSON.stringify(declarationAudit.valueExports) !== JSON.stringify(esmExports)) {
-    fail('runtime and declaration package-root value exports differ');
+  if (!runtimeOnly) {
+    const audit = run(
+      process.execPath,
+      [join(repositoryRoot, 'scripts/audit-public-api-docs.mjs'), installedRoot],
+      { cwd: repositoryRoot }
+    );
+    const declarationAudit = JSON.parse(audit.stdout);
+    if (JSON.stringify(declarationAudit.valueExports) !== JSON.stringify(esmExports)) {
+      fail('runtime and declaration package-root value exports differ');
+    }
   }
   const readme = readFileSync(join(installedRoot, 'README.md'), 'utf8');
   const compatibility = readFileSync(join(installedRoot, 'docs/compatibility.md'), 'utf8');
@@ -268,6 +319,10 @@ try {
       new esm.DatabaseCapabilityError('node:sqlite', 'backup', ['onlineBackup']),
     ],
     ['isNoCapableDriverError', new esm.NoCapableDriverError('read-session', ['read'])],
+    [
+      'isBackupPublishedPermissionError',
+      new esm.BackupPublishedPermissionError('/published/backup.zip', 0o640, 0o600),
+    ],
     ['isTemporaryArtifactCleanupError', new esm.TemporaryArtifactCleanupError(['/private/tmp'])],
     ['isReadContextError', new esm.ReadContextDisposedError()],
     ['isReadContextSourceMismatchError', new esm.ReadContextSourceMismatchError()],
@@ -318,6 +373,11 @@ try {
   ) {
     fail('backup result did not report the running packed-package version');
   }
+  if (expectedBackupDriver && esm.getActiveDriver() !== expectedBackupDriver) {
+    fail(
+      `automatic backup selected ${String(esm.getActiveDriver())}; expected ${expectedBackupDriver}`
+    );
+  }
   const JSZip = requireFromWorkspace('jszip');
   const backupZip = await JSZip.loadAsync(readFileSync(backupPath));
   const archivedManifestEntry = backupZip.file('manifest.json');
@@ -332,22 +392,81 @@ try {
   const validation = await esm.validateBackup(backupPath);
   if (validation.status !== 'valid') fail('packed library could not validate its synthetic backup');
 
-  typecheckDocumentationFences('README.md', readme, workspace);
-  const compatibilityExamples = typecheckDocumentationFences(
-    'docs/compatibility.md',
-    compatibility,
-    workspace
-  );
-  const publicExample = compatibilityExamples.find((source) =>
-    source.includes("const workspace = '/work/a';")
-  );
-  if (!publicExample) fail('packaged compatibility contract is missing its public-library example');
-  const typecheckedExamplePath = join(workspace, 'public-example.mts');
-  writeFileSync(typecheckedExamplePath, publicExample, { mode: 0o600 });
-  run(process.execPath, [typecheckedExamplePath], {
-    cwd: workspace,
-    env: { CURSOR_DATA_PATH: storeRoot },
-  });
+  if (expectedNodeSqliteBackup) {
+    esm.setDriver('node:sqlite');
+    const forcedBackupPath = join(workspace, 'forced-node-sqlite.zip');
+    let forcedBackupError;
+    try {
+      await esm.createBackup({
+        sourcePath: composerWorkspaceRoot,
+        outputPath: forcedBackupPath,
+        force: true,
+      });
+    } catch (error) {
+      forcedBackupError = error;
+    }
+
+    if (expectedNodeSqliteBackup === 'supported') {
+      if (forcedBackupError) {
+        fail(`capable forced node:sqlite backup failed: ${String(forcedBackupError)}`);
+      }
+      if (!existsSync(forcedBackupPath)) fail('capable forced node:sqlite backup wrote no archive');
+    } else {
+      if (!forcedBackupError) {
+        fail(`forced node:sqlite backup unexpectedly succeeded for ${expectedNodeSqliteBackup}`);
+      }
+      const expectedErrorName =
+        expectedNodeSqliteBackup === 'unavailable'
+          ? 'DriverNotAvailableError'
+          : 'DatabaseCapabilityError';
+      if (forcedBackupError?.name !== expectedErrorName) {
+        fail(
+          `forced node:sqlite backup returned ${String(forcedBackupError?.name)}; ` +
+            `expected ${expectedErrorName}`
+        );
+      }
+      if (
+        expectedNodeSqliteBackup === 'unavailable' &&
+        !(forcedBackupError instanceof esm.DriverNotAvailableError)
+      ) {
+        fail('unavailable node:sqlite did not return the exported driver error class');
+      }
+      if (
+        expectedNodeSqliteBackup === 'missing' &&
+        (!esm.isDatabaseCapabilityError(forcedBackupError) ||
+          forcedBackupError.details?.operation !== 'backup' ||
+          JSON.stringify(forcedBackupError.details?.missingCapabilities) !==
+            JSON.stringify(['onlineBackup']) ||
+          !forcedBackupError.details?.alternatives?.includes('better-sqlite3'))
+      ) {
+        fail('incapable node:sqlite did not report the exact online-backup capability boundary');
+      }
+      if (existsSync(forcedBackupPath)) {
+        fail('incapable forced node:sqlite backup published an archive');
+      }
+    }
+  }
+
+  if (!runtimeOnly) {
+    typecheckDocumentationFences('README.md', readme, workspace);
+    const compatibilityExamples = typecheckDocumentationFences(
+      'docs/compatibility.md',
+      compatibility,
+      workspace
+    );
+    const publicExample = compatibilityExamples.find((source) =>
+      source.includes("const workspace = '/work/a';")
+    );
+    if (!publicExample) {
+      fail('packaged compatibility contract is missing its public-library example');
+    }
+    const typecheckedExamplePath = join(workspace, 'public-example.mts');
+    writeFileSync(typecheckedExamplePath, publicExample, { mode: 0o600 });
+    run(process.execPath, [typecheckedExamplePath], {
+      cwd: workspace,
+      env: { CURSOR_DATA_PATH: storeRoot },
+    });
+  }
 
   const cliPath = join(installedRoot, 'dist/cli/index.js');
   const documentedList = run(
@@ -392,6 +511,9 @@ try {
       version: installedPackage.version,
       exportCount: esmExports.length,
       candidate: tarball,
+      runtimeOnly,
+      backupDriver: expectedBackupDriver ?? esm.getActiveDriver(),
+      nodeSqliteBackup: expectedNodeSqliteBackup,
     })}\n`
   );
 } finally {

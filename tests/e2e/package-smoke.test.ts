@@ -293,6 +293,47 @@ describe('packed-package contract smoke', () => {
     const smoked = runNode([smokeScript, tarball], repositoryRoot, 360_000, npmEnvironment);
     expect(smoked.status, `${smoked.stdout}${smoked.stderr}`).toBe(0);
     expect(JSON.parse(smoked.stdout)).toMatchObject({ candidate: tarball });
+
+    const runtimeSmoked = runNode(
+      [
+        smokeScript,
+        tarball,
+        '--runtime-only',
+        '--expected-backup-driver=node:sqlite',
+        '--expected-node-sqlite-backup=supported',
+      ],
+      repositoryRoot,
+      360_000,
+      npmEnvironment
+    );
+    expect(runtimeSmoked.status, `${runtimeSmoked.stdout}${runtimeSmoked.stderr}`).toBe(0);
+    expect(JSON.parse(runtimeSmoked.stdout)).toMatchObject({
+      candidate: tarball,
+      runtimeOnly: true,
+      backupDriver: 'node:sqlite',
+      nodeSqliteBackup: 'supported',
+    });
+
+    const missingExpectations = runNode(
+      [smokeScript, tarball, '--runtime-only'],
+      repositoryRoot,
+      30_000,
+      npmEnvironment
+    );
+    expect(missingExpectations.status).not.toBe(0);
+    expect(missingExpectations.stderr).toContain(
+      'runtime-only smoke requires recognized SQLite driver and capability expectations'
+    );
+
+    const unknownFlag = runNode(
+      [smokeScript, tarball, '--runtime-only', '--capability-check-skipped'],
+      repositoryRoot,
+      30_000,
+      npmEnvironment
+    );
+    expect(unknownFlag.status).not.toBe(0);
+    expect(unknownFlag.stderr).toContain('unknown argument: --capability-check-skipped');
+
     const afterHash = createHash('sha256').update(readFileSync(tarball)).digest('hex');
     expect(afterHash).toBe(beforeHash);
 

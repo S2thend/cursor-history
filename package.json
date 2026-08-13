@@ -1,6 +1,6 @@
 {
   "name": "cursor-history",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "The ultimate CLI tool and library to browse, search, export, migrate, and backup your Cursor AI chat history",
   "type": "module",
   "main": "dist/lib/index.js",
@@ -25,6 +25,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
+    "pretest": "npm run build",
     "test": "vitest run --reporter=json --outputFile=.vitest-results.tmp && npm run test:verify",
     "test:verify": "node scripts/verify-test-results.mjs .vitest-results.tmp",
     "test:compatibility": "vitest run tests/compatibility --reporter=json --outputFile=.vitest-compatibility-results.tmp && node scripts/verify-test-results.mjs .vitest-compatibility-results.tmp",
@@ -74,13 +75,17 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "docs/compatibility.md"
+    "docs/compatibility.md",
+    "docs/logo.png",
+    "docs/readme_es.md",
+    "docs/readme_fr.md",
+    "docs/readme_zh.md"
   ],
   "publishConfig": {
     "access": "public"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": "20.x || 22.x || 23.x || 24.x || 25.x || 26.x"
   },
   "dependencies": {
     "better-sqlite3": ">=12.10.0 <13",

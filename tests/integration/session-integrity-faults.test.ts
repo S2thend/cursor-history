@@ -214,8 +214,17 @@ function releaseBypasses(source: string): string[] {
   if (!workflowNeeds(source, 'verify-candidate').includes('package-candidate')) {
     failures.push('verification bypasses the preserved candidate');
   }
+  if (!workflowNeeds(source, 'package-candidate').includes('source-quality')) {
+    failures.push('packaging bypasses source validation');
+  }
+  if (!workflowNeeds(source, 'runtime-candidate').includes('package-candidate')) {
+    failures.push('runtime matrix bypasses the preserved candidate');
+  }
   if (!workflowNeeds(source, 'approve-candidate').includes('verify-candidate')) {
     failures.push('protected approval bypasses verification');
+  }
+  if (!workflowNeeds(source, 'approve-candidate').includes('runtime-candidate')) {
+    failures.push('protected approval bypasses runtime matrix');
   }
   const publishNeeds = workflowNeeds(source, 'publish');
   if (!publishNeeds.includes('approve-candidate')) failures.push('publish bypasses approval');
@@ -617,6 +626,15 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
     expect(publishAfterFailure).not.toBe(source);
     expect(releaseBypasses(publishAfterFailure)).toContain(
       'publish runs after a failed dependency'
+    );
+
+    const approvalSkipsRuntime = source.replace(
+      'needs: [verify-candidate, runtime-candidate]',
+      'needs: verify-candidate'
+    );
+    expect(approvalSkipsRuntime).not.toBe(source);
+    expect(releaseBypasses(approvalSkipsRuntime)).toContain(
+      'protected approval bypasses runtime matrix'
     );
   });
 });

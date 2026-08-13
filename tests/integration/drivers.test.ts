@@ -239,8 +239,16 @@ const betterSqlite3Available = await betterSqlite3Driver.isAvailable();
 if (betterSqlite3Available) {
   runDriverTests('better-sqlite3', async () => betterSqlite3Driver);
 } else {
-  describe.skip('better-sqlite3 (not available)', () => {
-    it('skipped - native bindings not available', () => {});
+  describe('better-sqlite3 unavailable runtime profile', () => {
+    it('executes the capability assertion instead of hiding it behind a skip', async () => {
+      const profile = await betterSqlite3Driver.getCapabilityProfile();
+      expect(profile).toMatchObject({
+        driver: 'better-sqlite3',
+        available: false,
+        capabilities: new Set(),
+      });
+      expect(profile.unavailableReason).toEqual(expect.any(String));
+    });
   });
 }
 
@@ -249,7 +257,15 @@ const nodeSqliteAvailable = await nodeSqliteDriver.isAvailable();
 if (nodeSqliteAvailable) {
   runDriverTests('node:sqlite', async () => nodeSqliteDriver);
 } else {
-  describe.skip('node:sqlite (not available on this Node version)', () => {
-    it('skipped', () => {});
+  describe('node:sqlite unavailable runtime profile', () => {
+    it('executes the capability assertion instead of hiding it behind a skip', async () => {
+      const profile = await nodeSqliteDriver.getCapabilityProfile();
+      expect(profile).toMatchObject({
+        driver: 'node:sqlite',
+        available: false,
+        capabilities: new Set(),
+      });
+      expect(profile.unavailableReason).toEqual(expect.any(String));
+    });
   });
 }
