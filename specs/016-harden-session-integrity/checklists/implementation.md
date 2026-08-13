@@ -243,8 +243,11 @@ successful carrier fixture is permitted.
 - [ ] The publish workflow is fail-closed and its manifest-producing runtime matrix, clean-install,
   test, build, pack-once, checksum, smoke, and protected-approval paths are contract tested.
 - [ ] No raw private evidence or external vibe-history checkout is a recurring CI dependency.
-- [ ] T114 confirms no copied proprietary third-party implementation or generated downstream
-  database remains in reachable branch history; T132 establishes only the clean current tree.
+- [ ] T114 confirms the frozen current tree contains no copied or derived third-party consumer
+  implementation and that no upstream vibe-history source file, private Cursor input, or generated
+  downstream database/archive exists in the current tree or reachable history. By explicit
+  maintainer decision, deleted compact derived test-harness revisions in feature-branch ancestry
+  are accepted and do not require a history rewrite; T132 establishes the clean current tree.
 - [ ] T112 and T113 have been rerun from the corrected 0.18.0 revision. T114 must run from the revision containing this checklist;
   T115 must preserve and verify one tarball from that exact revision before protected approval.
 

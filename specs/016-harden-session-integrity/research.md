@@ -33,6 +33,15 @@ another third-party consumer, and its internal fingerprint is not a third-party 
 Repository tests and fixtures do not contain copied third-party adapter, digest, comparison policy,
 persistence engine, SQLite schema/transaction, rollback, or downstream archive bytes.
 
+Earlier feature-branch commits temporarily contained a compact, locally derived compatibility
+harness for some of those behaviors, but never contained an upstream vibe-history source file,
+private Cursor input, or a generated downstream database/archive. T132 removed that harness from
+the current tree. After reviewing the bounded historical exposure, the maintainer explicitly
+accepted the deleted harness revisions remaining in this feature branch's ancestry; release
+sanitation therefore verifies the frozen tree plus the absence of upstream source files, private
+inputs, and generated downstream artifacts, and does not require a history rewrite solely for
+those deleted test-harness revisions.
+
 The exact no-vibe-history-change guarantee is a separate release-blocking T113 certification. With
 owner authorization, T113 uses an external checkout at the recorded upstream revision and runs that
 project's unchanged adapter, exact comparison policy and digest, and real SQLite persistence path.
@@ -51,9 +60,12 @@ cannot honestly supply. Both gates are required, so this separation does not wea
 no-consumer-change guarantee.
 
 **Alternatives considered**: Copy or vendor the third-party implementation and downstream archive
-(licensing and provenance risk); claim the generic model proves the exact third-party transaction
-(false); depend on an adjacent checkout during recurring CI (not reproducible or self-contained);
-preserve every v0.17 Store ID (explicitly outside the agreed contract).
+(licensing and provenance risk); rewrite the otherwise unpublished feature history solely to purge
+the already deleted compact derived harness (rejected by explicit maintainer decision after
+confirming that no upstream source file, private input, or downstream database/archive was tracked);
+claim the generic model proves the exact third-party transaction (false); depend on an adjacent
+checkout during recurring CI (not reproducible or self-contained); preserve every v0.17 Store ID
+(explicitly outside the agreed contract).
 
 ## 2. Composer identity projection
 
