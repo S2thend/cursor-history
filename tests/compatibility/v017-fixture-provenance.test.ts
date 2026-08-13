@@ -30,7 +30,7 @@ describe('locked v0.17 transition provenance and baselines', () => {
       committedAt: '2026-08-03T08:16:19Z',
       packageVersion: '0.17.0',
     });
-    expect(provenance.sources).toHaveLength(12);
+    expect(provenance.sources).toHaveLength(13);
     expect(
       provenance.sources.every(
         ({ path, gitBlob, lockedBehavior }) =>
@@ -41,6 +41,10 @@ describe('locked v0.17 transition provenance and baselines', () => {
       preserveNativeComposerIds: true,
       preserveUnstableStorePositionalIds: false,
       preserveCrossFormatStoreIds: false,
+      publicSearchCoordinates:
+        'correct existing fields to use the matched message and complete-message coordinate space',
+      publicJsonExportIndex:
+        'tagged releases omitted index; v0.18 adds zero-based metadata and corrects only the unreleased one-based leak',
     });
   });
 
@@ -155,6 +159,93 @@ describe('locked v0.17 transition provenance and baselines', () => {
     }
   });
 
+  it('locks the v0.16/v0.17 public-search defect as an explicit corrective exception', () => {
+    const search = fixture<{
+      taggedReleases: Array<{
+        tag: string;
+        commit: string;
+        libraryIndexGitBlob: string;
+        coreParserGitBlob: string;
+      }>;
+      query: string;
+      contextLines: number;
+      sourceMessage: { messageIndex: number; content: string };
+      legacyResult: Record<string, unknown>;
+      correctiveResult: Record<string, unknown>;
+      jsonExportIndex: Record<string, unknown>;
+    }>('search-coordinate-correction.json');
+
+    expect(search.taggedReleases).toEqual([
+      {
+        tag: 'v0.16.0',
+        commit: 'e8a7abf8cea3419a9dda911e174a05f82a9b260e',
+        libraryIndexGitBlob: 'bd50cc6c166cb835cc6fb9c280288e39dde099f8',
+        coreParserGitBlob: '110a31865caa49a2c8b15707dc7535761ce3dbf6',
+      },
+      {
+        tag: 'v0.17.0',
+        commit: '5e6ac2bebd041607d7e8b57e3f364aeb9440c2db',
+        libraryIndexGitBlob: 'f0cc8b69d27ef47071e90256c469d4e24e716b01',
+        coreParserGitBlob: 'b694368c1088ef413d035020df30c39281326700',
+      },
+    ]);
+    expect(search).toMatchObject({
+      query: 'missing-ID',
+      contextLines: 0,
+      sourceMessage: {
+        messageIndex: 1,
+        content: 'Synthetic workspace missing-ID answer.',
+      },
+      legacyResult: {
+        match: '...missing-ID...',
+        messageIndex: 0,
+        offset: 3,
+        coordinateSpace: 'snippet-relative',
+      },
+      correctiveResult: {
+        match: 'Synthetic workspace missing-ID answer.',
+        messageIndex: 1,
+        offset: 20,
+        coordinateSpace: 'complete-message-content-utf16',
+      },
+      jsonExportIndex: {
+        taggedReleaseBaseline: {
+          indexPresence: 'absent',
+          evidence: 'The v0.16.0 and v0.17.0 core exportToJson objects omit index.',
+        },
+        unreleasedFeatureBranchRegression: {
+          commit: '9365a890bf387a13a0e5ab7e9eb5f294f83d28e8',
+          tree: '163c44bfa66ea6f80899a4e496fcbc0924f3f363',
+          coreParserGitBlob: 'fb0320233edeb91aff5e16579f2261ec3381e797',
+          libraryIndexGitBlob: 'bb69bff9d62912ede498be78cb507d494a70fd39',
+          publicSelectorIndex: 0,
+          resolvedCoreIndex: 1,
+          exportedIndex: 1,
+        },
+        correctiveRelease: {
+          version: '0.18.0',
+          publicSelectorIndex: 0,
+          exportedIndex: 0,
+          indexScope: 'workspace',
+          classification: 'additive-zero-based-metadata',
+        },
+        sharedFieldContract: [
+          'id',
+          'title',
+          'createdAt',
+          'lastUpdatedAt',
+          'messageCount',
+          'workspacePath',
+          'source',
+          'messages[].id',
+          'messages[].role',
+          'messages[].content',
+          'messages[].timestamp',
+        ],
+      },
+    });
+  });
+
   it('keeps every v0.17 fixture wholly synthetic and declares its only UUID', () => {
     for (const name of [
       'provenance.json',
@@ -163,6 +254,7 @@ describe('locked v0.17 transition provenance and baselines', () => {
       'transcript-complete.json',
       'store-db-complete.json',
       'cli-fatal-output.json',
+      'search-coordinate-correction.json',
     ]) {
       expect(scanSyntheticFixtureBytes(name, readFileSync(join(ROOT, name)), [SESSION_ID])).toEqual(
         []

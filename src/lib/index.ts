@@ -125,6 +125,7 @@ export {
   isMigrationTargetChangedError,
   isDatabaseCapabilityError,
   isNoCapableDriverError,
+  isBackupPublishedPermissionError,
   isTemporaryArtifactCleanupError,
   isReadContextError,
   isReadContextSourceMismatchError,
@@ -146,6 +147,7 @@ export {
   NoDriverAvailableError,
   DatabaseCapabilityMissingError,
   NoCapableDatabaseDriverError,
+  BackupPublishedPermissionError,
   TemporaryArtifactCleanupError,
   ReadContextError,
   ReadContextSourceMismatchError,
@@ -207,7 +209,11 @@ import {
 import { MESSAGE_TYPES as MESSAGE_TYPES_CONST } from '../core/types.js';
 import * as storage from '../core/storage.js';
 import * as migrate from '../core/migrate.js';
-import { exportToJson, exportToMarkdown } from '../core/parser.js';
+import {
+  exportToJson,
+  exportToMarkdown,
+  findCaseInsensitiveMatchPositions,
+} from '../core/parser.js';
 import { expandPath, pathsEqual } from './platform.js';
 import { normalizePublicWorkspacePath, normalizeWorkspacePath } from '../core/workspace-scope.js';
 import type {
@@ -225,6 +231,26 @@ function toCoreSessionIdentifier(identifier: number | string): number | string {
   if (typeof identifier === 'number') return identifier + 1;
   if (/^\d+$/.test(identifier)) return Number.parseInt(identifier, 10) + 1;
   return identifier;
+}
+
+/**
+ * Serialize a core session through the library's zero-based index contract.
+ * The shallow projection is deliberate: exportToJson is read-only and no
+ * message identity, provenance, or timestamp value may be rewritten here.
+ */
+function exportLibrarySessionToJson(coreSession: CoreSession): string {
+  return exportToJson(
+    { ...coreSession, index: Math.max(0, coreSession.index - 1) },
+    coreSession.workspacePath
+  );
+}
+
+/** Split source content into lines without retaining CR/LF line-terminator code units. */
+function splitOriginalSourceLines(content: string): string[] {
+  const lines = content.split('\n');
+  return lines.map((line, index) =>
+    index < lines.length - 1 && line.endsWith('\r') ? line.slice(0, -1) : line
+  );
 }
 
 interface PublicReadContextRecord {
@@ -1119,39 +1145,42 @@ export async function searchSessions(
           }
 
           const firstSnippet = coreResult.snippets[0];
-          const match = firstSnippet?.text ?? '';
-          const offset = firstSnippet?.matchPositions[0]?.[0] ?? 0;
-          const lines = match.split('\n');
-          const contextBefore: string[] = [];
-          const contextAfter: string[] = [];
-
-          let matchLineIndex = 0;
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            if (line && line.includes(query)) {
-              matchLineIndex = i;
-              break;
-            }
+          let discoveredMessageIndex = -1;
+          let discoveredOffset = -1;
+          for (const [index, message] of fullSession.messages.entries()) {
+            const firstPosition = findCaseInsensitiveMatchPositions(message.content, query)[0];
+            if (!firstPosition) continue;
+            discoveredMessageIndex = index;
+            discoveredOffset = firstPosition[0];
+            break;
           }
-
-          if (resolved.context > 0) {
-            const start = Math.max(0, matchLineIndex - resolved.context);
-            const end = Math.min(lines.length, matchLineIndex + resolved.context + 1);
-
-            for (let i = start; i < matchLineIndex; i++) {
-              const line = lines[i];
-              if (line) contextBefore.push(line);
-            }
-            for (let i = matchLineIndex + 1; i < end; i++) {
-              const line = lines[i];
-              if (line) contextAfter.push(line);
-            }
-          }
+          const candidateMessageIndex = firstSnippet?.messageIndex ?? discoveredMessageIndex;
+          const messageIndex =
+            candidateMessageIndex >= 0 && candidateMessageIndex < fullSession.messages.length
+              ? candidateMessageIndex
+              : Math.max(0, discoveredMessageIndex);
+          const messageContent = fullSession.messages[messageIndex]?.content ?? '';
+          const projectedOffset = firstSnippet?.contentMatchPositions?.[0]?.[0];
+          const fallbackOffset =
+            messageIndex === discoveredMessageIndex
+              ? discoveredOffset
+              : (findCaseInsensitiveMatchPositions(messageContent, query)[0]?.[0] ?? -1);
+          const offset = projectedOffset ?? Math.max(0, fallbackOffset);
+          const lines = splitOriginalSourceLines(messageContent);
+          const matchLineIndex = messageContent.slice(0, offset).split('\n').length - 1;
+          const contextBefore =
+            resolved.context > 0
+              ? lines.slice(Math.max(0, matchLineIndex - resolved.context), matchLineIndex)
+              : [];
+          const contextAfter =
+            resolved.context > 0
+              ? lines.slice(matchLineIndex + 1, matchLineIndex + resolved.context + 1)
+              : [];
 
           results.push({
             session: convertToLibrarySession(fullSession),
-            match: lines[matchLineIndex] ?? match,
-            messageIndex: 0,
+            match: lines[matchLineIndex] ?? firstSnippet?.text ?? '',
+            messageIndex,
             offset,
             contextBefore: contextBefore.length > 0 ? contextBefore : undefined,
             contextAfter: contextAfter.length > 0 ? contextAfter : undefined,
@@ -1217,7 +1246,7 @@ export async function exportSessionToJson(
       if (!coreSession) {
         throw new SessionNotFoundError(index);
       }
-      return exportToJson(coreSession, coreSession.workspacePath);
+      return exportLibrarySessionToJson(coreSession);
     } finally {
       if (bound.ownsContext) await bound.context.dispose();
     }
@@ -1332,7 +1361,7 @@ export async function exportAllSessionsToJson(config?: LibraryConfig): Promise<s
           );
           if (!session) continue;
           exportedSessions.push(
-            JSON.parse(exportToJson(session, session.workspacePath)) as Record<string, unknown>
+            JSON.parse(exportLibrarySessionToJson(session)) as Record<string, unknown>
           );
         } catch (error) {
           if (!isSessionAmbiguityError(error)) throw error;

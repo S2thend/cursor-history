@@ -303,19 +303,19 @@ export interface SearchResult {
   /** Reference to the session containing this match */
   session: Session;
 
-  /** Matched content snippet */
+  /** Complete source line containing the first case-insensitive match. */
   match: string;
 
-  /** Message index within session where match was found */
+  /** Zero-based index in `session.messages` of the matched message. */
   messageIndex: number;
 
-  /** Context lines before match (optional, based on config) */
+  /** Complete neighboring lines before the match, bounded by `config.context`. */
   contextBefore?: string[];
 
-  /** Context lines after match (optional, based on config) */
+  /** Complete neighboring lines after the match, bounded by `config.context`. */
   contextAfter?: string[];
 
-  /** Character offset of match within message content */
+  /** Zero-based UTF-16 code-unit offset within the complete original matched message content. */
   offset?: number;
 }
 

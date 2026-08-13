@@ -6,6 +6,7 @@ const mockGetSession = vi.fn();
 const mockSearchSessions = vi.fn();
 const mockResolveSessionIdentifiers = vi.fn();
 const mockCreateSessionReadContext = vi.fn();
+const mockExportToJson = vi.fn(() => '{"test": true}');
 
 interface MockCoreReadContext {
   customDataPath?: string;
@@ -90,9 +91,13 @@ vi.mock('../../src/core/storage.js', () => ({
 }));
 
 vi.mock('../../src/core/parser.js', () => ({
-  exportToJson: vi.fn(() => '{"test": true}'),
+  exportToJson: (...args: unknown[]) => mockExportToJson(...args),
   exportToMarkdown: vi.fn(() => '# Test'),
   parseChatData: vi.fn(() => []),
+  findCaseInsensitiveMatchPositions: (content: string, query: string) => {
+    const offset = content.toLowerCase().indexOf(query.toLowerCase());
+    return offset < 0 ? [] : [[offset, offset + query.length]];
+  },
 }));
 
 vi.mock('../../src/core/migrate.js', () => ({
@@ -895,6 +900,7 @@ describe('getSession', () => {
 // =============================================================================
 describe('searchSessions', () => {
   it('returns search results', async () => {
+    const content = 'before line\nA MixedCase BUG lives here\nafter line';
     mockSearchSessions.mockResolvedValue([
       {
         sessionId: 'c1',
@@ -902,16 +908,75 @@ describe('searchSessions', () => {
         workspacePath: '~/proj',
         createdAt: now,
         matchCount: 1,
-        snippets: [{ messageRole: 'user', text: 'found the bug', matchPositions: [[10, 13]] }],
+        snippets: [
+          {
+            messageRole: 'assistant',
+            text: '...MixedCase BUG...',
+            matchPositions: [[13, 16]],
+            messageIndex: 1,
+            contentMatchPositions: [[24, 27]],
+          },
+        ],
       },
     ]);
-    mockGetSession.mockResolvedValue(makeCoreSession());
+    const coreSession = makeCoreSession();
+    coreSession.messages = [
+      { id: 'm1', role: 'user', content: 'unrelated', timestamp: now, codeBlocks: [] },
+      { id: 'm2', role: 'assistant', content, timestamp: later, codeBlocks: [] },
+    ];
+    coreSession.messageCount = 2;
+    mockGetSession.mockResolvedValue(coreSession);
 
-    const results = await searchSessions('bug');
+    const results = await searchSessions('bug', { context: 1 });
     expect(results).toHaveLength(1);
     expect(results[0]!.session.id).toBe('c1');
+    expect(results[0]).toMatchObject({
+      match: 'A MixedCase BUG lives here',
+      messageIndex: 1,
+      offset: 24,
+      contextBefore: ['before line'],
+      contextAfter: ['after line'],
+    });
     expect(mockSearchSessions.mock.calls[0]?.[4]).toBe(mockReadContext);
     expect(mockGetSession).toHaveBeenCalledWith('c1', undefined, undefined, mockReadContext, 1);
+  });
+
+  it('returns complete CRLF source lines without retaining line terminators', async () => {
+    const content = 'before line\r\nA MixedCase BUG lives here\r\nafter line';
+    mockSearchSessions.mockResolvedValue([
+      {
+        sessionId: 'c1',
+        index: 1,
+        workspacePath: '~/proj',
+        createdAt: now,
+        matchCount: 1,
+        snippets: [
+          {
+            messageRole: 'assistant',
+            text: 'placeholder',
+            matchPositions: [[0, 3]],
+            messageIndex: 0,
+            contentMatchPositions: [[25, 28]],
+          },
+        ],
+      },
+    ]);
+    const coreSession = makeCoreSession();
+    coreSession.messages = [
+      { id: 'm1', role: 'assistant', content, timestamp: now, codeBlocks: [] },
+    ];
+    coreSession.messageCount = 1;
+    mockGetSession.mockResolvedValue(coreSession);
+
+    const [result] = await searchSessions('bug', { context: 1 });
+
+    expect(result).toMatchObject({
+      match: 'A MixedCase BUG lives here',
+      messageIndex: 0,
+      offset: 25,
+      contextBefore: ['before line'],
+      contextAfter: ['after line'],
+    });
   });
 
   it('returns empty for no matches', async () => {
@@ -953,10 +1018,16 @@ describe('exportSessionToJson', () => {
   });
 
   it('delegates to core exportToJson', async () => {
-    mockGetSession.mockResolvedValue(makeCoreSession());
+    const coreSession = makeCoreSession('c1', 1);
+    mockGetSession.mockResolvedValue(coreSession);
 
     const json = await exportSessionToJson(0);
     expect(json).toBe('{"test": true}');
+    expect(mockExportToJson).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'c1', index: 0 }),
+      '~/proj'
+    );
+    expect(coreSession.index).toBe(1);
   });
 
   it('interprets a numeric string export target as a zero-based index', async () => {
@@ -1041,6 +1112,21 @@ describe('bulk export late ambiguity handling', () => {
       })
     );
     expect(mockReadContext.releaseSession).toHaveBeenCalledWith('late-ambiguous');
+  });
+});
+
+describe('public JSON export index projection', () => {
+  it('projects every bulk-exported core index to the public zero-based contract', async () => {
+    mockListSessions.mockResolvedValue([makeCoreSummary('first', 1), makeCoreSummary('second', 2)]);
+    mockGetSession.mockImplementation(async (id: string) =>
+      makeCoreSession(id, id === 'first' ? 1 : 2)
+    );
+
+    await exportAllSessionsToJson();
+
+    expect(
+      mockExportToJson.mock.calls.map(([session]) => (session as { index: number }).index)
+    ).toEqual([0, 1]);
   });
 });
 

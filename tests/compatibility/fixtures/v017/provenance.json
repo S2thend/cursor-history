@@ -45,6 +45,11 @@
       "lockedBehavior": ["released source literals", "released Session and Message shapes"]
     },
     {
+      "path": "src/lib/index.ts",
+      "gitBlob": "f0cc8b69d27ef47071e90256c469d4e24e716b01",
+      "lockedBehavior": ["released public search result coordinates"]
+    },
+    {
       "path": "src/cli/errors.ts",
       "gitBlob": "82c02af4edf72915fa6b93d5679113500aed07b1",
       "lockedBehavior": ["exit categories", "human-readable fatal stderr"]
@@ -75,7 +80,8 @@
     "degraded-store.json": "Degraded v0.17 Store view that must be pinned rather than replace",
     "transcript-complete.json": "Complete transcript-side transition input",
     "store-db-complete.json": "Complete Store-DB-side replacement input",
-    "cli-fatal-output.json": "Exact tagged fatal stdout/stderr byte baselines and exit categories"
+    "cli-fatal-output.json": "Exact tagged fatal stdout/stderr byte baselines and exit categories",
+    "search-coordinate-correction.json": "Exact v0.16/v0.17 public search-coordinate defect, tagged JSON-export absence, unreleased one-based leak, and corrective results"
   },
   "transitionContract": {
     "preserveNativeComposerIds": true,
@@ -83,6 +89,8 @@
     "preserveCrossFormatStoreIds": false,
     "completeInput": "one whole-session replacement followed by an unchanged no-op",
     "degradedInput": "pin complete data and emit retry/manual guidance",
-    "fatalJsonMigration": "preserve fields and exit category while moving fatal JSON from stdout to stderr"
+    "fatalJsonMigration": "preserve fields and exit category while moving fatal JSON from stdout to stderr",
+    "publicSearchCoordinates": "correct existing fields to use the matched message and complete-message coordinate space",
+    "publicJsonExportIndex": "tagged releases omitted index; v0.18 adds zero-based metadata and corrects only the unreleased one-based leak"
   }
 }

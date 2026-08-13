@@ -10,10 +10,12 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   generateV016Fixtures,
@@ -37,7 +39,11 @@ import {
   syncV016Session,
 } from '../helpers/v016-consumer.js';
 import type { Session } from '../../src/lib/types.js';
-import { listSessions as listLibrarySessions } from '../../src/lib/index.js';
+import {
+  exportSessionToJson as exportLibrarySessionToJson,
+  listSessions as listLibrarySessions,
+  searchSessions as searchLibrarySessions,
+} from '../../src/lib/index.js';
 
 const FIXTURE_ROOT = join(process.cwd(), 'tests', 'compatibility', 'fixtures', 'v016');
 const GENERATOR_PATH = join(
@@ -106,6 +112,76 @@ function taggedCursorSession(): Session {
     activeBranchBubbleIds: session.activeBranchBubbleIds,
     metadata: { lastModified: session.lastUpdatedAt },
   };
+}
+
+function taggedWorkspaceFallbackSession(): Session {
+  const fixture = JSON.parse(readFileSync(join(FIXTURE_ROOT, 'tagged-output.json'), 'utf8')) as {
+    workspaceFallbackSessions: Array<{
+      id: string;
+      createdAt: string;
+      lastUpdatedAt: string;
+      source: 'workspace-fallback';
+      messages: Array<{
+        id: string | null;
+        role: 'user' | 'assistant';
+        content: string;
+        timestamp: string;
+      }>;
+    }>;
+  };
+  const session = fixture.workspaceFallbackSessions[0]!;
+  return {
+    id: session.id,
+    workspace: '/fixture/v016/project',
+    timestamp: session.createdAt,
+    source: session.source,
+    messageCount: session.messages.length,
+    messages: session.messages.map(({ id, ...message }) => ({
+      ...message,
+      ...(id === null || id.length === 0 ? {} : { id }),
+    })),
+    metadata: { lastModified: session.lastUpdatedAt },
+  };
+}
+
+async function withCurrentWorkspaceFallback<T>(
+  run: (fixture: { root: string; workspaceStorage: string }) => Promise<T>
+): Promise<T> {
+  const root = mkdtempSync(join(tmpdir(), 'cursor-history-v016-workspace-current-'));
+  const workspaceStorage = join(root, 'User', 'workspaceStorage');
+  const workspaceDirectory = join(workspaceStorage, 'synthetic-workspace-fallback-016');
+  const emptyStoreRoot = join(root, 'empty-store');
+  const previousStoreRoot = process.env['CURSOR_STORE_ROOT'];
+  try {
+    mkdirSync(workspaceDirectory, { recursive: true });
+    mkdirSync(emptyStoreRoot, { recursive: true });
+    writeFileSync(
+      join(workspaceDirectory, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL('/fixture/v016/project').href })
+    );
+    const database = new BetterSqlite3(join(workspaceDirectory, 'state.vscdb'));
+    try {
+      database.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+      database
+        .prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)')
+        .run(
+          'composer.composerData',
+          readFileSync(join(FIXTURE_ROOT, 'workspace-fallback.json'), 'utf8')
+        );
+    } finally {
+      database.close();
+    }
+    process.env['CURSOR_STORE_ROOT'] = emptyStoreRoot;
+    return await run({ root, workspaceStorage });
+  } finally {
+    if (previousStoreRoot === undefined) delete process.env['CURSOR_STORE_ROOT'];
+    else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function keyBytes(keys: readonly string[]): Buffer {
+  return Buffer.from(keys.join('\0'), 'utf8');
 }
 
 function archiveInventory(path: string): {
@@ -389,6 +465,212 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
       else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('round-trips raw workspace-fallback data through the scoped production library without changing v0.16 persistence keys', async () => {
+    await withCurrentWorkspaceFallback(async ({ root, workspaceStorage }) => {
+      const result = await listLibrarySessions({
+        dataPath: workspaceStorage,
+        workspace: '/fixture/v016/project',
+        limit: 100,
+      });
+      expect(result.pagination.total).toBe(1);
+      const current = result.data[0]!;
+      const tagged = taggedWorkspaceFallbackSession();
+      const expectedProjection = normalizeCursorSessionV016(tagged);
+      const currentProjection = normalizeCursorSessionV016(current);
+
+      expect(current).toMatchObject({
+        id: V016_SYNTHETIC_SESSION_ID,
+        workspace: '/fixture/v016/project',
+        source: 'workspace-fallback',
+      });
+      expect(current.messages.map(({ id }) => id)).toEqual([
+        'workspace-native-016',
+        'msg:1',
+        'msg:2',
+      ]);
+      expect(currentProjection).toEqual(expectedProjection);
+      expect(
+        keyBytes([
+          currentProjection.id,
+          ...currentProjection.messages.map(({ id }) => id),
+          ...currentProjection.messages.flatMap(({ toolCalls = [] }) =>
+            toolCalls.map(({ id }) => id)
+          ),
+        ])
+      ).toEqual(
+        keyBytes([
+          expectedProjection.id,
+          ...expectedProjection.messages.map(({ id }) => id),
+          ...expectedProjection.messages.flatMap(({ toolCalls = [] }) =>
+            toolCalls.map(({ id }) => id)
+          ),
+        ])
+      );
+
+      const archivePath = join(root, 'workspace-fallback-consumer-archive.sqlite');
+      expect(syncV016Session(archivePath, tagged)).toEqual({
+        action: 'skipped',
+        messagesAppended: 0,
+      });
+      const beforeState = readV016ArchiveState(archivePath, expectedProjection.id);
+      const beforeInventory = archiveInventory(archivePath);
+      expect(syncV016Session(archivePath, current)).toEqual({
+        action: 'skipped',
+        messagesAppended: 0,
+      });
+      expect(readV016ArchiveState(archivePath, expectedProjection.id)).toEqual(beforeState);
+      expect(archiveInventory(archivePath)).toEqual(beforeInventory);
+    });
+  });
+
+  it('applies the versioned public-search coordinate correction to the raw v0.16 workspace fixture', async () => {
+    const baseline = JSON.parse(
+      readFileSync(
+        join(
+          process.cwd(),
+          'tests',
+          'compatibility',
+          'fixtures',
+          'v017',
+          'search-coordinate-correction.json'
+        ),
+        'utf8'
+      )
+    ) as {
+      query: string;
+      contextLines: number;
+      legacyResult: { match: string; messageIndex: number; offset: number };
+      correctiveResult: { match: string; messageIndex: number; offset: number };
+    };
+
+    expect(baseline.legacyResult).toMatchObject({
+      match: '...missing-ID...',
+      messageIndex: 0,
+      offset: 3,
+    });
+    await withCurrentWorkspaceFallback(async ({ workspaceStorage }) => {
+      const results = await searchLibrarySessions(baseline.query, {
+        dataPath: workspaceStorage,
+        workspace: '/fixture/v016/project',
+        context: baseline.contextLines,
+      });
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        session: { id: V016_SYNTHETIC_SESSION_ID },
+        match: baseline.correctiveResult.match,
+        messageIndex: baseline.correctiveResult.messageIndex,
+        offset: baseline.correctiveResult.offset,
+      });
+    });
+  });
+
+  it('adds a zero-based public JSON export index without drifting v0.16 identity or content', async () => {
+    const baseline = JSON.parse(
+      readFileSync(
+        join(
+          process.cwd(),
+          'tests',
+          'compatibility',
+          'fixtures',
+          'v017',
+          'search-coordinate-correction.json'
+        ),
+        'utf8'
+      )
+    ) as {
+      jsonExportIndex: {
+        taggedReleaseBaseline: { indexPresence: 'absent' };
+        unreleasedFeatureBranchRegression: { exportedIndex: number };
+        correctiveRelease: {
+          version: string;
+          exportedIndex: number;
+          indexScope: string;
+          classification: string;
+        };
+      };
+    };
+    expect(baseline.jsonExportIndex).toMatchObject({
+      taggedReleaseBaseline: { indexPresence: 'absent' },
+      unreleasedFeatureBranchRegression: { exportedIndex: 1 },
+      correctiveRelease: {
+        version: '0.18.0',
+        exportedIndex: 0,
+        indexScope: 'workspace',
+        classification: 'additive-zero-based-metadata',
+      },
+    });
+
+    await withCurrentWorkspaceFallback(async ({ workspaceStorage }) => {
+      const config = {
+        dataPath: workspaceStorage,
+        workspace: '/fixture/v016/project',
+      } as const;
+      const current = (await listLibrarySessions({ ...config, limit: 100 })).data[0]!;
+      const exported = JSON.parse(await exportLibrarySessionToJson(0, config)) as {
+        index: number;
+        indexScope: string;
+        id: string;
+        title: string;
+        createdAt: string;
+        lastUpdatedAt: string;
+        messageCount: number;
+        workspacePath: string;
+        source: 'global' | 'workspace-fallback';
+        messages: Array<{
+          id?: string;
+          role: 'user' | 'assistant';
+          content: string;
+          timestamp: string;
+          toolCalls?: Session['messages'][number]['toolCalls'];
+        }>;
+      };
+      const exportedById = JSON.parse(
+        await exportLibrarySessionToJson(V016_SYNTHETIC_SESSION_ID, config)
+      ) as typeof exported;
+
+      expect(exported.index).toBe(baseline.jsonExportIndex.correctiveRelease.exportedIndex);
+      expect(exported.indexScope).toBe(baseline.jsonExportIndex.correctiveRelease.indexScope);
+      expect(exportedById).toEqual(exported);
+      expect(exported).toMatchObject({
+        id: V016_SYNTHETIC_SESSION_ID,
+        title: 'Synthetic workspace fallback',
+        createdAt: '2024-01-16T00:00:00.000Z',
+        lastUpdatedAt: '2024-01-16T00:01:00.000Z',
+        messageCount: 3,
+        workspacePath: '/fixture/v016/project',
+        source: 'workspace-fallback',
+      });
+      expect(
+        exported.messages.map(({ id, role, content, timestamp }) => ({
+          id,
+          role,
+          content,
+          timestamp,
+        }))
+      ).toEqual(
+        current.messages.map(({ id, role, content, timestamp }) => ({
+          id,
+          role,
+          content,
+          timestamp,
+        }))
+      );
+
+      const exportedConsumerProjection = normalizeCursorSessionV016({
+        id: exported.id,
+        workspace: exported.workspacePath,
+        timestamp: exported.createdAt,
+        source: exported.source,
+        messageCount: exported.messageCount,
+        messages: exported.messages,
+        metadata: { lastModified: exported.lastUpdatedAt },
+      });
+      expect(exportedConsumerProjection).toEqual(
+        normalizeCursorSessionV016(taggedWorkspaceFallbackSession())
+      );
+    });
   });
 });
 
