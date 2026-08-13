@@ -563,9 +563,9 @@ npm run test:watch    # 监视模式
 本项目通过 GitHub Actions 使用 npm trusted publishing，不使用 `NPM_TOKEN` 仓库 secret。
 首次发布前：
 
-1. 在 npm 中把此包的 trusted publisher 精确绑定到本 GitHub 仓库和
-   `.github/workflows/npm-publish.yml`；如果 npm 要求，同时绑定
-   `npm-release-verification` environment。
+1. 在 npm 中把此包的 trusted publisher 精确绑定到本 GitHub 仓库；workflow filename
+   填写 `npm-publish.yml`（文件位于 `.github/workflows/npm-publish.yml`），environment
+   填写 `npm-release-verification`，并允许 `npm publish` action。
 2. 在 GitHub 创建 `npm-release-verification` environment，设置指定维护者为 required
    reviewers，并按仓库保护策略禁止未经审核的绕过。
 
@@ -575,9 +575,9 @@ npm run test:watch    # 监视模式
    干净 revision。
 2. 确认版本 tag 尚不存在，并且只推送该 tag（例如 `git push origin v0.18.0`）。revision
    冻结前不要推送或移动 release tag。
-3. 工作流会验证源码和全部受支持运行时，仅打包一次，把候选包绑定到 revision 和
-   SHA-256，然后在 `approve-candidate` job 的受保护 `npm-release-verification`
-   environment 处暂停。
+3. 工作流会验证源码和全部受支持运行时，仅打包一次，并把候选包绑定到 revision 和
+   SHA-256。上述门禁通过后，真正的 `publish` job 会在受保护的
+   `npm-release-verification` environment 处暂停，批准前不能请求 OIDC token。
 4. 下载这个由校验和寻址的候选包，按 [release-verification.md](release-verification.md)
    完成针对同一制品的私有验证；只有全部通过后才批准 environment。
 5. 批准后以 npm provenance 发布原样保留的同一组字节，不重新构建或打包。

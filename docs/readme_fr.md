@@ -569,9 +569,10 @@ npm run test:watch    # Mode surveillance
 Les versions utilisent la publication de confiance npm via GitHub Actions. Aucun secret de dépôt
 `NPM_TOKEN` n'est utilisé. Avant la première publication :
 
-1. Configurez l'éditeur de confiance du paquet npm pour ce dépôt exact et
-   `.github/workflows/npm-publish.yml`, y compris l'environnement `npm-release-verification` lorsque
-   npm le demande.
+1. Configurez l'éditeur de confiance du paquet npm pour ce dépôt exact, saisissez
+   `npm-publish.yml` comme nom du workflow (le fichier se trouve dans
+   `.github/workflows/npm-publish.yml`), définissez l'environnement `npm-release-verification` et
+   autorisez l'action `npm publish`.
 2. Créez l'environnement GitHub `npm-release-verification`, imposez des mainteneurs désignés comme
    réviseurs et empêchez tout contournement non révisé conformément à la politique du dépôt.
 
@@ -582,8 +583,9 @@ Pour chaque version :
 2. Vérifiez que le tag n'existe pas, puis poussez uniquement ce tag (par exemple,
    `git push origin v0.18.0`). Ne poussez ni ne déplacez un tag avant que la révision soit figée.
 3. Le workflow valide les sources et tous les environnements pris en charge, empaquette une seule
-   fois, lie le candidat à sa révision et à son SHA-256, puis s'arrête dans la tâche
-   `approve-candidate` sur l'environnement protégé `npm-release-verification`.
+   fois et lie le candidat à sa révision et à son SHA-256. Une fois ces contrôles réussis, la vraie
+   tâche `publish` s'arrête sur l'environnement protégé `npm-release-verification` avant de demander
+   son jeton OIDC.
 4. Téléchargez ce candidat adressé par sa somme et effectuez les contrôles privés de l'artefact exact
    décrits dans [release-verification.md](release-verification.md). N'approuvez l'environnement
    qu'après leur réussite.

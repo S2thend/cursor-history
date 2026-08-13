@@ -27,8 +27,10 @@ The 24 LTS and 26 Current labels describe the v0.18.0 release date; the explicit
 the durable gate. Runtime jobs perform a production tarball install without repository
 devDependencies; a native dependency may still use host build tooling when no compatible prebuild
 is available. Jobs fail on a wrong provider, wrong capability outcome, checksum/metadata mismatch,
-or smoke failure. Protected approval depends on both this complete runtime matrix and the full
-package/declaration/documentation verification.
+or smoke failure. The actual `publish` job depends directly on both this complete runtime matrix
+and the full package/declaration/documentation verification. That job uses the protected
+`npm-release-verification` environment, so maintainer approval occurs on the same job that later
+requests the npm OIDC token and publishes the preserved candidate.
 
 The exact-candidate smoke uses one topology-valid fictional Store workspace: `meta.cwd` is
 `/work/a`, the chat directory is keyed by MD5 of `/work/a`, and the project directory uses the

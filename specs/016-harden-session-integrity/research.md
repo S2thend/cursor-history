@@ -611,12 +611,18 @@ Run source-level install/typecheck/lint/full-test/build gates on Node 24, a runt
 Vite 7 development toolchain (which requires Node 20.19+), rather than trying to execute that
 toolchain on the Node 20.0 product floor. Split publication into required source validation, a
 pack-once candidate stage, a fail-closed exact-candidate runtime matrix, full package verification,
-a protected verification approval, and a dependent publish job. The runtime matrix installs the
+and one protected publish job that directly depends on all of those gates. The publish job itself
+uses the `npm-release-verification` environment, so the maintainer approval and the environment
+claim on the job's npm OIDC token cannot diverge. The runtime matrix installs the
 checksum-addressed package as a production dependency without the repository's development
 dependencies and executes its public CLI/library on every supported boundary. It does not run
 repository development scripts there, but it also does not claim that a native runtime dependency
 can never build from source or require its platform compiler/toolchain. The jobs observe both
 automatic provider choice and forced `node:sqlite` backup behavior.
+Full exact-package verification uses an ordinary locked `npm ci` for its repository-owned test
+tooling because the frozen-schema fixture creates real SQLite databases and therefore requires the
+installed native `better-sqlite3` binding. The candidate under test remains the separately installed,
+checksum-addressed tarball; repository tooling is never substituted for candidate runtime code.
 Remove all failure swallowing. Before repository
 freeze, run the metadata-only authorized source-limit preflight and relock all affected artifacts if
 a legitimate source exceeds a default. Freeze tracked evidence, then run install, typecheck, lint,

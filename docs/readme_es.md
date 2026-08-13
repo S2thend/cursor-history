@@ -569,9 +569,10 @@ npm run test:watch    # Modo observación
 Las versiones usan la publicación de confianza de npm mediante GitHub Actions. No se utiliza ningún
 secreto de repositorio `NPM_TOKEN`. Antes de la primera publicación:
 
-1. Configura el publicador de confianza del paquete npm para este repositorio exacto y
-   `.github/workflows/npm-publish.yml`, incluido el entorno `npm-release-verification` cuando npm lo
-   solicite.
+1. Configura el publicador de confianza del paquete npm para este repositorio exacto, introduce
+   `npm-publish.yml` como nombre del flujo (el archivo está en
+   `.github/workflows/npm-publish.yml`), establece el entorno `npm-release-verification` y permite
+   la acción `npm publish`.
 2. Crea el entorno de GitHub `npm-release-verification`, exige revisores mantenedores designados y
    evita omitir la revisión según la política de protección del repositorio.
 
@@ -581,9 +582,9 @@ Para cada versión:
    documentadas y congela una revisión limpia.
 2. Confirma que la etiqueta no exista y empuja solo esa etiqueta (por ejemplo,
    `git push origin v0.18.0`). No empujes ni muevas una etiqueta antes de congelar la revisión.
-3. El flujo valida el código y todos los entornos compatibles, empaqueta una sola vez, vincula el
-   candidato a la revisión y a su SHA-256 y se detiene en el trabajo `approve-candidate`, dentro del
-   entorno protegido `npm-release-verification`.
+3. El flujo valida el código y todos los entornos compatibles, empaqueta una sola vez y vincula el
+   candidato a la revisión y a su SHA-256. Cuando esas puertas pasan, el trabajo real `publish` se
+   detiene en el entorno protegido `npm-release-verification` antes de solicitar su token OIDC.
 4. Descarga ese candidato identificado por suma y completa las verificaciones privadas del artefacto
    exacto descritas en [release-verification.md](release-verification.md). Aprueba el entorno solo
    cuando todas pasen.

@@ -883,9 +883,10 @@ pnpm typecheck
 Releases use npm trusted publishing through GitHub Actions. No `NPM_TOKEN` repository secret is
 used. Before the first release:
 
-1. Configure the npm package's trusted publisher for this exact GitHub repository and
-   `.github/workflows/npm-publish.yml`, including the `npm-release-verification` environment when
-   requested by npm.
+1. Configure the npm package's trusted publisher for this exact GitHub repository, enter
+   `npm-publish.yml` as the workflow filename (the file lives at
+   `.github/workflows/npm-publish.yml`), set the environment to `npm-release-verification`, and
+   allow the `npm publish` action.
 2. Create the GitHub environment `npm-release-verification`, require designated maintainer
    reviewers, and prevent unreviewed bypass according to the repository's protection policy.
 
@@ -895,9 +896,9 @@ For each release:
    release gates, and freeze one clean revision.
 2. Confirm the version tag does not already exist, then push only that tag (for example,
    `git push origin v0.18.0`). Do not push or move a release tag before the revision is frozen.
-3. The workflow validates sources and every supported runtime, packs exactly once, binds the
-   candidate to its revision and SHA-256, and then pauses in the `approve-candidate` job at the
-   protected `npm-release-verification` environment.
+3. The workflow validates sources and every supported runtime, packs exactly once, and binds the
+   candidate to its revision and SHA-256. After those gates pass, the actual `publish` job pauses at
+   the protected `npm-release-verification` environment before it can request its OIDC token.
 4. Download that checksum-addressed candidate and complete the private exact-artifact checks in
    [docs/release-verification.md](docs/release-verification.md). Approve the environment only after
    those checks pass.
