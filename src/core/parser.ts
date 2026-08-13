@@ -217,6 +217,8 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     }
   }
 
+  let hasUnresolvedRelationship = false;
+
   // Tag Store provenance only after source-native IDs/occurrences are frozen.
   const messages = ss.messages.map((message, messageIndex) => {
     const identity = allocated[messageIndex]!.identity;
@@ -232,13 +234,19 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
         ({ call, id, identityOrigin }) => ({ ...call, id, identityOrigin })
       );
     }
-    const explicitParent = message.parentMessageId
-      ? rawToResolved.get(message.parentMessageId)
-      : undefined;
-    const sequentialParent =
-      messageIndex > 0 ? allocated[messageIndex - 1]!.identity.value : undefined;
-    if (explicitParent ?? sequentialParent) {
-      resolved.parentMessageId = explicitParent ?? sequentialParent;
+    if (message.parentMessageId !== undefined) {
+      const explicitParent = rawToResolved.get(message.parentMessageId);
+      if (explicitParent !== undefined) {
+        resolved.parentMessageId = explicitParent;
+      } else {
+        // An explicit source relationship that cannot be resolved is not
+        // equivalent to an absent relationship. Do not fabricate a sequential
+        // parent; preserve fidelity by omitting it and degrading the session.
+        delete resolved.parentMessageId;
+        hasUnresolvedRelationship = true;
+      }
+    } else if (messageIndex > 0) {
+      resolved.parentMessageId = allocated[messageIndex - 1]!.identity.value;
     } else {
       delete resolved.parentMessageId;
     }
@@ -271,7 +279,7 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
         reasonCodes: [...ss.resolution.reasonCodes],
       }
     : undefined;
-  if (hasUnsupportedSelectedEvidence) {
+  if (hasUnsupportedSelectedEvidence || hasUnresolvedRelationship) {
     if (resolution) {
       resolution.state = 'partial';
       if (!resolution.reasonCodes.includes('source-partial')) {
@@ -321,11 +329,14 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
     messages,
     workspaceId: 'store',
     workspacePath: normalizePublicWorkspacePath(ss.workspacePath),
-    source: hasUnsupportedSelectedEvidence ? 'workspace-fallback' : ss.source,
+    source:
+      hasUnsupportedSelectedEvidence || hasUnresolvedRelationship
+        ? 'workspace-fallback'
+        : ss.source,
     resolvedSource: ss.resolvedSource,
     resolution:
       resolution ??
-      (hasUnsupportedSelectedEvidence
+      (hasUnsupportedSelectedEvidence || hasUnresolvedRelationship
         ? {
             state: 'partial',
             expectedSourceRoles: ['store'],
@@ -335,7 +346,9 @@ export function mapStoreSession(ss: StoreSession, index: number): ChatSession {
             reasonCodes: ['source-partial'],
           }
         : undefined),
-    resolutionState: resolution?.state ?? (hasUnsupportedSelectedEvidence ? 'partial' : undefined),
+    resolutionState:
+      resolution?.state ??
+      (hasUnsupportedSelectedEvidence || hasUnresolvedRelationship ? 'partial' : undefined),
     ...(ss.sourceInstances
       ? {
           sourceInstances: ss.sourceInstances.map((instance) => ({
@@ -651,9 +664,11 @@ export function resolveComposerMessageIdentities(messages: readonly Message[]): 
     ({ sourceOrdinal: _sourceOrdinal, ...message }) => {
       const resolved: Message = { ...message };
       if (message.toolCalls?.length) {
-        resolved.toolCalls = allocateToolCallIdentities(message.id, message.toolCalls).map(
-          ({ call, id, identityOrigin }) => ({ ...call, id, identityOrigin })
-        );
+        resolved.toolCalls = allocateToolCallIdentities(
+          message.id,
+          message.toolCalls,
+          'composer'
+        ).map(({ call, id, identityOrigin }) => ({ ...call, id, identityOrigin }));
       }
       return resolved;
     }
@@ -781,28 +796,69 @@ export function extractPreview(messages: Message[]): string {
 }
 
 /**
- * Search messages for query and return snippets with context
+ * Locate case-insensitive matches while reporting offsets in the original UTF-16 string.
+ *
+ * @param content - Complete original message content.
+ * @param query - Non-normalized query matched with JavaScript lowercase semantics.
+ * @returns Original-content half-open UTF-16 ranges, including overlapping matches.
  */
+export function findCaseInsensitiveMatchPositions(
+  content: string,
+  query: string
+): [number, number][] {
+  const foldedQuery = query.toLowerCase();
+  if (foldedQuery.length === 0) return [];
+
+  const foldedContent = content.toLowerCase();
+  const sourceStarts: number[] = [];
+  const sourceEnds: number[] = [];
+  let sourceOffset = 0;
+
+  // JavaScript string offsets are UTF-16 code-unit offsets. Lowercasing can expand a source code
+  // point (for example, U+0130 becomes two code points), so a folded-string offset cannot be
+  // exposed directly as an offset into the original message. Context-sensitive lowercase forms
+  // can change code-point values, but their widths remain attributable to the same source point.
+  for (const sourcePoint of content) {
+    const sourceStart = sourceOffset;
+    sourceOffset += sourcePoint.length;
+    const foldedWidth = sourcePoint.toLowerCase().length;
+    for (let index = 0; index < foldedWidth; index++) {
+      sourceStarts.push(sourceStart);
+      sourceEnds.push(sourceOffset);
+    }
+  }
+
+  // Unicode lowercase mappings are width-additive. Keep a conservative identity mapping if a
+  // future runtime ever violates that property rather than publishing an out-of-range offset.
+  const hasExactMap = sourceStarts.length === foldedContent.length;
+  const positions: [number, number][] = [];
+  let searchStart = 0;
+  while (true) {
+    const foldedStart = foldedContent.indexOf(foldedQuery, searchStart);
+    if (foldedStart === -1) break;
+    const foldedEnd = foldedStart + foldedQuery.length;
+    const sourceStart = hasExactMap ? (sourceStarts[foldedStart] ?? content.length) : foldedStart;
+    const sourceEnd = hasExactMap
+      ? (sourceEnds[foldedEnd - 1] ?? sourceStart)
+      : Math.min(content.length, foldedEnd);
+    const previous = positions.at(-1);
+    if (!previous || previous[0] !== sourceStart || previous[1] !== sourceEnd) {
+      positions.push([sourceStart, sourceEnd]);
+    }
+    searchStart = foldedStart + 1;
+  }
+  return positions;
+}
+
 export function getSearchSnippets(
   messages: Message[],
   query: string,
   contextChars: number = 50
 ): SearchSnippet[] {
   const snippets: SearchSnippet[] = [];
-  const lowerQuery = query.toLowerCase();
 
-  for (const message of messages) {
-    const lowerContent = message.content.toLowerCase();
-    const positions: [number, number][] = [];
-
-    // Find all match positions
-    let searchStart = 0;
-    while (true) {
-      const pos = lowerContent.indexOf(lowerQuery, searchStart);
-      if (pos === -1) break;
-      positions.push([pos, pos + query.length]);
-      searchStart = pos + 1;
-    }
+  for (const [messageIndex, message] of messages.entries()) {
+    const positions = findCaseInsensitiveMatchPositions(message.content, query);
 
     if (positions.length === 0) {
       continue;
@@ -835,6 +891,8 @@ export function getSearchSnippets(
       messageRole: message.role,
       text,
       matchPositions: adjustedPositions,
+      messageIndex,
+      contentMatchPositions: positions,
     });
   }
 
@@ -851,6 +909,22 @@ function describeSessionSource(session: ChatSession): string {
     const stacks = session.sources?.join(' + ') ?? 'composer + store';
     return `merged from ${stacks} (backbone: ${session.preferredSource ?? 'composer'})`;
   }
+  switch (session.resolvedSource) {
+    case 'store-db':
+      return `Store stack (store.db — ${session.resolution?.state ?? session.resolutionState ?? 'complete'})`;
+    case 'store-transcript':
+      return `Store stack (transcript${
+        (session.resolution?.state ?? session.resolutionState) === 'partial' ? ' — partial' : ''
+      })`;
+    case 'store-metadata':
+      return 'Store stack (metadata only)';
+    case 'composer':
+    case undefined:
+      break;
+  }
+
+  // Transitional pre-provenance values remain readable for old callers that
+  // construct ChatSession objects directly.
   switch (session.source) {
     case 'transcript':
       return 'Store stack (transcript)';
@@ -893,6 +967,16 @@ export function exportToMarkdown(session: ChatSession, workspacePath?: string): 
   }
   if (session.transcriptState) {
     lines.push(`**Transcript State**: ${session.transcriptState}`);
+  }
+  const resolutionState = session.resolution?.state ?? session.resolutionState;
+  if (resolutionState === 'partial') {
+    const reasons = session.resolution?.reasonCodes ?? [];
+    lines.push('');
+    lines.push(
+      `> **Warning — partial session**: one or more expected source contributions were unavailable.${
+        reasons.length > 0 ? ` Reason codes: ${reasons.join(', ')}.` : ''
+      }`
+    );
   }
   lines.push('');
   lines.push('---');

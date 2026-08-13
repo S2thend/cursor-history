@@ -556,6 +556,44 @@ describe('getSearchSnippets', () => {
     const result = getSearchSnippets([msg('user', 'find me here')], 'find');
     expect(result[0]!.matchPositions.length).toBeGreaterThan(0);
   });
+
+  it('retains the source message index and full-message offsets beside snippet offsets', () => {
+    const content = `${'prefix '.repeat(20)}MixedCase Needle${' suffix'.repeat(20)}`;
+    const result = getSearchSnippets(
+      [msg('user', 'not this message'), msg('assistant', content)],
+      'mixedcase needle',
+      8
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      messageIndex: 1,
+      contentMatchPositions: [
+        [content.indexOf('MixedCase Needle'), content.indexOf('MixedCase Needle') + 16],
+      ],
+    });
+    expect(result[0]!.matchPositions[0]![0]).toBeLessThan(result[0]!.contentMatchPositions![0]![0]);
+  });
+
+  it('maps case-folded matches back to original UTF-16 message offsets', () => {
+    const content = '😀 İstanbul\nMixed CASE';
+    const result = getSearchSnippets([msg('assistant', content)], 'case');
+
+    expect(result[0]!.contentMatchPositions).toEqual([
+      [content.indexOf('CASE'), content.indexOf('CASE') + 'CASE'.length],
+    ]);
+    expect(content.slice(...result[0]!.contentMatchPositions![0]!)).toBe('CASE');
+
+    const expanded = getSearchSnippets([msg('assistant', content)], 'i');
+    expect(expanded[0]!.contentMatchPositions).toContainEqual([
+      content.indexOf('İ'),
+      content.indexOf('İ') + 1,
+    ]);
+  });
+
+  it('returns no snippets for an empty query', () => {
+    expect(getSearchSnippets([msg('user', 'content')], '')).toEqual([]);
+  });
 });
 
 // =============================================================================
@@ -915,6 +953,38 @@ describe('exportToMarkdown — source line and no duplicate tool', () => {
   it('includes a readable source line for a single-source Store session', () => {
     const md = exportToMarkdown(session({ source: 'store-complete' }));
     expect(md).toContain('**Source**: Store stack (store.db — complete)');
+  });
+
+  it('derives Store provenance from resolvedSource when source is a compatibility value', () => {
+    const md = exportToMarkdown(
+      session({
+        source: 'global',
+        resolvedSource: 'store-db',
+        resolutionState: 'complete',
+      })
+    );
+    expect(md).toContain('**Source**: Store stack (store.db — complete)');
+  });
+
+  it('visibly discloses partial resolution and machine-readable reason codes', () => {
+    const md = exportToMarkdown(
+      session({
+        source: 'workspace-fallback',
+        resolvedSource: 'store-transcript',
+        resolutionState: 'partial',
+        resolution: {
+          state: 'partial',
+          expectedSourceRoles: ['composer', 'store'],
+          loadedSourceRoles: ['store'],
+          omittedSourceRoles: [],
+          failedSourceRoles: ['composer'],
+          reasonCodes: ['source-unavailable'],
+        },
+      })
+    );
+    expect(md).toContain('**Source**: Store stack (transcript — partial)');
+    expect(md).toContain('**Warning — partial session**');
+    expect(md).toContain('Reason codes: source-unavailable.');
   });
 
   it('includes a merged source line', () => {

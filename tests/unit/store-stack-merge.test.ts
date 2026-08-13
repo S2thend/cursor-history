@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyStoreMergeToSummary,
+  exactLcsAnchorPairs,
   mergeCrossStackSessions,
   greedyAnchorPairs,
 } from '../../src/core/store-stack/merge.js';
@@ -25,6 +26,43 @@ function makeSession(overrides: Partial<ChatSession> & { messages: Message[] }):
 
 function msg(partial: Partial<Message> & { role: 'user' | 'assistant'; content: string }): Message {
   return { id: null, codeBlocks: [], ...partial };
+}
+
+/** Released full-matrix LCS semantics used as the compatibility oracle. */
+function legacyLcsAnchorPairs(a: readonly string[], b: readonly string[]): Array<[number, number]> {
+  const dp = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+  for (let aIndex = a.length - 1; aIndex >= 0; aIndex--) {
+    for (let bIndex = b.length - 1; bIndex >= 0; bIndex--) {
+      dp[aIndex]![bIndex] =
+        a[aIndex] === b[bIndex]
+          ? dp[aIndex + 1]![bIndex + 1]! + 1
+          : Math.max(dp[aIndex + 1]![bIndex]!, dp[aIndex]![bIndex + 1]!);
+    }
+  }
+
+  const pairs: Array<[number, number]> = [];
+  let aIndex = 0;
+  let bIndex = 0;
+  while (aIndex < a.length && bIndex < b.length) {
+    if (a[aIndex] === b[bIndex]) {
+      pairs.push([aIndex++, bIndex++]);
+    } else if (dp[aIndex + 1]![bIndex]! >= dp[aIndex]![bIndex + 1]!) {
+      aIndex++;
+    } else {
+      bIndex++;
+    }
+  }
+  return pairs;
+}
+
+function sequencesThroughLength(alphabet: readonly string[], maxLength: number): string[][] {
+  const result: string[][] = [[]];
+  let frontier: string[][] = [[]];
+  for (let length = 1; length <= maxLength; length++) {
+    frontier = frontier.flatMap((prefix) => alphabet.map((key) => [...prefix, key]));
+    result.push(...frontier);
+  }
+  return result;
 }
 
 describe('mergeCrossStackSessions', () => {
@@ -150,6 +188,40 @@ describe('mergeCrossStackSessions', () => {
     expect(() => assertFixedPair(faulted)).toThrow();
   });
 
+  it('keeps the same LCS tie across the former oversize-alignment boundary', () => {
+    const composerPrefix = [
+      msg({ id: 'composer-a', role: 'user', content: 'A' }),
+      msg({ id: 'composer-b', role: 'assistant', content: 'B' }),
+    ];
+    const storePrefix = [
+      msg({ id: 'store-b', role: 'assistant', content: 'B', thinking: 'store-b' }),
+      msg({ id: 'store-a', role: 'user', content: 'A', thinking: 'store-a' }),
+    ];
+    const matchedPrefix = (composerMessages: Message[], storeMessages: Message[]): string[] =>
+      mergeCrossStackSessions(
+        makeSession({ source: 'global', messages: composerMessages }),
+        makeSession({ source: 'store-complete', messages: storeMessages }),
+        'composer',
+        1
+      )
+        .messages.filter(
+          (message) =>
+            message.source === 'both' && (message.content === 'A' || message.content === 'B')
+        )
+        .map((message) => message.content);
+
+    const small = matchedPrefix(composerPrefix, storePrefix);
+    const composerLarge = [...composerPrefix];
+    const storeLarge = [...storePrefix];
+    for (let index = 0; index < 499; index++) {
+      const content = `stable-filler-${index}`;
+      composerLarge.push(msg({ role: index % 2 === 0 ? 'user' : 'assistant', content }));
+      storeLarge.push(msg({ role: index % 2 === 0 ? 'user' : 'assistant', content }));
+    }
+    expect(composerLarge.length * storeLarge.length).toBeGreaterThan(250_000);
+    expect(matchedPrefix(composerLarge, storeLarge)).toEqual(small);
+  });
+
   it('ignores standalone files for pairing and appends unmatched Store calls in native order', () => {
     const composer = makeSession({
       source: 'global',
@@ -194,6 +266,67 @@ describe('mergeCrossStackSessions', () => {
     expect(tools[0]).toMatchObject({ result: 'read', files: ['/different-store-metadata'] });
   });
 
+  it('freezes a matched synthetic tool identity from the Composer request projection', () => {
+    const composer = makeSession({
+      source: 'global',
+      messages: [
+        msg({
+          role: 'assistant',
+          content: 'tools',
+          toolCalls: [
+            {
+              name: 'Read',
+              status: 'completed',
+              params: { path: '/same' },
+              files: ['/composer.txt'],
+            },
+          ],
+        }),
+      ],
+    });
+    const store = makeSession({
+      source: 'store-complete',
+      messages: [
+        msg({
+          role: 'assistant',
+          content: 'tools',
+          toolCalls: [
+            {
+              name: 'Read',
+              status: 'completed',
+              params: { path: '/same' },
+              files: ['/store.txt'],
+            },
+          ],
+        }),
+      ],
+    });
+
+    const composerPreferred = mergeCrossStackSessions(composer, store, 'composer', 1).messages[0]!
+      .toolCalls![0]!;
+    const storePreferred = mergeCrossStackSessions(composer, store, 'store', 1).messages[0]!
+      .toolCalls![0]!;
+    expect(storePreferred.id).toBe(composerPreferred.id);
+    expect(storePreferred.id).toMatch(/^tool:v1:msg:0:[a-f0-9]{64}:1$/u);
+    expect(composerPreferred.files).toEqual(['/composer.txt']);
+    expect(storePreferred.files).toEqual(['/store.txt']);
+
+    const changedStore = makeSession({
+      ...store,
+      messages: [
+        msg({
+          ...store.messages[0]!,
+          role: 'assistant',
+          content: 'tools',
+          toolCalls: [{ ...store.messages[0]!.toolCalls![0]!, files: ['/changed-store.txt'] }],
+        }),
+      ],
+    });
+    expect(
+      mergeCrossStackSessions(composer, changedStore, 'store', 1).messages[0]!.toolCalls![0]!.id
+    ).toBe(composerPreferred.id);
+  });
+
   it('rewrites stored relationships and inserts Store gaps between active Composer nodes', () => {
     const composer = makeSession({
       source: 'global',
@@ -226,6 +359,78 @@ describe('mergeCrossStackSessions', () => {
     expect(last.parentMessageId).toBe(gap.id);
     expect(merged.activeBranchMessageIds).toEqual(['composer-a', gap.id, 'composer-b']);
     expect(merged.activeBranchBubbleIds).toEqual(merged.activeBranchMessageIds);
+  });
+
+  it('uses a resolvable alternate parent when the preferred source parent is invalid', () => {
+    const composer = makeSession({
+      source: 'global',
+      messages: [
+        msg({ id: 'composer-parent', role: 'user', content: 'parent' }),
+        msg({
+          id: 'composer-child',
+          role: 'assistant',
+          content: 'child',
+          parentMessageId: 'composer-parent',
+        }),
+      ],
+    });
+    const store = makeSession({
+      source: 'store-complete',
+      messages: [
+        msg({ id: 'store-parent', role: 'user', content: 'parent' }),
+        msg({
+          id: 'store-child',
+          role: 'assistant',
+          content: 'child',
+          parentMessageId: 'missing-store-parent',
+        }),
+      ],
+    });
+
+    const merged = mergeCrossStackSessions(composer, store, 'store', 1);
+    expect(merged.messages.find((message) => message.content === 'child')?.parentMessageId).toBe(
+      'composer-parent'
+    );
+    expect(merged.resolution?.state).toBe('complete');
+  });
+
+  it('marks merged output partial when no explicit relationship or branch reference resolves', () => {
+    const composer = makeSession({
+      source: 'global',
+      messages: [
+        msg({ id: 'composer-parent', role: 'user', content: 'parent' }),
+        msg({
+          id: 'composer-child',
+          role: 'assistant',
+          content: 'child',
+          parentMessageId: 'missing-composer-parent',
+        }),
+      ],
+      activeBranchBubbleIds: ['composer-parent', 'missing-branch-node'],
+    });
+    const store = makeSession({
+      source: 'store-complete',
+      messages: [
+        msg({ id: 'store-parent', role: 'user', content: 'parent' }),
+        msg({
+          id: 'store-child',
+          role: 'assistant',
+          content: 'child',
+          parentMessageId: 'missing-store-parent',
+        }),
+      ],
+    });
+
+    const merged = mergeCrossStackSessions(composer, store, 'store', 1);
+    expect(
+      merged.messages.find((message) => message.content === 'child')?.parentMessageId
+    ).toBeUndefined();
+    expect(merged.activeBranchMessageIds).toBeUndefined();
+    expect(merged.activeBranchBubbleIds).toBeUndefined();
+    expect(merged).toMatchObject({
+      source: 'workspace-fallback',
+      resolution: { state: 'partial', reasonCodes: ['source-partial'] },
+    });
   });
 
   it('marks any explicitly partial contribution unsafe for legacy replacement', () => {
@@ -582,14 +787,26 @@ describe('mergeCrossStackSessions', () => {
 
   it('matches duplicate signatures earliest-first (stable)', () => {
     const composer = makeSession({
-      messages: [msg({ role: 'user', content: 'ping' }), msg({ role: 'user', content: 'ping' })],
+      messages: [
+        msg({ id: 'composer-first', role: 'user', content: 'ping' }),
+        msg({ id: 'composer-second', role: 'user', content: 'ping' }),
+      ],
     });
     const store = makeSession({
-      messages: [msg({ role: 'user', content: 'ping' }), msg({ role: 'user', content: 'ping' })],
+      messages: [msg({ id: 'store-only', role: 'user', content: 'ping', thinking: 'enrichment' })],
     });
     const merged = mergeCrossStackSessions(composer, store, 'composer', 0);
     expect(merged.messages).toHaveLength(2);
-    expect(merged.messages.every((m) => m.source === 'both')).toBe(true);
+    expect(merged.messages[0]).toMatchObject({
+      id: 'composer-first',
+      source: 'both',
+      thinking: 'enrichment',
+    });
+    expect(merged.messages[1]).toMatchObject({
+      id: 'composer-second',
+      source: 'composer',
+    });
+    expect(merged.messages[1]!.thinking).toBeUndefined();
   });
 
   it('one side missing content, other complete: fills content, single message', () => {
@@ -861,7 +1078,56 @@ describe('mergeCrossStackSessions', () => {
   });
 });
 
-describe('greedyAnchorPairs (oversize fallback) — no crossing anchors', () => {
+describe('exactLcsAnchorPairs', () => {
+  it('is exhaustive-equivalent to the released DP binding for duplicate-heavy small inputs', () => {
+    const sequences = sequencesThroughLength(['A', 'B'], 6);
+    const mismatches: Array<{
+      composer: string[];
+      store: string[];
+      expected: Array<[number, number]>;
+      actual: Array<[number, number]>;
+    }> = [];
+
+    for (const composer of sequences) {
+      for (const store of sequences) {
+        const expected = legacyLcsAnchorPairs(composer, store);
+        const actual = exactLcsAnchorPairs(composer, store);
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+          mismatches.push({ composer, store, expected, actual });
+        }
+      }
+    }
+
+    expect(mismatches).toEqual([]);
+  });
+
+  it('evaluates at most two DP cells per input pair for a long identical sequence', () => {
+    const length = 900;
+    const keys = Array.from({ length }, (_, index) => `key-${index}`);
+    const work = { cellEvaluations: 0, checkpointRows: 0, peakRetainedRows: 0 };
+
+    const pairs = exactLcsAnchorPairs(keys, keys, work);
+
+    expect(pairs).toEqual(keys.map((_, index) => [index, index]));
+    expect(work.cellEvaluations).toBe(2 * length * length);
+    expect(work.peakRetainedRows).toBeLessThanOrEqual(2 * Math.ceil(Math.sqrt(length)) + 2);
+  });
+
+  it('keeps Composer-skip tie binding within the same quadratic work bound', () => {
+    const length = 800;
+    const composer = Array.from({ length }, (_, index) => (index % 2 === 0 ? 'A' : 'B'));
+    const store = Array.from({ length }, (_, index) => (index % 2 === 0 ? 'B' : 'A'));
+    const work = { cellEvaluations: 0, checkpointRows: 0, peakRetainedRows: 0 };
+
+    const pairs = exactLcsAnchorPairs(composer, store, work);
+
+    expect(pairs).toEqual(Array.from({ length: length - 1 }, (_, index) => [index + 1, index]));
+    expect(work.cellEvaluations).toBeLessThanOrEqual(2 * length * length);
+    expect(work.peakRetainedRows).toBeLessThanOrEqual(2 * Math.ceil(Math.sqrt(length)) + 3);
+  });
+});
+
+describe('greedyAnchorPairs helper — no crossing anchors', () => {
   it('produces strictly increasing pairs even when keys are reversed', () => {
     // backbone [A,B], other [B,A]: an unguarded greedy pass would emit (0,1)
     // and (1,0), which cross. The monotonic guard must yield only (0,1).
@@ -874,8 +1140,8 @@ describe('greedyAnchorPairs (oversize fallback) — no crossing anchors', () => 
     }
   });
 
-  it('matches an identical same-order oversize sequence fully', () => {
-    const n = 502; // 502*502 > 250_000 DP threshold → greedy path
+  it('matches an identical same-order sequence fully', () => {
+    const n = 502;
     const keys = Array.from({ length: n }, (_, i) => `k${i}`);
     const pairs = greedyAnchorPairs(keys, keys);
     expect(pairs).toHaveLength(n);

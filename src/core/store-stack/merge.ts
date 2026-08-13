@@ -78,13 +78,6 @@ const EMPTY_PLACEHOLDER = '[empty message]';
 /** Sentinel content produced by the storage layer for an unparseable bubble. */
 const CORRUPTED_PLACEHOLDER = '[corrupted message]';
 
-/**
- * Product threshold above which the O(n*m) LCS DP table is skipped in favor of a
- * linear greedy strong-anchor pass, bounding memory on very long conversations.
- * 250k is roughly a 500x500 alignment; real sessions rarely approach this.
- */
-const LCS_DP_CELL_LIMIT = 250_000;
-
 /** Normalize whitespace for content matching (trim + collapse internal runs). */
 function normalizeText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
@@ -191,44 +184,121 @@ function strongKey(m: Message, index: number, side: 'b' | 'o'): string {
   return JSON.stringify([m.role, matchContent(m.content), tools]);
 }
 
-/**
- * Phase-1 anchor pairs via LCS over strong keys (deterministic, earliest-first
- * backtracking). Returns [] for the oversize case (caller falls back to a
- * linear greedy strong-anchor pass).
- */
-function lcsAnchorPairs(a: string[], b: string[]): Array<[number, number]> {
-  const n = a.length;
-  const m = b.length;
-  if (n === 0 || m === 0) return [];
-  if (n * m > LCS_DP_CELL_LIMIT) return []; // scale guard -- caller falls back
+/** Deterministic work counters used by alignment complexity regression tests. */
+export interface LcsAlignmentWork {
+  cellEvaluations: number;
+  checkpointRows: number;
+  peakRetainedRows: number;
+}
 
-  // dp[i][j] = LCS length of a[i..] vs b[j..]
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i]![j] = a[i] === b[j] ? 1 + dp[i + 1]![j + 1]! : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
-    }
+/** Fill one exact suffix-LCS row from the already-computed row below it. */
+function fillLcsSuffixRow(
+  aKey: string,
+  b: readonly string[],
+  next: Uint32Array,
+  work?: LcsAlignmentWork
+): Uint32Array {
+  const current = new Uint32Array(b.length + 1);
+  for (let bIndex = b.length - 1; bIndex >= 0; bIndex--) {
+    if (work) work.cellEvaluations++;
+    current[bIndex] =
+      aKey === b[bIndex] ? next[bIndex + 1]! + 1 : Math.max(next[bIndex]!, current[bIndex + 1]!);
   }
+  return current;
+}
+
+/**
+ * Phase-1 anchor pairs with the exact legacy DP tie contract.
+ *
+ * The legacy implementation matched an equal current cell immediately and, on
+ * a mismatch with equal remaining LCS lengths, advanced Composer. A plain
+ * Hirschberg split can choose a different duplicate occurrence, so it is not a
+ * safe replacement for identity-bearing alignment.
+ *
+ * Instead, this implementation computes exact suffix rows once while retaining
+ * only square-root-spaced checkpoints. It then reconstructs one checkpoint
+ * block at a time using the same DP cells and the same branch order as the
+ * legacy full matrix. Every cell is evaluated at most twice: once to establish
+ * checkpoints and once while reconstructing its block. Runtime is therefore
+ * O(a.length * b.length), with O(b.length * sqrt(a.length)) retained cells
+ * rather than a quadratic matrix. No input-size threshold changes semantics.
+ *
+ * @internal Exported so deterministic equivalence and work-bound tests exercise
+ * the production implementation directly.
+ */
+export function exactLcsAnchorPairs(
+  a: readonly string[],
+  b: readonly string[],
+  work?: LcsAlignmentWork
+): Array<[number, number]> {
+  if (work) {
+    work.cellEvaluations = 0;
+    work.checkpointRows = 0;
+    work.peakRetainedRows = 0;
+  }
+  if (a.length === 0 || b.length === 0) return [];
+
+  const blockSize = Math.max(1, Math.ceil(Math.sqrt(a.length)));
+  const checkpoints = new Map<number, Uint32Array>();
+  let next: Uint32Array = new Uint32Array(b.length + 1);
+  checkpoints.set(a.length, next);
+
+  for (let aIndex = a.length - 1; aIndex >= 0; aIndex--) {
+    const current = fillLcsSuffixRow(a[aIndex]!, b, next, work);
+    if (aIndex % blockSize === 0) checkpoints.set(aIndex, current);
+    next = current;
+  }
+
+  if (work) {
+    work.checkpointRows = checkpoints.size;
+    work.peakRetainedRows = checkpoints.size + 2;
+  }
+
   const pairs: Array<[number, number]> = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      pairs.push([i, j]);
-      i++;
-      j++;
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
-      i++; // advance backbone on ties (deterministic)
-    } else {
-      j++;
+  let aCursor = 0;
+  let bCursor = 0;
+  while (aCursor < a.length && bCursor < b.length) {
+    const blockStart = aCursor;
+    const blockEnd = Math.min(a.length, Math.floor(blockStart / blockSize + 1) * blockSize);
+    const boundary = checkpoints.get(blockEnd);
+    if (!boundary) {
+      throw new Error(`Missing LCS checkpoint at Composer row ${blockEnd}`);
+    }
+
+    const rows = new Array<Uint32Array>(blockEnd - blockStart + 1);
+    rows[blockEnd - blockStart] = boundary;
+    let blockNext = boundary;
+    for (let aIndex = blockEnd - 1; aIndex >= blockStart; aIndex--) {
+      const current = fillLcsSuffixRow(a[aIndex]!, b, blockNext, work);
+      rows[aIndex - blockStart] = current;
+      blockNext = current;
+    }
+    if (work) {
+      work.peakRetainedRows = Math.max(work.peakRetainedRows, checkpoints.size + rows.length);
+    }
+
+    while (aCursor < blockEnd && bCursor < b.length) {
+      const current = rows[aCursor - blockStart]!;
+      if (current[bCursor] === 0) return pairs;
+      if (a[aCursor] === b[bCursor]) {
+        pairs.push([aCursor, bCursor]);
+        aCursor++;
+        bCursor++;
+        continue;
+      }
+      const skipComposer = rows[aCursor - blockStart + 1]![bCursor]!;
+      const skipStore = current[bCursor + 1]!;
+      if (skipComposer >= skipStore) aCursor++;
+      else bCursor++;
     }
   }
   return pairs;
 }
 
 /**
- * Linear fallback anchor pass for oversize sequences: match equal strong keys
- * in order, O(n+m). Weak messages (side-unique keys) never match across sides.
+ * Linear monotonic anchor helper retained for callers that explicitly need a
+ * best-effort greedy plan. Production merge alignment always uses the exact
+ * checkpointed LCS above. Weak messages never match across sides.
  * The returned pairs are STRICTLY INCREASING on both axes (the b-side cursor
  * only advances forward), so they never cross — `alignAndMerge` relies on this.
  */
@@ -665,10 +735,7 @@ function matchGapPairs(
 function computeAlignment(composer: Message[], store: Message[]): AlignmentPlan {
   const composerKeys = composer.map((message, index) => strongKey(message, index, 'b'));
   const storeKeys = store.map((message, index) => strongKey(message, index, 'o'));
-  const anchors =
-    composerKeys.length * storeKeys.length > LCS_DP_CELL_LIMIT
-      ? greedyAnchorPairs(composerKeys, storeKeys)
-      : lcsAnchorPairs(composerKeys, storeKeys);
+  const anchors = exactLcsAnchorPairs(composerKeys, storeKeys);
 
   const pairs: AlignmentPair[] = [];
   let composerCursor = 0;
@@ -875,6 +942,13 @@ function freezeComposerMessages(messages: Message[]): Message[] {
   return projectV016ComposerMessages(messages).map((projected) => {
     const message = { ...projected } as Message & { sourceOrdinal?: number };
     delete message.sourceOrdinal;
+    if (message.toolCalls?.length) {
+      message.toolCalls = allocateToolCallIdentities(
+        message.id!,
+        message.toolCalls,
+        'composer'
+      ).map(({ call, id, identityOrigin }) => ({ ...call, id, identityOrigin }));
+    }
     return message;
   });
 }
@@ -1001,7 +1075,8 @@ function rewriteRenderedRelationships(
   rawStore: Message[],
   identityMaps: { composer: Map<string, string>; store: Map<string, string> },
   preferredSource: 'composer' | 'store'
-): void {
+): boolean {
+  let hasUnresolvedRelationship = false;
   for (const entry of rendered) {
     const composerMessage =
       entry.composerIndex === undefined ? undefined : rawComposer[entry.composerIndex];
@@ -1018,12 +1093,18 @@ function rewriteRenderedRelationships(
           ] as const);
 
     delete entry.message.parentMessageId;
+    let explicitParentPresent = false;
+    let parentResolved = false;
     for (const [source, sourceMessage] of ordered) {
       if (sourceMessage?.parentMessageId === undefined) continue;
+      explicitParentPresent = true;
       const parentMessageId = identityMaps[source].get(sourceMessage.parentMessageId);
-      if (parentMessageId !== undefined) entry.message.parentMessageId = parentMessageId;
+      if (parentMessageId === undefined) continue;
+      entry.message.parentMessageId = parentMessageId;
+      parentResolved = true;
       break;
     }
+    if (explicitParentPresent && !parentResolved) hasUnresolvedRelationship = true;
 
     delete entry.message.isSidechain;
     for (const [, sourceMessage] of ordered) {
@@ -1032,6 +1113,7 @@ function rewriteRenderedRelationships(
       break;
     }
   }
+  return hasUnresolvedRelationship;
 }
 
 /**
@@ -1043,14 +1125,18 @@ function rewriteActiveBranch(
   composer: ChatSession,
   rendered: RenderedMessage[],
   composerIdentityMap: Map<string, string>
-): string[] | undefined {
+): { ids: string[] | undefined; unresolved: boolean } {
   const sourceBranch = composer.activeBranchBubbleIds ?? composer.activeBranchMessageIds;
-  if (sourceBranch === undefined) return undefined;
+  if (sourceBranch === undefined) return { ids: undefined, unresolved: false };
+  let unresolved = false;
   const mapped = sourceBranch.flatMap((sourceId) => {
     const resolved = composerIdentityMap.get(sourceId);
-    return resolved === undefined ? [] : [resolved];
+    if (resolved !== undefined) return [resolved];
+    unresolved = true;
+    return [];
   });
-  if (mapped.length <= 1) return mapped;
+  if (unresolved) return { ids: undefined, unresolved: true };
+  if (mapped.length <= 1) return { ids: mapped, unresolved: false };
 
   const positions: number[] = [];
   let cursor = -1;
@@ -1059,11 +1145,15 @@ function rewriteActiveBranch(
       (entry, index) =>
         index > cursor && entry.message.id === id && entry.composerIndex !== undefined
     );
-    if (position < 0) continue;
+    if (position < 0) {
+      unresolved = true;
+      continue;
+    }
     positions.push(position);
     cursor = position;
   }
-  if (positions.length === 0) return [];
+  if (unresolved) return { ids: undefined, unresolved: true };
+  if (positions.length === 0) return { ids: [], unresolved: false };
 
   const branch: string[] = [rendered[positions[0]!]!.message.id!];
   for (let index = 1; index < positions.length; index++) {
@@ -1081,7 +1171,7 @@ function rewriteActiveBranch(
     }
     branch.push(rendered[current]!.message.id!);
   }
-  return branch;
+  return { ids: branch, unresolved: false };
 }
 
 /** Rebuild active parent/leaf semantics after Store gaps alter the branch. */
@@ -1138,14 +1228,21 @@ function isCompleteContribution(session: FidelityInput, unknownIsComplete: boole
   }
 }
 
-function mergedResolution(composer: FidelityInput, store: FidelityInput, unknownIsComplete = true) {
+function mergedResolution(
+  composer: FidelityInput,
+  store: FidelityInput,
+  unknownIsComplete = true,
+  relationshipPartial = false
+) {
   const complete =
     isCompleteContribution(composer, unknownIsComplete) &&
-    isCompleteContribution(store, unknownIsComplete);
+    isCompleteContribution(store, unknownIsComplete) &&
+    !relationshipPartial;
   const reasonCodes = new Set<ResolutionReasonCode>([
     ...(composer.resolution?.reasonCodes ?? []),
     ...(store.resolution?.reasonCodes ?? []),
   ]);
+  if (relationshipPartial) reasonCodes.add('source-partial');
   if (!complete && reasonCodes.size === 0) reasonCodes.add('source-partial' as const);
   const orderedRoles = (roles: Iterable<SourceRole>): SourceRole[] => {
     const values = new Set(roles);
@@ -1222,17 +1319,19 @@ export function mergeCrossStackSessions(
     resolved.composer,
     resolved.store
   );
-  rewriteRenderedRelationships(
+  const hasUnresolvedParent = rewriteRenderedRelationships(
     rendered,
     composer.messages,
     store.messages,
     identityMaps,
     preferredSource
   );
-  const activeBranchMessageIds = rewriteActiveBranch(composer, rendered, identityMaps.composer);
+  const activeBranch = rewriteActiveBranch(composer, rendered, identityMaps.composer);
+  const activeBranchMessageIds = activeBranch.ids;
   rebuildActiveBranchParents(rendered, activeBranchMessageIds);
   const messages = rendered.map(({ message }) => message);
-  const resolution = mergedResolution(composer, store);
+  const relationshipPartial = hasUnresolvedParent || activeBranch.unresolved;
+  const resolution = mergedResolution(composer, store, true, relationshipPartial);
 
   // A merged session is Composer-backed regardless of the rendering backbone.
   // Resolve clocks from source-native inputs in fixed Composer-then-Store order

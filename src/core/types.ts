@@ -492,7 +492,12 @@ export type LogicalSessionSummary = ChatSessionSummary | AmbiguousSessionSummary
 export interface SearchResult {
   sessionId: string;
   index: number;
+  /** Backward-compatible workspace address; canonical for scoped results. */
   workspacePath: string;
+  /** Stable canonical workspace selected for this logical session. */
+  canonicalWorkspacePath?: string;
+  /** Workspace membership that satisfied the active filter, when scoped. */
+  matchedWorkspacePath?: string;
   createdAt: Date;
   matchCount: number;
   snippets: SearchSnippet[];
@@ -504,7 +509,12 @@ export interface SearchResult {
 export interface SearchSnippet {
   messageRole: MessageRole;
   text: string;
+  /** Positions relative to `text`, retained for CLI highlighting. */
   matchPositions: [number, number][];
+  /** Zero-based index in the full session message array. */
+  messageIndex?: number;
+  /** Absolute positions in the complete source message content. */
+  contentMatchPositions?: [number, number][];
 }
 
 /**

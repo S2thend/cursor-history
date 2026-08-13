@@ -384,10 +384,19 @@ export interface AllocatedToolCallIdentity<T extends ToolIdentityInput = ToolIde
   occurrence?: number;
 }
 
-/** Allocate modern tool IDs without using status/result/error enrichment. */
+/** Source projection used to freeze a synthetic tool identity. */
+export type ToolIdentityProjection = 'composer' | 'store';
+
+/**
+ * Allocate modern tool IDs without using outcome enrichment. Composer-backed
+ * calls intentionally exclude standalone files and source relationships: a
+ * matched Store call may enrich those fields, but must not rewrite the frozen
+ * Composer slot identity. Store-only calls retain the richer Store projection.
+ */
 export function allocateToolCallIdentities<T extends ToolIdentityInput>(
   stableMessageId: string,
-  calls: readonly T[]
+  calls: readonly T[],
+  projection: ToolIdentityProjection = 'store'
 ): Array<AllocatedToolCallIdentity<T>> {
   if (stableMessageId.length === 0) {
     throw new TypeError('Stable message identity must be nonempty');
@@ -408,8 +417,10 @@ export function allocateToolCallIdentities<T extends ToolIdentityInput>(
 
     const canonicalInput: Record<string, unknown> = { name: call.name };
     if (hasParams(call)) canonicalInput['params'] = call.params;
-    if (call.files !== undefined) canonicalInput['files'] = [...call.files];
-    if (call.sourceRelationships !== undefined) {
+    if (projection === 'store' && call.files !== undefined) {
+      canonicalInput['files'] = [...call.files];
+    }
+    if (projection === 'store' && call.sourceRelationships !== undefined) {
       canonicalInput['sourceRelationships'] = call.sourceRelationships;
     }
     const baseFingerprint = sha256CanonicalJsonV1(canonicalInput);
