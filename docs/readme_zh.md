@@ -356,7 +356,7 @@ import {
 } from 'cursor-history';
 
 // 列出所有会话并分页
-const result = listSessions({ limit: 10 });
+const result = await listSessions({ limit: 10 });
 console.log(`找到 ${result.pagination.total} 个会话`);
 
 for (const session of result.data) {
@@ -364,17 +364,18 @@ for (const session of result.data) {
 }
 
 // 获取特定会话（从零开始的索引）
-const session = getSession(0);
+const session = await getSession(0);
 console.log(session.messages);
 
 // 在所有会话中搜索
-const results = searchSessions('authentication', { context: 2 });
+const results = await searchSessions('authentication', { context: 2 });
 for (const match of results) {
-  console.log(match.match);
+  // 完整消息数组索引、完整内容中的 UTF-16 偏移量以及完整源代码行。
+  console.log(match.messageIndex, match.offset, match.match);
 }
 
 // 导出为 Markdown
-const markdown = exportSessionToMarkdown(0);
+const markdown = await exportSessionToMarkdown(0);
 ```
 
 ### 迁移 API
@@ -383,24 +384,26 @@ const markdown = exportSessionToMarkdown(0);
 import { migrateSession, migrateWorkspace } from 'cursor-history';
 
 // 将会话移动到另一个工作区
-const results = migrateSession({
+const moveResults = await migrateSession({
   sessions: 3,  // 索引或 ID
   destination: '/path/to/new/project'
 });
+console.log(moveResults);
 
 // 复制多个会话（保留原件）
-const results = migrateSession({
+const copyResults = await migrateSession({
   sessions: [1, 3, 5],
   destination: '/path/to/project',
   mode: 'copy'
 });
+console.log(copyResults);
 
 // 在工作区之间迁移所有会话
-const result = migrateWorkspace({
+const workspaceResult = await migrateWorkspace({
   source: '/old/project',
   destination: '/new/project'
 });
-console.log(`迁移了 ${result.successCount} 个会话`);
+console.log(`迁移了 ${workspaceResult.successCount} 个会话`);
 ```
 
 ### 备份 API
@@ -411,7 +414,8 @@ import {
   restoreBackup,
   validateBackup,
   listBackups,
-  getDefaultBackupDir
+  getDefaultBackupDir,
+  listSessions
 } from 'cursor-history';
 
 // 创建备份
@@ -426,7 +430,7 @@ console.log(`备份已创建: ${result.backupPath}`);
 console.log(`会话数: ${result.manifest.stats.sessionCount}`);
 
 // 验证备份
-const validation = validateBackup('~/backup.zip');
+const validation = await validateBackup('~/backup.zip');
 if (validation.status === 'valid') {
   console.log('备份有效');
 } else if (validation.status === 'warnings') {
@@ -434,20 +438,21 @@ if (validation.status === 'valid') {
 }
 
 // 从备份恢复
-const restoreResult = restoreBackup({
+const restoreResult = await restoreBackup({
   backupPath: '~/backup.zip',
   force: true
 });
 console.log(`恢复了 ${restoreResult.filesRestored} 个文件`);
+// 检查 restoreResult.warnings：损坏的条目会被跳过，绝不会恢复。
 
 // 列出可用备份
-const backups = listBackups();  // 扫描 ~/cursor-history-backups/
+const backups = await listBackups();  // 扫描 ~/cursor-history-backups/
 for (const backup of backups) {
   console.log(`${backup.filename}: ${backup.manifest?.stats.sessionCount} 个会话`);
 }
 
 // 从备份读取会话而不恢复
-const sessions = listSessions({ backupPath: '~/backup.zip' });
+const sessions = await listSessions({ backupPath: '~/backup.zip' });
 ```
 
 ### 可用函数
@@ -475,6 +480,8 @@ const sessions = listSessions({ backupPath: '~/backup.zip' });
 ### 配置选项
 
 ```typescript
+import type { MessageType } from 'cursor-history';
+
 interface LibraryConfig {
   dataPath?: string;       // 自定义 Cursor 数据路径
   workspace?: string;      // 按工作区路径过滤
@@ -492,20 +499,22 @@ interface LibraryConfig {
 ```typescript
 import {
   listSessions,
-  getSession,
   createBackup,
+  restoreBackup,
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
-  isInvalidFilterError,
   isBackupError,
+  isBackupPublishedPermissionError,
+  isRestoreRollbackError,
   isRestoreError,
-  isInvalidBackupError
+  isInvalidBackupError,
+  validateMessageTypes
 } from 'cursor-history';
 
 try {
-  const result = listSessions();
+  const result = await listSessions();
 } catch (err) {
   if (isDatabaseLockedError(err)) {
     console.error('数据库已锁定 - 关闭 Cursor 后重试');
@@ -518,19 +527,28 @@ try {
   }
 }
 
-// 过滤错误处理
 try {
-  const session = getSession(0, { messageFilter: ['invalid'] });
+  await createBackup({ outputPath: '/private/backups/cursor.zip' });
 } catch (err) {
-  if (isInvalidFilterError(err)) {
-    console.error('无效的过滤类型:', err.invalidTypes);
-    console.error('有效类型:', err.validTypes);
+  if (isBackupPublishedPermissionError(err)) {
+    if (err.details.pathIdentityVerified) {
+      console.error('已验证发布备份需要修正文件模式:', err.details.outputPath);
+    } else {
+      // 已越过提交点，但此路径不可信。不要在这里更改其文件模式。
+      console.error('发布备份路径需要身份恢复:', err.details.outputPath);
+    }
   }
+}
+
+// 将无类型过滤值传给读取操作前先进行验证
+const invalidTypes = validateMessageTypes(['invalid']);
+if (invalidTypes.length > 0) {
+  console.error('无效的过滤类型:', invalidTypes);
 }
 
 // 备份特定错误
 try {
-  const result = await createBackup();
+  await createBackup();
 } catch (err) {
   if (isBackupError(err)) {
     console.error('备份失败:', err.message);
@@ -538,6 +556,15 @@ try {
     console.error('无效的备份文件');
   } else if (isRestoreError(err)) {
     console.error('恢复失败:', err.message);
+  }
+}
+
+try {
+  await restoreBackup({ backupPath: '/private/backups/cursor.zip', force: true });
+} catch (err) {
+  if (isRestoreRollbackError(err)) {
+    // 这些是清单相对路径，绝不是私有物理定位符。
+    console.error('以下项目需要手动恢复:', err.details.residualFiles);
   }
 }
 ```

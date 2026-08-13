@@ -362,7 +362,7 @@ import {
 } from 'cursor-history';
 
 // Listar todas las sesiones con paginación
-const result = listSessions({ limit: 10 });
+const result = await listSessions({ limit: 10 });
 console.log(`Encontradas ${result.pagination.total} sesiones`);
 
 for (const session of result.data) {
@@ -370,17 +370,18 @@ for (const session of result.data) {
 }
 
 // Obtener una sesión específica (índice basado en cero)
-const session = getSession(0);
+const session = await getSession(0);
 console.log(session.messages);
 
 // Buscar en todas las sesiones
-const results = searchSessions('authentication', { context: 2 });
+const results = await searchSessions('authentication', { context: 2 });
 for (const match of results) {
-  console.log(match.match);
+  // Índice en el array completo, desplazamiento UTF-16 y línea de origen completa.
+  console.log(match.messageIndex, match.offset, match.match);
 }
 
 // Exportar a Markdown
-const markdown = exportSessionToMarkdown(0);
+const markdown = await exportSessionToMarkdown(0);
 ```
 
 ### API de migración
@@ -389,24 +390,26 @@ const markdown = exportSessionToMarkdown(0);
 import { migrateSession, migrateWorkspace } from 'cursor-history';
 
 // Mover una sesión a otro espacio de trabajo
-const results = migrateSession({
+const moveResults = await migrateSession({
   sessions: 3,  // índice o ID
   destination: '/ruta/a/nuevo/proyecto'
 });
+console.log(moveResults);
 
 // Copiar múltiples sesiones (mantiene originales)
-const results = migrateSession({
+const copyResults = await migrateSession({
   sessions: [1, 3, 5],
   destination: '/ruta/a/proyecto',
   mode: 'copy'
 });
+console.log(copyResults);
 
 // Migrar todas las sesiones entre espacios de trabajo
-const result = migrateWorkspace({
+const workspaceResult = await migrateWorkspace({
   source: '/proyecto/antiguo',
   destination: '/proyecto/nuevo'
 });
-console.log(`Migradas ${result.successCount} sesiones`);
+console.log(`Migradas ${workspaceResult.successCount} sesiones`);
 ```
 
 ### API de respaldo
@@ -417,7 +420,8 @@ import {
   restoreBackup,
   validateBackup,
   listBackups,
-  getDefaultBackupDir
+  getDefaultBackupDir,
+  listSessions
 } from 'cursor-history';
 
 // Crear un respaldo
@@ -432,7 +436,7 @@ console.log(`Respaldo creado: ${result.backupPath}`);
 console.log(`Sesiones: ${result.manifest.stats.sessionCount}`);
 
 // Validar un respaldo
-const validation = validateBackup('~/backup.zip');
+const validation = await validateBackup('~/backup.zip');
 if (validation.status === 'valid') {
   console.log('El respaldo es válido');
 } else if (validation.status === 'warnings') {
@@ -440,20 +444,21 @@ if (validation.status === 'valid') {
 }
 
 // Restaurar desde respaldo
-const restoreResult = restoreBackup({
+const restoreResult = await restoreBackup({
   backupPath: '~/backup.zip',
   force: true
 });
 console.log(`Restaurados ${restoreResult.filesRestored} archivos`);
+// Revisa restoreResult.warnings: las entradas corruptas se omiten y nunca se restauran.
 
 // Listar respaldos disponibles
-const backups = listBackups();  // Escanea ~/cursor-history-backups/
+const backups = await listBackups();  // Escanea ~/cursor-history-backups/
 for (const backup of backups) {
   console.log(`${backup.filename}: ${backup.manifest?.stats.sessionCount} sesiones`);
 }
 
 // Leer sesiones de respaldo sin restaurar
-const sessions = listSessions({ backupPath: '~/backup.zip' });
+const sessions = await listSessions({ backupPath: '~/backup.zip' });
 ```
 
 ### Funciones disponibles
@@ -481,6 +486,8 @@ const sessions = listSessions({ backupPath: '~/backup.zip' });
 ### Opciones de configuración
 
 ```typescript
+import type { MessageType } from 'cursor-history';
+
 interface LibraryConfig {
   dataPath?: string;       // Ruta personalizada de datos de Cursor
   workspace?: string;      // Filtrar por ruta de espacio de trabajo
@@ -498,20 +505,22 @@ interface LibraryConfig {
 ```typescript
 import {
   listSessions,
-  getSession,
   createBackup,
+  restoreBackup,
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
-  isInvalidFilterError,
   isBackupError,
+  isBackupPublishedPermissionError,
+  isRestoreRollbackError,
   isRestoreError,
-  isInvalidBackupError
+  isInvalidBackupError,
+  validateMessageTypes
 } from 'cursor-history';
 
 try {
-  const result = listSessions();
+  const result = await listSessions();
 } catch (err) {
   if (isDatabaseLockedError(err)) {
     console.error('Base de datos bloqueada - cierra Cursor y reintenta');
@@ -524,19 +533,28 @@ try {
   }
 }
 
-// Manejo de errores de filtro
 try {
-  const session = getSession(0, { messageFilter: ['invalid'] });
+  await createBackup({ outputPath: '/private/backups/cursor.zip' });
 } catch (err) {
-  if (isInvalidFilterError(err)) {
-    console.error('Tipos de filtro inválidos:', err.invalidTypes);
-    console.error('Tipos válidos:', err.validTypes);
+  if (isBackupPublishedPermissionError(err)) {
+    if (err.details.pathIdentityVerified) {
+      console.error('El respaldo publicado verificado necesita corregir permisos:', err.details.outputPath);
+    } else {
+      // Se cruzó el punto de confirmación, pero esta ruta no es fiable. No cambies sus permisos aquí.
+      console.error('La ruta del respaldo publicado requiere recuperación de identidad:', err.details.outputPath);
+    }
   }
+}
+
+// Validar valores de filtro sin tipo antes de pasarlos a una operación de lectura
+const invalidTypes = validateMessageTypes(['invalid']);
+if (invalidTypes.length > 0) {
+  console.error('Tipos de filtro inválidos:', invalidTypes);
 }
 
 // Errores específicos de respaldo
 try {
-  const result = await createBackup();
+  await createBackup();
 } catch (err) {
   if (isBackupError(err)) {
     console.error('Respaldo fallido:', err.message);
@@ -544,6 +562,15 @@ try {
     console.error('Archivo de respaldo inválido');
   } else if (isRestoreError(err)) {
     console.error('Restauración fallida:', err.message);
+  }
+}
+
+try {
+  await restoreBackup({ backupPath: '/private/backups/cursor.zip', force: true });
+} catch (err) {
+  if (isRestoreRollbackError(err)) {
+    // Estas son rutas relativas al manifiesto, nunca localizadores físicos privados.
+    console.error('Se requiere recuperación manual para:', err.details.residualFiles);
   }
 }
 ```

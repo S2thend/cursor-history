@@ -292,14 +292,29 @@ describe('packed-package contract smoke', () => {
     const beforeHash = createHash('sha256').update(readFileSync(tarball)).digest('hex');
     const smoked = runNode([smokeScript, tarball], repositoryRoot, 360_000, npmEnvironment);
     expect(smoked.status, `${smoked.stdout}${smoked.stderr}`).toBe(0);
-    expect(JSON.parse(smoked.stdout)).toMatchObject({
+    const smokeReport = JSON.parse(smoked.stdout);
+    expect(smokeReport).toMatchObject({
       candidate: tarball,
       runtimeOnly: false,
       manifestCompatibility: true,
       producerOnlyProjectionWrites: 0,
+      localizedDocumentationExamples: {
+        'docs/readme_es.md': {
+          typechecked: 6,
+          executed: ['library-read-flow', 'configuration-types'],
+        },
+        'docs/readme_fr.md': {
+          typechecked: 6,
+          executed: ['library-read-flow', 'configuration-types'],
+        },
+        'docs/readme_zh.md': {
+          typechecked: 6,
+          executed: ['library-read-flow', 'configuration-types'],
+        },
+      },
     });
-    expect(JSON.parse(smoked.stdout).packedSchemaTestCount).toBeGreaterThan(0);
-    expect(JSON.parse(smoked.stdout).initialProjectionWrites).toBeGreaterThan(0);
+    expect(smokeReport.packedSchemaTestCount).toBeGreaterThan(0);
+    expect(smokeReport.initialProjectionWrites).toBeGreaterThan(0);
 
     const runtimeSmoked = runNode(
       [

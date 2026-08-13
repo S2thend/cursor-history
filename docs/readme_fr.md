@@ -362,7 +362,7 @@ import {
 } from 'cursor-history';
 
 // Lister toutes les sessions avec pagination
-const result = listSessions({ limit: 10 });
+const result = await listSessions({ limit: 10 });
 console.log(`Trouvé ${result.pagination.total} sessions`);
 
 for (const session of result.data) {
@@ -370,17 +370,18 @@ for (const session of result.data) {
 }
 
 // Obtenir une session spécifique (index à base zéro)
-const session = getSession(0);
+const session = await getSession(0);
 console.log(session.messages);
 
 // Rechercher dans toutes les sessions
-const results = searchSessions('authentication', { context: 2 });
+const results = await searchSessions('authentication', { context: 2 });
 for (const match of results) {
-  console.log(match.match);
+  // Index dans le tableau complet, décalage UTF-16 et ligne source complète.
+  console.log(match.messageIndex, match.offset, match.match);
 }
 
 // Exporter en Markdown
-const markdown = exportSessionToMarkdown(0);
+const markdown = await exportSessionToMarkdown(0);
 ```
 
 ### API de migration
@@ -389,24 +390,26 @@ const markdown = exportSessionToMarkdown(0);
 import { migrateSession, migrateWorkspace } from 'cursor-history';
 
 // Déplacer une session vers un autre espace de travail
-const results = migrateSession({
+const moveResults = await migrateSession({
   sessions: 3,  // index ou ID
   destination: '/chemin/vers/nouveau/projet'
 });
+console.log(moveResults);
 
 // Copier plusieurs sessions (garde les originaux)
-const results = migrateSession({
+const copyResults = await migrateSession({
   sessions: [1, 3, 5],
   destination: '/chemin/vers/projet',
   mode: 'copy'
 });
+console.log(copyResults);
 
 // Migrer toutes les sessions entre espaces de travail
-const result = migrateWorkspace({
+const workspaceResult = await migrateWorkspace({
   source: '/ancien/projet',
   destination: '/nouveau/projet'
 });
-console.log(`Migré ${result.successCount} sessions`);
+console.log(`Migré ${workspaceResult.successCount} sessions`);
 ```
 
 ### API de sauvegarde
@@ -417,7 +420,8 @@ import {
   restoreBackup,
   validateBackup,
   listBackups,
-  getDefaultBackupDir
+  getDefaultBackupDir,
+  listSessions
 } from 'cursor-history';
 
 // Créer une sauvegarde
@@ -432,7 +436,7 @@ console.log(`Sauvegarde créée : ${result.backupPath}`);
 console.log(`Sessions : ${result.manifest.stats.sessionCount}`);
 
 // Valider une sauvegarde
-const validation = validateBackup('~/backup.zip');
+const validation = await validateBackup('~/backup.zip');
 if (validation.status === 'valid') {
   console.log('La sauvegarde est valide');
 } else if (validation.status === 'warnings') {
@@ -440,20 +444,21 @@ if (validation.status === 'valid') {
 }
 
 // Restaurer depuis une sauvegarde
-const restoreResult = restoreBackup({
+const restoreResult = await restoreBackup({
   backupPath: '~/backup.zip',
   force: true
 });
 console.log(`Restauré ${restoreResult.filesRestored} fichiers`);
+// Consultez restoreResult.warnings : les entrées corrompues sont ignorées, jamais restaurées.
 
 // Lister les sauvegardes disponibles
-const backups = listBackups();  // Scanne ~/cursor-history-backups/
+const backups = await listBackups();  // Scanne ~/cursor-history-backups/
 for (const backup of backups) {
   console.log(`${backup.filename}: ${backup.manifest?.stats.sessionCount} sessions`);
 }
 
 // Lire les sessions depuis une sauvegarde sans restaurer
-const sessions = listSessions({ backupPath: '~/backup.zip' });
+const sessions = await listSessions({ backupPath: '~/backup.zip' });
 ```
 
 ### Fonctions disponibles
@@ -481,6 +486,8 @@ const sessions = listSessions({ backupPath: '~/backup.zip' });
 ### Options de configuration
 
 ```typescript
+import type { MessageType } from 'cursor-history';
+
 interface LibraryConfig {
   dataPath?: string;       // Chemin personnalisé des données Cursor
   workspace?: string;      // Filtrer par chemin d'espace de travail
@@ -498,20 +505,22 @@ interface LibraryConfig {
 ```typescript
 import {
   listSessions,
-  getSession,
   createBackup,
+  restoreBackup,
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
-  isInvalidFilterError,
   isBackupError,
+  isBackupPublishedPermissionError,
+  isRestoreRollbackError,
   isRestoreError,
-  isInvalidBackupError
+  isInvalidBackupError,
+  validateMessageTypes
 } from 'cursor-history';
 
 try {
-  const result = listSessions();
+  const result = await listSessions();
 } catch (err) {
   if (isDatabaseLockedError(err)) {
     console.error('Base de données verrouillée - fermez Cursor et réessayez');
@@ -524,19 +533,28 @@ try {
   }
 }
 
-// Gestion des erreurs de filtre
 try {
-  const session = getSession(0, { messageFilter: ['invalid'] });
+  await createBackup({ outputPath: '/private/backups/cursor.zip' });
 } catch (err) {
-  if (isInvalidFilterError(err)) {
-    console.error('Types de filtre invalides :', err.invalidTypes);
-    console.error('Types valides :', err.validTypes);
+  if (isBackupPublishedPermissionError(err)) {
+    if (err.details.pathIdentityVerified) {
+      console.error('La sauvegarde publiée vérifiée nécessite une correction de mode :', err.details.outputPath);
+    } else {
+      // Le point de validation est franchi, mais ce chemin n'est pas fiable. Ne changez pas son mode ici.
+      console.error("Le chemin de sauvegarde publié nécessite une récupération d'identité :", err.details.outputPath);
+    }
   }
+}
+
+// Valider les valeurs de filtre non typées avant de les passer à une opération de lecture
+const invalidTypes = validateMessageTypes(['invalid']);
+if (invalidTypes.length > 0) {
+  console.error('Types de filtre invalides :', invalidTypes);
 }
 
 // Erreurs spécifiques aux sauvegardes
 try {
-  const result = await createBackup();
+  await createBackup();
 } catch (err) {
   if (isBackupError(err)) {
     console.error('Échec de la sauvegarde :', err.message);
@@ -544,6 +562,15 @@ try {
     console.error('Fichier de sauvegarde invalide');
   } else if (isRestoreError(err)) {
     console.error('Échec de la restauration :', err.message);
+  }
+}
+
+try {
+  await restoreBackup({ backupPath: '/private/backups/cursor.zip', force: true });
+} catch (err) {
+  if (isRestoreRollbackError(err)) {
+    // Ce sont des chemins relatifs au manifeste, jamais des localisateurs physiques privés.
+    console.error('Récupération manuelle requise pour :', err.details.residualFiles);
   }
 }
 ```

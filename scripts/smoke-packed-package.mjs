@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -75,6 +75,108 @@ function typecheckDocumentationFences(markdownPath, markdown, workspace) {
     );
   }
   return examples;
+}
+
+const localizedReadmePaths = ['docs/readme_es.md', 'docs/readme_fr.md', 'docs/readme_zh.md'];
+
+// Every localized TypeScript fence is typechecked. Runtime execution is limited
+// to deterministic, read-only examples: the library read flow and the
+// declaration-only configuration example. Driver selection depends on host
+// capabilities; migration and backup/restore mutate data; error examples
+// intentionally target environment-dependent failure paths. Each fence must
+// match exactly one policy so adding, removing, or reordering examples cannot
+// silently reduce this contract to a packaged-file existence check.
+const localizedExamplePolicies = [
+  {
+    name: 'driver-selection',
+    marker: "setDriver('better-sqlite3')",
+    execute: false,
+  },
+  {
+    name: 'library-read-flow',
+    marker: 'exportSessionToMarkdown',
+    execute: true,
+  },
+  {
+    name: 'session-migration',
+    marker: 'migrateWorkspace',
+    execute: false,
+  },
+  {
+    name: 'backup-and-restore',
+    marker: 'listBackups',
+    execute: false,
+  },
+  {
+    name: 'configuration-types',
+    marker: 'interface LibraryConfig',
+    execute: true,
+  },
+  {
+    name: 'error-handling',
+    marker: 'isDatabaseLockedError',
+    execute: false,
+  },
+];
+
+function classifyLocalizedExamples(markdownPath, examples) {
+  const classified = [];
+  const observedPolicies = new Set();
+  for (const [index, source] of examples.entries()) {
+    const matchingPolicies = localizedExamplePolicies.filter(({ marker }) =>
+      source.includes(marker)
+    );
+    if (matchingPolicies.length !== 1) {
+      fail(
+        `${markdownPath} TypeScript example ${index + 1} matched ` +
+          `${matchingPolicies.length} localized runtime policies; expected exactly one`
+      );
+    }
+    const policy = matchingPolicies[0];
+    if (observedPolicies.has(policy.name)) {
+      fail(`${markdownPath} repeats localized example policy ${policy.name}`);
+    }
+    observedPolicies.add(policy.name);
+    classified.push({ index, source, policy });
+  }
+  for (const { name } of localizedExamplePolicies) {
+    if (!observedPolicies.has(name)) {
+      fail(`${markdownPath} is missing localized example policy ${name}`);
+    }
+  }
+  return classified;
+}
+
+function runTypecheckedDocumentationFence(markdownPath, index, workspace, env) {
+  const sourcePath = join(
+    workspace,
+    `docs-${markdownPath.replace(/[^a-z0-9]/giu, '-')}-${index + 1}.mts`
+  );
+  const outputDirectory = join(workspace, 'compiled-documentation-examples');
+  mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
+  run(
+    process.execPath,
+    [
+      join(repositoryRoot, 'node_modules/typescript/bin/tsc'),
+      '--strict',
+      '--skipLibCheck',
+      '--target',
+      'ES2022',
+      '--module',
+      'NodeNext',
+      '--moduleResolution',
+      'NodeNext',
+      '--outDir',
+      outputDirectory,
+      sourcePath,
+    ],
+    { cwd: workspace }
+  );
+  const emittedPath = join(outputDirectory, basename(sourcePath).replace(/\.mts$/u, '.mjs'));
+  if (!existsSync(emittedPath)) {
+    fail(`${markdownPath} TypeScript example ${index + 1} emitted no runnable module`);
+  }
+  run(process.execPath, [emittedPath], { cwd: workspace, env });
 }
 
 function assertOwnerPrivateFile(path, label) {
@@ -296,6 +398,12 @@ try {
   }
   const readme = readFileSync(join(installedRoot, 'README.md'), 'utf8');
   const compatibility = readFileSync(join(installedRoot, 'docs/compatibility.md'), 'utf8');
+  const localizedReadmes = new Map(
+    localizedReadmePaths.map((markdownPath) => [
+      markdownPath,
+      readFileSync(join(installedRoot, markdownPath), 'utf8'),
+    ])
+  );
   if (!compatibility.includes('Compatibility Matrix v1')) {
     fail('packaged compatibility contract does not identify Matrix v1');
   }
@@ -653,6 +761,7 @@ try {
     }
   }
 
+  let localizedDocumentationExamples = {};
   if (!runtimeOnly) {
     typecheckDocumentationFences('README.md', readme, workspace);
     const compatibilityExamples = typecheckDocumentationFences(
@@ -672,6 +781,28 @@ try {
       cwd: workspace,
       env: { CURSOR_DATA_PATH: storeRoot },
     });
+
+    localizedDocumentationExamples = Object.fromEntries(
+      [...localizedReadmes.entries()].map(([markdownPath, markdown]) => {
+        const examples = typecheckDocumentationFences(markdownPath, markdown, workspace);
+        const classified = classifyLocalizedExamples(markdownPath, examples);
+        const executed = [];
+        for (const { index, policy } of classified) {
+          if (!policy.execute) continue;
+          runTypecheckedDocumentationFence(markdownPath, index, workspace, {
+            CURSOR_DATA_PATH: storeRoot,
+          });
+          executed.push(policy.name);
+        }
+        return [
+          markdownPath,
+          {
+            typechecked: classified.length,
+            executed,
+          },
+        ];
+      })
+    );
   }
 
   const cliPath = join(installedRoot, 'dist/cli/index.js');
@@ -758,6 +889,7 @@ try {
       backupDriver: expectedBackupDriver ?? esm.getActiveDriver(),
       nodeSqliteBackup: expectedNodeSqliteBackup,
       packedSchemaTestCount,
+      localizedDocumentationExamples,
       manifestCompatibility: true,
       initialProjectionWrites: initialWrites,
       producerOnlyProjectionWrites: producerOnlyWrites,
