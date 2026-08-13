@@ -564,31 +564,35 @@ npm test              # Ejecutar todas las pruebas
 npm run test:watch    # Modo observación
 ```
 
-### Publicar en NPM
+### Publicar en npm
 
-Este proyecto usa GitHub Actions para publicación automática en NPM. Para publicar una nueva versión:
+Las versiones usan la publicación de confianza de npm mediante GitHub Actions. No se utiliza ningún
+secreto de repositorio `NPM_TOKEN`. Antes de la primera publicación:
 
-1. Actualizar versión en `package.json`:
-   ```bash
-   npm version patch  # Para correcciones de bugs (0.1.0 -> 0.1.1)
-   npm version minor  # Para nuevas características (0.1.0 -> 0.2.0)
-   npm version major  # Para cambios importantes (0.1.0 -> 1.0.0)
-   ```
+1. Configura el publicador de confianza del paquete npm para este repositorio exacto y
+   `.github/workflows/npm-publish.yml`, incluido el entorno `npm-release-verification` cuando npm lo
+   solicite.
+2. Crea el entorno de GitHub `npm-release-verification`, exige revisores mantenedores designados y
+   evita omitir la revisión según la política de protección del repositorio.
 
-2. Empujar la etiqueta de versión para disparar publicación automática:
-   ```bash
-   git push origin main --tags
-   ```
+Para cada versión:
 
-3. El flujo de trabajo de GitHub automáticamente:
-   - Ejecutará verificaciones de tipos, linting y pruebas
-   - Compilará el proyecto
-   - Publicará en NPM con procedencia
+1. Actualiza y valida todos los metadatos versionados y las notas de la versión, completa las puertas
+   documentadas y congela una revisión limpia.
+2. Confirma que la etiqueta no exista y empuja solo esa etiqueta (por ejemplo,
+   `git push origin v0.18.0`). No empujes ni muevas una etiqueta antes de congelar la revisión.
+3. El flujo valida el código y todos los entornos compatibles, empaqueta una sola vez, vincula el
+   candidato a la revisión y a su SHA-256 y se detiene en el trabajo `approve-candidate`, dentro del
+   entorno protegido `npm-release-verification`.
+4. Descarga ese candidato identificado por suma y completa las verificaciones privadas del artefacto
+   exacto descritas en [release-verification.md](release-verification.md). Aprueba el entorno solo
+   cuando todas pasen.
+5. La aprobación publica exactamente esos bytes conservados con procedencia npm, sin recompilar ni
+   volver a empaquetar.
 
-**Configuración inicial**: Agrega tu token de acceso NPM como secreto de GitHub llamado `NPM_TOKEN`:
-1. Crea un token de acceso NPM en https://www.npmjs.com/settings/YOUR_USERNAME/tokens
-2. Ve a configuración de tu repositorio GitHub → Secrets and variables → Actions
-3. Agrega un nuevo secreto de repositorio llamado `NPM_TOKEN` con tu token NPM
+Cualquier fallo de código, runtime, artefacto o verificación privada bloquea la publicación. Nunca
+fuerces silenciosamente el movimiento de una etiqueta: corrige explícitamente un candidato aún no
+publicado y usa una versión nueva si ya se publicó cualquier byte.
 
 ## Compatibilidad de v0.18
 

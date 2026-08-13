@@ -558,31 +558,32 @@ npm test              # 运行所有测试
 npm run test:watch    # 监视模式
 ```
 
-### 发布到 NPM
+### 发布到 npm
 
-本项目使用 GitHub Actions 进行自动 NPM 发布。要发布新版本：
+本项目通过 GitHub Actions 使用 npm trusted publishing，不使用 `NPM_TOKEN` 仓库 secret。
+首次发布前：
 
-1. 更新 `package.json` 中的版本：
-   ```bash
-   npm version patch  # 用于 bug 修复 (0.1.0 -> 0.1.1)
-   npm version minor  # 用于新功能 (0.1.0 -> 0.2.0)
-   npm version major  # 用于破坏性更改 (0.1.0 -> 1.0.0)
-   ```
+1. 在 npm 中把此包的 trusted publisher 精确绑定到本 GitHub 仓库和
+   `.github/workflows/npm-publish.yml`；如果 npm 要求，同时绑定
+   `npm-release-verification` environment。
+2. 在 GitHub 创建 `npm-release-verification` environment，设置指定维护者为 required
+   reviewers，并按仓库保护策略禁止未经审核的绕过。
 
-2. 推送版本标签以触发自动发布：
-   ```bash
-   git push origin main --tags
-   ```
+每次发布时：
 
-3. GitHub 工作流将自动：
-   - 运行类型检查、代码检查和测试
-   - 构建项目
-   - 发布到 NPM 并带有来源证明
+1. 更新并验证所有带版本的包元数据和 release notes，完成文档规定的门禁，然后冻结一个
+   干净 revision。
+2. 确认版本 tag 尚不存在，并且只推送该 tag（例如 `git push origin v0.18.0`）。revision
+   冻结前不要推送或移动 release tag。
+3. 工作流会验证源码和全部受支持运行时，仅打包一次，把候选包绑定到 revision 和
+   SHA-256，然后在 `approve-candidate` job 的受保护 `npm-release-verification`
+   environment 处暂停。
+4. 下载这个由校验和寻址的候选包，按 [release-verification.md](release-verification.md)
+   完成针对同一制品的私有验证；只有全部通过后才批准 environment。
+5. 批准后以 npm provenance 发布原样保留的同一组字节，不重新构建或打包。
 
-**首次设置**：将您的 NPM 访问令牌添加为名为 `NPM_TOKEN` 的 GitHub secret：
-1. 在 https://www.npmjs.com/settings/YOUR_USERNAME/tokens 创建 NPM 访问令牌
-2. 转到您的 GitHub 仓库设置 → Secrets and variables → Actions
-3. 添加名为 `NPM_TOKEN` 的新仓库 secret，值为您的 NPM 令牌
+源码、运行时、制品或私有验证中的任何失败都会阻止发布。绝不能悄悄强制移动 release
+tag；尚未发布的失败候选必须显式处置，只要已有字节发布就必须使用新版本。
 
 ## v0.18 兼容性说明
 

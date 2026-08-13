@@ -878,31 +878,35 @@ pnpm test:watch       # Watch mode
 pnpm typecheck
 ```
 
-### Releasing to NPM
+### Releasing to npm
 
-This project uses GitHub Actions for automatic NPM publishing. To release a new version:
+Releases use npm trusted publishing through GitHub Actions. No `NPM_TOKEN` repository secret is
+used. Before the first release:
 
-1. Update version in `package.json`:
-   ```bash
-   npm version patch  # For bug fixes (0.1.0 -> 0.1.1)
-   npm version minor  # For new features (0.1.0 -> 0.2.0)
-   npm version major  # For breaking changes (0.1.0 -> 1.0.0)
-   ```
+1. Configure the npm package's trusted publisher for this exact GitHub repository and
+   `.github/workflows/npm-publish.yml`, including the `npm-release-verification` environment when
+   requested by npm.
+2. Create the GitHub environment `npm-release-verification`, require designated maintainer
+   reviewers, and prevent unreviewed bypass according to the repository's protection policy.
 
-2. Push the version tag to trigger automatic publishing:
-   ```bash
-   git push origin main --tags
-   ```
+For each release:
 
-3. The GitHub workflow will automatically:
-   - Run type checks, linting, and tests
-   - Build the project
-   - Publish to NPM with provenance
+1. Update and validate all versioned package metadata and release notes, complete the documented
+   release gates, and freeze one clean revision.
+2. Confirm the version tag does not already exist, then push only that tag (for example,
+   `git push origin v0.18.0`). Do not push or move a release tag before the revision is frozen.
+3. The workflow validates sources and every supported runtime, packs exactly once, binds the
+   candidate to its revision and SHA-256, and then pauses in the `approve-candidate` job at the
+   protected `npm-release-verification` environment.
+4. Download that checksum-addressed candidate and complete the private exact-artifact checks in
+   [docs/release-verification.md](docs/release-verification.md). Approve the environment only after
+   those checks pass.
+5. Approval publishes those same preserved bytes with npm provenance; the workflow does not rebuild
+   or repack them.
 
-**First-time setup**: Add your NPM access token as a GitHub secret named `NPM_TOKEN`:
-1. Create an NPM access token at https://www.npmjs.com/settings/YOUR_USERNAME/tokens
-2. Go to your GitHub repository settings → Secrets and variables → Actions
-3. Add a new repository secret named `NPM_TOKEN` with your NPM token
+Any failed source, runtime, artifact, or private verification blocks publication. Never silently
+force-move a release tag; remediate an unpublished failed candidate explicitly, and use a new
+version if any bytes have already been published.
 
 ## Contributing
 
