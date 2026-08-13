@@ -20,7 +20,10 @@ import { parseTranscriptFile } from '../../src/core/store-stack/transcript.js';
 import type { ChatSession } from '../../src/core/types.js';
 import type { StoreSession } from '../../src/core/store-stack/types.js';
 import type { Session } from '../../src/lib/types.js';
-import { computeV016MessageDigest, normalizeCursorSessionV016 } from '../helpers/v016-consumer.js';
+import {
+  fingerprintV016DownstreamContract,
+  projectV016DownstreamContract,
+} from '../helpers/v016-downstream-contract.js';
 
 describe('canonical JSON and SHA-256 v1', () => {
   it('sorts keys by Unicode code point, preserves arrays, and applies JSON undefined rules', () => {
@@ -295,7 +298,7 @@ describe('relationship rewriting', () => {
 
 describe('unchanged-consumer attachment projection and fidelity', () => {
   function compatibilityDigest(session: Session): string {
-    return computeV016MessageDigest(normalizeCursorSessionV016(session).messages);
+    return fingerprintV016DownstreamContract(projectV016DownstreamContract(session));
   }
 
   function sourceSession(
@@ -386,11 +389,11 @@ describe('unchanged-consumer attachment projection and fidelity', () => {
     const contentProjected = structuredClone(baseline);
     contentProjected.messages[0]!.content +=
       '\n```text\nSynthetic lossless attachment content.\n```';
-    const projected = normalizeCursorSessionV016(contentProjected);
-    expect(projected.messages[0]!.codeBlocks).toEqual([
-      { language: 'text', content: 'Synthetic lossless attachment content.\n' },
-    ]);
-    expect(computeV016MessageDigest(projected.messages)).not.toBe(baselineDigest);
+    const projected = projectV016DownstreamContract(contentProjected);
+    expect(projected.messages[0]!.content).toContain(
+      '```text\nSynthetic lossless attachment content.\n```'
+    );
+    expect(fingerprintV016DownstreamContract(projected)).not.toBe(baselineDigest);
 
     const toolProjected = structuredClone(baseline);
     toolProjected.messages[0]!.toolCalls![0]!.result = 'Changed consumed attachment result.';

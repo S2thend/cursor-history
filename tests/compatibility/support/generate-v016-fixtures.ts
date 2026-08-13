@@ -23,7 +23,6 @@ const CREATED_AT = '2024-01-16T00:00:00.000Z';
 const UPDATED_AT = '2024-01-16T00:01:00.000Z';
 const PROJECTOR_TAG = 'v0.16.0';
 const PROJECTOR_COMMIT = 'e8a7abf8cea3419a9dda911e174a05f82a9b260e';
-const CONSUMER_REVISION = '698701775144f7d8875330e1f8caec9ddfc27744';
 // SQLite writes its library version into header bytes 96..99. That value is
 // not logical database content and otherwise makes byte hashes drift whenever
 // the lockfile upgrades better-sqlite3's bundled SQLite patch release.
@@ -33,7 +32,6 @@ const ARTIFACT_NAMES = [
   'composer-global-state.vscdb',
   'workspace-fallback.json',
   'tagged-output.json',
-  'legacy-consumer-archive.sqlite',
   'merged-store-source.json',
 ] as const;
 
@@ -515,234 +513,6 @@ function writeComposerDatabase(path: string): void {
   });
 }
 
-interface ConsumerMessage {
-  id: string;
-  sourceId: string | null;
-  role: 'user' | 'assistant';
-  content: string;
-  contentType: 'text' | 'tool_call' | 'tool_result';
-  timestamp: string;
-  parentMessageId?: string;
-  isSidechain: false;
-  codeBlocks: Array<{ language?: string; content: string }>;
-  toolCalls: Array<{
-    id: string;
-    name: string;
-    input: Record<string, unknown>;
-    output?: unknown;
-    status: 'success' | 'error' | 'pending';
-  }>;
-}
-
-function extractCodeBlocks(content: string): Array<{ language?: string; content: string }> {
-  const blocks: Array<{ language?: string; content: string }> = [];
-  const pattern = /```([^\n`]*)\n([\s\S]*?)```/g;
-  for (const match of content.matchAll(pattern)) {
-    const language = match[1]?.trim();
-    blocks.push({ ...(language ? { language } : {}), content: match[2] ?? '' });
-  }
-  return blocks;
-}
-
-function consumerMessages(): ConsumerMessage[] {
-  const sessionId = `cursor:${V016_SYNTHETIC_SESSION_ID}`;
-  const messages = TAGGED_GLOBAL_MESSAGES.map((message, index): ConsumerMessage => {
-    const id =
-      typeof message.id === 'string' && message.id.length > 0
-        ? `${sessionId}:${message.id}`
-        : `${sessionId}:msg:${index}`;
-    const toolCalls = (message.toolCalls ?? []).map((tool, toolIndex) => ({
-      id: `${id}:tc:${toolIndex}`,
-      name: tool.name,
-      input: tool.params ?? {},
-      ...(tool.result === undefined ? {} : { output: tool.result }),
-      status:
-        tool.status === 'completed'
-          ? ('success' as const)
-          : tool.status === 'error' || tool.status === 'cancelled'
-            ? ('error' as const)
-            : ('pending' as const),
-    }));
-    return {
-      id,
-      sourceId: message.id,
-      role: message.role,
-      content: message.content,
-      contentType:
-        toolCalls.length > 0
-          ? message.role === 'assistant'
-            ? 'tool_call'
-            : 'tool_result'
-          : 'text',
-      timestamp: message.timestamp,
-      isSidechain: false,
-      codeBlocks: extractCodeBlocks(message.content),
-      toolCalls,
-    };
-  });
-  const bySourceId = new Map(
-    messages.flatMap((message) =>
-      message.sourceId && message.sourceId.length > 0 ? [[message.sourceId, message] as const] : []
-    )
-  );
-  const active = TAGGED_OUTPUT.globalSession.activeBranchBubbleIds.flatMap((id) => {
-    const message = bySourceId.get(id);
-    return message ? [message] : [];
-  });
-  for (let index = 1; index < active.length; index++) {
-    active[index]!.parentMessageId = active[index - 1]!.id;
-  }
-  return messages;
-}
-
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJsonValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.keys(value as Record<string, unknown>)
-        .sort()
-        .map((key) => [key, sortJsonValue((value as Record<string, unknown>)[key])])
-    );
-  }
-  return value;
-}
-
-function consumerDigest(messages: readonly ConsumerMessage[]): string {
-  const payload = messages.map((message) => ({
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    contentType: message.contentType,
-    timestamp: message.timestamp,
-    model: null,
-    parentMessageId: message.parentMessageId ?? null,
-    isSidechain: message.isSidechain,
-    tokenUsage: null,
-    codeBlocks: sortJsonValue(message.codeBlocks),
-    toolCalls: sortJsonValue(message.toolCalls),
-    metadata: null,
-  }));
-  return sha256(JSON.stringify(payload));
-}
-
-function writeConsumerArchive(path: string): void {
-  const messages = consumerMessages();
-  const sessionId = `cursor:${V016_SYNTHETIC_SESSION_ID}`;
-  const leafMessageId = messages.find(
-    (message) => message.sourceId === 'native-tool-search-016'
-  )!.id;
-  createFreshDatabase(path, (database) => {
-    database.pragma('foreign_keys = ON');
-    database.exec(`
-      CREATE TABLE sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE sessions (
-        id TEXT NOT NULL, hostname TEXT NOT NULL, provider TEXT NOT NULL,
-        title TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-        project_path TEXT, git_branch TEXT, leaf_message_id TEXT,
-        agent_session_ids TEXT, parent_session_id TEXT, first_user_message TEXT,
-        message_count INTEGER NOT NULL DEFAULT 0, metadata TEXT,
-        PRIMARY KEY (id, hostname)
-      );
-      CREATE TABLE messages (
-        session_id TEXT NOT NULL, hostname TEXT NOT NULL, id TEXT NOT NULL,
-        role TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL,
-        timestamp TEXT, model TEXT, parent_message_id TEXT,
-        is_sidechain INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER,
-        output_tokens INTEGER, cache_read_input_tokens INTEGER,
-        cache_creation_input_tokens INTEGER, reasoning_tokens INTEGER, metadata TEXT,
-        PRIMARY KEY (session_id, hostname, id),
-        FOREIGN KEY (session_id, hostname) REFERENCES sessions(id, hostname) ON DELETE CASCADE
-      );
-      CREATE TABLE code_blocks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-        hostname TEXT NOT NULL, message_id TEXT NOT NULL, language TEXT,
-        content TEXT NOT NULL, file_path TEXT
-      );
-      CREATE TABLE tool_calls (
-        id TEXT NOT NULL, session_id TEXT NOT NULL, hostname TEXT NOT NULL,
-        message_id TEXT NOT NULL, name TEXT NOT NULL, input TEXT NOT NULL,
-        output TEXT, status TEXT NOT NULL, duration_ms INTEGER,
-        PRIMARY KEY (session_id, hostname, message_id, id)
-      );
-    `);
-    database
-      .prepare('INSERT INTO sync_metadata (key, value) VALUES (?, ?)')
-      .run('schema_version', '2');
-    database
-      .prepare(
-        `INSERT INTO sessions
-         (id, hostname, provider, created_at, updated_at, project_path,
-          leaf_message_id, first_user_message, message_count, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        sessionId,
-        V016_SYNTHETIC_HOSTNAME,
-        'cursor',
-        CREATED_AT,
-        UPDATED_AT,
-        V016_SYNTHETIC_WORKSPACE,
-        leafMessageId,
-        'Synthetic question alpha.',
-        messages.length,
-        JSON.stringify({
-          cursorSource: 'global',
-          _vibeHistorySync: { messageDigest: consumerDigest(messages) },
-        })
-      );
-    const insertMessage = database.prepare(
-      `INSERT INTO messages
-       (session_id, hostname, id, role, content, content_type, timestamp,
-        parent_message_id, is_sidechain)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    const insertBlock = database.prepare(
-      `INSERT INTO code_blocks
-       (session_id, hostname, message_id, language, content)
-       VALUES (?, ?, ?, ?, ?)`
-    );
-    const insertTool = database.prepare(
-      `INSERT INTO tool_calls
-       (id, session_id, hostname, message_id, name, input, output, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    for (const message of messages) {
-      insertMessage.run(
-        sessionId,
-        V016_SYNTHETIC_HOSTNAME,
-        message.id,
-        message.role,
-        message.content,
-        message.contentType,
-        message.timestamp,
-        message.parentMessageId ?? null,
-        0
-      );
-      for (const block of message.codeBlocks) {
-        insertBlock.run(
-          sessionId,
-          V016_SYNTHETIC_HOSTNAME,
-          message.id,
-          block.language ?? null,
-          block.content
-        );
-      }
-      for (const tool of message.toolCalls) {
-        insertTool.run(
-          tool.id,
-          sessionId,
-          V016_SYNTHETIC_HOSTNAME,
-          message.id,
-          tool.name,
-          JSON.stringify(tool.input),
-          tool.output === undefined ? null : JSON.stringify(tool.output),
-          tool.status
-        );
-      }
-    }
-  });
-}
-
 export interface V016FixtureLogicalInventory {
   composerGlobal: {
     table: 'cursorDiskKV';
@@ -759,13 +529,6 @@ export interface V016FixtureLogicalInventory {
     globalMessageIds: Array<string | null>;
     workspaceMessageIds: Array<string | null>;
     sources: string[];
-  };
-  consumerArchive: {
-    schemaVersion: string;
-    sessionIds: string[];
-    messageIds: string[];
-    toolCallIds: string[];
-    codeBlockCount: number;
   };
   storeUpgrade: {
     labels: string[];
@@ -787,7 +550,7 @@ function collectStrings(value: unknown, keys: ReadonlySet<string>, result: Set<s
   }
 }
 
-/** Read only the five generated artifacts and return their deterministic logical inventory. */
+/** Read only the four generated artifacts and return their deterministic logical inventory. */
 export function inspectV016FixtureSet(root: string): V016FixtureLogicalInventory {
   const payloadStrings = new Set<string>();
   const composerPath = pathInside(root, 'composer-global-state.vscdb');
@@ -820,44 +583,6 @@ export function inspectV016FixtureSet(root: string): V016FixtureLogicalInventory
   collectStrings(tagged, new Set(['content', 'text', 'result']), payloadStrings);
   collectStrings(store, new Set(['content', 'text', 'result']), payloadStrings);
 
-  const archive = new BetterSqlite3(pathInside(root, 'legacy-consumer-archive.sqlite'), {
-    readonly: true,
-  });
-  let schemaVersion: string;
-  let sessionIds: string[];
-  let messageRows: Array<{ id: string; content: string }>;
-  let toolRows: Array<{ id: string; output: string | null }>;
-  let codeBlockCount: number;
-  try {
-    schemaVersion = (
-      archive.prepare("SELECT value FROM sync_metadata WHERE key = 'schema_version'").get() as {
-        value: string;
-      }
-    ).value;
-    sessionIds = (
-      archive.prepare('SELECT id FROM sessions ORDER BY id ASC').all() as Array<{ id: string }>
-    ).map(({ id }) => id);
-    messageRows = archive
-      .prepare('SELECT id, content FROM messages ORDER BY id ASC')
-      .all() as Array<{ id: string; content: string }>;
-    toolRows = archive.prepare('SELECT id, output FROM tool_calls ORDER BY id ASC').all() as Array<{
-      id: string;
-      output: string | null;
-    }>;
-    codeBlockCount = (
-      archive.prepare('SELECT COUNT(*) AS count FROM code_blocks').get() as { count: number }
-    ).count;
-  } finally {
-    archive.close();
-  }
-  for (const { content } of messageRows) payloadStrings.add(content);
-  for (const { output } of toolRows) {
-    if (output) {
-      const parsed = JSON.parse(output) as unknown;
-      if (typeof parsed === 'string') payloadStrings.add(parsed);
-    }
-  }
-
   return {
     composerGlobal: {
       table: 'cursorDiskKV',
@@ -885,13 +610,6 @@ export function inspectV016FixtureSet(root: string): V016FixtureLogicalInventory
         tagged.globalSession.source,
         ...tagged.workspaceFallbackSessions.map(({ source }) => source),
       ],
-    },
-    consumerArchive: {
-      schemaVersion,
-      sessionIds,
-      messageIds: messageRows.map(({ id }) => id),
-      toolCallIds: toolRows.map(({ id }) => id),
-      codeBlockCount,
     },
     storeUpgrade: {
       labels: store.sourceNativeOrder.map(({ label }) => label),
@@ -999,10 +717,9 @@ export interface V016FixtureManifest {
       projectorManifest: string;
       sourceFormat: Record<string, unknown>;
     };
-    vibeHistoryConsumer: {
-      revision: string;
+    externalConsumerCertification: {
       manifest: string;
-      archiveSchema: number;
+      recurringCiIncludesThirdPartyImplementation: false;
     };
   };
   syntheticIdentities: {
@@ -1028,7 +745,6 @@ export function generateV016Fixtures(outputDirectory: string): V016FixtureManife
   writeComposerDatabase(pathInside(root, 'composer-global-state.vscdb'));
   writeJson(pathInside(root, 'workspace-fallback.json'), WORKSPACE_FALLBACK);
   writeJson(pathInside(root, 'tagged-output.json'), TAGGED_OUTPUT);
-  writeConsumerArchive(pathInside(root, 'legacy-consumer-archive.sqlite'));
   writeJson(pathInside(root, 'merged-store-source.json'), MERGED_STORE_SOURCE);
 
   const logicalInventory = inspectV016FixtureSet(root);
@@ -1078,10 +794,9 @@ export function generateV016Fixtures(outputDirectory: string): V016FixtureManife
           workspaceFallbackContainer: 'tabs[].messages[]',
         },
       },
-      vibeHistoryConsumer: {
-        revision: CONSUMER_REVISION,
+      externalConsumerCertification: {
         manifest: 'tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json',
-        archiveSchema: 2,
+        recurringCiIncludesThirdPartyImplementation: false,
       },
     },
     syntheticIdentities: {

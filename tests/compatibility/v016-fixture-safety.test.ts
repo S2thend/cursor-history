@@ -32,12 +32,7 @@ import {
   projectV016GlobalSession,
   projectV016WorkspaceSessions,
 } from './support/v016-projector.js';
-import {
-  computeV016MessageDigest,
-  normalizeCursorSessionV016,
-  readV016ArchiveState,
-  syncV016Session,
-} from '../helpers/v016-consumer.js';
+import { projectV016DownstreamContract } from '../helpers/v016-downstream-contract.js';
 import type { Session } from '../../src/lib/types.js';
 import {
   exportSessionToJson as exportLibrarySessionToJson,
@@ -57,7 +52,6 @@ const GENERATED_ARTIFACTS = [
   'composer-global-state.vscdb',
   'workspace-fallback.json',
   'tagged-output.json',
-  'legacy-consumer-archive.sqlite',
   'merged-store-source.json',
   'fixture-manifest.json',
 ] as const;
@@ -184,31 +178,8 @@ function keyBytes(keys: readonly string[]): Buffer {
   return Buffer.from(keys.join('\0'), 'utf8');
 }
 
-function archiveInventory(path: string): {
-  messageIds: string[];
-  toolCallIds: string[];
-  codeBlockCount: number;
-} {
-  const database = new BetterSqlite3(path, { readonly: true });
-  try {
-    return {
-      messageIds: (
-        database.prepare('SELECT id FROM messages ORDER BY id ASC').all() as Array<{ id: string }>
-      ).map(({ id }) => id),
-      toolCallIds: (
-        database.prepare('SELECT id FROM tool_calls ORDER BY id ASC').all() as Array<{ id: string }>
-      ).map(({ id }) => id),
-      codeBlockCount: (
-        database.prepare('SELECT COUNT(*) AS count FROM code_blocks').get() as { count: number }
-      ).count,
-    };
-  } finally {
-    database.close();
-  }
-}
-
 describe('locked wholly synthetic v0.16 fixture generation', () => {
-  it('records fixed source-format and separately pinned consumer provenance', () => {
+  it('records fixed source-format and external-consumer certification provenance', () => {
     const manifest = readManifest();
     expect(manifest.fixtureSchema).toBe(V016_FIXTURE_SCHEMA);
     expect(manifest.generator.deterministic).toBe(true);
@@ -229,10 +200,9 @@ describe('locked wholly synthetic v0.16 fixture generation', () => {
         nullBubblePayload: 'preserved as a row-key-ID [corrupted message] entry',
       },
     });
-    expect(manifest.provenance.vibeHistoryConsumer).toEqual({
-      revision: '698701775144f7d8875330e1f8caec9ddfc27744',
+    expect(manifest.provenance.externalConsumerCertification).toEqual({
       manifest: 'tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json',
-      archiveSchema: 2,
+      recurringCiIncludesThirdPartyImplementation: false,
     });
     expect(manifest.generator.forbiddenInputs).toEqual(
       expect.arrayContaining([
@@ -379,51 +349,12 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
     );
   });
 
-  it('conforms to the pinned unchanged consumer schema, identity, digest, and real sync output', () => {
-    const cursorSession = taggedCursorSession();
-    const normalized = normalizeCursorSessionV016(cursorSession);
-    const committedPath = join(FIXTURE_ROOT, 'legacy-consumer-archive.sqlite');
-    const committedState = readV016ArchiveState(committedPath, normalized.id);
-    const manifest = readManifest();
-
-    expect(committedState.exists).toBe(true);
-    expect(committedState.messageDigest).toBe(computeV016MessageDigest(normalized.messages));
-    expect(committedState.messageIds).toEqual(
-      [...normalized.messages]
-        .sort((left, right) => {
-          const timestampOrder = left.timestamp.getTime() - right.timestamp.getTime();
-          return timestampOrder !== 0 ? timestampOrder : left.id.localeCompare(right.id);
-        })
-        .map(({ id }) => id)
-    );
-    expect(archiveInventory(committedPath)).toEqual({
-      messageIds: manifest.logicalInventory.consumerArchive.messageIds,
-      toolCallIds: manifest.logicalInventory.consumerArchive.toolCallIds,
-      codeBlockCount: 1,
-    });
-
-    const root = mkdtempSync(join(tmpdir(), 'cursor-history-v016-consumer-'));
-    const generatedArchive = join(root, 'archive.sqlite');
-    try {
-      expect(syncV016Session(generatedArchive, cursorSession)).toEqual({
-        action: 'added',
-        messagesAppended: cursorSession.messages.length,
-      });
-      const generatedState = readV016ArchiveState(generatedArchive, normalized.id);
-      expect(generatedState).toEqual(committedState);
-      expect(archiveInventory(generatedArchive)).toEqual(archiveInventory(committedPath));
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('round-trips the raw Composer database through the current public library without changing v0.16 consumer output', async () => {
+  it('round-trips the raw Composer database without changing generic v0.16 key bindings', async () => {
     const root = mkdtempSync(join(tmpdir(), 'cursor-history-v016-current-library-'));
     const userRoot = join(root, 'User');
     const workspaceStorage = join(userRoot, 'workspaceStorage');
     const globalStorage = join(userRoot, 'globalStorage');
     const emptyStoreRoot = join(root, 'empty-store');
-    const archivePath = join(root, 'legacy-consumer-archive.sqlite');
     const previousStoreRoot = process.env['CURSOR_STORE_ROOT'];
     try {
       mkdirSync(workspaceStorage, { recursive: true });
@@ -433,7 +364,6 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
         join(FIXTURE_ROOT, 'composer-global-state.vscdb'),
         join(globalStorage, 'state.vscdb')
       );
-      copyFileSync(join(FIXTURE_ROOT, 'legacy-consumer-archive.sqlite'), archivePath);
       process.env['CURSOR_STORE_ROOT'] = emptyStoreRoot;
 
       const result = await listLibrarySessions({ dataPath: workspaceStorage, limit: 100 });
@@ -441,9 +371,9 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
       expect(current).toBeDefined();
 
       const tagged = taggedCursorSession();
-      const expectedProjection = normalizeCursorSessionV016(tagged);
-      const currentProjection = normalizeCursorSessionV016(current!);
-      expect(currentProjection).toEqual(expectedProjection);
+      const expectedProjection = projectV016DownstreamContract(tagged);
+      const currentProjection = projectV016DownstreamContract(current!);
+      expect(currentProjection).toEqual({ ...expectedProjection, resolvedSource: 'composer' });
       expect(current!.messages.map(({ id }) => id)).toEqual(
         tagged.messages.map((message, index) => message.id || `msg:${index}`)
       );
@@ -451,15 +381,6 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
         id: 'synthetic-null-payload-016',
         content: '[corrupted message]',
       });
-
-      const beforeState = readV016ArchiveState(archivePath, expectedProjection.id);
-      const beforeInventory = archiveInventory(archivePath);
-      expect(syncV016Session(archivePath, current!)).toEqual({
-        action: 'skipped',
-        messagesAppended: 0,
-      });
-      expect(readV016ArchiveState(archivePath, expectedProjection.id)).toEqual(beforeState);
-      expect(archiveInventory(archivePath)).toEqual(beforeInventory);
     } finally {
       if (previousStoreRoot === undefined) delete process.env['CURSOR_STORE_ROOT'];
       else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
@@ -467,8 +388,8 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
     }
   });
 
-  it('round-trips raw workspace-fallback data through the scoped production library without changing v0.16 persistence keys', async () => {
-    await withCurrentWorkspaceFallback(async ({ root, workspaceStorage }) => {
+  it('round-trips raw workspace-fallback data without changing generic v0.16 keys', async () => {
+    await withCurrentWorkspaceFallback(async ({ workspaceStorage }) => {
       const result = await listLibrarySessions({
         dataPath: workspaceStorage,
         workspace: '/fixture/v016/project',
@@ -477,8 +398,8 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
       expect(result.pagination.total).toBe(1);
       const current = result.data[0]!;
       const tagged = taggedWorkspaceFallbackSession();
-      const expectedProjection = normalizeCursorSessionV016(tagged);
-      const currentProjection = normalizeCursorSessionV016(current);
+      const expectedProjection = projectV016DownstreamContract(tagged);
+      const currentProjection = projectV016DownstreamContract(current);
 
       expect(current).toMatchObject({
         id: V016_SYNTHETIC_SESSION_ID,
@@ -490,38 +411,20 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
         'msg:1',
         'msg:2',
       ]);
-      expect(currentProjection).toEqual(expectedProjection);
+      expect(currentProjection).toEqual({ ...expectedProjection, resolvedSource: 'composer' });
       expect(
         keyBytes([
-          currentProjection.id,
-          ...currentProjection.messages.map(({ id }) => id),
-          ...currentProjection.messages.flatMap(({ toolCalls = [] }) =>
-            toolCalls.map(({ id }) => id)
-          ),
+          currentProjection.sessionKey,
+          ...currentProjection.messages.map(({ key }) => key),
+          ...currentProjection.messages.flatMap(({ tools }) => tools.map(({ key }) => key)),
         ])
       ).toEqual(
         keyBytes([
-          expectedProjection.id,
-          ...expectedProjection.messages.map(({ id }) => id),
-          ...expectedProjection.messages.flatMap(({ toolCalls = [] }) =>
-            toolCalls.map(({ id }) => id)
-          ),
+          expectedProjection.sessionKey,
+          ...expectedProjection.messages.map(({ key }) => key),
+          ...expectedProjection.messages.flatMap(({ tools }) => tools.map(({ key }) => key)),
         ])
       );
-
-      const archivePath = join(root, 'workspace-fallback-consumer-archive.sqlite');
-      expect(syncV016Session(archivePath, tagged)).toEqual({
-        action: 'skipped',
-        messagesAppended: 0,
-      });
-      const beforeState = readV016ArchiveState(archivePath, expectedProjection.id);
-      const beforeInventory = archiveInventory(archivePath);
-      expect(syncV016Session(archivePath, current)).toEqual({
-        action: 'skipped',
-        messagesAppended: 0,
-      });
-      expect(readV016ArchiveState(archivePath, expectedProjection.id)).toEqual(beforeState);
-      expect(archiveInventory(archivePath)).toEqual(beforeInventory);
     });
   });
 
@@ -658,7 +561,7 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
         }))
       );
 
-      const exportedConsumerProjection = normalizeCursorSessionV016({
+      const exportedContractProjection = projectV016DownstreamContract({
         id: exported.id,
         workspace: exported.workspacePath,
         timestamp: exported.createdAt,
@@ -667,8 +570,8 @@ describe('locked v0.16 raw-layout and downstream archive fidelity', () => {
         messages: exported.messages,
         metadata: { lastModified: exported.lastUpdatedAt },
       });
-      expect(exportedConsumerProjection).toEqual(
-        normalizeCursorSessionV016(taggedWorkspaceFallbackSession())
+      expect(exportedContractProjection).toEqual(
+        projectV016DownstreamContract(taggedWorkspaceFallbackSession())
       );
     });
   });

@@ -1,15 +1,14 @@
 {
   "repository": "S2thend/vibe-history",
   "revision": "698701775144f7d8875330e1f8caec9ddfc27744",
-  "schemaVersion": "2",
-  "archiveAssumptions": {
-    "hostnamePartitioned": true,
-    "replacementTransactionOwner": "vibe-history",
-    "cursorHistoryProvidesCompleteView": true,
-    "cursorHistoryDoesNotOwnPersistence": true
+  "license": {
+    "path": "LICENSE",
+    "gitBlob": "f7928ea16bb40f2089dc0ba87a750d37c171fce8",
+    "classification": "All Rights Reserved"
   },
   "sourceBlobs": {
     "packages/core/src/providers/cursor/index.ts": "cb986058e481bebe6a902d80519f17813b53bc8f",
+    "packages/core/src/providers/utils.ts": "e0326b4c104d00d3672d25b77298afcdd702105a",
     "packages/core/src/sync/engine.ts": "48b82557d32225f6489f329e2a349aa93d0d149f",
     "packages/core/src/sync/policy.ts": "d5a16bca2b3169c00ba08076422a7f44b6627b4f",
     "packages/core/src/sync/state.ts": "ce51f1429f7169f5586dcc5e66eed9df22c46d22",
@@ -20,5 +19,18 @@
     "packages/core/src/types/message.ts": "cab7fa684c7685b4b0c7a6813391c53eee8c1d31",
     "packages/core/src/types/session.ts": "c8c337fc34da8c28cb9adc9f063135339a92ac9b"
   },
-  "localHarness": "tests/helpers/v016-consumer.ts"
+  "recurringCiModel": {
+    "exactThirdPartyAdapterIncluded": false,
+    "exactThirdPartyDatabaseIncluded": false,
+    "model": "generic cursor-history public-key and complete-view contract"
+  },
+  "externalCertification": {
+    "ownerAuthorizedCheckoutRequired": true,
+    "task": "T113",
+    "requirements": [
+      "exact adapter projection",
+      "exact persistence policy and digest",
+      "exact SQLite schema, transaction, rollback, and repeated-sync behavior"
+    ]
+  }
 }

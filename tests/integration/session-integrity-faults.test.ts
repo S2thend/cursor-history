@@ -23,12 +23,11 @@ import { parseTranscriptFile } from '../../src/core/store-stack/transcript.js';
 import type { ChatSession, Message as CoreMessage } from '../../src/core/types.js';
 import type { Message, Session } from '../../src/lib/types.js';
 import {
-  computeV016MessageDigest,
-  initializeV016Archive,
-  normalizeCursorSessionV016,
-  readV016ArchiveState,
-  syncV016Session,
-} from '../helpers/v016-consumer.js';
+  applyGenericCompleteView,
+  fingerprintV016DownstreamContract,
+  projectV016DownstreamContract,
+  type GenericDownstreamState,
+} from '../helpers/v016-downstream-contract.js';
 import {
   SESSION_INTEGRITY_IDS,
   createSessionIntegrityFixtureRoot,
@@ -139,15 +138,19 @@ function consumerSession(messages: Message[], source: Session['source'] = 'globa
 }
 
 function assertEveryOldKeyPreserved(baseline: Session, candidate: Session): void {
-  const oldIds = new Set(normalizeCursorSessionV016(baseline).messages.map(({ id }) => id));
-  const candidateIds = new Set(normalizeCursorSessionV016(candidate).messages.map(({ id }) => id));
+  const oldIds = new Set(projectV016DownstreamContract(baseline).messages.map(({ key }) => key));
+  const candidateIds = new Set(
+    projectV016DownstreamContract(candidate).messages.map(({ key }) => key)
+  );
   const missing = [...oldIds].filter((id) => !candidateIds.has(id));
   if (missing.length > 0) throw new Error(`Compatibility identity drift: ${missing.join(', ')}`);
 }
 
 function assertCompleteProjection(expected: Session, candidate: Session): void {
-  const expectedDigest = computeV016MessageDigest(normalizeCursorSessionV016(expected).messages);
-  const candidateDigest = computeV016MessageDigest(normalizeCursorSessionV016(candidate).messages);
+  const expectedDigest = fingerprintV016DownstreamContract(projectV016DownstreamContract(expected));
+  const candidateDigest = fingerprintV016DownstreamContract(
+    projectV016DownstreamContract(candidate)
+  );
   if (candidateDigest !== expectedDigest) {
     throw new Error('Append-only or timestamp-watermark projection lost complete content.');
   }
@@ -457,10 +460,7 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
     ).toThrow('tool order');
   });
 
-  it('detects identity, fidelity, watermark, and append-only transition faults in the v0.16 consumer', () => {
-    const root = fixture('ch-fault-consumer-');
-    const archive = join(root.root, 'consumer.sqlite');
-    initializeV016Archive(archive);
+  it('detects identity, completeness, watermark, and append-only faults generically', () => {
     const baseline = consumerSession([
       {
         id: 'native-old',
@@ -469,9 +469,9 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
         timestamp: '2024-01-02T00:00:00.000Z',
       },
     ]);
-    expect(syncV016Session(archive, baseline).action).toBe('added');
-    const storedSessionId = normalizeCursorSessionV016(baseline).id;
-    const original = readV016ArchiveState(archive, storedSessionId);
+    const state: GenericDownstreamState = {};
+    expect(applyGenericCompleteView(state, baseline, 'complete').action).toBe('added');
+    const original = structuredClone(state);
 
     const complete = consumerSession([
       {
@@ -489,25 +489,26 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
     ]);
     assertEveryOldKeyPreserved(baseline, complete);
     expect(new Date(complete.messages[1]!.timestamp).getTime()).toBeLessThan(
-      new Date(original.maxTimestamp!).getTime()
+      new Date(baseline.messages[0]!.timestamp).getTime()
     );
-    expect(syncV016Session(archive, complete).action).toBe('replaced');
-    expect(syncV016Session(archive, complete).action).toBe('skipped');
+    expect(applyGenericCompleteView(state, complete, 'complete').action).toBe('replaced');
+    expect(applyGenericCompleteView(state, complete, 'complete').action).toBe('skipped');
 
-    const beforeDegraded = readV016ArchiveState(archive, storedSessionId).messageDigest;
+    const beforeDegraded = structuredClone(state);
     const degraded = consumerSession(complete.messages.slice(0, 1), 'workspace-fallback');
-    expect(syncV016Session(archive, degraded).action).toBe('skipped');
-    expect(readV016ArchiveState(archive, storedSessionId).messageDigest).toBe(beforeDegraded);
+    expect(applyGenericCompleteView(state, degraded, 'degraded').action).toBe('skipped');
+    expect(state).toEqual(beforeDegraded);
 
     const identityFault = structuredClone(complete);
     identityFault.messages[0]!.id = 'rewritten-old-key';
     expect(() => assertEveryOldKeyPreserved(baseline, identityFault)).toThrow('identity drift');
 
-    const boundary = new Date(original.maxTimestamp!).getTime();
+    const boundary = new Date(baseline.messages[0]!.timestamp).getTime();
     const appendOnlyFault = consumerSession(
       complete.messages.filter(({ timestamp }) => new Date(timestamp).getTime() >= boundary)
     );
     expect(() => assertCompleteProjection(complete, appendOnlyFault)).toThrow('Append-only');
+    expect(original.view).toBeDefined();
   });
 
   it('detects source-limit bypass, missing reset, and automatic-raise faults', () => {
