@@ -891,14 +891,14 @@ async function inspectArchive(
 
     if (archiveEntry.uncompressedSize === fileEntry.size && checksum === fileEntry.checksum) {
       validFiles.push(fileEntry.path);
+      stagedFiles.push({
+        manifestEntry: fileEntry,
+        archiveEntryName: archiveEntry.name,
+        ...(temporaryPath ? { temporaryPath } : {}),
+      });
     } else {
       corruptedFiles.push(fileEntry.path);
     }
-    stagedFiles.push({
-      manifestEntry: fileEntry,
-      archiveEntryName: archiveEntry.name,
-      ...(temporaryPath ? { temporaryPath } : {}),
-    });
   }
 
   const errors: string[] = [];

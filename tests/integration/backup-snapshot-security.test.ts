@@ -1040,6 +1040,71 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     expect(currentPrivateTempPaths()).toEqual(before);
   });
 
+  it('restores only intact entries from a mixed archive and leaves a corrupt destination untouched', async () => {
+    const validGlobal = Buffer.from('valid global sqlite bytes');
+    const expectedWorkspace = Buffer.from('expected workspace bytes');
+    const corruptWorkspace = Buffer.from('corrupt workspace bytes!');
+    const manifest = {
+      version: '1.0.0',
+      createdAt: new Date(0).toISOString(),
+      sourcePlatform: 'linux',
+      cursorHistoryVersion: '0.16.0',
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: validGlobal.length,
+          checksum: computeChecksum(validGlobal),
+          type: 'global-db',
+        },
+        {
+          path: 'workspaceStorage/ws/state.vscdb',
+          size: expectedWorkspace.length,
+          checksum: computeChecksum(expectedWorkspace),
+          type: 'workspace-db',
+        },
+      ],
+      stats: {
+        totalSize: validGlobal.length + expectedWorkspace.length,
+        sessionCount: 0,
+        workspaceCount: 1,
+      },
+    };
+    const archivePath = join(fixtureRoot, 'mixed-integrity-restore.zip');
+    writeFileSync(
+      archivePath,
+      buildZip([
+        { name: 'globalStorage/state.vscdb', data: validGlobal, method: 8 },
+        { name: 'workspaceStorage/ws/state.vscdb', data: corruptWorkspace, method: 8 },
+        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)), method: 8 },
+      ]).buffer,
+      { mode: 0o600 }
+    );
+    const targetPath = join(fixtureRoot, 'mixed-restore', 'User', 'workspaceStorage');
+    const corruptDestination = join(targetPath, 'ws', 'state.vscdb');
+    const priorDestination = Buffer.from('existing destination must survive');
+    mkdirSync(dirname(corruptDestination), { recursive: true });
+    writeFileSync(corruptDestination, priorDestination, { mode: 0o600 });
+
+    const validation = await validateBackup(archivePath);
+    expect(validation).toMatchObject({
+      status: 'warnings',
+      validFiles: ['globalStorage/state.vscdb'],
+      corruptedFiles: ['workspaceStorage/ws/state.vscdb'],
+    });
+
+    const result = await restoreBackup({ backupPath: archivePath, targetPath });
+
+    expect(result).toMatchObject({
+      success: true,
+      filesRestored: 1,
+      warnings: ['Checksum mismatch: workspaceStorage/ws/state.vscdb'],
+    });
+    expect(readFileSync(join(dirname(targetPath), 'globalStorage', 'state.vscdb'))).toEqual(
+      validGlobal
+    );
+    expect(readFileSync(corruptDestination)).toEqual(priorDestination);
+  });
+
   it('rolls back already-published files when a later restore publication fails', async () => {
     const replacementGlobal = Buffer.from('replacement global');
     const replacementWorkspace = Buffer.from('replacement workspace');

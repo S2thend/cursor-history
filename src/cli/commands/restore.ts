@@ -174,7 +174,7 @@ export function registerRestoreCommand(program: Command): void {
               `Warning: Backup has ${validation.corruptedFiles.length} file(s) with checksum mismatches.`
             )
           );
-          console.log(pc.dim('These files will be restored but may be corrupted.\n'));
+          console.log(pc.dim('These files will be skipped; only intact files will be restored.\n'));
         }
 
         // Resolve target path if provided
