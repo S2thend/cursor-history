@@ -9,6 +9,7 @@ export type SessionIntegrityErrorCode =
   | 'NO_CAPABLE_DATABASE_DRIVER'
   | 'BACKUP_PUBLISHED_PERMISSION_FAILED'
   | 'BACKUP_PUBLISHED_CLEANUP_FAILED'
+  | 'BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED'
   | 'RESTORE_ROLLBACK_INCOMPLETE'
   | 'TEMPORARY_ARTIFACT_CLEANUP_FAILED'
   | 'READ_CONTEXT_SOURCE_MISMATCH'
@@ -124,6 +125,31 @@ export class SessionScopeMismatchError extends SessionIntegrityError<
       workspacePath,
       remedy: 'List sessions in the same workspace scope and reuse that scoped index or ID.',
     });
+  }
+}
+
+/**
+ * Refuses a workspace-scoped backup read when legacy archive metadata cannot identify every
+ * off-scope Composer membership without extracting conversation databases.
+ *
+ * @param workspaceCount - Number of workspace databases declared by the manifest, when known.
+ */
+export class BackupWorkspaceScopeMetadataError extends SessionIntegrityError<
+  'BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED',
+  { workspaceCount: number | null; remedy: string }
+> {
+  override readonly name = 'BackupWorkspaceScopeMetadataError';
+
+  constructor(workspaceCount: number | null) {
+    super(
+      'BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED',
+      'This backup cannot be read safely with a workspace scope because it lacks a complete metadata-only Composer workspace inventory.',
+      {
+        workspaceCount,
+        remedy:
+          'Recreate the backup with cursor-history 0.18.0 or later, or omit the workspace filter only when reading every archived workspace is intended.',
+      }
+    );
   }
 }
 

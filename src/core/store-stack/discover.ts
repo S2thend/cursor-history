@@ -50,6 +50,7 @@ import type {
   StoreSession,
   TranscriptUse,
 } from './types.js';
+import { logicalSessionIdKey } from '../session-id.js';
 
 export interface StoreDiscoveryOptions {
   /** Validated before any source content or directory inventory is read. */
@@ -533,6 +534,9 @@ export async function discoverStoreSessions(
   const signal = options.signal;
   const io = options.io;
   const selectedSessionIds = options.sessionIds;
+  const selectedSessionKeys = selectedSessionIds
+    ? new Set([...selectedSessionIds].map(logicalSessionIdKey))
+    : undefined;
   throwIfAborted(signal);
   const byId = new Map<string, StoreSession>();
   const inventory = new Map<string, InventoryEvidence>();
@@ -543,7 +547,8 @@ export async function discoverStoreSessions(
   let perSessionInventoryComplete = true;
 
   const evidenceFor = (uuid: string): InventoryEvidence => {
-    let value = inventory.get(uuid);
+    const logicalKey = logicalSessionIdKey(uuid);
+    let value = inventory.get(logicalKey);
     if (!value) {
       value = {
         perSessionDirectory: false,
@@ -558,7 +563,7 @@ export async function discoverStoreSessions(
         unsupportedExpectationMetadata: false,
         metadataFailures: [],
       };
-      inventory.set(uuid, value);
+      inventory.set(logicalKey, value);
     }
     return value;
   };
@@ -597,9 +602,10 @@ export async function discoverStoreSessions(
       storeDbPath: dbInventoried ? dbPath : undefined,
       chatDir: sessionDir,
     });
-    const candidates = metadataCandidates.get(uuid) ?? [];
+    const logicalKey = logicalSessionIdKey(uuid);
+    const candidates = metadataCandidates.get(logicalKey) ?? [];
     candidates.push({ ...candidate });
-    metadataCandidates.set(uuid, candidates);
+    metadataCandidates.set(logicalKey, candidates);
     selectMetadataCandidate(byId, candidate, hasExplicitUpdatedAt, explicitUpdatedAt);
   };
 
@@ -614,7 +620,7 @@ export async function discoverStoreSessions(
       const directUuid = uuidFromCompactDirectoryName(hash);
       if (
         directUuid &&
-        (!selectedSessionIds || selectedSessionIds.has(directUuid)) &&
+        (!selectedSessionKeys || selectedSessionKeys.has(logicalSessionIdKey(directUuid))) &&
         pathExists(join(hashDir, 'store.db'), signal, io, 'store-session-metadata', directUuid)
       ) {
         recordChatInventory(directUuid, hashDir);
@@ -622,7 +628,7 @@ export async function discoverStoreSessions(
       const sessionListing = listDirs(hashDir, signal, io);
       perSessionInventoryComplete &&= sessionListing.complete;
       for (const uuid of sessionListing.entries) {
-        if (selectedSessionIds && !selectedSessionIds.has(uuid)) continue;
+        if (selectedSessionKeys && !selectedSessionKeys.has(logicalSessionIdKey(uuid))) continue;
         const sessionDir = join(chats, hash, uuid);
         recordChatInventory(uuid, sessionDir);
       }
@@ -636,7 +642,7 @@ export async function discoverStoreSessions(
     const sessionListing = listDirs(acp, signal, io);
     perSessionInventoryComplete &&= sessionListing.complete;
     for (const uuid of sessionListing.entries) {
-      if (selectedSessionIds && !selectedSessionIds.has(uuid)) continue;
+      if (selectedSessionKeys && !selectedSessionKeys.has(logicalSessionIdKey(uuid))) continue;
       const sessionDir = join(acp, uuid);
       throwIfAborted(signal);
       const dbPath = join(sessionDir, 'store.db');
@@ -668,9 +674,10 @@ export async function discoverStoreSessions(
         storeDbPath: dbInventoried ? dbPath : undefined,
         chatDir: sessionDir,
       });
-      const candidates = metadataCandidates.get(uuid) ?? [];
+      const logicalKey = logicalSessionIdKey(uuid);
+      const candidates = metadataCandidates.get(logicalKey) ?? [];
       candidates.push({ ...candidate });
-      metadataCandidates.set(uuid, candidates);
+      metadataCandidates.set(logicalKey, candidates);
       selectMetadataCandidate(byId, candidate, false, explicitUpdatedAt);
     }
   }
@@ -707,7 +714,7 @@ export async function discoverStoreSessions(
         throwIfAborted(signal);
         if (entry.isDirectory()) {
           const uuid = entry.name;
-          if (selectedSessionIds && !selectedSessionIds.has(uuid)) continue;
+          if (selectedSessionKeys && !selectedSessionKeys.has(logicalSessionIdKey(uuid))) continue;
           const nested = join(transcriptDir, uuid, `${uuid}.jsonl`);
           if (pathExists(nested, signal, io, 'store-session-metadata', uuid)) {
             const evidence = evidenceFor(uuid);
@@ -716,7 +723,10 @@ export async function discoverStoreSessions(
               uuid,
               'store-transcript',
               nested,
-              transcriptWorkspacePath(sanitized, metadataCandidates.get(uuid) ?? [])
+              transcriptWorkspacePath(
+                sanitized,
+                metadataCandidates.get(logicalSessionIdKey(uuid)) ?? []
+              )
             );
             if (!evidence.transcriptOccurrences.some(({ path }) => path === nested)) {
               evidence.transcriptOccurrences.push(transcriptOccurrence);
@@ -739,7 +749,7 @@ export async function discoverStoreSessions(
           }
         } else if (entry.name.endsWith('.jsonl')) {
           const uuid = entry.name.slice(0, -'.jsonl'.length);
-          if (selectedSessionIds && !selectedSessionIds.has(uuid)) continue;
+          if (selectedSessionKeys && !selectedSessionKeys.has(logicalSessionIdKey(uuid))) continue;
           const evidence = evidenceFor(uuid);
           evidence.transcriptInventoried = true;
           const transcriptPath = join(transcriptDir, entry.name);
@@ -747,7 +757,10 @@ export async function discoverStoreSessions(
             uuid,
             'store-transcript',
             transcriptPath,
-            transcriptWorkspacePath(sanitized, metadataCandidates.get(uuid) ?? [])
+            transcriptWorkspacePath(
+              sanitized,
+              metadataCandidates.get(logicalSessionIdKey(uuid)) ?? []
+            )
           );
           if (!evidence.transcriptOccurrences.some(({ path }) => path === transcriptPath)) {
             evidence.transcriptOccurrences.push(transcriptOccurrence);
@@ -909,7 +922,8 @@ export async function discoverStoreSessions(
 
     const dbUsable = Boolean(deep && deep.messages.length > 0);
     const selectedDbSafe = dbUsable && (selectedDbCandidate?.failures.length ?? 0) === 0;
-    const sessionTranscriptCandidates = transcriptCandidates.get(ss.id) ?? [];
+    const logicalKey = logicalSessionIdKey(ss.id);
+    const sessionTranscriptCandidates = transcriptCandidates.get(logicalKey) ?? [];
     let selectedTranscriptSafe = false;
     let transcriptReplicaInstances: SessionSourceInstance[] = [];
     if (dbUsable) {
@@ -1030,7 +1044,7 @@ export async function discoverStoreSessions(
         createdAt: deep.createdAt,
         // store.db currently exposes one session time. Preserve the released
         // last-update fallback only when meta.json did not store updatedAtMs.
-        ...(!explicitUpdatedAt.has(ss.id) ? { lastUpdatedAt: deep.createdAt } : {}),
+        ...(!explicitUpdatedAt.has(logicalKey) ? { lastUpdatedAt: deep.createdAt } : {}),
       };
     }
 
@@ -1096,7 +1110,7 @@ export async function discoverStoreSessions(
     ss.messages = [];
     ss.messageIdentityEvidence = [];
     ss.resolvedSource = 'store-metadata';
-    const metadata = metadataCandidates.get(ss.id) ?? [];
+    const metadata = metadataCandidates.get(logicalKey) ?? [];
     if (metadata.length > 0) {
       ss.sourceInstances = canonicalSourceInstances([
         ...metadataSourceInstances(ss, metadata),
@@ -1354,23 +1368,25 @@ function attachTranscript(
   io?: OperationIoContext
 ): void {
   throwIfAborted(signal);
+  const logicalKey = logicalSessionIdKey(uuid);
   const parsed = parseTranscriptFile(file, limits, 'partial', signal, io, uuid);
-  const candidates = candidatesById.get(uuid) ?? [];
+  const candidates = candidatesById.get(logicalKey) ?? [];
   candidates.push({ path: file, workspacePath, parsed });
-  candidatesById.set(uuid, candidates);
-  const existing = byId.get(uuid);
+  candidatesById.set(logicalKey, candidates);
+  const existing = byId.get(logicalKey);
   const failures = parsed.diagnostic ? [parsed.diagnostic] : [];
 
   if (existing) {
     if (!shouldReplaceTranscript(existing, parsed.state, parsed.messages.length, file, signal)) {
       return;
     }
+    existing.id = uuid;
     existing.transcriptState = parsed.state;
     existing.transcriptPath = file;
     existing.messages = parsed.messages;
     existing.messageIdentityEvidence = parsed.messageIdentityEvidence;
     existing.rawContentBlockEvidence = parsed.rawContentBlockEvidence;
-    selectedFailures.set(uuid, failures);
+    selectedFailures.set(logicalKey, failures);
     return;
   }
 
@@ -1379,7 +1395,7 @@ function attachTranscript(
     directMessages: parsed.messages,
   });
 
-  byId.set(uuid, {
+  byId.set(logicalKey, {
     id: uuid,
     workspacePath,
     title: null,
@@ -1391,7 +1407,7 @@ function attachTranscript(
     transcriptState: parsed.state,
     transcriptPath: file,
   });
-  selectedFailures.set(uuid, failures);
+  selectedFailures.set(logicalKey, failures);
 }
 
 /** Record transcript presence without opening or decoding its conversation payload. */
@@ -1400,7 +1416,8 @@ function attachTranscriptInventory(
   uuid: string,
   file: string
 ): void {
-  const existing = byId.get(uuid);
+  const logicalKey = logicalSessionIdKey(uuid);
+  const existing = byId.get(logicalKey);
   if (existing) {
     if (!existing.transcriptPath || file < existing.transcriptPath) {
       existing.transcriptPath = file;
@@ -1413,7 +1430,7 @@ function attachTranscriptInventory(
     directMessages: [],
   });
   byId.set(
-    uuid,
+    logicalKey,
     emptyStoreSession({
       id: uuid,
       workspacePath: undefined,
@@ -1423,7 +1440,7 @@ function attachTranscriptInventory(
       chatDir: undefined,
     })
   );
-  byId.get(uuid)!.transcriptPath = file;
+  byId.get(logicalKey)!.transcriptPath = file;
 }
 
 /** Prefer state, then message count, then canonical path; never filesystem time. */
@@ -1460,16 +1477,17 @@ function selectMetadataCandidate(
   hasExplicitUpdatedAt: boolean,
   explicitUpdatedAt: Set<string>
 ): void {
-  const existing = byId.get(candidate.id);
+  const logicalKey = logicalSessionIdKey(candidate.id);
+  const existing = byId.get(logicalKey);
   if (!existing) {
-    byId.set(candidate.id, candidate);
-    if (hasExplicitUpdatedAt) explicitUpdatedAt.add(candidate.id);
+    byId.set(logicalKey, candidate);
+    if (hasExplicitUpdatedAt) explicitUpdatedAt.add(logicalKey);
     return;
   }
   if (!shouldReplaceMetadata(existing, candidate)) return;
   replaceMetadata(existing, candidate);
-  if (hasExplicitUpdatedAt) explicitUpdatedAt.add(candidate.id);
-  else explicitUpdatedAt.delete(candidate.id);
+  if (hasExplicitUpdatedAt) explicitUpdatedAt.add(logicalKey);
+  else explicitUpdatedAt.delete(logicalKey);
 }
 
 function logStoreResolution(
@@ -1764,6 +1782,7 @@ function shouldReplaceMetadata(existing: StoreSession, candidate: StoreSession):
 }
 
 function replaceMetadata(target: StoreSession, source: StoreSession): void {
+  target.id = source.id;
   target.workspacePath = source.workspacePath;
   target.title = source.title;
   target.createdAt = source.createdAt;

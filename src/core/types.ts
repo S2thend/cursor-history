@@ -69,7 +69,13 @@ export interface SessionSourceInstance {
   state: 'contributed' | 'equivalent-replica' | 'omitted-by-scope' | 'failed' | 'superseded';
 }
 
-/** Completeness and contributor state of a resolved logical session. */
+/**
+ * Completeness and contributor state of a resolved logical session.
+ *
+ * Role arrays describe physical contributors, so one role may appear in both `loadedSourceRoles`
+ * and `omittedSourceRoles`/`failedSourceRoles` when some representations or occurrences loaded and
+ * others did not. `sourceInstances` is the authoritative representation-level detail.
+ */
 export interface SessionResolution {
   state: ResolutionState;
   expectedSourceRoles: SourceRole[];
@@ -682,7 +688,10 @@ export interface WorkspaceMigrationResult {
  * Metadata stored in the manifest.json file within the backup zip
  */
 export interface BackupManifest {
-  /** Manifest schema version for backward compatibility */
+  /**
+   * Enclosing backup-manifest version. Additive optional metadata keeps the v1 envelope at
+   * `1.0.0`; independently evolving members carry their own schema version.
+   */
   version: string;
   /** ISO 8601 timestamp when backup was created */
   createdAt: string;
@@ -694,8 +703,41 @@ export interface BackupManifest {
   cursorHistoryVersion: string;
   /** List of files in the backup with metadata */
   files: BackupFileEntry[];
+  /**
+   * Metadata-only Composer workspace membership used to plan workspace-scoped reads without
+   * extracting conversation databases outside the selected scope. Absent in legacy manifests.
+   */
+  composerWorkspaceInventory?: BackupComposerWorkspaceInventory;
   /** Aggregate statistics for quick display */
   stats: BackupStats;
+}
+
+/** Versioned metadata-only Composer membership carried by new backup manifests. */
+export interface BackupComposerWorkspaceInventory {
+  /**
+   * Inventory schema version, independently validated while the enclosing manifest remains
+   * backward-compatible `1.0.0`.
+   */
+  schemaVersion: 1;
+  /** One canonically ordered entry for every workspace database in the archive. */
+  workspaces: BackupComposerWorkspaceInventoryEntry[];
+}
+
+/** Workspace path and native session UUIDs projected without conversation payloads. */
+export interface BackupComposerWorkspaceInventoryEntry {
+  /** Cursor workspace-storage directory identifier. */
+  workspaceId: string;
+  /** Historical workspace path, or null when workspace metadata was absent/unreadable. */
+  workspacePath: string | null;
+  /** Canonically ordered, unique native Composer session UUIDs in this workspace database. */
+  sessionIds: string[];
+  /** Materialized workspace session IDs that also have a verified shared-global counterpart. */
+  globalCounterpartSessionIds: string[];
+  /**
+   * Canonically ordered UUIDs referenced by selected-composer or view-pane membership metadata,
+   * including sessions whose conversation payload lives only in the shared global database.
+   */
+  linkedGlobalSessionIds: string[];
 }
 
 /**

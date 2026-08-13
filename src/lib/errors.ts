@@ -8,6 +8,7 @@
 import {
   BackupPublishedPermissionError,
   BackupPublishedCleanupError,
+  BackupWorkspaceScopeMetadataError,
   DatabaseCapabilityError,
   MigrationTargetChangedError,
   NoCapableDriverError,
@@ -700,6 +701,7 @@ export {
   NoCapableDriverError as NoCapableDatabaseDriverError,
   BackupPublishedPermissionError,
   BackupPublishedCleanupError,
+  BackupWorkspaceScopeMetadataError,
   RestoreRollbackError,
   TemporaryArtifactCleanupError,
   ReadContextError,
@@ -809,6 +811,18 @@ export function isBackupPublishedCleanupError(
   error: unknown
 ): error is BackupPublishedCleanupError {
   return error instanceof BackupPublishedCleanupError;
+}
+
+/**
+ * Test whether a legacy backup lacks the metadata required for a strict workspace-scoped read.
+ *
+ * @param error - Unknown caught value.
+ * @returns True when the value is a {@link BackupWorkspaceScopeMetadataError}.
+ */
+export function isBackupWorkspaceScopeMetadataError(
+  error: unknown
+): error is BackupWorkspaceScopeMetadataError {
+  return error instanceof BackupWorkspaceScopeMetadataError;
 }
 
 /**

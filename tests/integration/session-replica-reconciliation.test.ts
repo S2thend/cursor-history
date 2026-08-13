@@ -204,6 +204,57 @@ describe('FR-042 consumed-field integration gate', () => {
 });
 
 describe.sequential('logical replica reconciliation through public reads', () => {
+  it('retains v0.16 localeCompare workspace discovery order when code-point order differs', async () => {
+    const root = fixture();
+    const suffixes = ['Z', 'ä', 'é', 'z', 'Å', 'a', 'Ω'];
+    const codePointCompare = (left: string, right: string): number =>
+      left < right ? -1 : left > right ? 1 : 0;
+    const differingPair = suffixes
+      .flatMap((left) => suffixes.map((right) => [left, right] as const))
+      .find(
+        ([left, right]) =>
+          left !== right &&
+          Math.sign(left.localeCompare(right)) !== Math.sign(codePointCompare(left, right))
+      );
+    expect(
+      differingPair,
+      'fixture requires one collation pair whose v0.16 localeCompare order differs from code-point order'
+    ).toBeDefined();
+    const [left, right] = differingPair!;
+    const [localeFirstSuffix, localeSecondSuffix] =
+      left.localeCompare(right) < 0 ? [left, right] : [right, left];
+    expect(codePointCompare(localeFirstSuffix, localeSecondSuffix)).toBeGreaterThan(0);
+
+    const localeFirst = composerSession(
+      root,
+      'v0.16 locale-first workspace row',
+      'bbbbbbbb-0000-0000-0000-000000000045'
+    );
+    const localeSecond = composerSession(
+      root,
+      'v0.16 locale-second workspace row',
+      'aaaaaaaa-0000-0000-0000-000000000046'
+    );
+    // v0.16 sorted normalized non-.code-workspace paths with localeCompare(),
+    // then retained that discovery order when createdAt timestamps tied.
+    writeComposerWorkspaceSummary(
+      root,
+      'workspace-locale-first',
+      `${root.root}/workspaces/${localeFirstSuffix}`,
+      [localeFirst]
+    );
+    writeComposerWorkspaceSummary(
+      root,
+      'workspace-locale-second',
+      `${root.root}/workspaces/${localeSecondSuffix}`,
+      [localeSecond]
+    );
+
+    const rows = await listSummaryRows({ dataPath: root.workspaceStorage });
+    expect(rows.data.map(({ id }) => id)).toEqual([localeFirst.id, localeSecond.id]);
+    expect(rows.data.map(({ index }) => index)).toEqual([0, 1]);
+  });
+
   it('retains equal-time v0.16 Composer discovery order after one row becomes merged', async () => {
     const root = fixture();
     const discoveredFirst = composerSession(

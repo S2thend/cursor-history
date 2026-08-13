@@ -5,6 +5,7 @@ import {
   listSessionSummaries,
 } from '../../core/storage.js';
 import { SessionScopeMismatchError } from '../../core/errors.js';
+import { sessionIdsEqual } from '../../core/session-id.js';
 import type {
   ChatSession,
   SourceReadLimitsOverride,
@@ -64,7 +65,9 @@ export async function resolveCommandSession(
         )
       : undefined;
     const boundScopedSummary = scopedSessions?.find((summary) =>
-      typeof identifier === 'number' ? summary.index === identifier : summary.id === identifier
+      typeof identifier === 'number'
+        ? summary.index === identifier
+        : sessionIdsEqual(summary.id, identifier)
     );
     const session = context
       ? scopedLookup

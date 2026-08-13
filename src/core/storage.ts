@@ -35,6 +35,7 @@ import type {
   ResolutionReasonCode,
   SessionResolution,
   SourceRole,
+  BackupManifest,
 } from './types.js';
 import {
   getCursorDataPath,
@@ -72,18 +73,19 @@ import {
 import {
   createComposerSqliteBudget,
   forEachBoundedComposerBubbleMetadata,
-  forEachBoundedComposerBubbleValue,
+  forEachBoundedComposerBubbleMetadataByExactPrefix,
+  forEachBoundedComposerBubbleValueByExactPrefix,
   forEachBoundedComposerMetadata,
   forEachBoundedComposerValue,
   getBoundedComposerMetadataByKey,
   readBoundedComposerValueByKey,
-  readFirstBoundedComposerBubbleValue,
-  sqliteLikeLiteralPrefix,
+  readFirstBoundedComposerBubbleValueByExactPrefix,
   type ComposerSqliteMetadata,
 } from './composer-sqlite.js';
 import {
   isSessionIntegrityError,
   SessionAmbiguityError,
+  BackupWorkspaceScopeMetadataError,
   ReadContextDisposedError,
   ReadContextOptionsMismatchError,
   ReadContextScopeMismatchError,
@@ -97,6 +99,11 @@ import {
   type ReplicaConsumedPayload,
 } from './session-catalog.js';
 import { projectV016ComposerMessages } from './session-identity.js';
+import {
+  logicalSessionIdKey,
+  selectNativeSessionIdSpelling,
+  sessionIdsEqual,
+} from './session-id.js';
 import {
   normalizeWorkspacePath,
   resolveWorkspaceScope,
@@ -660,7 +667,7 @@ function getWorkspaceComposerPointerIds(
           const matches = source.match(COMPOSER_GUID_RE);
           if (matches) {
             for (const match of matches) {
-              ids.add(match.toLowerCase());
+              ids.add(match);
             }
           }
         }
@@ -926,6 +933,67 @@ interface WorkspaceJsonShape {
   workspace?: string;
 }
 
+const BACKUP_COMPOSER_SESSION_IDS = Symbol('backupComposerSessionIds');
+const BACKUP_GLOBAL_COUNTERPART_SESSION_IDS = Symbol('backupGlobalCounterpartSessionIds');
+const BACKUP_LINKED_GLOBAL_SESSION_IDS = Symbol('backupLinkedGlobalSessionIds');
+const BACKUP_CONTAINS_GLOBAL_DATABASE = Symbol('backupContainsGlobalDatabase');
+type WorkspaceWithBackupComposerSessionIds = Workspace & {
+  [BACKUP_COMPOSER_SESSION_IDS]?: ReadonlySet<string>;
+  [BACKUP_GLOBAL_COUNTERPART_SESSION_IDS]?: ReadonlySet<string>;
+  [BACKUP_LINKED_GLOBAL_SESSION_IDS]?: ReadonlySet<string>;
+  [BACKUP_CONTAINS_GLOBAL_DATABASE]?: boolean;
+};
+
+function attachBackupComposerSessionIds(
+  workspace: Workspace,
+  sessionIds: Iterable<string> | undefined,
+  globalCounterpartSessionIds: Iterable<string> | undefined,
+  linkedGlobalSessionIds: Iterable<string> | undefined,
+  containsGlobalDatabase = false
+): Workspace {
+  if (sessionIds !== undefined) {
+    Object.defineProperty(workspace, BACKUP_COMPOSER_SESSION_IDS, {
+      value: new Set(sessionIds),
+    });
+  }
+  Object.defineProperty(workspace, BACKUP_CONTAINS_GLOBAL_DATABASE, {
+    value: containsGlobalDatabase,
+  });
+  if (linkedGlobalSessionIds !== undefined) {
+    Object.defineProperty(workspace, BACKUP_LINKED_GLOBAL_SESSION_IDS, {
+      value: new Set(linkedGlobalSessionIds),
+    });
+  }
+  if (globalCounterpartSessionIds !== undefined) {
+    Object.defineProperty(workspace, BACKUP_GLOBAL_COUNTERPART_SESSION_IDS, {
+      value: new Set(globalCounterpartSessionIds),
+    });
+  }
+  return workspace;
+}
+
+function getBackupGlobalCounterpartSessionIds(
+  workspace: Workspace
+): ReadonlySet<string> | undefined {
+  return (workspace as WorkspaceWithBackupComposerSessionIds)[
+    BACKUP_GLOBAL_COUNTERPART_SESSION_IDS
+  ];
+}
+
+function getBackupLinkedGlobalSessionIds(workspace: Workspace): ReadonlySet<string> | undefined {
+  return (workspace as WorkspaceWithBackupComposerSessionIds)[BACKUP_LINKED_GLOBAL_SESSION_IDS];
+}
+
+function getBackupComposerSessionIds(workspace: Workspace): ReadonlySet<string> | undefined {
+  return (workspace as WorkspaceWithBackupComposerSessionIds)[BACKUP_COMPOSER_SESSION_IDS];
+}
+
+function backupContainsGlobalDatabase(workspace: Workspace): boolean {
+  return (
+    (workspace as WorkspaceWithBackupComposerSessionIds)[BACKUP_CONTAINS_GLOBAL_DATABASE] === true
+  );
+}
+
 /**
  * Convert file:// URI from workspace.json to filesystem path
  */
@@ -984,6 +1052,83 @@ async function readWorkspaceJsonFromBackup(
   return getWorkspacePathFromJson(jsonData);
 }
 
+function backupWorkspaceDatabaseEntries(
+  manifest: BackupManifest
+): Array<{ workspaceId: string; dbPath: string }> {
+  return manifest.files.flatMap((file) => {
+    if (file.type !== 'workspace-db') return [];
+    const match = /^workspaceStorage\/([^/]+)\/state\.vscdb$/u.exec(file.path);
+    return match?.[1] ? [{ workspaceId: match[1], dbPath: file.path }] : [];
+  });
+}
+
+/**
+ * Resolve workspace paths and native Composer UUID membership before choosing any database to
+ * extract. New archives carry a complete metadata-only inventory. A legacy archive is safe under
+ * strict scope only when it contains at most one workspace database; otherwise inspecting enough
+ * databases to arbitrate duplicate UUIDs would violate the scope boundary.
+ */
+async function resolveBackupWorkspaceInventory(
+  manifest: BackupManifest,
+  backupPath: string,
+  readOptions: Readonly<StorageReadOperationOptions>,
+  strictWorkspaceScope: boolean
+): Promise<Workspace[]> {
+  if (manifest.files.length === 0) {
+    throw new ZipArchiveFormatError('No intact restorable files found in backup.');
+  }
+  const databases = backupWorkspaceDatabaseEntries(manifest);
+  const containsGlobalDatabase = manifest.files.some(
+    ({ type, path }) => type === 'global-db' && path === 'globalStorage/state.vscdb'
+  );
+  const inventory = manifest.composerWorkspaceInventory;
+  if (inventory) {
+    const dbPathByWorkspaceId = new Map(
+      databases.map(({ workspaceId, dbPath }) => [workspaceId, dbPath])
+    );
+    return inventory.workspaces.map((entry) =>
+      attachBackupComposerSessionIds(
+        {
+          id: entry.workspaceId,
+          path: entry.workspacePath ?? `(workspace: ${entry.workspaceId})`,
+          dbPath: dbPathByWorkspaceId.get(entry.workspaceId)!,
+          sessionCount: 0,
+        },
+        entry.sessionIds,
+        entry.globalCounterpartSessionIds,
+        entry.linkedGlobalSessionIds,
+        containsGlobalDatabase
+      )
+    );
+  }
+
+  if (strictWorkspaceScope && databases.length > 1) {
+    throw new BackupWorkspaceScopeMetadataError(databases.length);
+  }
+
+  const workspaces: Workspace[] = [];
+  for (const database of databases) {
+    const workspacePath =
+      (await readWorkspaceJsonFromBackup(backupPath, database.workspaceId, readOptions)) ??
+      `(workspace: ${database.workspaceId})`;
+    workspaces.push(
+      attachBackupComposerSessionIds(
+        {
+          id: database.workspaceId,
+          path: workspacePath,
+          dbPath: database.dbPath,
+          sessionCount: 0,
+        },
+        undefined,
+        undefined,
+        undefined,
+        containsGlobalDatabase
+      )
+    );
+  }
+  return workspaces;
+}
+
 /**
  * Find workspaces from a backup file
  * Note: This is async to ensure driver auto-selection happens first
@@ -994,70 +1139,115 @@ async function findWorkspacesFromBackup(
 ): Promise<Workspace[]> {
   const manifest = await readBackupManifest(backupPath, readOptions);
   if (!manifest) {
+    if (readOptions.workspaceFilterPath) {
+      throw new ZipArchiveFormatError('Manifest file not found in backup.');
+    }
     return [];
   }
   throwIfReadAborted(readOptions.signal);
 
   const workspaces: Workspace[] = [];
+  const workspaceInventory = await resolveBackupWorkspaceInventory(
+    manifest,
+    backupPath,
+    readOptions,
+    readOptions.workspaceFilterPath !== undefined
+  );
 
-  // Find all workspace databases
-  for (const file of manifest.files) {
+  for (const workspace of workspaceInventory) {
     throwIfReadAborted(readOptions.signal);
-    if (file.type !== 'workspace-db') continue;
-
-    // Extract workspace ID from path: workspaceStorage/{id}/state.vscdb
-    const match = file.path.match(/^workspaceStorage\/([^/]+)\/state\.vscdb$/);
-    if (!match) continue;
-
-    const workspaceId = match[1]!;
-    // Try to get workspace path from workspace.json, fall back to workspace ID
-    const workspacePath =
-      (await readWorkspaceJsonFromBackup(backupPath, workspaceId, readOptions)) ??
-      `(workspace: ${workspaceId})`;
-
     if (
       readOptions.workspaceFilterPath &&
-      !pathsEqual(workspacePath, readOptions.workspaceFilterPath)
+      !pathsEqual(workspace.path, readOptions.workspaceFilterPath)
     ) {
       continue;
     }
 
-    // Count sessions in this workspace
-    let sessionCount = 0;
-    let db: Database | null = null;
-    let readError: unknown;
-    try {
-      db = await openBackupDatabase(backupPath, file.path, readOptions);
-      throwIfReadAborted(readOptions.signal);
-      const result = getChatDataFromDb(
-        db,
-        createComposerSqliteBudget(resolveSourceReadLimits(readOptions.sourceReadLimits)),
-        readOptions.signal
-      );
-      if (result) {
-        const parsed = parseChatData(result.data, result.bundle);
-        sessionCount = parsed.length;
-      }
-    } catch (error) {
-      readError = error;
-    }
-    if (db) {
+    // New inventories are the canonical logical count and avoid opening a payload carrier merely
+    // for discovery. A linked global-only UUID counts as addressable membership, while a global
+    // counterpart of an already materialized UUID does not count twice. Legacy archives retain
+    // their historical parsed-workspace count because they lack enough metadata to prove more.
+    const materializedIds = getBackupComposerSessionIds(workspace);
+    const linkedGlobalIds = getBackupLinkedGlobalSessionIds(workspace);
+    const countedIds =
+      materializedIds !== undefined && linkedGlobalIds !== undefined
+        ? new Set([...materializedIds, ...linkedGlobalIds].map(logicalSessionIdKey))
+        : undefined;
+    let sessionCount = countedIds?.size ?? 0;
+    let legacyMaterializedIds: string[] | undefined;
+    let legacyLinkedGlobalIds: string[] | undefined;
+    if (!countedIds) {
+      let db: Database | null = null;
+      let readError: unknown;
       try {
-        db.close();
-      } catch (closeError) {
-        attachReadFailureCause(closeError, readError);
-        throw closeError;
+        db = await openBackupDatabase(backupPath, workspace.dbPath, readOptions);
+        throwIfReadAborted(readOptions.signal);
+        const result = getChatDataFromDb(
+          db,
+          createComposerSqliteBudget(resolveSourceReadLimits(readOptions.sourceReadLimits)),
+          readOptions.signal
+        );
+        if (result) {
+          const parsed = parseChatData(result.data, result.bundle);
+          legacyMaterializedIds = parsed.map(({ id }) => id);
+          const materializedLogicalIds = new Set(legacyMaterializedIds.map(logicalSessionIdKey));
+          const selectedIds = extractComposerIdsFromData(result.bundle.composerData)
+            .filter(({ source }) => source === 'selectedComposerIds')
+            .map(({ composerId }) => composerId);
+          const pointerIds = getWorkspaceComposerPointerIds(
+            db,
+            createComposerSqliteBudget(resolveSourceReadLimits(readOptions.sourceReadLimits)),
+            readOptions.signal
+          );
+          if (backupContainsGlobalDatabase(workspace)) {
+            legacyLinkedGlobalIds = [...new Set([...selectedIds, ...pointerIds])].filter(
+              (id) => !materializedLogicalIds.has(logicalSessionIdKey(id))
+            );
+          }
+          sessionCount = new Set(legacyMaterializedIds.map(logicalSessionIdKey)).size;
+        } else if (backupContainsGlobalDatabase(workspace)) {
+          legacyLinkedGlobalIds = getWorkspaceComposerPointerIds(
+            db,
+            createComposerSqliteBudget(resolveSourceReadLimits(readOptions.sourceReadLimits)),
+            readOptions.signal
+          );
+        }
+      } catch (error) {
+        readError = error;
       }
+      if (db) {
+        try {
+          db.close();
+        } catch (closeError) {
+          attachReadFailureCause(closeError, readError);
+          throw closeError;
+        }
+      }
+      if (readError !== undefined) throw readError;
     }
-    if (readError !== undefined) throw readError;
 
-    if (sessionCount > 0) {
-      workspaces.push({
-        id: workspaceId,
-        path: workspacePath,
-        dbPath: file.path, // Relative path within backup
-        sessionCount,
-      });
+    const effectiveLinkedGlobalIds = [
+      ...(getBackupLinkedGlobalSessionIds(workspace) ?? legacyLinkedGlobalIds ?? []),
+    ];
+    if (sessionCount > 0 || effectiveLinkedGlobalIds.length > 0) {
+      const projected = attachBackupComposerSessionIds(
+        {
+          id: workspace.id,
+          path: workspace.path,
+          dbPath: workspace.dbPath,
+          sessionCount,
+        },
+        // Preserve `undefined` for legacy manifests. An empty set means the new inventory
+        // positively proves absence; `undefined` means global membership is unknown and the
+        // scoped result must conservatively disclose the omitted shared-global contributor.
+        getBackupComposerSessionIds(workspace) ?? legacyMaterializedIds,
+        getBackupGlobalCounterpartSessionIds(workspace),
+        effectiveLinkedGlobalIds,
+        backupContainsGlobalDatabase(workspace)
+      );
+      workspaces.push(
+        countedIds ? attachCountedComposerSessionIds(projected, countedIds) : projected
+      );
     }
   }
 
@@ -1075,24 +1265,10 @@ async function findComposerWorkspaceInventory(
 ): Promise<Workspace[]> {
   if (backupPath) {
     const manifest = await readBackupManifest(backupPath, readOptions);
-    if (!manifest) return [];
-    const inventory: Workspace[] = [];
-    for (const file of manifest.files) {
-      if (file.type !== 'workspace-db') continue;
-      const match = file.path.match(/^workspaceStorage\/([^/]+)\/state\.vscdb$/u);
-      if (!match) continue;
-      const workspaceId = match[1]!;
-      const workspacePath =
-        (await readWorkspaceJsonFromBackup(backupPath, workspaceId, readOptions)) ??
-        `(workspace: ${workspaceId})`;
-      inventory.push({
-        id: workspaceId,
-        path: workspacePath,
-        dbPath: file.path,
-        sessionCount: 0,
-      });
+    if (!manifest) {
+      throw new ZipArchiveFormatError('Manifest file not found in backup.');
     }
-    return inventory;
+    return resolveBackupWorkspaceInventory(manifest, backupPath, readOptions, true);
   }
 
   const basePath = getCursorDataPath(customDataPath);
@@ -1373,7 +1549,7 @@ function attachCountedComposerSessionIds(
   sessionIds: Iterable<string>
 ): Workspace {
   Object.defineProperty(workspace, COUNTED_COMPOSER_SESSION_IDS, {
-    value: new Set(sessionIds),
+    value: new Set([...sessionIds].map(logicalSessionIdKey)),
   });
   return workspace;
 }
@@ -1415,6 +1591,7 @@ export async function findWorkspaces(
   let globalDbAvailable = false;
   let globalComposerRecords: GlobalComposerRecord[] = [];
   let globalBubbleCounts = new Map<string, number>();
+  let globalComposerIdSpellings: ReadonlyMap<string, readonly string[]> = new Map();
   const globalCatalogBudget = createComposerSqliteBudget(
     resolveSourceReadLimits(operationOptions.sourceReadLimits)
   );
@@ -1483,10 +1660,10 @@ export async function findWorkspaces(
         );
         if (result) {
           const parsed = parseChatData(result.data, result.bundle);
-          sessionCount = parsed.length;
           for (const session of parsed) {
-            seenComposerIds.add(session.id);
+            seenComposerIds.add(logicalSessionIdKey(session.id));
           }
+          sessionCount = seenComposerIds.size;
 
           const rawComposerData = result.bundle.composerData;
           const composerRefs = extractComposerIdsFromData(rawComposerData);
@@ -1541,17 +1718,24 @@ export async function findWorkspaces(
               .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cursorDiskKV'")
               .get();
             globalDbAvailable = Boolean(tableCheck);
-            if (globalDbAvailable && !operationOptions.workspaceFilterPath) {
-              globalComposerRecords = loadGlobalComposerRecords(
+            if (globalDbAvailable) {
+              globalComposerIdSpellings = loadGlobalComposerIdSpellings(
                 globalDb,
                 globalCatalogBudget,
                 operationOptions.signal
               );
-              globalBubbleCounts = loadGlobalBubbleCounts(
-                globalDb,
-                globalCatalogBudget,
-                operationOptions.signal
-              );
+              if (!operationOptions.workspaceFilterPath) {
+                globalComposerRecords = loadGlobalComposerRecords(
+                  globalDb,
+                  globalCatalogBudget,
+                  operationOptions.signal
+                );
+                globalBubbleCounts = loadGlobalBubbleCounts(
+                  globalDb,
+                  globalCatalogBudget,
+                  operationOptions.signal
+                );
+              }
             }
           } catch (error) {
             if (shouldPropagateReadFailure(error)) throw error;
@@ -1573,17 +1757,26 @@ export async function findWorkspaces(
         // Selected + pointer IDs are only counted when they resolve to a real
         // global composer with bubbles, so non-composer GUIDs never inflate counts.
         for (const composerId of [...selectedIds, ...pointerIds]) {
-          if (seenComposerIds.has(composerId)) continue;
+          const logicalId = logicalSessionIdKey(composerId);
+          if (seenComposerIds.has(logicalId)) continue;
+          const exactGlobalId = selectGlobalComposerSpelling(
+            globalComposerIdSpellings.get(logicalId),
+            [composerId]
+          );
           const bubbleCount = operationOptions.workspaceFilterPath
-            ? countGlobalComposerBubbles(
-                globalDb,
-                composerId,
-                globalCatalogBudget,
-                operationOptions.signal
-              )
-            : (globalBubbleCounts.get(composerId) ?? 0);
+            ? exactGlobalId
+              ? countGlobalComposerBubbles(
+                  globalDb,
+                  exactGlobalId,
+                  globalCatalogBudget,
+                  operationOptions.signal
+                )
+              : 0
+            : exactGlobalId
+              ? (globalBubbleCounts.get(exactGlobalId) ?? 0)
+              : 0;
           if (bubbleCount > 0) {
-            seenComposerIds.add(composerId);
+            seenComposerIds.add(logicalId);
             sessionCount++;
           }
         }
@@ -1595,17 +1788,23 @@ export async function findWorkspaces(
             globalCatalogBudget,
             operationOptions.signal
           )) {
-            if (seenComposerIds.has(composerId)) continue;
+            const logicalId = logicalSessionIdKey(composerId);
+            if (seenComposerIds.has(logicalId)) continue;
+            const exactGlobalId = selectGlobalComposerSpelling(
+              globalComposerIdSpellings.get(logicalId),
+              [composerId]
+            );
             if (
+              !exactGlobalId ||
               countGlobalComposerBubbles(
                 globalDb,
-                composerId,
+                exactGlobalId,
                 globalCatalogBudget,
                 operationOptions.signal
               ) <= 0
             )
               continue;
-            seenComposerIds.add(composerId);
+            seenComposerIds.add(logicalId);
             sessionCount++;
           }
         }
@@ -1619,8 +1818,9 @@ export async function findWorkspaces(
             globalCatalogBudget,
             operationOptions.signal
           )) {
-            if (seenComposerIds.has(summary.id)) continue;
-            seenComposerIds.add(summary.id);
+            const logicalId = logicalSessionIdKey(summary.id);
+            if (seenComposerIds.has(logicalId)) continue;
+            seenComposerIds.add(logicalId);
             sessionCount++;
           }
         }
@@ -1628,8 +1828,9 @@ export async function findWorkspaces(
         // No global storage: pointer GUIDs cannot be confirmed as composers, so
         // only count real selectedComposerIds (avoid phantom session counts).
         for (const composerId of selectedIds) {
-          if (seenComposerIds.has(composerId)) continue;
-          seenComposerIds.add(composerId);
+          const logicalId = logicalSessionIdKey(composerId);
+          if (seenComposerIds.has(logicalId)) continue;
+          seenComposerIds.add(logicalId);
           sessionCount++;
         }
       }
@@ -1767,6 +1968,63 @@ function loadGlobalBubbleCounts(
   return counts;
 }
 
+/** Read only native Composer key spellings and group them by case-insensitive UUID identity. */
+function loadGlobalComposerIdSpellings(
+  db: Database,
+  budget = createComposerSqliteBudget(),
+  signal?: AbortSignal
+): ReadonlyMap<string, readonly string[]> {
+  const byLogicalId = new Map<string, Set<string>>();
+  try {
+    const admit = (id: string): void => {
+      if (!id) return;
+      const logicalId = logicalSessionIdKey(id);
+      const spellings = byLogicalId.get(logicalId) ?? new Set<string>();
+      spellings.add(id);
+      byLogicalId.set(logicalId, spellings);
+    };
+    forEachBoundedComposerMetadata(
+      db,
+      'cursorDiskKV',
+      'composerData:%',
+      budget,
+      ({ key }) => {
+        const id = key.startsWith('composerData:') ? key.slice('composerData:'.length) : '';
+        admit(id);
+      },
+      signal
+    );
+    forEachBoundedComposerBubbleMetadata(
+      db,
+      'bubbleId:%',
+      budget,
+      ({ key }) => admit(key.split(':')[1] ?? ''),
+      signal
+    );
+  } catch (error) {
+    throwOwningDatabaseReadFailure(error);
+  }
+  return new Map(
+    [...byLogicalId].map(([logicalId, spellings]) => [
+      logicalId,
+      Object.freeze([...spellings].sort(compareCodePoints)),
+    ])
+  );
+}
+
+/** Prefer an exact observed spelling, otherwise select a deterministic real global spelling. */
+function selectGlobalComposerSpelling(
+  spellings: readonly string[] | undefined,
+  preferredSpellings: Iterable<string>
+): string | undefined {
+  if (!spellings || spellings.length === 0) return undefined;
+  const observed = new Set(spellings);
+  for (const preferred of preferredSpellings) {
+    if (observed.has(preferred)) return preferred;
+  }
+  return selectNativeSessionIdSpelling(spellings);
+}
+
 /** Count one already selected Composer UUID without scanning another session's keys. */
 function countGlobalComposerBubbles(
   db: Database,
@@ -1776,9 +2034,9 @@ function countGlobalComposerBubbles(
 ): number {
   try {
     let count = 0;
-    forEachBoundedComposerBubbleMetadata(
+    forEachBoundedComposerBubbleMetadataByExactPrefix(
       db,
-      `bubbleId:${sqliteLikeLiteralPrefix(composerId)}:%`,
+      `bubbleId:${composerId}:`,
       budget,
       () => {
         count++;
@@ -1810,9 +2068,9 @@ function buildGlobalComposerSummary(
   let firstBubbleValue: string | null | undefined;
   if (!composerMetadata.createdAt || !composerMetadata.lastUpdatedAt) {
     const timestampRows: BubbleRow[] = [];
-    forEachBoundedComposerBubbleValue(
+    forEachBoundedComposerBubbleValueByExactPrefix(
       db,
-      `bubbleId:${sqliteLikeLiteralPrefix(composerId)}:%`,
+      `bubbleId:${composerId}:`,
       budget,
       (row) => {
         if (firstBubbleValue === undefined) firstBubbleValue = row.value;
@@ -1830,9 +2088,9 @@ function buildGlobalComposerSummary(
 
   let preview = '';
   if (options?.includePreview !== false) {
-    firstBubbleValue ??= readFirstBoundedComposerBubbleValue(
+    firstBubbleValue ??= readFirstBoundedComposerBubbleValueByExactPrefix(
       db,
-      `bubbleId:${sqliteLikeLiteralPrefix(composerId)}:%`,
+      `bubbleId:${composerId}:`,
       budget,
       signal
     )?.value;
@@ -2152,7 +2410,13 @@ export async function getWorkspaceLinkedComposerIds(
 
     const ids = new Set<string>();
     const records = loadGlobalComposerRecords(db);
-    const recordById = new Map(records.map((record) => [record.id, record.data]));
+    const recordsByLogicalId = new Map<string, GlobalComposerRecord[]>();
+    for (const record of records) {
+      const logicalId = logicalSessionIdKey(record.id);
+      const variants = recordsByLogicalId.get(logicalId) ?? [];
+      variants.push(record);
+      recordsByLogicalId.set(logicalId, variants);
+    }
     for (const record of records) {
       if (composerBelongsToWorkspace(record.data, workspace)) {
         ids.add(record.id);
@@ -2169,10 +2433,14 @@ export async function getWorkspaceLinkedComposerIds(
       try {
         wsDb = await openDatabase(workspace.dbPath);
         for (const pointerId of getWorkspaceComposerPointerIds(wsDb)) {
-          const data = recordById.get(pointerId);
-          if (!data) continue;
-          if (!composerHasWorkspaceStamp(data) || composerBelongsToWorkspace(data, workspace)) {
-            ids.add(pointerId);
+          const variants = recordsByLogicalId.get(logicalSessionIdKey(pointerId)) ?? [];
+          for (const record of variants) {
+            if (
+              !composerHasWorkspaceStamp(record.data) ||
+              composerBelongsToWorkspace(record.data, workspace)
+            ) {
+              ids.add(record.id);
+            }
           }
         }
       } catch (error) {
@@ -2257,6 +2525,10 @@ interface SessionReadContextPrivateState {
    * cross-workspace contributor without widening the context's workspace scan.
    */
   readonly boundComposerWorkspaceBySession: Map<string, Workspace>;
+  /** Exact Composer ID spelling selected inside the bound workspace database. */
+  readonly boundComposerWorkspaceIdBySession: Map<string, string>;
+  /** Exact global cursorDiskKV spelling selected for a case-insensitive logical UUID. */
+  readonly boundComposerGlobalIdBySession: Map<string, string>;
   readonly boundStoreOccurrencesBySession: Map<string, readonly StorePhysicalOccurrence[]>;
   readonly emittedDiagnosticKeys: Set<string>;
 }
@@ -2408,8 +2680,9 @@ export function createSessionReadContext(
     resolutionStarts: 0,
     releaseSession(sessionId: string): void {
       if (context.disposed) throw new ReadContextDisposedError();
+      const logicalId = logicalSessionIdKey(sessionId);
       for (const key of [...context.completedSessions.keys()]) {
-        if (key === sessionId || key.startsWith(`${sessionId}\0`)) {
+        if (key === logicalId || key.startsWith(`${logicalId}\0`)) {
           context.completedSessions.delete(key);
         }
       }
@@ -2435,6 +2708,8 @@ export function createSessionReadContext(
         context.logicalSummaries = null;
         const privateState = sessionReadContextPrivate.get(context);
         privateState?.boundComposerWorkspaceBySession.clear();
+        privateState?.boundComposerWorkspaceIdBySession.clear();
+        privateState?.boundComposerGlobalIdBySession.clear();
         privateState?.boundStoreOccurrencesBySession.clear();
         privateState?.emittedDiagnosticKeys.clear();
         sessionReadContextPrivate.delete(context);
@@ -2449,6 +2724,8 @@ export function createSessionReadContext(
 
   sessionReadContextPrivate.set(context, {
     boundComposerWorkspaceBySession: new Map(),
+    boundComposerWorkspaceIdBySession: new Map(),
+    boundComposerGlobalIdBySession: new Map(),
     boundStoreOccurrencesBySession: new Map(),
     emittedDiagnosticKeys: new Set(),
   });
@@ -2579,6 +2856,51 @@ interface ComposerPhysicalCandidate {
   readonly summary: ChatSessionSummary;
   readonly session: ChatSession;
   readonly workspace: Workspace;
+  /** Manifest-backed workspace membership without a materialized workspace conversation. */
+  readonly membershipOnly?: boolean;
+}
+
+interface ComposerGlobalCandidate {
+  readonly exactId: string;
+  readonly session: ChatSession;
+  readonly preview?: string;
+}
+
+function projectGlobalComposerCandidate(
+  exactId: string,
+  summary: GlobalComposerSummary,
+  workspacePath: string
+): ComposerGlobalCandidate {
+  return {
+    exactId,
+    preview: summary.preview,
+    session: {
+      id: exactId,
+      index: 0,
+      title: summary.title,
+      createdAt: summary.createdAt,
+      createdAtSource: summary.createdAtSource,
+      lastUpdatedAt: summary.lastUpdatedAt,
+      lastUpdatedAtSource: summary.lastUpdatedAtSource,
+      messageCount: summary.messageCount,
+      messages: [],
+      workspaceId: 'global',
+      workspacePath,
+      source: 'global',
+      resolvedSource: 'composer',
+      sources: ['composer'],
+      resolutionState: 'complete',
+      resolution: {
+        state: 'complete',
+        expectedSourceRoles: ['composer'],
+        loadedSourceRoles: ['composer'],
+        omittedSourceRoles: [],
+        failedSourceRoles: [],
+        reasonCodes: [],
+      },
+      messageIdentityVersion: 1,
+    },
+  };
 }
 
 function consumedComposerPayload(session: ChatSession): ReplicaConsumedPayload {
@@ -2618,6 +2940,82 @@ function consumedComposerPayload(session: ChatSession): ReplicaConsumedPayload {
   };
 }
 
+/** Decode one already-bound global Composer spelling without case-folded SQLite matching. */
+function loadExactGlobalComposerSession(
+  db: Database,
+  exactId: string,
+  workspacePath: string,
+  budget = createComposerSqliteBudget(),
+  signal?: AbortSignal
+): ChatSession | null {
+  const rows: BubbleRow[] = [];
+  forEachBoundedComposerBubbleValueByExactPrefix(
+    db,
+    `bubbleId:${exactId}:`,
+    budget,
+    (row) => rows.push({ key: row.key, value: row.value }),
+    signal
+  );
+  const composerData = readBoundedComposerValueByKey(
+    db,
+    'cursorDiskKV',
+    `composerData:${exactId}`,
+    budget,
+    signal
+  );
+  const projection = resolveBubbleMessages(
+    rows,
+    composerMetadataTimestampsForSummary(composerData, {
+      createdAt: new Date(0),
+      createdAtSource: 'epoch-unknown',
+      lastUpdatedAt: new Date(0),
+      lastUpdatedAtSource: 'epoch-unknown',
+    })
+  );
+  let metadata: Record<string, unknown> = {};
+  if (composerData) {
+    try {
+      const parsed = JSON.parse(composerData) as unknown;
+      if (isRecord(parsed)) metadata = parsed;
+    } catch {
+      // Malformed optional metadata does not change the exact conversation payload.
+    }
+  }
+  return {
+    id: exactId,
+    index: 0,
+    title:
+      typeof metadata['name'] === 'string'
+        ? metadata['name']
+        : typeof metadata['title'] === 'string'
+          ? metadata['title']
+          : null,
+    createdAt: projection.createdAt,
+    createdAtSource: projection.createdAtSource,
+    lastUpdatedAt: projection.lastUpdatedAt,
+    lastUpdatedAtSource: projection.lastUpdatedAtSource,
+    messageCount: projection.messages.length,
+    messages: projection.messages,
+    workspaceId: 'global',
+    workspacePath,
+    usage: parseComposerSessionUsage(composerData, projection.messages),
+    activeBranchBubbleIds: extractActiveBranchBubbleIds(composerData),
+    source: 'global',
+    resolvedSource: 'composer',
+    sources: ['composer'],
+    resolutionState: 'complete',
+    resolution: {
+      state: 'complete',
+      expectedSourceRoles: ['composer'],
+      loadedSourceRoles: ['composer'],
+      omittedSourceRoles: [],
+      failedSourceRoles: [],
+      reasonCodes: [],
+    },
+    messageIdentityVersion: 1,
+  };
+}
+
 function composerWorkspaceMemberships(
   candidates: readonly ComposerPhysicalCandidate[]
 ): NonNullable<ChatSessionSummary['workspaceMemberships']> {
@@ -2636,6 +3034,20 @@ function composerWorkspaceMemberships(
 }
 
 /**
+ * Preserve the released v0.16 Composer discovery comparator. Public indices,
+ * equal-timestamp order, and first-equivalent-replica attribution all depended
+ * on this stable-sort order. Additive set-like metadata may use code-point
+ * ordering, but compatibility-facing Composer selection must not.
+ */
+function compareV016ComposerWorkspaces(left: Workspace, right: Workspace): number {
+  const leftPath = normalizePath(left.path);
+  const rightPath = normalizePath(right.path);
+  const leftKind = leftPath.endsWith('.code-workspace') ? 0 : 1;
+  const rightKind = rightPath.endsWith('.code-workspace') ? 0 : 1;
+  return leftKind - rightKind || leftPath.localeCompare(rightPath);
+}
+
+/**
  * Freeze Composer's canonical attribution independently from the active scope.
  * This reproduces the unfiltered v0.16 preference: configuration workspaces
  * precede folders, then normalized paths and physical workspace IDs break ties.
@@ -2643,17 +3055,9 @@ function composerWorkspaceMemberships(
 function canonicalComposerCandidate(
   candidates: readonly ComposerPhysicalCandidate[]
 ): ComposerPhysicalCandidate | undefined {
-  return [...candidates].sort((left, right) => {
-    const leftPath = normalizeWorkspacePath(left.workspace.path);
-    const rightPath = normalizeWorkspacePath(right.workspace.path);
-    const leftKind = leftPath.toLowerCase().endsWith('.code-workspace') ? 0 : 1;
-    const rightKind = rightPath.toLowerCase().endsWith('.code-workspace') ? 0 : 1;
-    return (
-      leftKind - rightKind ||
-      compareCodePoints(leftPath, rightPath) ||
-      compareCodePoints(left.workspace.id, right.workspace.id)
-    );
-  })[0];
+  return [...candidates].sort((left, right) =>
+    compareV016ComposerWorkspaces(left.workspace, right.workspace)
+  )[0];
 }
 
 interface ReconciledComposerRows {
@@ -2661,11 +3065,17 @@ interface ReconciledComposerRows {
   readonly ambiguous: AmbiguousSessionSummary[];
   /** Physical Composer workspace selected for each resolved logical UUID. */
   readonly selectedWorkspaces: ReadonlyMap<string, Workspace>;
+  /** Exact case-preserving ID selected inside that workspace payload. */
+  readonly selectedWorkspaceIds: ReadonlyMap<string, string>;
+  /** Exact case-preserving global key spelling bound for complete Composer hydration. */
+  readonly selectedGlobalIds: ReadonlyMap<string, string>;
 }
 
 /** Reconcile workspace replicas and apply the global-primary Composer rule. */
 async function reconcileComposerRows(
   candidatesById: ReadonlyMap<string, readonly ComposerPhysicalCandidate[]>,
+  globalCandidatesById: ReadonlyMap<string, readonly ComposerGlobalCandidate[]>,
+  preferredGlobalIdsById: ReadonlyMap<string, string>,
   globalPrimaryIds: ReadonlySet<string>,
   omittedWorkspacesById: ReadonlyMap<string, readonly Workspace[]>,
   indexScope: 'global' | 'workspace',
@@ -2676,6 +3086,8 @@ async function reconcileComposerRows(
   const resolved: ChatSessionSummary[] = [];
   const ambiguous: AmbiguousSessionSummary[] = [];
   const selectedWorkspaces = new Map<string, Workspace>();
+  const selectedWorkspaceIds = new Map<string, string>();
+  const selectedGlobalIds = new Map<string, string>();
   for (const [id, unsorted] of [...candidatesById.entries()].sort(([left], [right]) =>
     compareCodePoints(left, right)
   )) {
@@ -2685,12 +3097,14 @@ async function reconcileComposerRows(
       const leftMatched = activeWorkspacePath === leftPath ? 0 : 1;
       const rightMatched = activeWorkspacePath === rightPath ? 0 : 1;
       return (
-        leftMatched - rightMatched ||
-        compareCodePoints(leftPath, rightPath) ||
-        compareCodePoints(left.workspace.id, right.workspace.id)
+        leftMatched - rightMatched || compareV016ComposerWorkspaces(left.workspace, right.workspace)
       );
     });
     if (candidates.length === 0) continue;
+    const payloadCandidates = candidates.filter(({ membershipOnly }) => !membershipOnly);
+    // A verified pointer is authorization/membership evidence, not a second payload replica. Use
+    // it as the addressable empty fallback only when no materialized workspace payload was loaded.
+    const resolutionCandidates = payloadCandidates.length > 0 ? payloadCandidates : candidates;
     const omittedWorkspaces = omittedWorkspacesById.get(id) ?? [];
     const membershipCandidates = [
       ...candidates,
@@ -2703,9 +3117,73 @@ async function reconcileComposerRows(
     const memberships = composerWorkspaceMemberships(membershipCandidates);
     const canonical = canonicalComposerCandidate(membershipCandidates)!;
     const canonicalPath = normalizeWorkspacePath(canonical.workspace.path);
-    if (globalPrimaryIds.has(id)) {
-      const selected = candidates[0]!;
+    const globalCandidates = globalCandidatesById.get(id) ?? [];
+    if (globalPrimaryIds.has(id) && globalCandidates.length > 0) {
+      const publicId =
+        selectNativeSessionIdSpelling(resolutionCandidates.map(({ summary }) => summary.id)) ??
+        globalCandidates[0]!.exactId;
+      const globalInstances: PhysicalSessionInstance<ComposerGlobalCandidate>[] =
+        globalCandidates.map((candidate, sourceOrder) => ({
+          instanceKey: `composer-global\0${candidate.exactId}`,
+          logicalSessionId: candidate.exactId,
+          sourceRole: 'composer',
+          representation: 'composer-global',
+          fidelityTier: 'complete',
+          locator: candidate,
+          workspacePaths: memberships.map(({ workspacePath }) => workspacePath),
+          sourceOrder,
+          loadConsumedPayload: () => consumedComposerPayload(candidate.session),
+        }));
+      const globalCatalog = buildSessionCatalog(globalInstances)[0]!;
+      const globalReconciliation = await reconcileReplicaGroup(globalCatalog.replicaGroups[0]!, {
+        diagnosticContextId,
+      });
+      if (globalReconciliation.state === 'divergent') {
+        ambiguous.push({
+          ...projectAmbiguousSessionSummary(globalCatalog, [globalReconciliation], {
+            index: 0,
+            indexScope,
+            ...(activeWorkspacePath ? { indexWorkspacePath: activeWorkspacePath } : {}),
+          }),
+          id: publicId,
+          canonicalWorkspacePath: canonicalPath,
+        });
+        continue;
+      }
+
+      const selectedGlobal = globalReconciliation.selected.locator;
+      const selected =
+        resolutionCandidates.find((candidate) =>
+          sessionIdsEqual(candidate.summary.id, selectedGlobal.exactId)
+        ) ?? resolutionCandidates[0]!;
       const summary = selected.summary;
+      const selectedWorkspaceId = summary.id;
+      summary.id = publicId;
+      summary.title = selectedGlobal.session.title ?? summary.title;
+      // Global bubbles remain the sole conversation payload authority. Optional
+      // `composerData` metadata is not always present in global storage, however,
+      // while the selected workspace row can still carry Cursor's stored session
+      // timestamps. Preserve that higher-priority metadata instead of replacing it
+      // with a direct-message or epoch fallback derived from the global bubbles.
+      if (
+        selectedGlobal.session.createdAtSource === 'composer-metadata' ||
+        summary.createdAtSource !== 'composer-metadata'
+      ) {
+        summary.createdAt = selectedGlobal.session.createdAt;
+        summary.createdAtSource = selectedGlobal.session.createdAtSource;
+      }
+      if (
+        selectedGlobal.session.lastUpdatedAtSource === 'composer-metadata' ||
+        summary.lastUpdatedAtSource !== 'composer-metadata'
+      ) {
+        summary.lastUpdatedAt = selectedGlobal.session.lastUpdatedAt;
+        summary.lastUpdatedAtSource = selectedGlobal.session.lastUpdatedAtSource;
+      }
+      summary.messageCount = selectedGlobal.session.messageCount;
+      summary.preview =
+        selectedGlobal.preview ??
+        selectedGlobal.session.messages[0]?.content.slice(0, 100) ??
+        '(Empty session)';
       summary.source = 'global';
       summary.resolvedSource = 'composer';
       summary.resolutionState = 'complete';
@@ -2721,13 +3199,8 @@ async function reconcileComposerRows(
       summary.canonicalWorkspacePath = canonicalPath;
       summary.workspaceMemberships = memberships;
       summary.sourceInstances = [
-        {
-          sourceRole: 'composer',
-          representation: 'composer-global',
-          workspacePaths: memberships.map(({ workspacePath }) => workspacePath),
-          state: 'contributed',
-        },
-        ...candidates.map((candidate) => ({
+        ...globalReconciliation.sourceInstances,
+        ...payloadCandidates.map((candidate) => ({
           sourceRole: 'composer' as const,
           representation: 'composer-workspace' as const,
           workspacePaths: [normalizeWorkspacePath(candidate.workspace.path)],
@@ -2736,13 +3209,15 @@ async function reconcileComposerRows(
       ];
       resolved.push(summary);
       selectedWorkspaces.set(id, selected.workspace);
+      selectedWorkspaceIds.set(id, selectedWorkspaceId);
+      selectedGlobalIds.set(id, selectedGlobal.exactId);
       continue;
     }
 
-    const instances: PhysicalSessionInstance<ComposerPhysicalCandidate>[] = candidates.map(
-      (candidate, sourceOrder) => ({
-        instanceKey: `${candidate.workspace.id}\0${id}`,
-        logicalSessionId: id,
+    const instances: PhysicalSessionInstance<ComposerPhysicalCandidate>[] =
+      resolutionCandidates.map((candidate, sourceOrder) => ({
+        instanceKey: `${candidate.workspace.id}\0${candidate.summary.id}`,
+        logicalSessionId: candidate.summary.id,
         sourceRole: 'composer',
         representation: 'composer-workspace',
         fidelityTier: 'partial',
@@ -2758,8 +3233,7 @@ async function reconcileComposerRows(
         ],
         sourceOrder,
         loadConsumedPayload: () => consumedComposerPayload(candidate.session),
-      })
-    );
+      }));
     const catalog = buildSessionCatalog(instances, {
       ...(activeWorkspacePath
         ? {
@@ -2785,8 +3259,50 @@ async function reconcileComposerRows(
       continue;
     }
 
+    if (globalPrimaryIds.has(id)) {
+      const selected = reconciliation.selected.locator;
+      const summary = selected.summary;
+      const selectedWorkspaceId = summary.id;
+      summary.id = catalog.id;
+      summary.source = 'global';
+      summary.resolvedSource = 'composer';
+      summary.resolutionState = 'complete';
+      summary.resolution = {
+        state: 'complete',
+        expectedSourceRoles: ['composer'],
+        loadedSourceRoles: ['composer'],
+        omittedSourceRoles: [],
+        failedSourceRoles: [],
+        reasonCodes: [],
+      };
+      summary.workspacePath = contractPath(canonicalPath);
+      summary.canonicalWorkspacePath = canonicalPath;
+      summary.workspaceMemberships = memberships;
+      summary.sourceInstances = [
+        {
+          sourceRole: 'composer',
+          representation: 'composer-global',
+          workspacePaths: memberships.map(({ workspacePath }) => workspacePath),
+          state: 'contributed',
+        },
+        ...payloadCandidates.map((candidate) => ({
+          sourceRole: 'composer' as const,
+          representation: 'composer-workspace' as const,
+          workspacePaths: [normalizeWorkspacePath(candidate.workspace.path)],
+          state: 'superseded' as const,
+        })),
+      ];
+      resolved.push(summary);
+      selectedWorkspaces.set(id, selected.workspace);
+      selectedWorkspaceIds.set(id, selectedWorkspaceId);
+      selectedGlobalIds.set(id, preferredGlobalIdsById.get(id) ?? selectedWorkspaceId);
+      continue;
+    }
+
     const selected = reconciliation.selected.locator;
     const summary = selected.summary;
+    const selectedWorkspaceId = summary.id;
+    summary.id = catalog.id;
     summary.source = 'workspace-fallback';
     summary.resolvedSource = 'composer';
     summary.resolutionState = 'partial';
@@ -2803,7 +3319,13 @@ async function reconcileComposerRows(
     };
     summary.workspacePath = contractPath(canonicalPath);
     summary.canonicalWorkspacePath = canonicalPath;
-    summary.matchedWorkspacePath = catalog.matchedWorkspacePath;
+    summary.matchedWorkspacePath = activeWorkspacePath
+      ? candidates.some(({ workspace }) =>
+          workspaceFilterMatches(workspace.path, activeWorkspacePath)
+        )
+        ? activeWorkspacePath
+        : catalog.matchedWorkspacePath
+      : catalog.matchedWorkspacePath;
     summary.workspaceMatchKind = catalog.workspaceMatchKind;
     summary.workspaceMemberships = memberships;
     summary.sourceInstances = [
@@ -2817,8 +3339,9 @@ async function reconcileComposerRows(
     ];
     resolved.push(summary);
     selectedWorkspaces.set(id, selected.workspace);
+    selectedWorkspaceIds.set(id, selectedWorkspaceId);
   }
-  return { resolved, ambiguous, selectedWorkspaces };
+  return { resolved, ambiguous, selectedWorkspaces, selectedWorkspaceIds, selectedGlobalIds };
 }
 
 /** Record a known Store counterpart that strict workspace scope did not permit loading. */
@@ -3206,7 +3729,7 @@ async function getStoreSessionsCached(
     if (context && sessionIds) {
       const state = privateReadState(context);
       const bound = [...sessionIds].flatMap((id) => [
-        ...(state.boundStoreOccurrencesBySession.get(id) ?? []),
+        ...(state.boundStoreOccurrencesBySession.get(logicalSessionIdKey(id)) ?? []),
       ]);
       if (bound.length === 0) return [];
       allowedOccurrenceKeys = new Set(bound.map(({ instanceKey }) => instanceKey));
@@ -3276,8 +3799,10 @@ function bindStoreOccurrences(
 ): void {
   const bindings = privateReadState(context).boundStoreOccurrencesBySession;
   bindings.clear();
+  const selectedLogicalKeys = new Set([...selectedLogicalIds].map(logicalSessionIdKey));
   for (const session of storeSessions) {
-    if (!selectedLogicalIds.has(session.id)) continue;
+    const logicalKey = logicalSessionIdKey(session.id);
+    if (!selectedLogicalKeys.has(logicalKey)) continue;
     const inventoried = getStorePhysicalOccurrences(session);
     const permitted =
       !activeWorkspacePath || context.includeCrossWorkspaceSources
@@ -3286,7 +3811,7 @@ function bindStoreOccurrences(
             ({ workspacePath }) =>
               workspacePath && workspaceFilterMatches(workspacePath, activeWorkspacePath)
           );
-    bindings.set(session.id, Object.freeze([...permitted]));
+    bindings.set(logicalKey, Object.freeze([...permitted]));
   }
 }
 
@@ -3298,9 +3823,11 @@ function projectBoundStoreScope(
   if (!activeWorkspacePath) return;
   const all = getStorePhysicalOccurrences(session);
   const bound = new Set(
-    (privateReadState(context).boundStoreOccurrencesBySession.get(session.id) ?? []).map(
-      ({ instanceKey }) => instanceKey
-    )
+    (
+      privateReadState(context).boundStoreOccurrencesBySession.get(
+        logicalSessionIdKey(session.id)
+      ) ?? []
+    ).map(({ instanceKey }) => instanceKey)
   );
   const db = all.filter(({ representation }) => representation === 'store-db');
   const transcripts = all.filter(({ representation }) => representation === 'store-transcript');
@@ -3366,9 +3893,11 @@ async function hydrateSelectedStoreDisplayMetadata(
     metadataOnly: true,
     includeDisplayMetadata: true,
   });
-  const displayById = new Map(displayRows.map((session) => [session.id, session]));
+  const displayById = new Map(
+    displayRows.map((session) => [logicalSessionIdKey(session.id), session])
+  );
   for (const session of storeSessions) {
-    const display = displayById.get(session.id);
+    const display = displayById.get(logicalSessionIdKey(session.id));
     if (!display) continue;
     // Display hydration is intentionally narrow. Canonical workspace and
     // source timestamps were selected from the complete metadata inventory;
@@ -3437,6 +3966,25 @@ export async function listSessions(
     }
     activeWorkspacePath = workspaceScopeResult.path;
   }
+  const scopedBackupGlobalSessionIds = new Set<string>();
+  let scopedLegacyBackupGlobalMembershipUnknown = false;
+  if (backupPath && activeWorkspacePath) {
+    for (const workspace of composerWorkspaceInventory) {
+      if (!workspaceFilterMatches(workspace.path, activeWorkspacePath)) continue;
+      for (const id of getBackupGlobalCounterpartSessionIds(workspace) ?? []) {
+        scopedBackupGlobalSessionIds.add(logicalSessionIdKey(id));
+      }
+      for (const id of getBackupLinkedGlobalSessionIds(workspace) ?? []) {
+        scopedBackupGlobalSessionIds.add(logicalSessionIdKey(id));
+      }
+      if (
+        backupContainsGlobalDatabase(workspace) &&
+        getBackupGlobalCounterpartSessionIds(workspace) === undefined
+      ) {
+        scopedLegacyBackupGlobalMembershipUnknown = true;
+      }
+    }
+  }
   if (context?.summaries) {
     return applySessionListLimit(context.summaries, options);
   }
@@ -3455,24 +4003,20 @@ export async function listSessions(
     activeWorkspacePath
       ? workspaces.filter((w) => workspaceFilterMatches(w.path, activeWorkspacePath!))
       : workspaces
-  ).sort((a, b) => {
-    const normA = normalizePath(a.path);
-    const normB = normalizePath(b.path);
-    const aCode = normA.endsWith('.code-workspace') ? 0 : 1;
-    const bCode = normB.endsWith('.code-workspace') ? 0 : 1;
-    if (aCode !== bCode) return aCode - bCode;
-    return compareCodePoints(normA, normB);
-  });
+  ).sort(compareV016ComposerWorkspaces);
 
   const allSessions: ChatSessionSummary[] = [];
   const composerCandidatesById = new Map<string, ComposerPhysicalCandidate[]>();
+  const composerGlobalCandidatesById = new Map<string, ComposerGlobalCandidate[]>();
+  const preferredGlobalIdsById = new Map<string, string>();
   const omittedComposerWorkspacesById = new Map<string, Workspace[]>();
+  const omittedComposerPhysicalIdsById = new Map<string, Map<string, Set<string>>>();
   const selectedStoreIds = new Set(
     storeCatalogSessions
       .filter(
         (session) => !activeWorkspacePath || storeMatchesWorkspace(session, activeWorkspacePath)
       )
-      .map(({ id }) => id)
+      .map(({ id }) => logicalSessionIdKey(id))
   );
   const globalPrimaryIds = new Set<string>();
   const omittedGlobalComposerIds = new Set<string>();
@@ -3481,6 +4025,129 @@ export async function listSessions(
   // When listing all workspaces (no filter), dedupe by session id; keep first occurrence (workspace order is already deterministic)
   const seenIds = activeWorkspacePath ? null : new Set<string>();
   const globalFallbackCandidates: WorkspaceGlobalCandidate[] = [];
+
+  /**
+   * Route unattributed global-only records through the same exact-spelling replica catalog as
+   * workspace-backed Composer rows. This prevents logical UUID folding from becoming first-wins
+   * when Cursor stored case variants or split metadata and bubble rows across spellings.
+   */
+  const registerGlobalOnlyComposer = (
+    db: Database,
+    logicalId: string,
+    records: readonly GlobalComposerRecord[],
+    bubbleCounts: ReadonlyMap<string, number>,
+    spellingsByLogicalId: ReadonlyMap<string, readonly string[]>,
+    budget: ReturnType<typeof createComposerSqliteBudget>,
+    physicalDatabasePath: string
+  ): boolean => {
+    const orderedRecords = [...records].sort((left, right) => compareCodePoints(left.id, right.id));
+    const preferredRecord = orderedRecords[0];
+    if (!preferredRecord) return false;
+    const observedSpellings = spellingsByLogicalId.get(logicalId) ?? [preferredRecord.id];
+    // Session-level metadata, not a stray bubble prefix, owns the public source-native spelling.
+    // This is the spelling v0.16 exposed and therefore the compatibility authority.
+    const publicId = preferredRecord.id;
+    const payloadSpellings = observedSpellings.filter(
+      (exactId) => (bubbleCounts.get(exactId) ?? 0) > 0
+    );
+    const payloadId = selectGlobalComposerSpelling(payloadSpellings, [publicId]);
+    if (!payloadId) return false;
+    const publicSummary = buildGlobalComposerSummary(
+      db,
+      payloadId,
+      preferredRecord.data,
+      {
+        bubbleCount: bubbleCounts.get(payloadId) ?? 0,
+        includePreview: false,
+      },
+      budget,
+      options.signal ?? context.signal
+    );
+    if (!publicSummary) return false;
+
+    const derivedPath = workspacePathFromComposer(preferredRecord.data);
+    const workspacePath = derivedPath ? contractPath(derivedPath) : '(global)';
+    const summary: ChatSessionSummary = {
+      id: publicId,
+      index: 0,
+      title: publicSummary.title,
+      createdAt: publicSummary.createdAt,
+      createdAtSource: publicSummary.createdAtSource,
+      lastUpdatedAt: publicSummary.lastUpdatedAt,
+      lastUpdatedAtSource: publicSummary.lastUpdatedAtSource,
+      messageCount: publicSummary.messageCount,
+      workspaceId: 'global',
+      workspacePath,
+      preview: publicSummary.preview || '(Empty session)',
+      source: 'global',
+      resolvedSource: 'composer',
+      sources: ['composer'],
+      resolutionState: 'complete',
+      resolution: {
+        state: 'complete',
+        expectedSourceRoles: ['composer'],
+        loadedSourceRoles: ['composer'],
+        omittedSourceRoles: [],
+        failedSourceRoles: [],
+        reasonCodes: [],
+      },
+      messageIdentityVersion: 1,
+    };
+    const workspace: Workspace = {
+      id: 'global',
+      path: workspacePath,
+      dbPath: physicalDatabasePath,
+      sessionCount: 1,
+    };
+    const placeholder: ChatSession = {
+      id: publicId,
+      index: 0,
+      title: summary.title,
+      createdAt: summary.createdAt,
+      createdAtSource: summary.createdAtSource,
+      lastUpdatedAt: summary.lastUpdatedAt,
+      lastUpdatedAtSource: summary.lastUpdatedAtSource,
+      messageCount: summary.messageCount,
+      messages: [],
+      workspaceId: 'global',
+      workspacePath,
+      source: 'global',
+      resolvedSource: 'composer',
+      sources: ['composer'],
+      resolutionState: 'complete',
+      resolution: summary.resolution,
+      messageIdentityVersion: 1,
+    };
+    composerCandidatesById.set(logicalId, [{ summary, session: placeholder, workspace }]);
+    globalPrimaryIds.add(logicalId);
+    preferredGlobalIdsById.set(logicalId, payloadId);
+
+    if (observedSpellings.length > 1) {
+      const physicalCandidates: ComposerGlobalCandidate[] = [];
+      const orderedSpellings = [
+        publicId,
+        ...observedSpellings.filter((exactId) => exactId !== publicId).sort(compareCodePoints),
+      ];
+      for (const exactId of orderedSpellings) {
+        const loaded = loadExactGlobalComposerSession(
+          db,
+          exactId,
+          workspacePath,
+          budget,
+          options.signal ?? context.signal
+        );
+        if (loaded) {
+          physicalCandidates.push({ exactId, session: loaded });
+        }
+      }
+      if (physicalCandidates.length > 1) {
+        composerGlobalCandidatesById.set(logicalId, physicalCandidates);
+      }
+    }
+
+    allSessions.push(summary);
+    return true;
+  };
 
   for (const workspace of filteredWorkspaces) {
     throwIfReadAborted(options.signal ?? context?.signal);
@@ -3515,7 +4182,7 @@ export async function listSessions(
       // Pointer keys (e.g. composerChatViewPane.<guid>) live in ItemTable and link
       // this workspace to its global composers even when no workspace stamp exists.
       const pointerIds = backupPath
-        ? []
+        ? [...(getBackupLinkedGlobalSessionIds(workspace) ?? [])]
         : getWorkspaceComposerPointerIds(
             workspaceDb,
             workspaceCatalogBudget,
@@ -3543,8 +4210,9 @@ export async function listSessions(
       }
 
       for (const session of sessions) {
-        workspaceSeenIds.add(session.id);
-        seenIds?.add(session.id);
+        const logicalId = logicalSessionIdKey(session.id);
+        workspaceSeenIds.add(logicalId);
+        seenIds?.add(logicalId);
         const summary: ChatSessionSummary = {
           id: session.id,
           index: 0, // Will be assigned after sorting
@@ -3559,9 +4227,65 @@ export async function listSessions(
           preview: session.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
         };
         allSessions.push(summary);
-        const candidates = composerCandidatesById.get(session.id) ?? [];
+        const candidates = composerCandidatesById.get(logicalId) ?? [];
         candidates.push({ summary, session, workspace });
-        composerCandidatesById.set(session.id, candidates);
+        composerCandidatesById.set(logicalId, candidates);
+      }
+
+      if (backupPath) {
+        for (const sessionId of pointerIds) {
+          const logicalId = logicalSessionIdKey(sessionId);
+          if (workspaceSeenIds.has(logicalId)) continue;
+          const epoch = new Date(0);
+          const metadataOnlySession: ChatSession = {
+            id: sessionId,
+            index: 0,
+            title: null,
+            createdAt: epoch,
+            createdAtSource: 'epoch-unknown',
+            lastUpdatedAt: epoch,
+            lastUpdatedAtSource: 'epoch-unknown',
+            messageCount: 0,
+            messages: [],
+            workspaceId: workspace.id,
+            workspacePath: contractPath(workspace.path),
+            source: 'workspace-fallback',
+            resolvedSource: 'composer',
+            sources: ['composer'],
+            resolutionState: 'partial',
+            resolution: {
+              state: 'partial',
+              expectedSourceRoles: ['composer'],
+              loadedSourceRoles: ['composer'],
+              omittedSourceRoles: ['composer'],
+              failedSourceRoles: [],
+              reasonCodes: ['workspace-scope-omitted'],
+            },
+            messageIdentityVersion: 1,
+          };
+          const summary: ChatSessionSummary = {
+            id: sessionId,
+            index: 0,
+            title: null,
+            createdAt: epoch,
+            createdAtSource: 'epoch-unknown',
+            lastUpdatedAt: epoch,
+            lastUpdatedAtSource: 'epoch-unknown',
+            messageCount: 0,
+            workspaceId: workspace.id,
+            workspacePath: contractPath(workspace.path),
+            preview: '(Messages omitted by workspace scope)',
+          };
+          allSessions.push(summary);
+          const candidates = composerCandidatesById.get(logicalId) ?? [];
+          candidates.push({
+            summary,
+            session: metadataOnlySession,
+            workspace,
+            membershipOnly: true,
+          });
+          composerCandidatesById.set(logicalId, candidates);
+        }
       }
 
       if (!backupPath) {
@@ -3592,32 +4316,50 @@ export async function listSessions(
       ({ path }) => !workspaceFilterMatches(path, activeWorkspacePath!)
     );
     for (const workspace of offScopeWorkspaces) {
+      if (backupPath) {
+        for (const id of getBackupComposerSessionIds(workspace) ?? []) {
+          const logicalId = logicalSessionIdKey(id);
+          if (!composerCandidatesById.has(logicalId) && !selectedStoreIds.has(logicalId)) continue;
+          const omitted = omittedComposerWorkspacesById.get(logicalId) ?? [];
+          if (!omitted.some((candidate) => candidate.id === workspace.id)) {
+            omitted.push(workspace);
+          }
+          omittedComposerWorkspacesById.set(logicalId, omitted);
+          const physicalIds = omittedComposerPhysicalIdsById.get(logicalId) ?? new Map();
+          const workspaceIds = physicalIds.get(workspace.id) ?? new Set<string>();
+          workspaceIds.add(id);
+          physicalIds.set(workspace.id, workspaceIds);
+          omittedComposerPhysicalIdsById.set(logicalId, physicalIds);
+        }
+        continue;
+      }
       let metadataDb: Database | null = null;
       let metadataError: unknown;
       try {
-        metadataDb = backupPath
-          ? await openBackupDatabase(backupPath, workspace.dbPath, {
-              sourceReadLimits: context.sourceReadLimits,
-              signal: context.signal,
-              sqliteDriver: context.sqliteDriver,
-              io: context.io,
-            })
-          : await openDatabase(
-              workspace.dbPath,
-              withDatabaseIo(context, {
-                resourceClass: 'workspace-session-index',
-                sourceRole: 'composer',
-                representation: 'composer-workspace',
-              })
-            );
+        metadataDb = await openDatabase(
+          workspace.dbPath,
+          withDatabaseIo(context, {
+            resourceClass: 'workspace-session-index',
+            sourceRole: 'composer',
+            representation: 'composer-workspace',
+          })
+        );
         const metadataBudget = createComposerSqliteBudget(
           context.sourceReadLimits ?? SOURCE_READ_LIMITS_V1_DEFAULTS
         );
         for (const id of loadWorkspaceComposerIdsOnly(metadataDb, metadataBudget, context.signal)) {
-          if (!composerCandidatesById.has(id) && !selectedStoreIds.has(id)) continue;
-          const omitted = omittedComposerWorkspacesById.get(id) ?? [];
-          omitted.push(workspace);
-          omittedComposerWorkspacesById.set(id, omitted);
+          const logicalId = logicalSessionIdKey(id);
+          if (!composerCandidatesById.has(logicalId) && !selectedStoreIds.has(logicalId)) continue;
+          const omitted = omittedComposerWorkspacesById.get(logicalId) ?? [];
+          if (!omitted.some((candidate) => candidate.id === workspace.id)) {
+            omitted.push(workspace);
+          }
+          omittedComposerWorkspacesById.set(logicalId, omitted);
+          const physicalIds = omittedComposerPhysicalIdsById.get(logicalId) ?? new Map();
+          const workspaceIds = physicalIds.get(workspace.id) ?? new Set<string>();
+          workspaceIds.add(id);
+          physicalIds.set(workspace.id, workspaceIds);
+          omittedComposerPhysicalIdsById.set(logicalId, physicalIds);
         }
       } catch (error) {
         metadataError = error;
@@ -3628,8 +4370,10 @@ export async function listSessions(
     }
 
     if (context.includeCrossWorkspaceSources) {
-      for (const [id, offScopeWorkspacesForId] of omittedComposerWorkspacesById) {
+      for (const [logicalId, offScopeWorkspacesForId] of omittedComposerWorkspacesById) {
         for (const workspace of offScopeWorkspacesForId) {
+          const physicalIds = omittedComposerPhysicalIdsById.get(logicalId)?.get(workspace.id);
+          if (!physicalIds || physicalIds.size === 0) continue;
           let payloadDb: Database | null = null;
           let payloadError: unknown;
           try {
@@ -3639,42 +4383,44 @@ export async function listSessions(
                   signal: context.signal,
                   sqliteDriver: context.sqliteDriver,
                   io: context.io,
-                  logicalSessionId: id,
+                  logicalSessionId: logicalId,
                 })
               : await openDatabase(
                   workspace.dbPath,
                   withDatabaseIo(context, {
                     resourceClass: 'workspace-conversation',
-                    logicalSessionId: id,
+                    logicalSessionId: logicalId,
                     sourceRole: 'composer',
                     representation: 'composer-workspace',
                   })
                 );
-            const session = loadOneWorkspaceComposer(
-              payloadDb,
-              id,
-              createComposerSqliteBudget(
-                context.sourceReadLimits ?? SOURCE_READ_LIMITS_V1_DEFAULTS
-              ),
-              context.signal
-            );
-            if (!session) continue;
-            const summary: ChatSessionSummary = {
-              id,
-              index: 0,
-              title: session.title,
-              createdAt: session.createdAt,
-              createdAtSource: session.createdAtSource,
-              lastUpdatedAt: session.lastUpdatedAt,
-              lastUpdatedAtSource: session.lastUpdatedAtSource,
-              messageCount: session.messageCount,
-              workspaceId: workspace.id,
-              workspacePath: contractPath(workspace.path),
-              preview: session.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
-            };
-            const candidates = composerCandidatesById.get(id) ?? [];
-            candidates.push({ summary, session, workspace });
-            composerCandidatesById.set(id, candidates);
+            for (const physicalId of [...physicalIds].sort(compareCodePoints)) {
+              const session = loadOneWorkspaceComposer(
+                payloadDb,
+                physicalId,
+                createComposerSqliteBudget(
+                  context.sourceReadLimits ?? SOURCE_READ_LIMITS_V1_DEFAULTS
+                ),
+                context.signal
+              );
+              if (!session) continue;
+              const summary: ChatSessionSummary = {
+                id: session.id,
+                index: 0,
+                title: session.title,
+                createdAt: session.createdAt,
+                createdAtSource: session.createdAtSource,
+                lastUpdatedAt: session.lastUpdatedAt,
+                lastUpdatedAtSource: session.lastUpdatedAtSource,
+                messageCount: session.messageCount,
+                workspaceId: workspace.id,
+                workspacePath: contractPath(workspace.path),
+                preview: session.messages[0]?.content.slice(0, 100) ?? '(Empty session)',
+              };
+              const candidates = composerCandidatesById.get(logicalId) ?? [];
+              candidates.push({ summary, session, workspace });
+              composerCandidatesById.set(logicalId, candidates);
+            }
           } catch (error) {
             payloadError = error;
             if (shouldPropagateReadFailure(error)) throw error;
@@ -3715,6 +4461,7 @@ export async function listSessions(
           .get();
 
         if (tableCheck) {
+          const openedGlobalDb = globalDb;
           const globalCatalogBudget = createComposerSqliteBudget(
             context.sourceReadLimits ?? SOURCE_READ_LIMITS_V1_DEFAULTS
           );
@@ -3728,48 +4475,115 @@ export async function listSessions(
                 globalCatalogBudget,
                 options.signal ?? context.signal
               );
+          const globalIdSpellings = loadGlobalComposerIdSpellings(
+            globalDb,
+            globalCatalogBudget,
+            options.signal ?? context.signal
+          );
           const scopedStoreComposerIds = new Set<string>();
           const catalogProbeIds = new Set([...composerCandidatesById.keys(), ...selectedStoreIds]);
-          for (const composerId of catalogProbeIds) {
-            const bubbleCount = activeWorkspacePath
-              ? countGlobalComposerBubbles(
-                  globalDb,
-                  composerId,
-                  globalCatalogBudget,
-                  options.signal ?? context.signal
-                )
-              : (globalBubbleCounts.get(composerId) ?? 0);
-            if (bubbleCount > 0) {
-              globalPrimaryIds.add(composerId);
-              if (selectedStoreIds.has(composerId) && !composerCandidatesById.has(composerId)) {
-                const projectedWorkspacePath = getGlobalComposerWorkspacePathMetadata(
-                  globalDb,
-                  composerId,
-                  globalCatalogBudget,
-                  options.signal ?? context.signal
-                );
-                if (projectedWorkspacePath) {
-                  globalComposerWorkspacePaths.set(composerId, projectedWorkspacePath);
-                }
-                if (!activeWorkspacePath || context.includeCrossWorkspaceSources) {
+          for (const logicalId of catalogProbeIds) {
+            const exactIds = globalIdSpellings.get(logicalId) ?? [];
+            const exactBubbleCounts = new Map<string, number>();
+            const exactWithPayload = exactIds.filter((exactId) => {
+              const bubbleCount = activeWorkspacePath
+                ? countGlobalComposerBubbles(
+                    openedGlobalDb,
+                    exactId,
+                    globalCatalogBudget,
+                    options.signal ?? context.signal
+                  )
+                : (globalBubbleCounts.get(exactId) ?? 0);
+              exactBubbleCounts.set(exactId, bubbleCount);
+              return bubbleCount > 0;
+            });
+            const preferredExactId = selectGlobalComposerSpelling(exactWithPayload, [
+              ...(composerCandidatesById.get(logicalId) ?? []).map(({ summary }) => summary.id),
+              ...storeCatalogSessions
+                .filter(({ id }) => logicalSessionIdKey(id) === logicalId)
+                .map(({ id }) => id),
+            ]);
+            if (preferredExactId) {
+              const bubbleCount = exactBubbleCounts.get(preferredExactId) ?? 0;
+              globalPrimaryIds.add(logicalId);
+              preferredGlobalIdsById.set(logicalId, preferredExactId);
+              const globalPayloadIsPermitted =
+                composerCandidatesById.has(logicalId) ||
+                !activeWorkspacePath ||
+                context.includeCrossWorkspaceSources;
+              if (globalPayloadIsPermitted) {
+                const globalCandidates: ComposerGlobalCandidate[] = [];
+                const workspacePath =
+                  composerCandidatesById.get(logicalId)?.[0]?.summary.workspacePath ?? '(global)';
+                if (exactIds.length === 1) {
                   const globalSummary =
                     getGlobalComposerSummary(
                       globalDb,
-                      composerId,
-                      new Map([[composerId, bubbleCount]]),
+                      preferredExactId,
+                      activeWorkspacePath
+                        ? new Map([[preferredExactId, bubbleCount]])
+                        : globalBubbleCounts,
                       globalCatalogBudget,
                       options.signal ?? context.signal
                     ) ??
                     buildGlobalComposerSummary(
                       globalDb,
-                      composerId,
+                      preferredExactId,
                       {},
                       { bubbleCount },
                       globalCatalogBudget,
                       options.signal ?? context.signal
                     );
                   if (globalSummary) {
-                    scopedStoreComposerIds.add(composerId);
+                    globalCandidates.push(
+                      projectGlobalComposerCandidate(preferredExactId, globalSummary, workspacePath)
+                    );
+                  }
+                } else {
+                  for (const exactId of exactIds) {
+                    const session = loadExactGlobalComposerSession(
+                      globalDb,
+                      exactId,
+                      workspacePath,
+                      globalCatalogBudget,
+                      options.signal ?? context.signal
+                    );
+                    if (session) globalCandidates.push({ exactId, session });
+                  }
+                }
+                if (globalCandidates.length > 0) {
+                  composerGlobalCandidatesById.set(logicalId, globalCandidates);
+                }
+              }
+              if (selectedStoreIds.has(logicalId) && !composerCandidatesById.has(logicalId)) {
+                const projectedWorkspacePath = getGlobalComposerWorkspacePathMetadata(
+                  globalDb,
+                  preferredExactId,
+                  globalCatalogBudget,
+                  options.signal ?? context.signal
+                );
+                if (projectedWorkspacePath) {
+                  globalComposerWorkspacePaths.set(logicalId, projectedWorkspacePath);
+                }
+                if (!activeWorkspacePath || context.includeCrossWorkspaceSources) {
+                  const globalSummary =
+                    getGlobalComposerSummary(
+                      globalDb,
+                      preferredExactId,
+                      new Map([[preferredExactId, bubbleCount]]),
+                      globalCatalogBudget,
+                      options.signal ?? context.signal
+                    ) ??
+                    buildGlobalComposerSummary(
+                      globalDb,
+                      preferredExactId,
+                      {},
+                      { bubbleCount },
+                      globalCatalogBudget,
+                      options.signal ?? context.signal
+                    );
+                  if (globalSummary) {
+                    scopedStoreComposerIds.add(logicalId);
                     const globalWorkspacePath =
                       globalSummary.workspacePath ?? projectedWorkspacePath;
                     allSessions.push({
@@ -3788,10 +4602,10 @@ export async function listSessions(
                       preview: globalSummary.preview || '(Empty session)',
                     });
                   } else {
-                    failedGlobalComposerIds.add(composerId);
+                    failedGlobalComposerIds.add(logicalId);
                   }
                 } else {
-                  omittedGlobalComposerIds.add(composerId);
+                  omittedGlobalComposerIds.add(logicalId);
                 }
               }
             }
@@ -3821,33 +4635,50 @@ export async function listSessions(
           // composer matching multiple workspace dirs is listed at most once.
           const recoveredIds = new Set<string>(scopedStoreComposerIds);
           for (const candidate of globalFallbackCandidates) {
-            for (const composerId of candidate.composerIds) {
-              if (candidate.existingIds.has(composerId)) continue;
-              if (seenIds?.has(composerId)) continue;
-              if (recoveredIds.has(composerId)) continue;
+            for (const requestedId of candidate.composerIds) {
+              const logicalId = logicalSessionIdKey(requestedId);
+              if (candidate.existingIds.has(logicalId)) continue;
+              if (seenIds?.has(logicalId)) continue;
+              if (recoveredIds.has(logicalId)) continue;
+              const composerId = selectGlobalComposerSpelling(globalIdSpellings.get(logicalId), [
+                requestedId,
+              ]);
+              if (!composerId) continue;
 
-              if (!summaryCache.has(composerId)) {
+              if (!summaryCache.has(logicalId)) {
                 summaryCache.set(
-                  composerId,
+                  logicalId,
                   getGlobalComposerSummary(
                     globalDb,
                     composerId,
-                    globalBubbleCounts,
+                    activeWorkspacePath
+                      ? new Map([
+                          [
+                            composerId,
+                            countGlobalComposerBubbles(
+                              globalDb,
+                              composerId,
+                              globalCatalogBudget,
+                              options.signal ?? context.signal
+                            ),
+                          ],
+                        ])
+                      : globalBubbleCounts,
                     globalCatalogBudget,
                     options.signal ?? context.signal
                   )
                 );
               }
 
-              const summary = summaryCache.get(composerId);
+              const summary = summaryCache.get(logicalId);
               if (!summary) {
                 continue;
               }
 
-              candidate.existingIds.add(summary.id);
-              seenIds?.add(summary.id);
-              recoveredIds.add(summary.id);
-              allSessions.push({
+              candidate.existingIds.add(logicalId);
+              seenIds?.add(logicalId);
+              recoveredIds.add(logicalId);
+              const recoveredSummary: ChatSessionSummary = {
                 id: summary.id,
                 index: 0,
                 title: summary.title,
@@ -3859,7 +4690,43 @@ export async function listSessions(
                 workspaceId: candidate.workspace.id,
                 workspacePath: contractPath(candidate.workspace.path),
                 preview: summary.preview || '(Empty session)',
-              });
+              };
+              const membershipSession: ChatSession = {
+                id: summary.id,
+                index: 0,
+                title: summary.title,
+                createdAt: summary.createdAt,
+                createdAtSource: summary.createdAtSource,
+                lastUpdatedAt: summary.lastUpdatedAt,
+                lastUpdatedAtSource: summary.lastUpdatedAtSource,
+                messageCount: summary.messageCount,
+                messages: [],
+                workspaceId: candidate.workspace.id,
+                workspacePath: contractPath(candidate.workspace.path),
+                source: 'global',
+                resolvedSource: 'composer',
+                sources: ['composer'],
+                resolutionState: 'complete',
+                messageIdentityVersion: 1,
+              };
+              allSessions.push(recoveredSummary);
+              composerCandidatesById.set(logicalId, [
+                {
+                  summary: recoveredSummary,
+                  session: membershipSession,
+                  workspace: candidate.workspace,
+                  membershipOnly: true,
+                },
+              ]);
+              composerGlobalCandidatesById.set(logicalId, [
+                projectGlobalComposerCandidate(
+                  composerId,
+                  summary,
+                  contractPath(candidate.workspace.path)
+                ),
+              ]);
+              globalPrimaryIds.add(logicalId);
+              preferredGlobalIdsById.set(logicalId, composerId);
             }
 
             if (candidate.includeWorkspaceLinked && !activeWorkspacePath) {
@@ -3871,13 +4738,14 @@ export async function listSessions(
                 globalCatalogBudget,
                 options.signal ?? context.signal
               )) {
-                if (candidate.existingIds.has(summary.id)) continue;
-                if (seenIds?.has(summary.id)) continue;
-                if (recoveredIds.has(summary.id)) continue;
+                const logicalId = logicalSessionIdKey(summary.id);
+                if (candidate.existingIds.has(logicalId)) continue;
+                if (seenIds?.has(logicalId)) continue;
+                if (recoveredIds.has(logicalId)) continue;
 
-                candidate.existingIds.add(summary.id);
-                seenIds?.add(summary.id);
-                recoveredIds.add(summary.id);
+                candidate.existingIds.add(logicalId);
+                seenIds?.add(logicalId);
+                recoveredIds.add(logicalId);
                 allSessions.push({
                   id: summary.id,
                   index: 0,
@@ -3900,41 +4768,30 @@ export async function listSessions(
           // global record). Only on the unfiltered listing, where `seenIds` tracks
           // everything already shown.
           if (seenIds && !activeWorkspacePath) {
+            const recordsByLogicalId = new Map<string, GlobalComposerRecord[]>();
             for (const record of globalComposerRecords) {
-              if (seenIds.has(record.id) || recoveredIds.has(record.id)) continue;
-
-              // Use the precomputed bubble counts and skip the per-composer
-              // first-bubble preview query so the catch-all stays ~one scan total
-              // even when hundreds of composers are unattributed.
-              const summary = buildGlobalComposerSummary(
-                globalDb,
-                record.id,
-                record.data,
-                {
-                  bubbleCount: globalBubbleCounts.get(record.id) ?? 0,
-                  includePreview: false,
-                },
-                globalCatalogBudget,
-                options.signal ?? context.signal
-              );
-              if (!summary) continue;
-
-              seenIds.add(summary.id);
-              recoveredIds.add(summary.id);
-              const derivedPath = workspacePathFromComposer(record.data);
-              allSessions.push({
-                id: summary.id,
-                index: 0,
-                title: summary.title,
-                createdAt: summary.createdAt,
-                createdAtSource: summary.createdAtSource,
-                lastUpdatedAt: summary.lastUpdatedAt,
-                lastUpdatedAtSource: summary.lastUpdatedAtSource,
-                messageCount: summary.messageCount,
-                workspaceId: 'global',
-                workspacePath: derivedPath ? contractPath(derivedPath) : '(global)',
-                preview: summary.preview || '(Empty session)',
-              });
+              const logicalId = logicalSessionIdKey(record.id);
+              const grouped = recordsByLogicalId.get(logicalId) ?? [];
+              grouped.push(record);
+              recordsByLogicalId.set(logicalId, grouped);
+            }
+            for (const [logicalId, records] of recordsByLogicalId) {
+              if (seenIds.has(logicalId) || recoveredIds.has(logicalId)) continue;
+              if (
+                !registerGlobalOnlyComposer(
+                  globalDb,
+                  logicalId,
+                  records,
+                  globalBubbleCounts,
+                  globalIdSpellings,
+                  globalCatalogBudget,
+                  globalDbPath
+                )
+              ) {
+                continue;
+              }
+              seenIds.add(logicalId);
+              recoveredIds.add(logicalId);
             }
           }
         }
@@ -3948,10 +4805,11 @@ export async function listSessions(
   }
 
   // Backups carry the Composer global database as a separate archive entry.
-  // Its UUID/bubble presence is metadata needed to classify an already
-  // selected workspace row; inspect it before replica arbitration without
-  // decoding conversation content.
-  if (backupPath && composerCandidatesById.size > 0) {
+  // In an unfiltered read it is both (a) metadata used to classify workspace
+  // rows and (b) a conversation carrier of last resort. Some Cursor versions
+  // create global Composer records without any workspace row or pointer, so a
+  // candidate-only pass would make those sessions disappear from the archive.
+  if (backupPath && !activeWorkspacePath) {
     let backupGlobalDb: Database | null = null;
     let backupGlobalReadError: unknown;
     try {
@@ -3968,17 +4826,125 @@ export async function listSessions(
         const backupCatalogBudget = createComposerSqliteBudget(
           context.sourceReadLimits ?? SOURCE_READ_LIMITS_V1_DEFAULTS
         );
-        for (const composerId of composerCandidatesById.keys()) {
-          if (
-            countGlobalComposerBubbles(
-              backupGlobalDb,
-              composerId,
-              backupCatalogBudget,
-              options.signal ?? context.signal
-            ) > 0
-          ) {
-            globalPrimaryIds.add(composerId);
+        const globalComposerRecords = loadGlobalComposerRecords(
+          backupGlobalDb,
+          backupCatalogBudget,
+          options.signal ?? context.signal
+        );
+        const globalBubbleCounts = loadGlobalBubbleCounts(
+          backupGlobalDb,
+          backupCatalogBudget,
+          options.signal ?? context.signal
+        );
+        const globalIdSpellings = loadGlobalComposerIdSpellings(
+          backupGlobalDb,
+          backupCatalogBudget,
+          options.signal ?? context.signal
+        );
+        for (const logicalId of composerCandidatesById.keys()) {
+          const candidates = composerCandidatesById.get(logicalId)!;
+          const exactIds = globalIdSpellings.get(logicalId) ?? [];
+          const exactWithPayload = exactIds.filter(
+            (exactId) => (globalBubbleCounts.get(exactId) ?? 0) > 0
+          );
+          const composerId = selectGlobalComposerSpelling(
+            exactWithPayload,
+            candidates.map(({ summary }) => summary.id)
+          );
+          if (!composerId) continue;
+          const bubbleCount = globalBubbleCounts.get(composerId) ?? 0;
+          globalPrimaryIds.add(logicalId);
+          preferredGlobalIdsById.set(logicalId, composerId);
+          {
+            const globalCandidates: ComposerGlobalCandidate[] = [];
+            const workspacePath = candidates[0]?.summary.workspacePath ?? '(global)';
+            if (exactIds.length === 1) {
+              const globalSummary =
+                getGlobalComposerSummary(
+                  backupGlobalDb,
+                  composerId,
+                  globalBubbleCounts,
+                  backupCatalogBudget,
+                  options.signal ?? context.signal
+                ) ??
+                buildGlobalComposerSummary(
+                  backupGlobalDb,
+                  composerId,
+                  {},
+                  { bubbleCount },
+                  backupCatalogBudget,
+                  options.signal ?? context.signal
+                );
+              if (globalSummary) {
+                globalCandidates.push(
+                  projectGlobalComposerCandidate(composerId, globalSummary, workspacePath)
+                );
+              }
+            } else {
+              for (const exactId of exactIds) {
+                const session = loadExactGlobalComposerSession(
+                  backupGlobalDb,
+                  exactId,
+                  workspacePath,
+                  backupCatalogBudget,
+                  options.signal ?? context.signal
+                );
+                if (session) globalCandidates.push({ exactId, session });
+              }
+            }
+            if (globalCandidates.length > 0) {
+              composerGlobalCandidatesById.set(logicalId, globalCandidates);
+            }
           }
+          if (!candidates.every(({ membershipOnly }) => membershipOnly)) continue;
+          const globalSummary = getGlobalComposerSummary(
+            backupGlobalDb,
+            composerId,
+            new Map([[composerId, bubbleCount]]),
+            backupCatalogBudget,
+            options.signal ?? context.signal
+          );
+          if (!globalSummary) continue;
+          // The manifest pointer supplies workspace attribution while the unscoped global carrier
+          // supplies the complete title/timestamps/preview. Reuse one membership row as the
+          // logical candidate; hydration still occurs through the global database in getSession().
+          const preferred = candidates[0]!;
+          preferred.summary.title = globalSummary.title;
+          preferred.summary.createdAt = globalSummary.createdAt;
+          preferred.summary.createdAtSource = globalSummary.createdAtSource;
+          preferred.summary.lastUpdatedAt = globalSummary.lastUpdatedAt;
+          preferred.summary.lastUpdatedAtSource = globalSummary.lastUpdatedAtSource;
+          preferred.summary.messageCount = globalSummary.messageCount;
+          preferred.summary.preview = globalSummary.preview || '(Empty session)';
+        }
+
+        const admittedIds = new Set([
+          ...composerCandidatesById.keys(),
+          ...allSessions.map(({ id }) => logicalSessionIdKey(id)),
+        ]);
+        const recordsByLogicalId = new Map<string, GlobalComposerRecord[]>();
+        for (const record of globalComposerRecords) {
+          const logicalId = logicalSessionIdKey(record.id);
+          const grouped = recordsByLogicalId.get(logicalId) ?? [];
+          grouped.push(record);
+          recordsByLogicalId.set(logicalId, grouped);
+        }
+        for (const [logicalId, records] of recordsByLogicalId) {
+          if (admittedIds.has(logicalId)) continue;
+          if (
+            !registerGlobalOnlyComposer(
+              backupGlobalDb,
+              logicalId,
+              records,
+              globalBubbleCounts,
+              globalIdSpellings,
+              backupCatalogBudget,
+              'globalStorage/state.vscdb'
+            )
+          ) {
+            continue;
+          }
+          admittedIds.add(logicalId);
         }
       }
     } catch (error) {
@@ -3997,15 +4963,20 @@ export async function listSessions(
   // order of newly introduced Store-only rows depend on physical discovery.
   const v016ComposerDiscoveryOrder = new Map<string, number>();
   for (const summary of allSessions) {
-    if (!v016ComposerDiscoveryOrder.has(summary.id)) {
-      v016ComposerDiscoveryOrder.set(summary.id, v016ComposerDiscoveryOrder.size);
+    const logicalId = logicalSessionIdKey(summary.id);
+    if (!v016ComposerDiscoveryOrder.has(logicalId)) {
+      v016ComposerDiscoveryOrder.set(logicalId, v016ComposerDiscoveryOrder.size);
     }
   }
 
   const composerReplicaIds = new Set(composerCandidatesById.keys());
-  const nonReplicaComposerRows = allSessions.filter(({ id }) => !composerReplicaIds.has(id));
+  const nonReplicaComposerRows = allSessions.filter(
+    ({ id }) => !composerReplicaIds.has(logicalSessionIdKey(id))
+  );
   const composerRows = await reconcileComposerRows(
     composerCandidatesById,
+    composerGlobalCandidatesById,
+    preferredGlobalIdsById,
     globalPrimaryIds,
     context.includeCrossWorkspaceSources ? new Map() : omittedComposerWorkspacesById,
     activeWorkspacePath ? 'workspace' : 'global',
@@ -4013,10 +4984,57 @@ export async function listSessions(
     workspaceScopeResult?.kind === 'matched' ? workspaceScopeResult.matchKind : undefined,
     `${context.io.dataSourceIdentity}:${activeWorkspacePath ?? 'global'}`
   );
+  const composerAmbiguousIds = new Set(
+    composerRows.ambiguous.map(({ id }) => logicalSessionIdKey(id))
+  );
+  if (scopedBackupGlobalSessionIds.size > 0 || scopedLegacyBackupGlobalMembershipUnknown) {
+    for (const summary of composerRows.resolved) {
+      if (
+        !scopedLegacyBackupGlobalMembershipUnknown &&
+        !scopedBackupGlobalSessionIds.has(logicalSessionIdKey(summary.id))
+      ) {
+        continue;
+      }
+      summary.resolutionState = 'partial';
+      summary.source = 'workspace-fallback';
+      summary.resolution = mergeSessionResolutions(summary.resolution, {
+        state: 'partial',
+        expectedSourceRoles: ['composer'],
+        loadedSourceRoles: ['composer'],
+        omittedSourceRoles: ['composer'],
+        failedSourceRoles: [],
+        reasonCodes: ['workspace-scope-omitted'],
+      });
+      const alreadyDisclosed = summary.sourceInstances?.some(
+        ({ representation }) => representation === 'composer-global'
+      );
+      if (!alreadyDisclosed) {
+        summary.sourceInstances = [
+          ...(summary.sourceInstances ?? []),
+          {
+            sourceRole: 'composer',
+            representation: 'composer-global',
+            workspacePaths: activeWorkspacePath ? [activeWorkspacePath] : [],
+            state: 'omitted-by-scope',
+          },
+        ];
+      }
+    }
+  }
   const boundComposerWorkspaces = privateReadState(context).boundComposerWorkspaceBySession;
   boundComposerWorkspaces.clear();
   for (const [sessionId, workspace] of composerRows.selectedWorkspaces) {
-    boundComposerWorkspaces.set(sessionId, workspace);
+    boundComposerWorkspaces.set(logicalSessionIdKey(sessionId), workspace);
+  }
+  const boundComposerWorkspaceIds = privateReadState(context).boundComposerWorkspaceIdBySession;
+  boundComposerWorkspaceIds.clear();
+  for (const [sessionId, exactId] of composerRows.selectedWorkspaceIds) {
+    boundComposerWorkspaceIds.set(logicalSessionIdKey(sessionId), exactId);
+  }
+  const boundComposerGlobalIds = privateReadState(context).boundComposerGlobalIdBySession;
+  boundComposerGlobalIds.clear();
+  for (const [sessionId, exactId] of composerRows.selectedGlobalIds) {
+    boundComposerGlobalIds.set(logicalSessionIdKey(sessionId), exactId);
   }
   allSessions.splice(0, allSessions.length, ...nonReplicaComposerRows, ...composerRows.resolved);
   const storeAmbiguousRows: AmbiguousSessionSummary[] = [];
@@ -4027,13 +5045,13 @@ export async function listSessions(
   // Skipped in backup mode: backups capture vscdb, not the live ~/.cursor tree.
   if (!backupPath) {
     const selectedLogicalIds = new Set([
-      ...allSessions.map((session) => session.id),
+      ...allSessions.map((session) => logicalSessionIdKey(session.id)),
       ...selectedStoreIds,
     ]);
     bindStoreOccurrences(context, storeCatalogSessions, selectedLogicalIds, activeWorkspacePath);
     await hydrateSelectedStoreDisplayMetadata(context, storeCatalogSessions, customDataPath);
     for (const session of storeCatalogSessions) {
-      if (selectedLogicalIds.has(session.id)) {
+      if (selectedLogicalIds.has(logicalSessionIdKey(session.id))) {
         projectBoundStoreScope(context, session, activeWorkspacePath);
       }
     }
@@ -4042,7 +5060,10 @@ export async function listSessions(
     const storeSessions = storeCatalogSessions;
     const storeAmbiguousIds = new Set<string>();
     for (const session of storeSessions) {
-      const bound = privateReadState(context).boundStoreOccurrencesBySession.get(session.id) ?? [];
+      const bound =
+        privateReadState(context).boundStoreOccurrencesBySession.get(
+          logicalSessionIdKey(session.id)
+        ) ?? [];
       const dbCount = bound.filter(({ representation }) => representation === 'store-db').length;
       const transcriptCount = bound.filter(
         ({ representation }) => representation === 'store-transcript'
@@ -4057,7 +5078,7 @@ export async function listSessions(
             new Set([session.id]),
             'payload'
           )
-        ).find(({ id }) => id === session.id);
+        ).find(({ id }) => sessionIdsEqual(id, session.id));
         if (!reconciled) continue;
         session.sourceInstances = reconciled.sourceInstances;
         session.workspaceMemberships = reconciled.workspaceMemberships;
@@ -4066,11 +5087,11 @@ export async function listSessions(
       } catch (error) {
         if (!(error instanceof SessionAmbiguityError)) throw error;
         storeAmbiguousIds.add(session.id);
-        const composer = allSessions.find(({ id }) => id === session.id);
+        const composer = allSessions.find(({ id }) => sessionIdsEqual(id, session.id));
         allSessions.splice(
           0,
           allSessions.length,
-          ...allSessions.filter(({ id }) => id !== session.id)
+          ...allSessions.filter(({ id }) => !sessionIdsEqual(id, session.id))
         );
         storeAmbiguousRows.push({
           id: session.id,
@@ -4090,15 +5111,20 @@ export async function listSessions(
         });
       }
     }
-    const storeSeenIds = new Set(allSessions.map((session) => session.id));
+    const storeSeenIds = new Set(allSessions.map((session) => logicalSessionIdKey(session.id)));
     // Conflict priority for sessions present in BOTH stacks (same ID).
     const preferredSource = detectPreferredStackSource(customDataPath);
     for (const ss of storeSessions) {
-      if (storeAmbiguousIds.has(ss.id)) continue;
+      const logicalStoreId = logicalSessionIdKey(ss.id);
+      // One logical UUID owns one catalog row. A divergent Composer replica group remains
+      // ambiguous even when Store has a usable counterpart; never append a second Store row that
+      // would make direct lookup/index addressing depend on which row the caller encounters.
+      if (composerAmbiguousIds.has(logicalStoreId)) continue;
+      if ([...storeAmbiguousIds].some((id) => logicalSessionIdKey(id) === logicalStoreId)) continue;
       const storeMatchesScope = activeWorkspacePath
         ? storeMatchesWorkspace(ss, activeWorkspacePath)
         : true;
-      const composerSelected = storeSeenIds.has(ss.id);
+      const composerSelected = storeSeenIds.has(logicalStoreId);
       if (activeWorkspacePath && !storeMatchesScope && !composerSelected) continue;
 
       // Same ID in both stacks → merge scalar metadata and mark merged instead
@@ -4108,26 +5134,29 @@ export async function listSessions(
       // requested workspace, while transcript-only Store metadata may not
       // contain a cwd at all.
       if (composerSelected) {
-        const existingSummaries = allSessions.filter((s) => s.id === ss.id);
+        const existingSummaries = allSessions.filter((s) => sessionIdsEqual(s.id, ss.id));
         for (const existing of existingSummaries) {
+          // Composer is the compatibility authority for a cross-stack UUID; Store enrichment
+          // must not replace its source-native spelling merely because case differs.
+          const storeForMerge = { ...ss, id: existing.id };
           if (!activeWorkspacePath || storeMatchesScope || context.includeCrossWorkspaceSources) {
             applyStoreMergeToSummary(
               existing,
               {
-                id: ss.id,
-                title: ss.title,
-                createdAt: ss.createdAt,
-                createdAtSource: ss.createdAtSource,
-                lastUpdatedAt: ss.lastUpdatedAt,
-                lastUpdatedAtSource: ss.lastUpdatedAtSource,
-                directMessages: ss.messages,
-                workspacePath: ss.workspacePath,
-                messageCount: ss.messages.length,
-                source: ss.source,
-                resolution: ss.resolution,
-                transcriptState: ss.transcriptState,
-                sourceInstances: ss.sourceInstances,
-                workspaceMemberships: ss.workspaceMemberships,
+                id: storeForMerge.id,
+                title: storeForMerge.title,
+                createdAt: storeForMerge.createdAt,
+                createdAtSource: storeForMerge.createdAtSource,
+                lastUpdatedAt: storeForMerge.lastUpdatedAt,
+                lastUpdatedAtSource: storeForMerge.lastUpdatedAtSource,
+                directMessages: storeForMerge.messages,
+                workspacePath: storeForMerge.workspacePath,
+                messageCount: storeForMerge.messages.length,
+                source: storeForMerge.source,
+                resolution: storeForMerge.resolution,
+                transcriptState: storeForMerge.transcriptState,
+                sourceInstances: storeForMerge.sourceInstances,
+                workspaceMemberships: storeForMerge.workspaceMemberships,
               },
               preferredSource
             );
@@ -4137,7 +5166,7 @@ export async function listSessions(
         }
         continue;
       }
-      storeSeenIds.add(ss.id);
+      storeSeenIds.add(logicalStoreId);
       const storeSummary: ChatSessionSummary = {
         id: ss.id,
         index: 0,
@@ -4182,20 +5211,20 @@ export async function listSessions(
       };
       markComposerContributorOmittedByScope(
         storeSummary,
-        omittedComposerWorkspacesById.get(ss.id) ?? []
+        omittedComposerWorkspacesById.get(logicalStoreId) ?? []
       );
-      if (omittedGlobalComposerIds.has(ss.id)) {
+      if (omittedGlobalComposerIds.has(logicalStoreId)) {
         markGlobalComposerContributorUnavailable(
           storeSummary,
           'omitted-by-scope',
-          globalComposerWorkspacePaths.get(ss.id)
+          globalComposerWorkspacePaths.get(logicalStoreId)
         );
       }
-      if (failedGlobalComposerIds.has(ss.id)) {
+      if (failedGlobalComposerIds.has(logicalStoreId)) {
         markGlobalComposerContributorUnavailable(
           storeSummary,
           'failed',
-          globalComposerWorkspacePaths.get(ss.id)
+          globalComposerWorkspacePaths.get(logicalStoreId)
         );
       }
       allSessions.push(storeSummary);
@@ -4223,19 +5252,21 @@ export async function listSessions(
     ...allSessions.map((row) => ({ row, timestamp: row.createdAt.getTime() })),
     ...composerRows.ambiguous.map((row) => ({
       row,
-      timestamp: ambiguityTimes.get(row.id) ?? 0,
+      timestamp: ambiguityTimes.get(logicalSessionIdKey(row.id)) ?? 0,
     })),
     ...storeAmbiguousRows.map((row) => ({
       row,
-      timestamp: storeCatalogSessions.find(({ id }) => id === row.id)?.createdAt.getTime() ?? 0,
+      timestamp:
+        storeCatalogSessions.find(({ id }) => sessionIdsEqual(id, row.id))?.createdAt.getTime() ??
+        0,
     })),
   ];
   logicalRows.sort((left, right) => {
     const byTimestamp = right.timestamp - left.timestamp;
     if (byTimestamp !== 0) return byTimestamp;
 
-    const leftComposerOrder = v016ComposerDiscoveryOrder.get(left.row.id);
-    const rightComposerOrder = v016ComposerDiscoveryOrder.get(right.row.id);
+    const leftComposerOrder = v016ComposerDiscoveryOrder.get(logicalSessionIdKey(left.row.id));
+    const rightComposerOrder = v016ComposerDiscoveryOrder.get(logicalSessionIdKey(right.row.id));
     if (leftComposerOrder !== undefined && rightComposerOrder !== undefined) {
       return leftComposerOrder - rightComposerOrder;
     }
@@ -4378,7 +5409,7 @@ export async function listWorkspaces(
         );
         if (
           composerWorkspace &&
-          getCountedComposerSessionIds(composerWorkspace)?.has(storeSession.id)
+          getCountedComposerSessionIds(composerWorkspace)?.has(logicalSessionIdKey(storeSession.id))
         ) {
           continue;
         }
@@ -4459,7 +5490,7 @@ export async function getSession(
       typeof identifier === 'string'
         ? operationContext.summaries.find(
             (s) =>
-              s.id === identifier &&
+              sessionIdsEqual(s.id, identifier) &&
               (summaryIndexHint === undefined || s.index === summaryIndexHint)
           )
         : operationContext.summaries.find((s) => s.index === identifier);
@@ -4481,7 +5512,7 @@ export async function getSession(
       typeof identifier === 'string'
         ? summaries.find(
             (s) =>
-              s.id === identifier &&
+              sessionIdsEqual(s.id, identifier) &&
               (summaryIndexHint === undefined || s.index === summaryIndexHint)
           )
         : summaries.find((s) => s.index === identifier);
@@ -4490,7 +5521,9 @@ export async function getSession(
     const ambiguous = operationContext.logicalSummaries?.find(
       (row): row is AmbiguousSessionSummary =>
         row.resolutionState === 'ambiguous' &&
-        (typeof identifier === 'string' ? row.id === identifier : row.index === identifier)
+        (typeof identifier === 'string'
+          ? sessionIdsEqual(row.id, identifier)
+          : row.index === identifier)
     );
     if (ambiguous) {
       throw new SessionAmbiguityError(ambiguous.id, ambiguous.diagnosticOccurrenceRefs);
@@ -4499,7 +5532,7 @@ export async function getSession(
   }
 
   const index = summary.index;
-  const resolutionKey = `${summary.id}\0${summary.index}`;
+  const resolutionKey = `${logicalSessionIdKey(summary.id)}\0${summary.index}`;
   if (operationContext.completedSessions.has(resolutionKey)) {
     const completed = operationContext.completedSessions.get(resolutionKey) ?? null;
     operationContext.completedSessions.delete(resolutionKey);
@@ -4590,7 +5623,7 @@ async function resolveFinalSession(
         new Set([summary.id]),
         'payload'
       )
-    ).find((s) => s.id === summary.id);
+    ).find((s) => sessionIdsEqual(s.id, summary.id));
     resolved = storeSession ? mapStoreSession(storeSession, index) : null;
   } else {
     // Composer stack: global storage (full bubbles) with workspace fallback.
@@ -4658,6 +5691,7 @@ function projectSessionAddressing(session: ChatSession, summary: ChatSessionSumm
   });
   const projected: ChatSession = {
     ...session,
+    id: summary.id,
     ...(session.resolvedSource
       ? {}
       : summary.resolvedSource
@@ -4753,6 +5787,11 @@ async function loadComposerSession(
   backupPath?: string,
   context?: SessionReadContext
 ): Promise<ChatSession | null> {
+  const logicalId = logicalSessionIdKey(summary.id);
+  const boundGlobalId = context
+    ? privateReadState(context).boundComposerGlobalIdBySession.get(logicalId)
+    : undefined;
+  const globalPhysicalId = boundGlobalId ?? summary.id;
   const composerSessionBudget = createComposerSqliteBudget(
     context?.sourceReadLimits ?? SOURCE_READ_LIMITS_V1_DEFAULTS
   );
@@ -4766,21 +5805,29 @@ async function loadComposerSession(
   try {
     throwIfReadAborted(context?.signal);
     if (backupPath) {
-      try {
-        globalDb = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb', {
-          sourceReadLimits: context?.sourceReadLimits,
-          signal: context?.signal,
-          sqliteDriver: context?.sqliteDriver,
-          io: context?.io,
-          logicalSessionId: summary.id,
-        });
-      } catch (error) {
-        globalLifecycleError = error;
-        if (error instanceof BackupEntryNotFoundError) {
-          globalLoadFailed = true;
-          debugLogStorage('Global DB not present in backup; using workspace fallback.');
-        } else {
-          throw error;
+      if (context && context.workspaceScope !== null) {
+        // A backup database is one physical payload carrier. Even a UUID-selective SQL query would
+        // require materializing the complete shared global entry, so strict workspace scope must
+        // fall back to the selected workspace database without opening this archive member.
+        globalLoadFailed = true;
+        debugLogStorage('Workspace-scoped backup read omits the shared global database.');
+      } else {
+        try {
+          globalDb = await openBackupDatabase(backupPath, 'globalStorage/state.vscdb', {
+            sourceReadLimits: context?.sourceReadLimits,
+            signal: context?.signal,
+            sqliteDriver: context?.sqliteDriver,
+            io: context?.io,
+            logicalSessionId: summary.id,
+          });
+        } catch (error) {
+          globalLifecycleError = error;
+          if (error instanceof BackupEntryNotFoundError) {
+            globalLoadFailed = true;
+            debugLogStorage('Global DB not present in backup; using workspace fallback.');
+          } else {
+            throw error;
+          }
         }
       }
     } else {
@@ -4831,9 +5878,9 @@ async function loadComposerSession(
           globalLoadFailed = true;
           debugLogStorage('cursorDiskKV table not found');
         } else {
-          forEachBoundedComposerBubbleValue(
+          forEachBoundedComposerBubbleValueByExactPrefix(
             globalDb,
-            `bubbleId:${sqliteLikeLiteralPrefix(summary.id)}:%`,
+            `bubbleId:${globalPhysicalId}:`,
             composerSessionBudget,
             (row) => bubbleRows.push({ key: row.key, value: row.value }),
             context?.signal
@@ -4843,7 +5890,7 @@ async function loadComposerSession(
             const composerDataValue = readBoundedComposerValueByKey(
               globalDb,
               'cursorDiskKV',
-              `composerData:${summary.id}`,
+              `composerData:${globalPhysicalId}`,
               composerSessionBudget,
               context?.signal
             );
@@ -4934,8 +5981,11 @@ async function loadComposerSession(
 
   // Fall back to workspace storage (or use backup for backup mode)
   const boundWorkspace = context
-    ? privateReadState(context).boundComposerWorkspaceBySession.get(summary.id)
+    ? privateReadState(context).boundComposerWorkspaceBySession.get(logicalId)
     : undefined;
+  const workspacePhysicalId = context
+    ? (privateReadState(context).boundComposerWorkspaceIdBySession.get(logicalId) ?? summary.id)
+    : summary.id;
   const workspaces = boundWorkspace
     ? []
     : await getWorkspacesCached(context, customDataPath, backupPath);
@@ -4943,6 +5993,47 @@ async function loadComposerSession(
 
   if (!workspace) {
     return null;
+  }
+
+  if (
+    backupPath &&
+    context?.workspaceScope !== null &&
+    [...(getBackupLinkedGlobalSessionIds(workspace) ?? [])].some((id) =>
+      sessionIdsEqual(id, summary.id)
+    ) &&
+    ![...(getBackupComposerSessionIds(workspace) ?? [])].some((id) =>
+      sessionIdsEqual(id, summary.id)
+    )
+  ) {
+    // The native UUID is verified and addressable through manifest membership, but its complete
+    // conversation lives only in the forbidden shared global carrier. Return an honest empty
+    // partial session; do not reopen the workspace DB merely to rediscover the same pointer.
+    return {
+      id: summary.id,
+      index,
+      title: summary.title,
+      createdAt: summary.createdAt,
+      createdAtSource: summary.createdAtSource,
+      lastUpdatedAt: summary.lastUpdatedAt,
+      lastUpdatedAtSource: summary.lastUpdatedAtSource,
+      messageCount: 0,
+      messages: [],
+      workspaceId: workspace.id,
+      workspacePath: summary.workspacePath,
+      source: 'workspace-fallback',
+      resolvedSource: 'composer',
+      sources: ['composer'],
+      resolutionState: 'partial',
+      resolution: {
+        state: 'partial',
+        expectedSourceRoles: ['composer'],
+        loadedSourceRoles: ['composer'],
+        omittedSourceRoles: ['composer'],
+        failedSourceRoles: [],
+        reasonCodes: ['workspace-scope-omitted'],
+      },
+      messageIdentityVersion: 1,
+    };
   }
 
   let workspaceDb: Database | null = null;
@@ -4972,7 +6063,7 @@ async function loadComposerSession(
     if (!result) return null;
 
     const sessions = parseChatData(result.data, result.bundle);
-    const session = sessions.find((s) => s.id === summary.id);
+    const session = sessions.find((s) => s.id === workspacePhysicalId);
 
     if (!session) return null;
 
@@ -5016,12 +6107,14 @@ async function loadMergedSession(
       new Set([summary.id]),
       'payload'
     )
-  ).find((s) => s.id === summary.id);
+  ).find((s) => sessionIdsEqual(s.id, summary.id));
   const store = storeRaw ? mapStoreSession(storeRaw, index) : null;
   const composer = await loadComposerSession(summary, index, customDataPath, backupPath, context);
 
   if (composer && store) {
-    return mergeCrossStackSessions(composer, store, preferredSource, index);
+    // Composer spelling is the public compatibility authority even when Store is the preferred
+    // content backbone. Merge internals require equal IDs, so project only Store's logical ID.
+    return mergeCrossStackSessions(composer, { ...store, id: composer.id }, preferredSource, index);
   }
   const surviving = composer ?? store;
   if (!surviving) return null;
@@ -5241,9 +6334,9 @@ export async function getGlobalSession(
 
     const sessionBudget = createComposerSqliteBudget();
     const bubbleRows: BubbleRow[] = [];
-    forEachBoundedComposerBubbleValue(
+    forEachBoundedComposerBubbleValueByExactPrefix(
       db,
-      `bubbleId:${sqliteLikeLiteralPrefix(summary.id)}:%`,
+      `bubbleId:${summary.id}:`,
       sessionBudget,
       (row) => bubbleRows.push({ key: row.key, value: row.value })
     );
@@ -6470,7 +7563,7 @@ export async function resolveSessionIdentifiers(
       sessionId = session?.id;
     } else {
       // It's a session ID (UUID-like)
-      const session = summaries.find((s) => s.id === String(identifier));
+      const session = summaries.find((s) => sessionIdsEqual(s.id, String(identifier)));
       sessionId = session?.id;
     }
 

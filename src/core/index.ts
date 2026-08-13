@@ -37,6 +37,9 @@ export type {
   SourceBoundKind,
   AmbiguousSessionSummary,
   LogicalSessionSummary,
+  BackupManifest,
+  BackupComposerWorkspaceInventory,
+  BackupComposerWorkspaceInventoryEntry,
 } from './types.js';
 export type { SessionReadContext } from './storage.js';
 
@@ -76,6 +79,7 @@ export {
   NoCapableDatabaseDriverError,
   BackupPublishedPermissionError,
   BackupPublishedCleanupError,
+  BackupWorkspaceScopeMetadataError,
   RestoreRollbackError,
   TemporaryArtifactCleanupError,
   ReadContextError,

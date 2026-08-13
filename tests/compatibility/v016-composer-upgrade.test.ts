@@ -131,7 +131,32 @@ function publicSession(session: ChatSession): Session {
       ...(message.model ? { model: message.model } : {}),
     })),
     metadata: { lastModified: session.lastUpdatedAt.toISOString() },
+    ...(session.activeBranchBubbleIds
+      ? { activeBranchBubbleIds: [...session.activeBranchBubbleIds] }
+      : {}),
   };
+}
+
+/** Exact parent/leaf behavior used by the unchanged vibe-history Cursor adapter. */
+function projectLegacyActiveBranch(session: Session): {
+  leafMessageId: string | undefined;
+  parents: Map<string, string | undefined>;
+} {
+  const messages = session.messages.map((message, index) => ({
+    id: message.id ?? `msg:${String(index)}`,
+  }));
+  const bySourceId = new Map(
+    session.messages.flatMap((message, index) =>
+      message.id ? [[message.id, messages[index]!] as const] : []
+    )
+  );
+  const active = (session.activeBranchBubbleIds ?? [])
+    .map((id) => bySourceId.get(id))
+    .filter((message): message is { id: string } => message !== undefined);
+  const selected = active.length > 0 ? active : messages;
+  const parents = new Map<string, string | undefined>();
+  selected.forEach((message, index) => parents.set(message.id, selected[index - 1]?.id));
+  return { leafMessageId: selected.at(-1)?.id, parents };
 }
 
 describe('v0.16 Composer compatibility through a generic downstream contract', () => {
@@ -214,6 +239,32 @@ describe('v0.16 Composer compatibility through a generic downstream contract', (
       expect.arrayContaining(inserted.map(({ content }) => content))
     );
   });
+
+  it.each(storeFixture.preferredSourceCases)(
+    'keeps leading, middle, and trailing Store turns connected for the unchanged %s-backbone consumer',
+    (preferred) => {
+      const merged = mergeCrossStackSessions(composer, store, preferred, 1);
+      const incoming = publicSession(merged);
+      const leading = merged.messages.find(({ content }) =>
+        content.startsWith('Synthetic Store-only turn before')
+      )!;
+      const middle = merged.messages.find(
+        ({ content }) => content === 'Synthetic Store-only middle turn.'
+      )!;
+      const trailing = merged.messages.find(
+        ({ content }) => content === 'Synthetic Store collision payload.'
+      )!;
+      expect(merged.activeBranchBubbleIds).toEqual(
+        expect.arrayContaining([leading.id, middle.id, trailing.id])
+      );
+
+      const legacy = projectLegacyActiveBranch(incoming);
+      expect(legacy.parents.get(leading.id!)).toBeUndefined();
+      expect(legacy.parents.get(middle.id!)).toBeDefined();
+      expect(legacy.parents.get(trailing.id!)).toBeDefined();
+      expect(legacy.leafMessageId).toBe(trailing.id);
+    }
+  );
 
   it('rejects a degraded projection without mutating the pinned complete view', () => {
     const complete = publicSession(mergeCrossStackSessions(composer, store, 'store', 1));

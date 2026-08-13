@@ -105,6 +105,23 @@ function groupFor(
 }
 
 describe('metadata-only session catalog', () => {
+  it('folds only UUID spelling case and leaves arbitrary IDs distinct', () => {
+    const uuidUpper = 'AAAAAAAA-0000-4000-8000-000000000016';
+    const uuidLower = uuidUpper.toLowerCase();
+    const catalog = buildSessionCatalog([
+      makeInstance('uuid-upper', { sessionId: uuidUpper }),
+      makeInstance('uuid-lower', { sessionId: uuidLower }),
+      makeInstance('legacy-upper', { sessionId: 'Legacy-Session' }),
+      makeInstance('legacy-lower', { sessionId: 'legacy-session' }),
+    ]);
+
+    expect(catalog).toHaveLength(3);
+    expect(catalog.filter(({ id }) => id === uuidUpper || id === uuidLower)).toHaveLength(1);
+    expect(catalog.map(({ id }) => id)).toEqual(
+      expect.arrayContaining(['Legacy-Session', 'legacy-session'])
+    );
+  });
+
   it('groups by UUID, role, representation, and fidelity without hydrating payloads', () => {
     const loaders = Array.from({ length: 6 }, () => vi.fn(async () => basePayload));
     const catalog = buildSessionCatalog(

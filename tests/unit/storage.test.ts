@@ -173,7 +173,10 @@ function createGlobalDbForComposerMap(
         return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
       }
 
-      if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+      if (
+        sql.includes('length(CAST(value AS BLOB))') &&
+        (sql.includes('WHERE key LIKE ?') || sql.includes('substr(CAST(cursorDiskKV.key AS BLOB)'))
+      ) {
         const matchingRows = (pattern?: string) => {
           const prefix = String(pattern ?? '').replace(/%$/u, '');
           return Object.entries(composerMap).flatMap(([composerId, entry]) => {
@@ -996,7 +999,9 @@ describe('listSessions', () => {
       runSQL: vi.fn(),
       close: vi.fn(),
     };
-    vi.mocked(openBackupDatabase).mockResolvedValue(db);
+    vi.mocked(openBackupDatabase)
+      .mockResolvedValueOnce(db)
+      .mockRejectedValueOnce(new BackupEntryNotFoundError('globalStorage/state.vscdb'));
     const context = createSessionReadContext(undefined, '/backup.zip');
     context.workspaces = [
       {
@@ -1988,10 +1993,10 @@ describe('listSessions', () => {
 });
 
 describe('SessionReadContext final session cache', () => {
-  function backupComposerContext(sessionId: string, signal?: AbortSignal) {
+  function backupComposerContext(sessionId: string, signal?: AbortSignal, workspaceScoped = true) {
     const context = createSessionReadContext({
       backupPath: '/backup.zip',
-      workspacePath: '/work/a',
+      ...(workspaceScoped ? { workspacePath: '/work/a' } : {}),
       ...(signal ? { signal } : {}),
     });
     context.workspaces = [
@@ -2029,27 +2034,50 @@ describe('SessionReadContext final session cache', () => {
       controller.abort(primary);
       return db;
     });
-    const context = backupComposerContext(sessionId, controller.signal);
+    const context = backupComposerContext(sessionId, controller.signal, false);
 
     await expect(getSession(sessionId, undefined, '/backup.zip', context)).rejects.toBe(primary);
     expect(db.close).toHaveBeenCalledOnce();
   });
 
-  it('allows only an absent optional global entry to use the backup workspace fallback', async () => {
+  it('skips scoped global carriers and allows only an absent unscoped global entry to fall back', async () => {
     const sessionId = 'aaaaaaaa-0000-0000-0000-000000000087';
-    const missing = new BackupEntryNotFoundError('globalStorage/state.vscdb');
     const workspaceDb = createWorkspaceDb(
       JSON.stringify({
         allComposers: [{ composerId: sessionId, name: 'Workspace fallback', createdAt: 1000 }],
       })
     );
-    vi.mocked(openBackupDatabase).mockRejectedValueOnce(missing).mockResolvedValueOnce(workspaceDb);
-    const context = backupComposerContext(sessionId);
+    vi.mocked(openBackupDatabase).mockResolvedValueOnce(workspaceDb);
+    const scopedContext = backupComposerContext(sessionId);
 
-    await expect(getSession(sessionId, undefined, '/backup.zip', context)).resolves.toMatchObject({
-      id: sessionId,
-      source: 'workspace-fallback',
-    });
+    await expect(
+      getSession(sessionId, undefined, '/backup.zip', scopedContext)
+    ).resolves.toMatchObject({ id: sessionId, source: 'workspace-fallback' });
+    expect(openBackupDatabase).toHaveBeenNthCalledWith(
+      1,
+      '/backup.zip',
+      'workspaceStorage/workspace-a/state.vscdb',
+      expect.any(Object)
+    );
+    expect(openBackupDatabase).not.toHaveBeenCalledWith(
+      '/backup.zip',
+      'globalStorage/state.vscdb',
+      expect.any(Object)
+    );
+
+    vi.mocked(openBackupDatabase).mockClear();
+    const missing = new BackupEntryNotFoundError('globalStorage/state.vscdb');
+    vi.mocked(openBackupDatabase).mockRejectedValueOnce(missing).mockResolvedValueOnce(workspaceDb);
+    const unscopedContext = backupComposerContext(sessionId, undefined, false);
+    await expect(
+      getSession(sessionId, undefined, '/backup.zip', unscopedContext)
+    ).resolves.toMatchObject({ id: sessionId, source: 'workspace-fallback' });
+    expect(openBackupDatabase).toHaveBeenNthCalledWith(
+      1,
+      '/backup.zip',
+      'globalStorage/state.vscdb',
+      expect.any(Object)
+    );
     expect(openBackupDatabase).toHaveBeenNthCalledWith(
       2,
       '/backup.zip',
@@ -2057,11 +2085,12 @@ describe('SessionReadContext final session cache', () => {
       expect.any(Object)
     );
 
+    vi.mocked(openBackupDatabase).mockClear();
     const ioFailure = Object.assign(new Error('synthetic global backup I/O failure'), {
       code: 'EIO',
     });
     vi.mocked(openBackupDatabase).mockRejectedValueOnce(ioFailure);
-    const failedContext = backupComposerContext(sessionId);
+    const failedContext = backupComposerContext(sessionId, undefined, false);
     await expect(getSession(sessionId, undefined, '/backup.zip', failedContext)).rejects.toBe(
       ioFailure
     );
@@ -3099,6 +3128,29 @@ describe('resolveSessionIdentifiers', () => {
     expect(result).toEqual(['uuid-def']);
   });
 
+  it('resolves UUID letter case without normalizing the observed public spelling', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+    const nativeId = 'AAAAAAAA-0000-4000-8000-000000000016';
+    mockOpenDatabase.mockResolvedValue(
+      createWorkspaceDb(
+        JSON.stringify({ allComposers: [{ composerId: nativeId, createdAt: 1000 }] })
+      )
+    );
+
+    await expect(resolveSessionIdentifiers(nativeId.toLowerCase(), '/data')).resolves.toEqual([
+      nativeId,
+    ]);
+  });
+
+  it('does not case-fold arbitrary non-UUID session identifiers', async () => {
+    setupSessions();
+    await expect(resolveSessionIdentifiers('UUID-DEF', '/data')).rejects.toThrow();
+  });
+
   it('resolves comma-separated', async () => {
     setupSessions();
     const result = await resolveSessionIdentifiers('1, 2', '/data');
@@ -3242,7 +3294,11 @@ describe('getGlobalSession', () => {
             run: vi.fn(),
           };
         }
-        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+        if (
+          sql.includes('length(CAST(value AS BLOB))') &&
+          (sql.includes('WHERE key LIKE ?') ||
+            sql.includes('substr(CAST(cursorDiskKV.key AS BLOB)'))
+        ) {
           const matchingRows = (pattern?: string) =>
             String(pattern).startsWith('composerData:')
               ? [{ key: 'composerData:g1', value: composerValue }]

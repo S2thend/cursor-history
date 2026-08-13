@@ -38,6 +38,15 @@ export function sqliteLikeLiteralPrefix(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 }
 
+/**
+ * SQLite's `LIKE` operator folds ASCII case by default. Selected-session reads
+ * therefore use this byte-prefix predicate instead of LIKE so native Cursor
+ * IDs that differ only by case cannot share payload rows.
+ */
+function exactBlobPrefixPredicate(qualifiedKey: string): string {
+  return `${qualifiedKey} IS NOT NULL AND substr(CAST(${qualifiedKey} AS BLOB), 1, length(CAST(? AS BLOB))) = CAST(? AS BLOB)`;
+}
+
 interface InternalComposerSqliteMetadata extends ComposerSqliteMetadata {
   /** Compatibility for historical in-repo database test doubles only. */
   readonly inlineValue?: unknown;
@@ -182,7 +191,7 @@ export function getBoundedComposerMetadataByKey(
   throwIfAborted(signal);
   const raw = db
     .prepare(
-      `SELECT CAST(rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key = ? AND value IS NOT NULL`
+      `SELECT CAST(rowid AS TEXT) AS rowId, key, length(CAST(value AS BLOB)) AS byteLength FROM ${table} WHERE key = ? COLLATE BINARY AND value IS NOT NULL`
     )
     .get(key) as Record<string, unknown> | undefined;
   if (!raw) return undefined;
@@ -275,6 +284,46 @@ export function forEachBoundedComposerBubbleMetadata(
   }
 }
 
+/** Iterate nullable global bubbles for one exact, case-sensitive byte prefix. */
+export function forEachBoundedComposerBubbleMetadataByExactPrefix(
+  db: Database,
+  keyPrefix: string,
+  budget: SqliteSourceReadBudget,
+  visit: (metadata: ComposerSqliteBubbleMetadata) => void,
+  signal?: AbortSignal
+): void {
+  const pageRows = budget.limits.sqlitePageRows;
+  let afterRowId: number | bigint | null = null;
+  while (true) {
+    throwIfAborted(signal);
+    const rawPage = db
+      .prepare(
+        `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactBlobPrefixPredicate('cursorDiskKV.key')} AND (? IS NULL OR cursorDiskKV.rowid > ?) ORDER BY cursorDiskKV.rowid ASC LIMIT ?`
+      )
+      .all(keyPrefix, keyPrefix, afterRowId, afterRowId, pageRows) as Array<
+      Record<string, unknown>
+    >;
+    if (rawPage.length === 0) break;
+
+    const fallbackBase: number =
+      typeof afterRowId === 'number' && Number.isSafeInteger(afterRowId) ? afterRowId : -1;
+    const page = rawPage.map((row, index) =>
+      normalizeBubbleMetadata(row, undefined, fallbackBase + index + 1)
+    );
+    budget.admitMetadataPage(page.map(({ byteLength }) => byteLength));
+    for (const metadata of page) {
+      throwIfAborted(signal);
+      visit(metadata);
+    }
+
+    const legacyInlinePage = rawPage.some(
+      (row) => row['rowId'] === undefined && row['byteLength'] === undefined
+    );
+    if (legacyInlinePage || rawPage.length < pageRows) break;
+    afterRowId = page[page.length - 1]!.rowId;
+  }
+}
+
 function readAdmittedComposerValue(
   db: Database,
   table: ComposerKeyValueTable,
@@ -291,7 +340,7 @@ function readAdmittedComposerValue(
   } else {
     const row = db
       .prepare(
-        `SELECT key, CAST(value AS BLOB) AS value FROM ${table} WHERE ${table}.rowid = ? AND key = ?`
+        `SELECT key, CAST(value AS BLOB) AS value FROM ${table} WHERE ${table}.rowid = ? AND key = ? COLLATE BINARY`
       )
       .get(metadata.rowId, metadata.key) as { key?: unknown; value?: unknown } | undefined;
     if (!row || row.value === undefined || row.value === null) {
@@ -333,7 +382,7 @@ function readAdmittedComposerBubbleValue(
   } else {
     const row = db
       .prepare(
-        `SELECT key, CAST(value AS BLOB) AS value, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE cursorDiskKV.rowid = ? AND key = ?`
+        `SELECT key, CAST(value AS BLOB) AS value, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE cursorDiskKV.rowid = ? AND key = ? COLLATE BINARY`
       )
       .get(metadata.rowId, metadata.key) as
       { key?: unknown; value?: unknown; valueIsNull?: unknown } | undefined;
@@ -426,6 +475,25 @@ export function readFirstBoundedComposerBubbleValue(
   return readAdmittedComposerBubbleValue(db, metadata, budget, signal);
 }
 
+/** Read the first nullable global bubble for one exact byte prefix. */
+export function readFirstBoundedComposerBubbleValueByExactPrefix(
+  db: Database,
+  keyPrefix: string,
+  budget: SqliteSourceReadBudget,
+  signal?: AbortSignal
+): ComposerSqliteBubbleValue | undefined {
+  throwIfAborted(signal);
+  const raw = db
+    .prepare(
+      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactBlobPrefixPredicate('cursorDiskKV.key')} ORDER BY cursorDiskKV.rowid ASC LIMIT 1`
+    )
+    .get(keyPrefix, keyPrefix) as Record<string, unknown> | undefined;
+  if (!raw) return undefined;
+  const metadata = normalizeBubbleMetadata(raw, keyPrefix);
+  budget.admitMetadataPage([metadata.byteLength]);
+  return readAdmittedComposerBubbleValue(db, metadata, budget, signal);
+}
+
 /** Admit full metadata pages, then fetch and release each matching payload sequentially. */
 export function forEachBoundedComposerValue(
   db: Database,
@@ -459,6 +527,23 @@ export function forEachBoundedComposerBubbleValue(
   forEachBoundedComposerBubbleMetadata(
     db,
     keyPattern,
+    budget,
+    (metadata) => visit(readAdmittedComposerBubbleValue(db, metadata, budget, signal)),
+    signal
+  );
+}
+
+/** Fetch nullable global bubbles under one exact, case-sensitive byte prefix. */
+export function forEachBoundedComposerBubbleValueByExactPrefix(
+  db: Database,
+  keyPrefix: string,
+  budget: SqliteSourceReadBudget,
+  visit: (row: ComposerSqliteBubbleValue) => void,
+  signal?: AbortSignal
+): void {
+  forEachBoundedComposerBubbleMetadataByExactPrefix(
+    db,
+    keyPrefix,
     budget,
     (metadata) => visit(readAdmittedComposerBubbleValue(db, metadata, budget, signal)),
     signal

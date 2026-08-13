@@ -26,6 +26,8 @@ import {
   isBackupPublishedPermissionError,
   BackupPublishedCleanupError,
   isBackupPublishedCleanupError,
+  BackupWorkspaceScopeMetadataError,
+  isBackupWorkspaceScopeMetadataError,
   RestoreRollbackError,
   isRestoreRollbackError,
   TemporaryArtifactCleanupError,
@@ -198,6 +200,17 @@ describe('BackupPublishedCleanupError', () => {
     });
     expect(isBackupPublishedCleanupError(err)).toBe(true);
     expect(isBackupPublishedCleanupError(new Error('other'))).toBe(false);
+  });
+});
+
+describe('BackupWorkspaceScopeMetadataError', () => {
+  it('provides a safe actionable compatibility diagnostic', () => {
+    const err = new BackupWorkspaceScopeMetadataError(2);
+    expect(err.code).toBe('BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED');
+    expect(err.details).toMatchObject({ workspaceCount: 2 });
+    expect(err.details.remedy).toContain('0.18.0');
+    expect(isBackupWorkspaceScopeMetadataError(err)).toBe(true);
+    expect(isBackupWorkspaceScopeMetadataError(new Error('other'))).toBe(false);
   });
 });
 

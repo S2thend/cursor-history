@@ -99,7 +99,10 @@ describe('mergeCrossStackSessions', () => {
       expect(merged.messages.find((message) => message.content === 'Store-only gap')?.id).toMatch(
         /^store:v1:transcript:[0-9a-f]{64}:1$/
       );
-      expect(merged.activeBranchMessageIds).toEqual(['native-a']);
+      const storeGapId = merged.messages.find(
+        (message) => message.content === 'Store-only gap'
+      )!.id!;
+      expect(merged.activeBranchMessageIds).toEqual(['native-a', storeGapId]);
       expect(merged.source).toBe('global');
       expect(merged.resolvedSource).toBe('merged');
       expect(merged.messageIdentityVersion).toBe(1);
@@ -361,6 +364,42 @@ describe('mergeCrossStackSessions', () => {
     expect(merged.activeBranchBubbleIds).toEqual(merged.activeBranchMessageIds);
   });
 
+  it('projects leading and trailing Store-only turns into the legacy active branch', () => {
+    const composer = makeSession({
+      source: 'global',
+      messages: [
+        msg({ id: 'composer-a', role: 'user', content: 'A' }),
+        msg({ id: 'composer-b', role: 'assistant', content: 'B' }),
+      ],
+      activeBranchBubbleIds: ['composer-a', 'composer-b'],
+    });
+    const store = makeSession({
+      source: 'store-complete',
+      messages: [
+        msg({ id: 'store-leading', role: 'user', content: 'leading' }),
+        msg({ id: 'store-a', role: 'user', content: 'A' }),
+        msg({ id: 'store-middle', role: 'assistant', content: 'middle' }),
+        msg({ id: 'store-b', role: 'assistant', content: 'B' }),
+        msg({ id: 'store-trailing', role: 'user', content: 'trailing' }),
+        msg({ id: 'store-side', role: 'assistant', content: 'side', isSidechain: true }),
+      ],
+    });
+
+    const merged = mergeCrossStackSessions(composer, store, 'store', 1);
+    const byContent = new Map(merged.messages.map((message) => [message.content, message]));
+    expect(merged.activeBranchMessageIds).toEqual([
+      byContent.get('leading')!.id,
+      'composer-a',
+      byContent.get('middle')!.id,
+      'composer-b',
+      byContent.get('trailing')!.id,
+    ]);
+    expect(merged.activeBranchBubbleIds).toEqual(merged.activeBranchMessageIds);
+    expect(byContent.get('leading')!.parentMessageId).toBeUndefined();
+    expect(byContent.get('trailing')!.parentMessageId).toBe('composer-b');
+    expect(merged.activeBranchMessageIds).not.toContain(byContent.get('side')!.id);
+  });
+
   it('uses a resolvable alternate parent when the preferred source parent is invalid', () => {
     const composer = makeSession({
       source: 'global',
@@ -585,11 +624,10 @@ describe('mergeCrossStackSessions', () => {
           },
         ],
       });
-      expect(merged.messages.map(({ content }) => content)).toEqual(
-        preferred === 'composer'
-          ? ['Composer-only fact', 'Store-only fact']
-          : ['Store-only fact', 'Composer-only fact']
-      );
+      expect(merged.messages.map(({ content }) => content)).toEqual([
+        'Composer-only fact',
+        'Store-only fact',
+      ]);
     }
   });
 
@@ -676,7 +714,7 @@ describe('mergeCrossStackSessions', () => {
     expect(merged.messages.every((m) => m.source === 'both')).toBe(true);
   });
 
-  it('on WSL (store backbone) unmatched-message order follows Store', () => {
+  it('on WSL unmatched-message order stays semantic across backbones', () => {
     // Each stack has one unmatched message between the shared A…B anchors.
     // Backbone selection decides whether the Store-only or Composer-only
     // message comes first.
@@ -698,8 +736,8 @@ describe('mergeCrossStackSessions', () => {
     expect(byStore.preferredSource).toBe('store');
     expect(byStore.messages.map((m) => m.content)).toEqual([
       'A',
-      'store-only',
       'composer-only',
+      'store-only',
       'B',
     ]);
     // Composer backbone would order them the other way (composer-only first).

@@ -24,6 +24,8 @@ export type {
   SessionUsage,
   // Backup types
   BackupManifest,
+  BackupComposerWorkspaceInventory,
+  BackupComposerWorkspaceInventoryEntry,
   BackupFileEntry,
   BackupStats,
   BackupConfig,
@@ -127,6 +129,7 @@ export {
   isNoCapableDriverError,
   isBackupPublishedPermissionError,
   isBackupPublishedCleanupError,
+  isBackupWorkspaceScopeMetadataError,
   isRestoreRollbackError,
   isTemporaryArtifactCleanupError,
   isReadContextError,
@@ -151,6 +154,7 @@ export {
   NoCapableDatabaseDriverError,
   BackupPublishedPermissionError,
   BackupPublishedCleanupError,
+  BackupWorkspaceScopeMetadataError,
   RestoreRollbackError,
   TemporaryArtifactCleanupError,
   ReadContextError,
@@ -220,6 +224,7 @@ import {
 } from '../core/parser.js';
 import { expandPath, pathsEqual } from './platform.js';
 import { normalizePublicWorkspacePath, normalizeWorkspacePath } from '../core/workspace-scope.js';
+import { sessionIdsEqual } from '../core/session-id.js';
 import type {
   AmbiguousSessionSummary as CoreAmbiguousSessionSummary,
   ChatSession as CoreSession,
@@ -470,7 +475,7 @@ async function getCoreSessionInScope(
     bound.context
   );
   if (typeof identifier === 'string') {
-    const summary = scopedSessions.find(({ id }) => id === identifier);
+    const summary = scopedSessions.find(({ id }) => sessionIdsEqual(id, identifier));
     if (!summary) {
       throw new SessionScopeMismatchError(identifier, bound.workspace);
     }

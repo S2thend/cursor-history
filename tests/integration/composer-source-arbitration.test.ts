@@ -15,6 +15,7 @@ import * as library from '../../src/lib/index.js';
 import type { LibraryConfig } from '../../src/lib/types.js';
 import {
   SESSION_INTEGRITY_IDS,
+  createFixtureBackup,
   createSessionIntegrityFixtureRoot,
   writeComposerGlobalSessions,
   writeComposerWorkspaceSummary,
@@ -400,6 +401,140 @@ describe.sequential('Composer tier arbitration through physical fixtures', () =>
     expect(session.messages.map(({ content }) => content)).not.toContain(
       'workspace-copy-must-not-replace-global'
     );
+
+    const backupPath = await createFixtureBackup(root, 'global-primary.zip');
+    const backupSummaries = await storage.listSessionSummaries(
+      { all: true, limit: 0 },
+      undefined,
+      backupPath
+    );
+    expect(backupSummaries).toEqual([
+      expect.objectContaining({
+        id: global.id,
+        title: 'global-primary-needle',
+        messageCount: 1,
+        source: 'global',
+        resolutionState: 'complete',
+        sourceInstances: [
+          expect.objectContaining({
+            representation: 'composer-global',
+            state: 'contributed',
+          }),
+          expect.objectContaining({
+            representation: 'composer-workspace',
+            state: 'superseded',
+          }),
+          expect.objectContaining({
+            representation: 'composer-workspace',
+            state: 'superseded',
+          }),
+        ],
+      }),
+    ]);
+    await expect(library.getSession(global.id, { backupPath })).resolves.toMatchObject({
+      id: global.id,
+      messages: [expect.objectContaining({ content: 'global-primary-needle' })],
+    });
+  });
+
+  it('retains selected workspace metadata when global bubbles have no metadata or timestamps', async () => {
+    const root = fixture();
+    const sessionId = 'abcdefab-1234-4abc-8abc-abcdefabcdef';
+    const preferredCreatedAt = 1_783_111_222_333;
+    const global: ComposerFixtureSession = {
+      id: sessionId,
+      title: 'removed-global-metadata',
+      workspacePath: root.projectA,
+      createdAt: 1,
+      messages: [
+        {
+          id: 'global-message-without-time',
+          role: 'user',
+          content: 'global-payload-with-workspace-metadata',
+        },
+      ],
+    };
+    const globalDbPath = writeComposerGlobalSessions(root, [global]);
+    const globalDb = new BetterSqlite3(globalDbPath);
+    globalDb.prepare('DELETE FROM cursorDiskKV WHERE key = ?').run(`composerData:${sessionId}`);
+    globalDb.close();
+
+    writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, [
+      {
+        ...global,
+        title: 'workspace-metadata-title',
+        createdAt: preferredCreatedAt,
+        messages: [{ role: 'assistant', content: 'divergent-workspace-a-payload' }],
+      },
+    ]);
+    writeComposerWorkspaceSummary(root, 'workspace-z', root.projectA, [
+      {
+        ...global,
+        title: 'later-divergent-workspace-title',
+        createdAt: preferredCreatedAt + 10_000,
+        messages: [{ role: 'assistant', content: 'divergent-workspace-z-payload' }],
+      },
+    ]);
+
+    const liveOptions = {
+      all: true,
+      limit: 0,
+      workspacePath: root.projectA,
+    } as const;
+    const liveSummaries = await storage.listSessionSummaries(liveOptions, root.workspaceStorage);
+    expect(liveSummaries).toEqual([
+      expect.objectContaining({
+        id: sessionId,
+        title: 'workspace-metadata-title',
+        createdAt: new Date(preferredCreatedAt),
+        createdAtSource: 'composer-metadata',
+        lastUpdatedAt: new Date(preferredCreatedAt),
+        lastUpdatedAtSource: 'composer-metadata',
+        messageCount: 1,
+        source: 'global',
+      }),
+    ]);
+    const liveSession = await library.getSession(sessionId, {
+      dataPath: root.workspaceStorage,
+      workspace: root.projectA,
+    });
+    expect(liveSession.messages).toEqual([
+      expect.objectContaining({
+        content: 'global-payload-with-workspace-metadata',
+        timestamp: new Date(preferredCreatedAt).toISOString(),
+        timestampSource: 'session-fallback',
+      }),
+    ]);
+    expect(liveSession.messages.map(({ content }) => content)).not.toContain(
+      'divergent-workspace-a-payload'
+    );
+
+    const backupPath = await createFixtureBackup(root, 'global-metadata-fallback.zip');
+    const backupSummaries = await storage.listSessionSummaries(
+      { all: true, limit: 0 },
+      undefined,
+      backupPath
+    );
+    expect(backupSummaries).toEqual([
+      expect.objectContaining({
+        id: sessionId,
+        title: 'workspace-metadata-title',
+        createdAt: new Date(preferredCreatedAt),
+        createdAtSource: 'composer-metadata',
+        lastUpdatedAt: new Date(preferredCreatedAt),
+        lastUpdatedAtSource: 'composer-metadata',
+        messageCount: 1,
+        source: 'global',
+      }),
+    ]);
+    const backupSession = await library.getSession(sessionId, { backupPath });
+    expect(backupSession.messages).toEqual([
+      expect.objectContaining({
+        content: 'global-payload-with-workspace-metadata',
+        timestamp: new Date(preferredCreatedAt).toISOString(),
+        timestampSource: 'session-fallback',
+      }),
+    ]);
   });
 
   it('uses workspace content only as an explicit partial fallback when global is absent', async () => {

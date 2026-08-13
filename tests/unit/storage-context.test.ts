@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { IoObserverError, type AdapterIoEvent } from '../../src/core/io-observer.js';
+import { storeProjectDirectoryName } from '../../src/core/store-stack/paths.js';
 import { normalizeWorkspacePath } from '../../src/core/workspace-scope.js';
 import * as storage from '../../src/core/storage.js';
 
@@ -234,8 +235,20 @@ describe('SessionReadContext — one Store discovery per operation', () => {
     };
 
     try {
-      writeSession('hash-a', sessionA, '/workspace/a', 1783000000000, 'needle-a');
-      writeSession('hash-b', sessionB, '/workspace/b', 1784000000000, 'needle-b');
+      writeSession(
+        storeProjectDirectoryName('/workspace/a'),
+        sessionA,
+        '/workspace/a',
+        1783000000000,
+        'needle-a'
+      );
+      writeSession(
+        storeProjectDirectoryName('/workspace/b'),
+        sessionB,
+        '/workspace/b',
+        1784000000000,
+        'needle-b'
+      );
 
       const global = await storage.listSessions({ limit: 0, all: true }, root);
       expect(global.map((summary) => summary.id)).toEqual([sessionB, sessionA]);

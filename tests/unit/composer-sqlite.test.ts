@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   createComposerSqliteBudget,
+  forEachBoundedComposerBubbleValueByExactPrefix,
   forEachBoundedComposerBubbleValue,
   forEachBoundedComposerValue,
   readBoundedComposerValueByKey,
   readFirstBoundedComposerBubbleValue,
+  readFirstBoundedComposerBubbleValueByExactPrefix,
   readFirstBoundedComposerValue,
   sqliteLikeLiteralPrefix,
 } from '../../src/core/composer-sqlite.js';
@@ -103,6 +105,57 @@ describe('bounded Composer SQLite reads', () => {
       { rowId: 1, value: 'positive' },
       { rowId: 9_007_199_254_740_993n, value: 'bigint' },
     ]);
+  });
+
+  it('keeps exact-prefix bubble reads byte- and case-sensitive across bounded pages', () => {
+    const { raw, adapter } = database({ nullableValue: true });
+    const insert = raw.prepare('INSERT INTO cursorDiskKV (rowid, key, value) VALUES (?, ?, ?)');
+    insert.run(-4, 'bubbleId:ABC-Session:null', null);
+    insert.run(-1, 'bubbleId:abc-Session:decoy-a', 'lower-a');
+    insert.run(2, 'bubbleId:ABC-Session:owned', 'upper');
+    insert.run(3, 'bubbleId:abc-Session:decoy-b', 'lower-b');
+    const budget = createComposerSqliteBudget(
+      resolveSourceReadLimits({ sqlitePageRows: 1, sqliteRowCount: 2 })
+    );
+    const seen: Array<{ key: string; value: string | null }> = [];
+
+    forEachBoundedComposerBubbleValueByExactPrefix(
+      adapter,
+      'bubbleId:ABC-Session:',
+      budget,
+      ({ key, value }) => seen.push({ key, value })
+    );
+
+    expect(seen).toEqual([
+      { key: 'bubbleId:ABC-Session:null', value: null },
+      { key: 'bubbleId:ABC-Session:owned', value: 'upper' },
+    ]);
+    expect(budget.rowCount).toBe(2);
+    expect(
+      readFirstBoundedComposerBubbleValueByExactPrefix(
+        adapter,
+        'bubbleId:abc-Session:',
+        createComposerSqliteBudget()
+      )
+    ).toEqual(expect.objectContaining({ key: 'bubbleId:abc-Session:decoy-a', value: 'lower-a' }));
+  });
+
+  it('keeps exact-key reads case-sensitive even when the schema has NOCASE collation', () => {
+    const raw = new BetterSqlite3(':memory:');
+    databases.push(raw);
+    raw.exec('CREATE TABLE cursorDiskKV (key TEXT COLLATE NOCASE NOT NULL, value BLOB NOT NULL)');
+    const insert = raw.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)');
+    insert.run('composerData:ABC-Session', 'upper');
+    insert.run('composerData:abc-Session', 'lower');
+
+    expect(
+      readBoundedComposerValueByKey(
+        raw as unknown as Database,
+        'cursorDiskKV',
+        'composerData:abc-Session',
+        createComposerSqliteBudget()
+      )
+    ).toBe('lower');
   });
 
   it('uses a lowered per-operation row bound as the actual metadata page size', () => {

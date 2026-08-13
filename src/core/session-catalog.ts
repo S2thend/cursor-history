@@ -21,6 +21,7 @@ import type {
   WorkspaceMembership,
 } from './types.js';
 import { normalizeWorkspacePath } from './workspace-scope.js';
+import { logicalSessionIdKey, selectNativeSessionIdSpelling } from './session-id.js';
 
 const SOURCE_ROLE_ORDER = ['composer', 'store'] as const satisfies readonly SourceRole[];
 const REPRESENTATION_ORDER = [
@@ -336,9 +337,10 @@ export function buildSessionCatalog<TLocator>(
     }
     seenInstanceKeys.add(input.instanceKey);
     const instance = normalizePhysicalInstance(input);
-    const sessionInstances = bySession.get(instance.logicalSessionId) ?? [];
+    const logicalKey = logicalSessionIdKey(instance.logicalSessionId);
+    const sessionInstances = bySession.get(logicalKey) ?? [];
     sessionInstances.push(instance);
-    bySession.set(instance.logicalSessionId, sessionInstances);
+    bySession.set(logicalKey, sessionInstances);
   }
 
   const activeWorkspace = options.activeWorkspace
@@ -351,10 +353,41 @@ export function buildSessionCatalog<TLocator>(
   return Object.freeze(
     [...bySession.entries()]
       .sort(([left], [right]) => compareCodePoints(left, right))
-      .map(([id, unsortedInstances]) => {
+      .map(([_logicalKey, unsortedInstances]) => {
+        // Composer is the compatibility authority for a cross-stack logical UUID. Within that
+        // role, prefer the highest-fidelity/representation tier before choosing a deterministic
+        // real spelling. A Store case variant must never rewrite a v0.16 Composer public ID.
+        const preferredRole = unsortedInstances.some(({ sourceRole }) => sourceRole === 'composer')
+          ? 'composer'
+          : 'store';
+        const roleInstances = unsortedInstances.filter(
+          ({ sourceRole }) => sourceRole === preferredRole
+        );
+        const bestRepresentation = [...roleInstances].sort((left, right) => {
+          const byRepresentation = compareByDeclaration(
+            REPRESENTATION_ORDER,
+            left.representation,
+            right.representation
+          );
+          return (
+            byRepresentation ||
+            compareByDeclaration(FIDELITY_ORDER, left.fidelityTier, right.fidelityTier)
+          );
+        })[0]!;
+        const preferredTier = roleInstances.filter(
+          ({ representation, fidelityTier }) =>
+            representation === bestRepresentation.representation &&
+            fidelityTier === bestRepresentation.fidelityTier
+        );
+        const id = selectNativeSessionIdSpelling(
+          preferredTier.map(({ logicalSessionId }) => logicalSessionId)
+        )!;
         const instances = Object.freeze([...unsortedInstances].sort(compareInstances));
         const grouped = new Map<string, PhysicalSessionInstance<TLocator>[]>();
         for (const instance of instances) {
+          // Case spelling is a physical occurrence detail, not another representation. Candidates
+          // from one logical UUID must compete inside the same replica group so divergence cannot
+          // be hidden behind two differently cased map keys.
           const key = [instance.sourceRole, instance.representation, instance.fidelityTier].join(
             '\0'
           );

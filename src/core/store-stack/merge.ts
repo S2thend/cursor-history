@@ -754,7 +754,13 @@ function computeAlignment(composer: Message[], store: Message[]): AlignmentPlan 
   return { composer, store, pairs };
 }
 
-/** Render one fixed plan while allowing the preferred source to order gaps. */
+/**
+ * Render one fixed alignment in a source-order-independent semantic order.
+ * Preferred source chooses conflicting values inside matched messages; it must
+ * never move unmatched turns, rewrite the active leaf, or change parent chains.
+ * Composer gaps precede Store gaps at the same alignment boundary to retain the
+ * released Composer projection while appending newly discovered Store turns.
+ */
 function renderAlignment(
   plan: AlignmentPlan,
   preferredSource: 'composer' | 'store',
@@ -775,13 +781,8 @@ function renderAlignment(
   };
 
   for (const pair of plan.pairs) {
-    if (preferredSource === 'composer') {
-      appendUnmatched('composer', composerCursor, pair.composerIndex);
-      appendUnmatched('store', storeCursor, pair.storeIndex);
-    } else {
-      appendUnmatched('store', storeCursor, pair.storeIndex);
-      appendUnmatched('composer', composerCursor, pair.composerIndex);
-    }
+    appendUnmatched('composer', composerCursor, pair.composerIndex);
+    appendUnmatched('store', storeCursor, pair.storeIndex);
     result.push({
       message: mergeMessage(
         plan.composer[pair.composerIndex]!,
@@ -796,13 +797,8 @@ function renderAlignment(
     storeCursor = pair.storeIndex + 1;
   }
 
-  if (preferredSource === 'composer') {
-    appendUnmatched('composer', composerCursor, plan.composer.length);
-    appendUnmatched('store', storeCursor, plan.store.length);
-  } else {
-    appendUnmatched('store', storeCursor, plan.store.length);
-    appendUnmatched('composer', composerCursor, plan.composer.length);
-  }
+  appendUnmatched('composer', composerCursor, plan.composer.length);
+  appendUnmatched('store', storeCursor, plan.store.length);
   return result;
 }
 
@@ -1117,9 +1113,13 @@ function rewriteRenderedRelationships(
 }
 
 /**
- * Rewrite the Composer branch and include Store-only gaps only between two
- * confirmed active Composer nodes. A trailing Store message cannot be inferred
- * to be active merely because it follows the last known branch node.
+ * Rewrite the Composer branch over the semantically interleaved merged view.
+ * Composer nodes remain restricted to Cursor's explicit active branch, while
+ * Store-only nodes participate unless their source explicitly marks them as a
+ * sidechain. This applies uniformly to leading, middle, and trailing Store
+ * turns: released downstream adapters reconstruct both parents and the leaf
+ * exclusively from `activeBranchBubbleIds`, so omitting an otherwise admitted
+ * Store turn would persist it as an orphan in a supposedly complete view.
  */
 function rewriteActiveBranch(
   composer: ChatSession,
@@ -1136,9 +1136,6 @@ function rewriteActiveBranch(
     return [];
   });
   if (unresolved) return { ids: undefined, unresolved: true };
-  if (mapped.length <= 1) return { ids: mapped, unresolved: false };
-
-  const positions: number[] = [];
   let cursor = -1;
   for (const id of mapped) {
     const position = rendered.findIndex(
@@ -1149,27 +1146,19 @@ function rewriteActiveBranch(
       unresolved = true;
       continue;
     }
-    positions.push(position);
     cursor = position;
   }
   if (unresolved) return { ids: undefined, unresolved: true };
-  if (positions.length === 0) return { ids: [], unresolved: false };
-
-  const branch: string[] = [rendered[positions[0]!]!.message.id!];
-  for (let index = 1; index < positions.length; index++) {
-    const previous = positions[index - 1]!;
-    const current = positions[index]!;
-    for (let renderedIndex = previous + 1; renderedIndex < current; renderedIndex++) {
-      const entry = rendered[renderedIndex]!;
-      if (
-        entry.composerIndex === undefined &&
-        entry.storeIndex !== undefined &&
-        entry.message.isSidechain !== true
-      ) {
-        branch.push(entry.message.id!);
-      }
+  const activeComposerIds = new Set(mapped);
+  const branch: string[] = [];
+  for (const entry of rendered) {
+    if (entry.composerIndex !== undefined) {
+      if (activeComposerIds.has(entry.message.id!)) branch.push(entry.message.id!);
+      continue;
     }
-    branch.push(rendered[current]!.message.id!);
+    if (entry.storeIndex !== undefined && entry.message.isSidechain !== true) {
+      branch.push(entry.message.id!);
+    }
   }
   return { ids: branch, unresolved: false };
 }
