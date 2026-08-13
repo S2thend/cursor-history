@@ -15,16 +15,20 @@ import {
   constants,
   existsSync,
   copyFileSync,
+  fchmodSync,
+  fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
   statSync,
   unlinkSync,
+  writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -52,6 +56,7 @@ import { resolveSourceReadLimits } from './source-read-limits.js';
 import { createComposerSqliteBudget, readBoundedComposerValueByKey } from './composer-sqlite.js';
 import { IoObserverError, type OperationIoContext } from './io-observer.js';
 import {
+  RestoreRollbackError,
   SourceLimitConfigurationError,
   SourceLimitExceededError,
   TemporaryArtifactCleanupError,
@@ -958,11 +963,24 @@ async function inspectArchive(
     }
   }
 
+  for (const archiveEntry of archive.entries) {
+    if (
+      !archiveEntry.isDirectory &&
+      archiveEntry.name !== 'manifest.json' &&
+      !representedNames.has(archiveEntry.name)
+    ) {
+      throw new ZipArchiveFormatError(
+        `Backup contains an unmanifested file entry: ${archiveEntry.name}`
+      );
+    }
+  }
+
   const errors: string[] = [];
   if (missingFiles.length > 0) errors.push(`Missing files: ${missingFiles.join(', ')}`);
   if (corruptedFiles.length > 0) errors.push(`Corrupted files: ${corruptedFiles.join(', ')}`);
+  if (validFiles.length === 0) errors.push('No intact restorable files found in backup');
   const status =
-    missingFiles.length > 0 || (corruptedFiles.length > 0 && validFiles.length === 0)
+    missingFiles.length > 0 || validFiles.length === 0
       ? 'invalid'
       : corruptedFiles.length > 0
         ? 'warnings'
@@ -1266,6 +1284,150 @@ function existingRestoreDestinations(plans: readonly PlannedRestoreFile[]): stri
     .map(({ manifestEntry }) => manifestEntry.path);
 }
 
+function restoreReadFlags(): number {
+  let flags = constants.O_RDONLY;
+  if (typeof constants.O_NOFOLLOW === 'number') flags |= constants.O_NOFOLLOW;
+  return flags;
+}
+
+function restoreStageFlags(): number {
+  let flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY;
+  if (typeof constants.O_NOFOLLOW === 'number') flags |= constants.O_NOFOLLOW;
+  return flags;
+}
+
+function copyOpenFileContents(sourceDescriptor: number, targetDescriptor: number): void {
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  for (;;) {
+    const bytesRead = readSync(sourceDescriptor, buffer, 0, buffer.length, null);
+    if (bytesRead === 0) break;
+    let offset = 0;
+    while (offset < bytesRead) {
+      const bytesWritten = writeSync(targetDescriptor, buffer, offset, bytesRead - offset, null);
+      if (bytesWritten <= 0) throw new Error('Unable to copy restore data safely.');
+      offset += bytesWritten;
+    }
+  }
+}
+
+/** Snapshot an existing destination without following a leaf link created after path preflight. */
+function snapshotRestoreDestination(sourcePath: string, snapshotPath: string): number {
+  let sourceDescriptor: number | undefined;
+  let snapshotDescriptor: number | undefined;
+  let sourceMode: number | undefined;
+  let failure: unknown;
+  try {
+    sourceDescriptor = openSync(sourcePath, restoreReadFlags());
+    const sourceStats = fstatSync(sourceDescriptor);
+    if (!sourceStats.isFile()) throw new Error('Restore destination is not a regular file.');
+    sourceMode = sourceStats.mode & 0o777;
+
+    snapshotDescriptor = openSync(
+      snapshotPath,
+      constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0)
+    );
+    if (!fstatSync(snapshotDescriptor).isFile()) {
+      throw new Error('Private restore rollback staging is not a regular file.');
+    }
+    if (process.platform !== 'win32') fchmodSync(snapshotDescriptor, 0o600);
+    copyOpenFileContents(sourceDescriptor, snapshotDescriptor);
+    fsyncSync(snapshotDescriptor);
+  } catch (error) {
+    failure = error;
+  } finally {
+    for (const descriptor of [snapshotDescriptor, sourceDescriptor]) {
+      if (descriptor === undefined) continue;
+      try {
+        closeSync(descriptor);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+  }
+  if (failure !== undefined) throw failure;
+  return sourceMode!;
+}
+
+/**
+ * Copy one private validated entry into a new same-directory inode and atomically replace the
+ * destination directory entry. Existing destinations are never opened for writing, so force mode
+ * cannot truncate a hard-linked inode outside the selected Cursor tree.
+ */
+function publishRestoreFile(
+  trustedRoot: string,
+  sourcePath: string,
+  destinationPath: string,
+  replaceExisting: boolean,
+  onCommit?: () => void,
+  mode = 0o600
+): void {
+  assertNoLinkedRestorePath(trustedRoot, dirname(destinationPath), 'directory');
+  assertNoLinkedRestorePath(trustedRoot, destinationPath, 'file');
+
+  const publicationPath = join(
+    dirname(destinationPath),
+    `.cursor-history-restore-${randomUUID()}.tmp`
+  );
+  let sourceDescriptor: number | undefined;
+  let publicationDescriptor: number | undefined;
+  let operationError: unknown;
+  let cleanupError: TemporaryArtifactCleanupError | undefined;
+  try {
+    sourceDescriptor = openSync(sourcePath, restoreReadFlags());
+    if (!fstatSync(sourceDescriptor).isFile()) {
+      throw new Error('Private restore staging is not a regular file.');
+    }
+    publicationDescriptor = openSync(publicationPath, restoreStageFlags(), mode);
+    if (process.platform !== 'win32') fchmodSync(publicationDescriptor, mode);
+
+    copyOpenFileContents(sourceDescriptor, publicationDescriptor);
+    fsyncSync(publicationDescriptor);
+    closeSync(publicationDescriptor);
+    publicationDescriptor = undefined;
+    closeSync(sourceDescriptor);
+    sourceDescriptor = undefined;
+
+    // Recheck after the complete inode is durable and immediately before the directory-entry
+    // commit. Node 20 still cannot bind the ancestor chain through openat-style descriptors; that
+    // owner-controlled-tree limitation is documented on the public restore contract.
+    assertNoLinkedRestorePath(trustedRoot, dirname(destinationPath), 'directory');
+    assertNoLinkedRestorePath(trustedRoot, destinationPath, 'file');
+    if (replaceExisting) {
+      renameSync(publicationPath, destinationPath);
+    } else {
+      // Publish by no-clobber hard link so a destination created after the preflight wins with
+      // EEXIST instead of being overwritten. Removing the private sibling leaves one complete
+      // inode at the requested destination.
+      linkSync(publicationPath, destinationPath);
+      onCommit?.();
+      unlinkSync(publicationPath);
+    }
+    if (replaceExisting) onCommit?.();
+    syncParentDirectory(destinationPath);
+  } catch (error) {
+    operationError = error;
+  } finally {
+    for (const descriptor of [publicationDescriptor, sourceDescriptor]) {
+      if (descriptor === undefined) continue;
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the publication failure; the private path cleanup below remains mandatory.
+      }
+    }
+    try {
+      unlinkSync(publicationPath);
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') {
+        cleanupError = new TemporaryArtifactCleanupError([publicationPath]);
+        attachCleanupCause(cleanupError, operationError ?? error);
+      }
+    }
+  }
+  if (cleanupError) throw cleanupError;
+  if (operationError !== undefined) throw operationError;
+}
+
 // ============================================================================
 // Restore Operations (T040-T045)
 // ============================================================================
@@ -1300,8 +1462,10 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
   });
   const restoredFiles: Array<{
     manifestPath: string;
+    trustedRoot: string;
     destinationPath: string;
     previousPath?: string;
+    previousMode?: number;
   }> = [];
   let operationError: unknown;
   try {
@@ -1345,7 +1509,9 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     });
     throwIfAborted(signal);
 
-    const warnings = validation.corruptedFiles.map((file) => `Checksum mismatch: ${file}`);
+    const warnings = validation.corruptedFiles.map(
+      (file) => `Integrity mismatch (size or checksum); skipped: ${file}`
+    );
 
     // Create every required directory and then revalidate the complete target set before the first
     // file publication. This makes a late-path collision or static link fail with zero file writes.
@@ -1363,12 +1529,16 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     }
 
     const previousPaths = new Map<string, string>();
+    const previousModes = new Map<string, number>();
     for (let index = 0; index < restorePlan.length; index++) {
       const planned = restorePlan[index]!;
       if (!assertNoLinkedRestorePath(planned.trustedRoot, planned.destinationPath, 'file'))
         continue;
       const previousPath = workspace.createFile(`previous-${index}.bin`);
-      copyFileSync(planned.destinationPath, previousPath);
+      previousModes.set(
+        planned.destinationPath,
+        snapshotRestoreDestination(planned.destinationPath, previousPath)
+      );
       previousPaths.set(planned.destinationPath, previousPath);
     }
 
@@ -1401,13 +1571,23 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
         );
       }
       const previousPath = previousPaths.get(staged.destinationPath);
-      restoredFiles.push({
-        manifestPath: staged.manifestEntry.path,
-        destinationPath: staged.destinationPath,
-        ...(previousPath ? { previousPath } : {}),
-      });
+      const previousMode = previousModes.get(staged.destinationPath);
       throwIfAborted(signal);
-      copyFileSync(staged.temporaryPath, staged.destinationPath);
+      publishRestoreFile(
+        staged.trustedRoot,
+        staged.temporaryPath,
+        staged.destinationPath,
+        force,
+        () => {
+          restoredFiles.push({
+            manifestPath: staged.manifestEntry.path,
+            trustedRoot: staged.trustedRoot,
+            destinationPath: staged.destinationPath,
+            ...(previousPath ? { previousPath } : {}),
+            ...(previousMode === undefined ? {} : { previousMode }),
+          });
+        }
+      );
     }
 
     // Phase: Finalizing
@@ -1428,17 +1608,41 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     };
   } catch (error) {
     operationError = error;
+    const residualFiles: string[] = [];
+    let rollbackCleanupError: unknown;
     for (const restored of [...restoredFiles].reverse()) {
+      let rollbackCommitted = false;
       try {
         if (restored.previousPath) {
-          copyFileSync(restored.previousPath, restored.destinationPath);
-        } else if (existsSync(restored.destinationPath)) {
+          publishRestoreFile(
+            restored.trustedRoot,
+            restored.previousPath,
+            restored.destinationPath,
+            true,
+            () => {
+              rollbackCommitted = true;
+            },
+            restored.previousMode ?? 0o600
+          );
+        } else {
+          assertNoLinkedRestorePath(
+            restored.trustedRoot,
+            dirname(restored.destinationPath),
+            'directory'
+          );
           unlinkSync(restored.destinationPath);
+          rollbackCommitted = true;
         }
-      } catch {
-        // Preserve the primary operation failure; rollback residue remains at the explicit target.
+      } catch (rollbackError) {
+        if (!rollbackCommitted) residualFiles.push(restored.manifestPath);
+        rollbackCleanupError ??= rollbackCommitted ? rollbackError : undefined;
       }
     }
+
+    if (residualFiles.length > 0) {
+      throw new RestoreRollbackError(restoredFiles.length, residualFiles, error);
+    }
+    if (rollbackCleanupError !== undefined) throw rollbackCleanupError;
 
     if (shouldPropagateBoundedReadError(error)) throw error;
 

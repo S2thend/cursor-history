@@ -2,11 +2,13 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -23,6 +25,7 @@ import packageJson from '../../package.json';
 import type { Database } from '../../src/core/database/types.js';
 import {
   BackupPublishedPermissionError,
+  RestoreRollbackError,
   SourceLimitConfigurationError,
   SourceLimitExceededError,
   TemporaryArtifactCleanupError,
@@ -1002,6 +1005,76 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     expect(currentPrivateTempPaths()).toEqual(before);
   });
 
+  it('rejects an empty manifest because it contains no intact restorable entries', async () => {
+    const manifest = {
+      version: '1.0.0',
+      createdAt: new Date(0).toISOString(),
+      sourcePlatform: 'linux',
+      cursorHistoryVersion: '0.18.0',
+      files: [],
+      stats: { totalSize: 0, sessionCount: 0, workspaceCount: 0 },
+    };
+    const path = join(fixtureRoot, 'empty-manifest.zip');
+    writeFileSync(
+      path,
+      buildZip([{ name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) }]).buffer,
+      { mode: 0o600 }
+    );
+    const targetPath = join(fixtureRoot, 'empty-manifest', 'User', 'workspaceStorage');
+
+    const validation = await validateBackup(path);
+    expect(validation).toMatchObject({
+      status: 'invalid',
+      validFiles: [],
+      errors: ['No intact restorable files found in backup'],
+    });
+    await expect(restoreBackup({ backupPath: path, targetPath })).resolves.toMatchObject({
+      success: false,
+      filesRestored: 0,
+      error: 'No intact restorable files found in backup',
+    });
+    expect(existsSync(dirname(targetPath))).toBe(false);
+  });
+
+  it('rejects unmanifested file entries instead of silently accepting hidden archive payloads', async () => {
+    const payload = Buffer.from('declared database');
+    const manifest = {
+      version: '1.0.0',
+      createdAt: new Date(0).toISOString(),
+      sourcePlatform: 'linux',
+      cursorHistoryVersion: '0.18.0',
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: payload.length,
+          checksum: computeChecksum(payload),
+          type: 'global-db',
+        },
+      ],
+      stats: { totalSize: payload.length, sessionCount: 0, workspaceCount: 0 },
+    };
+    const path = join(fixtureRoot, 'unmanifested-entry.zip');
+    writeFileSync(
+      path,
+      buildZip([
+        { name: 'globalStorage/state.vscdb', data: payload },
+        { name: 'unlisted.bin', data: Buffer.from('must be rejected') },
+        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+      ]).buffer,
+      { mode: 0o600 }
+    );
+    const targetPath = join(fixtureRoot, 'unmanifested-entry', 'User', 'workspaceStorage');
+
+    const validation = await validateBackup(path);
+    expect(validation.status).toBe('invalid');
+    expect(validation.errors.join(' ')).toContain('unmanifested file entry');
+    await expect(restoreBackup({ backupPath: path, targetPath })).resolves.toMatchObject({
+      success: false,
+      filesRestored: 0,
+    });
+    expect(existsSync(dirname(targetPath))).toBe(false);
+  });
+
   it('streams a valid restore through private staging and publishes exact bytes', async () => {
     const file = Buffer.from('restored sqlite bytes');
     const manifest = {
@@ -1038,8 +1111,58 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     if (process.platform !== 'win32') {
       expect(lstatSync(restoredPath).mode & 0o777).toBe(0o600);
     }
+    expect(
+      readdirSync(dirname(restoredPath)).some((name) => name.startsWith('.cursor-history-restore-'))
+    ).toBe(false);
     expect(currentPrivateTempPaths()).toEqual(before);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'force replaces a hard-linked destination entry without modifying its outside peer',
+    async () => {
+      const replacement = Buffer.from('validated replacement bytes');
+      const original = Buffer.from('outside hard-link peer must survive');
+      const file = {
+        path: 'globalStorage/state.vscdb',
+        size: replacement.length,
+        checksum: computeChecksum(replacement),
+        type: 'global-db',
+      };
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.18.0',
+        files: [file],
+        stats: { totalSize: replacement.length, sessionCount: 0, workspaceCount: 0 },
+      };
+      const path = join(fixtureRoot, 'hard-linked-leaf.zip');
+      writeFileSync(
+        path,
+        buildZip([
+          { name: file.path, data: replacement },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const targetPath = join(fixtureRoot, 'hard-linked-leaf', 'User', 'workspaceStorage');
+      const destination = join(dirname(targetPath), file.path);
+      const outside = join(fixtureRoot, 'outside-hard-link-peer.vscdb');
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(outside, original, { mode: 0o600 });
+      linkSync(outside, destination);
+      const sharedInode = lstatSync(outside).ino;
+      expect(lstatSync(destination).ino).toBe(sharedInode);
+
+      const result = await restoreBackup({ backupPath: path, targetPath, force: true });
+
+      expect(result).toMatchObject({ success: true, filesRestored: 1 });
+      expect(readFileSync(destination)).toEqual(replacement);
+      expect(readFileSync(outside)).toEqual(original);
+      expect(lstatSync(destination).ino).not.toBe(sharedInode);
+      expect(lstatSync(outside).ino).toBe(sharedInode);
+    }
+  );
 
   it.each([
     ['settings.json', 'global-db'],
@@ -1367,7 +1490,9 @@ describe.sequential('backup plaintext snapshot isolation', () => {
       expect(result).toMatchObject({
         success: true,
         filesRestored: 1,
-        warnings: ['Checksum mismatch: workspaceStorage/ws/state.vscdb'],
+        warnings: [
+          'Integrity mismatch (size or checksum); skipped: workspaceStorage/ws/state.vscdb',
+        ],
       });
       expect(readFileSync(join(dirname(targetPath), 'globalStorage', 'state.vscdb'))).toEqual(
         validGlobal
@@ -1426,7 +1551,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     expect(result).toMatchObject({
       success: true,
       filesRestored: 1,
-      warnings: ['Checksum mismatch: workspaceStorage/ws/state.vscdb'],
+      warnings: ['Integrity mismatch (size or checksum); skipped: workspaceStorage/ws/state.vscdb'],
     });
     expect(readFileSync(join(dirname(targetPath), files[0]!.path))).toEqual(validGlobal);
     expect(readFileSync(workspaceDestination)).toEqual(priorWorkspace);
@@ -1487,7 +1612,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     }
   );
 
-  it('rolls back already-published files when a later restore publication fails', async () => {
+  it('rolls back an already-published file after a later extraction callback fails', async () => {
     const replacementGlobal = Buffer.from('replacement global');
     const replacementWorkspace = Buffer.from('replacement workspace');
     const files = [
@@ -1530,19 +1655,117 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     const targetPath = join(fixtureRoot, 'rollback-restore', 'User', 'workspaceStorage');
     const userDirectory = dirname(targetPath);
     const globalPath = join(userDirectory, files[0]!.path);
-    const blockedWorkspacePath = join(userDirectory, files[1]!.path);
+    const workspacePath = join(userDirectory, files[1]!.path);
     mkdirSync(dirname(globalPath), { recursive: true });
-    mkdirSync(blockedWorkspacePath, { recursive: true });
     const originalGlobal = Buffer.from('original global');
-    writeFileSync(globalPath, originalGlobal);
+    writeFileSync(globalPath, originalGlobal, { mode: 0o640 });
     const before = currentPrivateTempPaths();
 
-    const result = await restoreBackup({ backupPath: path, targetPath, force: true });
+    const result = await restoreBackup({
+      backupPath: path,
+      targetPath,
+      force: true,
+      onProgress: (progress) => {
+        if (progress.phase === 'extracting' && progress.filesCompleted === 1) {
+          expect(readFileSync(globalPath)).toEqual(replacementGlobal);
+          throw new Error('synthetic failure after first publication');
+        }
+      },
+    });
     expect(result.success).toBe(false);
+    expect(result.error).toContain('synthetic failure after first publication');
     expect(readFileSync(globalPath)).toEqual(originalGlobal);
-    expect(lstatSync(blockedWorkspacePath).isDirectory()).toBe(true);
+    expect(lstatSync(globalPath).mode & 0o777).toBe(0o640);
+    expect(existsSync(workspacePath)).toBe(false);
     expect(currentPrivateTempPaths()).toEqual(before);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'throws a typed honest result when a published file cannot be rolled back',
+    async () => {
+      const replacementGlobal = Buffer.from('replacement global');
+      const replacementWorkspace = Buffer.from('replacement workspace');
+      const files = [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: replacementGlobal.length,
+          checksum: computeChecksum(replacementGlobal),
+          type: 'global-db',
+        },
+        {
+          path: 'workspaceStorage/ws/state.vscdb',
+          size: replacementWorkspace.length,
+          checksum: computeChecksum(replacementWorkspace),
+          type: 'workspace-db',
+        },
+      ];
+      const manifest = {
+        version: '1.0.0',
+        createdAt: new Date(0).toISOString(),
+        sourcePlatform: 'linux',
+        cursorHistoryVersion: '0.18.0',
+        files,
+        stats: {
+          totalSize: replacementGlobal.length + replacementWorkspace.length,
+          sessionCount: 0,
+          workspaceCount: 1,
+        },
+      };
+      const path = join(fixtureRoot, 'rollback-incomplete.zip');
+      writeFileSync(
+        path,
+        buildZip([
+          { name: files[0]!.path, data: replacementGlobal },
+          { name: files[1]!.path, data: replacementWorkspace },
+          { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+        ]).buffer,
+        { mode: 0o600 }
+      );
+      const targetPath = join(fixtureRoot, 'rollback-incomplete', 'User', 'workspaceStorage');
+      const userDirectory = dirname(targetPath);
+      const globalDirectory = join(userDirectory, 'globalStorage');
+      const globalPath = join(globalDirectory, 'state.vscdb');
+      const movedGlobalDirectory = join(fixtureRoot, 'rollback-incomplete-residual');
+      const movedGlobalPath = join(movedGlobalDirectory, 'state.vscdb');
+      mkdirSync(globalDirectory, { recursive: true });
+      writeFileSync(globalPath, Buffer.from('original global'), { mode: 0o600 });
+      const before = currentPrivateTempPaths();
+
+      let caught: unknown;
+      try {
+        await restoreBackup({
+          backupPath: path,
+          targetPath,
+          force: true,
+          onProgress: (progress) => {
+            if (progress.phase === 'extracting' && progress.filesCompleted === 1) {
+              renameSync(globalDirectory, movedGlobalDirectory);
+              symlinkSync(movedGlobalDirectory, globalDirectory, 'dir');
+              throw new Error('synthetic failure with blocked rollback path');
+            }
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(RestoreRollbackError);
+      expect(caught).toMatchObject({
+        code: 'RESTORE_ROLLBACK_INCOMPLETE',
+        details: {
+          publishedFileCount: 1,
+          residualFileCount: 1,
+          residualFiles: ['globalStorage/state.vscdb'],
+          remedy: expect.stringContaining('known-good backup'),
+        },
+        cause: expect.objectContaining({
+          message: 'synthetic failure with blocked rollback path',
+        }),
+      });
+      expect(readFileSync(movedGlobalPath)).toEqual(replacementGlobal);
+      expect(currentPrivateTempPaths()).toEqual(before);
+    }
+  );
 
   it.each(['last-file', 'finalizing'] as const)(
     'rolls back and cleans private staging when cancellation occurs at %s progress',

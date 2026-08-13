@@ -15,6 +15,7 @@ import {
   ReadContextOptionsMismatchError,
   ReadContextScopeMismatchError,
   ReadContextSourceMismatchError,
+  RestoreRollbackError,
   SessionAmbiguityError,
   SessionIntegrityError,
   SessionScopeMismatchError,
@@ -697,6 +698,7 @@ export {
   DatabaseCapabilityError as DatabaseCapabilityMissingError,
   NoCapableDriverError as NoCapableDatabaseDriverError,
   BackupPublishedPermissionError,
+  RestoreRollbackError,
   TemporaryArtifactCleanupError,
   ReadContextError,
   ReadContextSourceMismatchError,
@@ -793,6 +795,16 @@ export function isBackupPublishedPermissionError(
   error: unknown
 ): error is BackupPublishedPermissionError {
   return error instanceof BackupPublishedPermissionError;
+}
+
+/**
+ * Test whether restore publication failed and one or more entries could not be rolled back.
+ *
+ * @param error - Unknown caught value.
+ * @returns True when the value is a {@link RestoreRollbackError}.
+ */
+export function isRestoreRollbackError(error: unknown): error is RestoreRollbackError {
+  return error instanceof RestoreRollbackError;
 }
 
 /**

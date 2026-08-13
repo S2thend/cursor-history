@@ -2091,7 +2091,7 @@ describe('backup command', () => {
 
   it('reports a safely published archive permission failure and exits with I/O status', async () => {
     mockCreateBackup.mockRejectedValue(
-      new BackupPublishedPermissionError('/backups/published.zip', 0o640, 0o600)
+      new BackupPublishedPermissionError('/backups/published.zip', 0o640, 0o600, undefined, true)
     );
 
     const program = createProgram();

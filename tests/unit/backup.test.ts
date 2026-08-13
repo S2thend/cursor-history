@@ -19,11 +19,16 @@ vi.mock('node:fs', async () => {
     chmodSync: vi.fn(),
     closeSync: vi.fn(),
     copyFileSync: vi.fn(),
+    fchmodSync: vi.fn(),
+    fstatSync: vi.fn(() => ({ isFile: () => true })),
     fsyncSync: vi.fn(),
     linkSync: vi.fn(),
     lstatSync: vi.fn(),
     openSync: vi.fn(() => 42),
+    readSync: vi.fn(() => 0),
+    realpathSync: vi.fn((path: Parameters<typeof actual.realpathSync>[0]) => String(path)),
     renameSync: vi.fn(),
+    writeSync: vi.fn(),
   };
 });
 

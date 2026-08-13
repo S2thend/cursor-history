@@ -24,6 +24,8 @@ import {
   isBackupError,
   BackupPublishedPermissionError,
   isBackupPublishedPermissionError,
+  RestoreRollbackError,
+  isRestoreRollbackError,
   NoDataError,
   isNoDataError,
   FileExistsError,
@@ -158,7 +160,7 @@ describe('BackupError', () => {
 
 describe('BackupPublishedPermissionError', () => {
   it('exposes the completed publication state and requested/actual modes', () => {
-    const err = new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600);
+    const err = new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600, undefined, true);
     expect(err.name).toBe('BackupPublishedPermissionError');
     expect(err.code).toBe('BACKUP_PUBLISHED_PERMISSION_FAILED');
     expect(err.details).toMatchObject({
@@ -166,10 +168,28 @@ describe('BackupPublishedPermissionError', () => {
       outputPath: '/backup.zip',
       requestedMode: 0o640,
       actualMode: 0o600,
+      pathIdentityVerified: true,
     });
     expect(err.message).toContain('requested 0o640, actual 0o600');
     expect(isBackupPublishedPermissionError(err)).toBe(true);
     expect(isBackupPublishedPermissionError(new Error('other'))).toBe(false);
+  });
+});
+
+describe('RestoreRollbackError', () => {
+  it('exposes only archive-relative residual entries and a stable recovery code', () => {
+    const err = new RestoreRollbackError(2, [
+      'workspaceStorage/ws/state.vscdb',
+      'globalStorage/state.vscdb',
+    ]);
+    expect(err.code).toBe('RESTORE_ROLLBACK_INCOMPLETE');
+    expect(err.details).toMatchObject({
+      publishedFileCount: 2,
+      residualFileCount: 2,
+      residualFiles: ['globalStorage/state.vscdb', 'workspaceStorage/ws/state.vscdb'],
+    });
+    expect(isRestoreRollbackError(err)).toBe(true);
+    expect(isRestoreRollbackError(new Error('other'))).toBe(false);
   });
 });
 
@@ -340,8 +360,13 @@ describe('type guards', () => {
     { guard: isBackupError, instance: new BackupError('msg'), name: 'isBackupError' },
     {
       guard: isBackupPublishedPermissionError,
-      instance: new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600),
+      instance: new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600, undefined, true),
       name: 'isBackupPublishedPermissionError',
+    },
+    {
+      guard: isRestoreRollbackError,
+      instance: new RestoreRollbackError(1, ['globalStorage/state.vscdb']),
+      name: 'isRestoreRollbackError',
     },
     { guard: isNoDataError, instance: new NoDataError('p'), name: 'isNoDataError' },
     { guard: isFileExistsError, instance: new FileExistsError('p'), name: 'isFileExistsError' },

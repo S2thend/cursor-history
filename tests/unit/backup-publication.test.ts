@@ -76,11 +76,14 @@ describe('published backup archive permissions', () => {
     expect(ops.chmodDescriptor).toHaveBeenCalledWith(23, 0o640);
   });
 
-  it('reports a committed archive when opening without symlink following fails', () => {
+  it('reports an unverified final path when opening and path verification both fail', () => {
     const cause = new Error('synthetic O_NOFOLLOW rejection');
     const ops = operations({
       openNoFollow: vi.fn(() => {
         throw cause;
+      }),
+      statPathNoFollow: vi.fn(() => {
+        throw new Error('synthetic path inspection failure');
       }),
     });
 
@@ -92,13 +95,37 @@ describe('published backup archive permissions', () => {
         details: expect.objectContaining({
           published: true,
           outputPath: '/backups/published.zip',
+          pathIdentityVerified: false,
           requestedMode: 0o600,
           actualMode: null,
+          remedy: expect.stringContaining('establish which file'),
         }),
         cause,
       })
     );
     expect(ops.chmodDescriptor).not.toHaveBeenCalled();
+  });
+
+  it('verifies the final path after opening without symlink following fails', () => {
+    const cause = new Error('synthetic O_NOFOLLOW rejection');
+    const ops = operations({
+      openNoFollow: vi.fn(() => {
+        throw cause;
+      }),
+    });
+
+    expect(() =>
+      enforcePublishedArchiveMode('/backups/published.zip', 0o600, identity, ops)
+    ).toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          pathIdentityVerified: true,
+          actualMode: 0o600,
+          remedy: expect.stringContaining('apply 0o600 permissions manually'),
+        }),
+        cause,
+      })
+    );
   });
 
   it('reports a committed archive and its observed inode mode when fchmod fails', () => {
@@ -122,6 +149,7 @@ describe('published backup archive permissions', () => {
       details: {
         published: true,
         outputPath: '/backups/published.zip',
+        pathIdentityVerified: true,
         requestedMode: 0o640,
         actualMode: 0o600,
         remedy: expect.stringContaining('Do not retry with --force'),
@@ -133,14 +161,21 @@ describe('published backup archive permissions', () => {
 
   it('never chmods a replacement inode opened after publication', () => {
     const replacement = stat(0o644, { inode: 99n });
-    const ops = operations({ statDescriptor: vi.fn(() => replacement) });
+    const ops = operations({
+      statDescriptor: vi.fn(() => replacement),
+      statPathNoFollow: vi.fn(() => replacement),
+    });
 
     expect(() =>
       enforcePublishedArchiveMode('/backups/published.zip', 0o600, identity, ops)
     ).toThrow(
       expect.objectContaining({
         code: 'BACKUP_PUBLISHED_PERMISSION_FAILED',
-        details: expect.objectContaining({ actualMode: 0o644 }),
+        details: expect.objectContaining({
+          pathIdentityVerified: false,
+          actualMode: null,
+          remedy: expect.not.stringContaining('apply 0o600 permissions manually'),
+        }),
       })
     );
     expect(ops.chmodDescriptor).not.toHaveBeenCalled();
@@ -161,7 +196,11 @@ describe('published backup archive permissions', () => {
     ).toThrow(
       expect.objectContaining({
         code: 'BACKUP_PUBLISHED_PERMISSION_FAILED',
-        details: expect.objectContaining({ actualMode: 0o640 }),
+        details: expect.objectContaining({
+          pathIdentityVerified: false,
+          actualMode: 0o640,
+          remedy: expect.not.stringContaining('apply 0o640 permissions manually'),
+        }),
       })
     );
     expect(ops.chmodDescriptor).toHaveBeenCalledWith(23, 0o640);

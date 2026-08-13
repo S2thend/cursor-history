@@ -62,6 +62,7 @@ export const CLI_COMMAND_REGISTRY = Object.freeze({
       'notFound',
       'io',
       'integrity',
+      'restoreRollbackIncomplete',
       'unexpected',
     ] as const),
   }),

@@ -77,37 +77,56 @@ export function enforcePublishedArchiveMode(
 ): void {
   let descriptor: number | undefined;
   let actualMode: number | null = null;
+  let pathIdentityVerified = false;
+  let pathIdentityVerificationAttempted = false;
   let failure: unknown;
+
+  const verifyFinalPathIdentity = (): void => {
+    pathIdentityVerificationAttempted = true;
+    const finalPath = operations.statPathNoFollow(outputPath);
+    if (!finalPath.regularFile || !hasIdentity(finalPath, expectedIdentity)) {
+      throw identityError('Published backup path was replaced during permission verification.');
+    }
+    actualMode = finalPath.mode;
+    pathIdentityVerified = true;
+  };
 
   try {
     descriptor = operations.openNoFollow(outputPath);
     const initial = operations.statDescriptor(descriptor);
-    actualMode = initial.mode;
     if (!initial.regularFile || !hasIdentity(initial, expectedIdentity)) {
       throw identityError('Published backup path no longer refers to the completed archive inode.');
     }
+    actualMode = initial.mode;
 
     if (initial.mode !== requestedMode) {
       operations.chmodDescriptor(descriptor, requestedMode);
       const changed = operations.statDescriptor(descriptor);
-      actualMode = changed.mode;
       if (!changed.regularFile || !hasIdentity(changed, expectedIdentity)) {
         throw identityError(
           'Published backup descriptor changed identity during permission update.'
         );
       }
+      actualMode = changed.mode;
       if (changed.mode !== requestedMode) {
         throw new Error('Published backup inode did not retain the requested permission mode.');
       }
     }
 
-    const finalPath = operations.statPathNoFollow(outputPath);
-    if (!finalPath.regularFile || !hasIdentity(finalPath, expectedIdentity)) {
-      throw identityError('Published backup path was replaced during permission verification.');
-    }
+    verifyFinalPathIdentity();
   } catch (cause) {
     failure = cause;
   } finally {
+    // Permission operations can fail before the ordinary final-path check. Make one best-effort
+    // identity check so the public error can distinguish a verified published path from an
+    // untrusted or replaced pathname. Preserve the primary failure as the cause.
+    if (failure !== undefined && !pathIdentityVerificationAttempted) {
+      try {
+        verifyFinalPathIdentity();
+      } catch {
+        pathIdentityVerified = false;
+      }
+    }
     if (descriptor !== undefined) {
       try {
         operations.close(descriptor);
@@ -118,6 +137,12 @@ export function enforcePublishedArchiveMode(
   }
 
   if (failure !== undefined) {
-    throw new BackupPublishedPermissionError(outputPath, requestedMode, actualMode, failure);
+    throw new BackupPublishedPermissionError(
+      outputPath,
+      requestedMode,
+      actualMode,
+      failure,
+      pathIdentityVerified
+    );
   }
 }

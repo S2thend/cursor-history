@@ -8,6 +8,7 @@ export type SessionIntegrityErrorCode =
   | 'DATABASE_CAPABILITY_MISSING'
   | 'NO_CAPABLE_DATABASE_DRIVER'
   | 'BACKUP_PUBLISHED_PERMISSION_FAILED'
+  | 'RESTORE_ROLLBACK_INCOMPLETE'
   | 'TEMPORARY_ARTIFACT_CLEANUP_FAILED'
   | 'READ_CONTEXT_SOURCE_MISMATCH'
   | 'READ_CONTEXT_SCOPE_MISMATCH'
@@ -276,6 +277,8 @@ export {
 export type BackupPublishedPermissionErrorDetails = {
   published: true;
   outputPath: string;
+  /** True only when the final path was verified against the staged archive inode. */
+  pathIdentityVerified: boolean;
   requestedMode: number;
   /** Observed permission bits, or null when the post-publication observation itself failed. */
   actualMode: number | null;
@@ -287,15 +290,18 @@ function formatPermissionMode(mode: number): string {
 }
 
 /**
- * Reports that a complete backup archive reached its final path but its requested mode did not.
+ * Reports that backup publication crossed its commit point but its requested mode did not.
  *
- * The rename or link is the publication commit point. The valid archive remains at `outputPath`;
- * callers must not retry blindly or assume that a thrown error means no archive was created.
+ * The rename or link is the publication commit point. `pathIdentityVerified` determines whether
+ * `outputPath` was subsequently proven to refer to that exact archive inode. Callers must not
+ * retry blindly or assume that either the absence or presence of an archive follows only from the
+ * thrown error.
  *
- * @param outputPath - Final path containing the safely published archive.
+ * @param outputPath - Final path selected for publication; trust it only when identity is verified.
  * @param requestedMode - Permission bits requested for the completed archive.
  * @param actualMode - Permission bits observed after failure, or null when mode inspection failed.
  * @param cause - Filesystem failure raised while inspecting or applying the requested mode.
+ * @param pathIdentityVerified - Whether the final path still matched the staged archive inode.
  */
 export class BackupPublishedPermissionError extends SessionIntegrityError<
   'BACKUP_PUBLISHED_PERMISSION_FAILED',
@@ -307,24 +313,27 @@ export class BackupPublishedPermissionError extends SessionIntegrityError<
     outputPath: string,
     requestedMode: number,
     actualMode: number | null,
-    cause?: unknown
+    cause?: unknown,
+    pathIdentityVerified = false
   ) {
     const requested = formatPermissionMode(requestedMode);
     const actual =
       actualMode === null ? 'unknown (mode inspection failed)' : formatPermissionMode(actualMode);
-    super(
-      'BACKUP_PUBLISHED_PERMISSION_FAILED',
-      `Backup archive was published at ${outputPath}, but its requested permissions could not be applied (requested ${requested}, actual ${actual}).`,
-      {
-        published: true,
-        outputPath,
-        requestedMode,
-        actualMode,
-        remedy:
-          `Keep or inspect the valid published archive, then apply ${requested} permissions manually. ` +
-          'Do not retry with --force unless replacing this archive is intentional.',
-      }
-    );
+    const message = pathIdentityVerified
+      ? `Backup archive was published at ${outputPath}, and that path still refers to the completed archive, but its requested permissions could not be applied (requested ${requested}, actual ${actual}).`
+      : `Backup publication crossed its commit point, but the archive identity at ${outputPath} could not be verified after the permission failure (requested ${requested}, actual ${actual}). The actual mode is only the last safely observed archive-inode mode and does not describe the current output path.`;
+    const remedy = pathIdentityVerified
+      ? `Inspect the verified published archive, then apply ${requested} permissions manually. ` +
+        'Do not retry with --force unless replacing this archive is intentional.'
+      : 'Do not use or change permissions on the output path based on this error. Inspect the destination and establish which file, if any, is the completed archive before recovery. Do not retry with --force unless replacing the current path is intentional.';
+    super('BACKUP_PUBLISHED_PERMISSION_FAILED', message, {
+      published: true,
+      outputPath,
+      pathIdentityVerified,
+      requestedMode,
+      actualMode,
+      remedy,
+    });
     if (cause !== undefined) {
       Object.defineProperty(this, 'cause', { configurable: true, value: cause });
     }
@@ -354,6 +363,40 @@ export class TemporaryArtifactCleanupError extends SessionIntegrityError<
           'Remove the listed private temporary paths after confirming no operation is active.',
       }
     );
+  }
+}
+
+/**
+ * Reports restored entries that could not be returned to their pre-restore state after a later
+ * failure. Manifest-relative paths are safe to expose; physical destination locators are omitted.
+ */
+export class RestoreRollbackError extends SessionIntegrityError<
+  'RESTORE_ROLLBACK_INCOMPLETE',
+  {
+    publishedFileCount: number;
+    residualFileCount: number;
+    residualFiles: string[];
+    remedy: string;
+  }
+> {
+  override readonly name = 'RestoreRollbackError';
+
+  constructor(publishedFileCount: number, residualFiles: string[], cause?: unknown) {
+    const ordered = [...new Set(residualFiles)].sort(compareCodePoints);
+    super(
+      'RESTORE_ROLLBACK_INCOMPLETE',
+      'Restore failed and one or more published files could not be rolled back.',
+      {
+        publishedFileCount,
+        residualFileCount: ordered.length,
+        residualFiles: ordered,
+        remedy:
+          'Stop Cursor, inspect the listed archive-relative destinations, and restore them from a known-good backup before retrying.',
+      }
+    );
+    if (cause !== undefined) {
+      Object.defineProperty(this, 'cause', { configurable: true, value: cause });
+    }
   }
 }
 

@@ -30,8 +30,9 @@ import type {
  * @returns Promise resolving to backup result
  * @throws {BackupError} If source discovery, output validation, or archive creation fails.
  * @throws {SessionIntegrityError} If a driver, source limit, cancellation, cleanup, or final archive
- * permission contract fails. A `BACKUP_PUBLISHED_PERMISSION_FAILED` error means the valid archive
- * already exists at `details.outputPath`; inspect or correct its mode instead of retrying blindly.
+ * permission contract fails. A `BACKUP_PUBLISHED_PERMISSION_FAILED` error means publication crossed
+ * its commit point; trust and inspect `details.outputPath` only when
+ * `details.pathIdentityVerified` is true, and never retry blindly.
  *
  * @example
  * ```typescript
@@ -61,7 +62,8 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
  * @param config - Restore configuration (backupPath required)
  * @returns Promise resolving to restore result
  * @throws {RestoreError} If the archive is missing, invalid, unsafe, or cannot be restored.
- * @throws {SessionIntegrityError} If a source limit, cancellation, or cleanup contract fails.
+ * @throws {SessionIntegrityError} If a source limit, cancellation, cleanup, or rollback contract
+ * fails. `RESTORE_ROLLBACK_INCOMPLETE` lists archive-relative entries still requiring recovery.
  *
  * @example
  * ```typescript

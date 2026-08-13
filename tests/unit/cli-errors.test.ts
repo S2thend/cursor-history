@@ -13,6 +13,7 @@ import {
 } from '../../src/cli/errors.js';
 import {
   BackupPublishedPermissionError,
+  RestoreRollbackError,
   SessionAmbiguityError,
   SourceLimitConfigurationError,
   SourceLimitExceededError,
@@ -247,7 +248,7 @@ describe('feature-016 typed error mapping', () => {
     expect(encoding.exitCode).toBe(ExitCode.IO_ERROR);
 
     const published = mapSessionIntegrityError(
-      new BackupPublishedPermissionError('/backups/published.zip', 0o640, 0o600)
+      new BackupPublishedPermissionError('/backups/published.zip', 0o640, 0o600, undefined, true)
     );
     expect(published.code).toBe('BACKUP_PUBLISHED_PERMISSION_FAILED');
     expect(published.exitCode).toBe(ExitCode.IO_ERROR);
@@ -256,6 +257,18 @@ describe('feature-016 typed error mapping', () => {
       outputPath: '/backups/published.zip',
       requestedMode: 0o640,
       actualMode: 0o600,
+      pathIdentityVerified: true,
+    });
+
+    const rollback = mapSessionIntegrityError(
+      new RestoreRollbackError(1, ['globalStorage/state.vscdb'])
+    );
+    expect(rollback.code).toBe('RESTORE_ROLLBACK_INCOMPLETE');
+    expect(rollback.exitCode).toBe(ExitCode.IO_ERROR);
+    expect(rollback.details).toMatchObject({
+      publishedFileCount: 1,
+      residualFileCount: 1,
+      residualFiles: ['globalStorage/state.vscdb'],
     });
   });
 
