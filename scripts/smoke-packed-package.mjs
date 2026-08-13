@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -145,6 +145,45 @@ function classifyLocalizedExamples(markdownPath, examples) {
     }
   }
   return classified;
+}
+
+function assertPackagedMarkdownLinkClosure(installedRoot, markdownPaths) {
+  let checkedTargets = 0;
+  for (const markdownPath of markdownPaths) {
+    const markdown = readFileSync(join(installedRoot, markdownPath), 'utf8');
+    for (const match of markdown.matchAll(/!?\[[^\]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/gu)) {
+      const rawTarget = (match[1] ?? '').replace(/^<|>$/gu, '');
+      if (
+        rawTarget.length === 0 ||
+        rawTarget.startsWith('#') ||
+        rawTarget.startsWith('//') ||
+        /^[a-z][a-z0-9+.-]*:/iu.test(rawTarget)
+      ) {
+        continue;
+      }
+      const encodedPath = rawTarget.split(/[?#]/u, 1)[0] ?? '';
+      let targetPath;
+      try {
+        targetPath = resolve(installedRoot, dirname(markdownPath), decodeURIComponent(encodedPath));
+      } catch {
+        fail(`${markdownPath} contains an invalid encoded local link ${rawTarget}`);
+      }
+      const packageRelative = relative(installedRoot, targetPath);
+      if (
+        packageRelative === '..' ||
+        packageRelative.startsWith(`..${sep}`) ||
+        isAbsolute(packageRelative)
+      ) {
+        fail(`${markdownPath} links outside the installed package: ${rawTarget}`);
+      }
+      if (!existsSync(targetPath)) {
+        fail(`${markdownPath} links to missing packaged target ${rawTarget}`);
+      }
+      checkedTargets += 1;
+    }
+  }
+  if (checkedTargets === 0) fail('packaged Markdown link-closure check executed no local targets');
+  return checkedTargets;
 }
 
 function runTypecheckedDocumentationFence(markdownPath, index, workspace, env) {
@@ -324,6 +363,7 @@ try {
     'LICENSE',
     'CHANGELOG.md',
     'docs/compatibility.md',
+    'docs/release-verification.md',
     'docs/logo.png',
     'docs/readme_es.md',
     'docs/readme_fr.md',
@@ -332,6 +372,10 @@ try {
   for (const relativePath of requiredFiles) {
     if (!existsSync(join(installedRoot, relativePath))) fail(`missing ${relativePath}`);
   }
+  const linkedDocumentationTargets = assertPackagedMarkdownLinkClosure(
+    installedRoot,
+    requiredFiles.filter((relativePath) => relativePath.endsWith('.md'))
+  );
 
   const esm = await import(pathToFileURL(join(installedRoot, 'dist/lib/index.js')).href);
   const requireFromWorkspace = createRequire(join(workspace, 'packed-smoke.cjs'));
@@ -889,6 +933,7 @@ try {
       backupDriver: expectedBackupDriver ?? esm.getActiveDriver(),
       nodeSqliteBackup: expectedNodeSqliteBackup,
       packedSchemaTestCount,
+      linkedDocumentationTargets,
       localizedDocumentationExamples,
       manifestCompatibility: true,
       initialProjectionWrites: initialWrites,

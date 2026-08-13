@@ -298,6 +298,7 @@ describe('packed-package contract smoke', () => {
       runtimeOnly: false,
       manifestCompatibility: true,
       producerOnlyProjectionWrites: 0,
+      linkedDocumentationTargets: expect.any(Number),
       localizedDocumentationExamples: {
         'docs/readme_es.md': {
           typechecked: 6,
@@ -314,6 +315,7 @@ describe('packed-package contract smoke', () => {
       },
     });
     expect(smokeReport.packedSchemaTestCount).toBeGreaterThan(0);
+    expect(smokeReport.linkedDocumentationTargets).toBeGreaterThan(0);
     expect(smokeReport.initialProjectionWrites).toBeGreaterThan(0);
 
     const runtimeSmoked = runNode(
