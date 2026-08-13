@@ -63,8 +63,10 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
  * @param config - Restore configuration (backupPath required)
  * @returns Promise resolving to restore result
  * @throws {RestoreError} If the archive is missing, invalid, unsafe, or cannot be restored.
- * @throws {SessionIntegrityError} If a source limit, cancellation, cleanup, or rollback contract
- * fails. `RESTORE_ROLLBACK_INCOMPLETE` lists archive-relative entries still requiring recovery.
+ * @throws {SessionIntegrityError} If a source limit, cancellation, cleanup, or publication contract
+ * fails. After any post-publication failure, `RESTORE_ROLLBACK_INCOMPLETE` lists every
+ * archive-relative entry intentionally left untouched for recovery from a known-good backup;
+ * portable Node path APIs cannot perform safe automatic multi-file rollback.
  *
  * @example
  * ```typescript

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import packageJson from '../../package.json';
 
@@ -100,6 +100,7 @@ import {
   restoreBackup,
 } from '../../src/core/backup.js';
 import { ZipArchiveFormatError } from '../../src/core/zip-stream.js';
+import { RestoreRollbackError, TemporaryArtifactCleanupError } from '../../src/core/errors.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -630,6 +631,24 @@ describe('createBackup', () => {
 // restoreBackup
 // =============================================================================
 describe('restoreBackup', () => {
+  it('has no pathname observation-then-mutation rollback window after publication', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const source = fs.readFileSync(resolve('src/core/backup.ts'), 'utf8');
+    const start = source.indexOf(
+      '// Portable Node filesystem APIs cannot atomically prove that a pathname'
+    );
+    const end = source.indexOf('if (shouldPropagateBoundedReadError(error))', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+
+    const failurePath = source.slice(start, end);
+    expect(failurePath).toContain('new RestoreRollbackError');
+    expect(failurePath).toContain('restoredFiles.map');
+    expect(failurePath).not.toMatch(
+      /\b(?:lstatSync|renameSync|unlinkSync|publishRestoreFile)\s*\(/u
+    );
+  });
+
   it('returns failure for invalid backup', async () => {
     vi.mocked(existsSync).mockReturnValue(false); // backup file doesn't exist
 
@@ -741,6 +760,94 @@ describe('restoreBackup', () => {
     expect(Object.isFrozen(policy)).toBe(true);
     expect(policy?.zipEntryCount).toBe(8);
     expect(sourceReadLimits.zipEntryCount).toBe(1);
+  });
+
+  it('does not let private-workspace cleanup mask published restore residuals', async () => {
+    const fileContent = Buffer.from('database content');
+    const manifest = {
+      version: '1.0.0',
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: fileContent.length,
+          checksum: computeChecksum(fileContent),
+          type: 'global-db',
+        },
+      ],
+    };
+    vi.mocked(existsSync).mockReturnValue(false);
+    vi.mocked(lstatSync).mockImplementation(() => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    openBoundedZipArchiveMock.mockResolvedValue(
+      mockArchive({
+        'manifest.json': Buffer.from(JSON.stringify(manifest)),
+        'globalStorage/state.vscdb': fileContent,
+      })
+    );
+    disposePrivateTempWorkspaceMock.mockImplementationOnce(() => {
+      throw new TemporaryArtifactCleanupError(
+        ['/private-workspace/verified-residue'],
+        ['/private-workspace/unverified-residue']
+      );
+    });
+
+    let caught: unknown;
+    try {
+      await restoreBackup({
+        backupPath: '/backup.zip',
+        targetPath: '/target/User/workspaceStorage',
+        onProgress: (progress) => {
+          if (progress.phase === 'finalizing') throw new Error('failure after publication');
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(RestoreRollbackError);
+    expect(caught).toMatchObject({
+      code: 'RESTORE_ROLLBACK_INCOMPLETE',
+      details: {
+        publishedFileCount: 1,
+        residualFiles: ['globalStorage/state.vscdb'],
+        residuePaths: ['/private-workspace/verified-residue'],
+        unverifiedResiduePaths: ['/private-workspace/unverified-residue'],
+      },
+      cause: expect.objectContaining({ message: 'failure after publication' }),
+    });
+  });
+
+  it('does not let outer cleanup mask an earlier cleanup failure before publication', async () => {
+    const initialCleanup = new TemporaryArtifactCleanupError(
+      ['/private-workspace/shared', '/private-workspace/initial'],
+      ['/private-workspace/initial-unknown']
+    );
+    const outerCleanup = new TemporaryArtifactCleanupError(
+      ['/private-workspace/outer', '/private-workspace/initial-unknown'],
+      ['/private-workspace/shared']
+    );
+    openBoundedZipArchiveMock.mockRejectedValueOnce(initialCleanup);
+    disposePrivateTempWorkspaceMock.mockImplementationOnce(() => {
+      throw outerCleanup;
+    });
+
+    let caught: unknown;
+    try {
+      await restoreBackup({ backupPath: '/backup.zip' });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TemporaryArtifactCleanupError);
+    expect(caught).toMatchObject({
+      code: 'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
+      details: {
+        residuePaths: ['/private-workspace/initial', '/private-workspace/outer'],
+        unverifiedResiduePaths: ['/private-workspace/initial-unknown', '/private-workspace/shared'],
+      },
+      cause: initialCleanup,
+    });
   });
 });
 

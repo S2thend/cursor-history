@@ -9,6 +9,7 @@ import {
   BackupPublishedPermissionError,
   BackupPublishedCleanupError,
   RestoreRollbackError,
+  TemporaryArtifactCleanupError,
   SessionAmbiguityError,
   SessionNotFoundError,
 } from '../../src/lib/errors.js';
@@ -2172,7 +2173,16 @@ describe('restore command source-read options', () => {
       errors: [],
       manifest: { files: [{ path: 'globalStorage/state.vscdb' }] },
     });
-    mockRestoreBackup.mockRejectedValue(new RestoreRollbackError(1, ['globalStorage/state.vscdb']));
+    mockRestoreBackup.mockRejectedValue(
+      new RestoreRollbackError(
+        1,
+        ['globalStorage/state.vscdb'],
+        new TemporaryArtifactCleanupError(
+          ['/private/verified-restore-stage'],
+          ['/private/unverified-restore-stage']
+        )
+      )
+    );
 
     const program = createProgram();
     registerRestoreCommand(program);
@@ -2185,6 +2195,10 @@ describe('restore command source-read options', () => {
     const output = consoleErrorSpy.mock.calls.map(([value]) => String(value)).join('\n');
     expect(output).toContain('Restore residual files:');
     expect(output).toContain('globalStorage/state.vscdb');
+    expect(output).toContain('Private residue paths:');
+    expect(output).toContain('/private/verified-restore-stage');
+    expect(output).toContain('Unverified residue paths (do not delete blindly):');
+    expect(output).toContain('/private/unverified-restore-stage');
     expect(output).toContain('known-good backup');
   });
 });

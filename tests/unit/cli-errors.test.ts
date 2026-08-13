@@ -15,6 +15,7 @@ import {
   BackupPublishedPermissionError,
   BackupPublishedCleanupError,
   RestoreRollbackError,
+  TemporaryArtifactCleanupError,
   SessionAmbiguityError,
   SourceLimitConfigurationError,
   SourceLimitExceededError,
@@ -277,7 +278,14 @@ describe('feature-016 typed error mapping', () => {
     });
 
     const rollback = mapSessionIntegrityError(
-      new RestoreRollbackError(1, ['globalStorage/state.vscdb'])
+      new RestoreRollbackError(
+        1,
+        ['globalStorage/state.vscdb'],
+        new TemporaryArtifactCleanupError(
+          ['/private/verified-stage'],
+          ['/private/unverified-stage']
+        )
+      )
     );
     expect(rollback.code).toBe('RESTORE_ROLLBACK_INCOMPLETE');
     expect(rollback.exitCode).toBe(ExitCode.IO_ERROR);
@@ -285,6 +293,10 @@ describe('feature-016 typed error mapping', () => {
       publishedFileCount: 1,
       residualFileCount: 1,
       residualFiles: ['globalStorage/state.vscdb'],
+      residueCount: 1,
+      residuePaths: ['/private/verified-stage'],
+      unverifiedResidueCount: 1,
+      unverifiedResiduePaths: ['/private/unverified-stage'],
     });
   });
 

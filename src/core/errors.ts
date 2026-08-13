@@ -450,12 +450,14 @@ export class TemporaryArtifactCleanupError extends SessionIntegrityError<
 }
 
 /**
- * Reports restored entries that could not be returned to their pre-restore state after a later
- * failure. Manifest-relative paths are safe to expose; physical destination locators are omitted.
+ * Reports entries that were published before a later restore failure. Portable Node path APIs do
+ * not provide atomic compare-and-replace/unlink, so automatic rollback leaves every published
+ * destination untouched and reports its manifest-relative path for explicit recovery.
  *
- * @param publishedFileCount - Number of entries published before rollback began.
- * @param residualFiles - Safe manifest-relative entries whose pre-restore state was not recovered.
- * @param cause - Original restore or rollback failure, when available.
+ * @param publishedFileCount - Number of entries published before the restore failed.
+ * @param residualFiles - Safe manifest-relative entries left untouched for explicit recovery.
+ * @param cause - Original restore failure, when available.
+ * @param temporaryCleanupErrors - Additional owner-private cleanup failures to expose at top level.
  */
 export class RestoreRollbackError extends SessionIntegrityError<
   'RESTORE_ROLLBACK_INCOMPLETE',
@@ -463,22 +465,51 @@ export class RestoreRollbackError extends SessionIntegrityError<
     publishedFileCount: number;
     residualFileCount: number;
     residualFiles: string[];
+    residueCount: number;
+    residuePaths: string[];
+    unverifiedResidueCount: number;
+    unverifiedResiduePaths: string[];
     remedy: string;
   }
 > {
   override readonly name = 'RestoreRollbackError';
 
-  constructor(publishedFileCount: number, residualFiles: string[], cause?: unknown) {
+  constructor(
+    publishedFileCount: number,
+    residualFiles: string[],
+    cause?: unknown,
+    temporaryCleanupErrors: readonly TemporaryArtifactCleanupError[] = []
+  ) {
     const ordered = [...new Set(residualFiles)].sort(compareCodePoints);
+    const cleanupErrors = [
+      ...(cause instanceof TemporaryArtifactCleanupError ? [cause] : []),
+      ...temporaryCleanupErrors,
+    ];
+    const unverifiedResiduePaths = [
+      ...new Set(cleanupErrors.flatMap((error) => error.details.unverifiedResiduePaths)),
+    ].sort(compareCodePoints);
+    const unverifiedResidueSet = new Set(unverifiedResiduePaths);
+    const residuePaths = [...new Set(cleanupErrors.flatMap((error) => error.details.residuePaths))]
+      .filter((path) => !unverifiedResidueSet.has(path))
+      .sort(compareCodePoints);
+    const cleanupRemedy =
+      residuePaths.length > 0 || unverifiedResiduePaths.length > 0
+        ? ' Remove only verified private temporary paths after confirming no operation is active; do not delete unverified paths blindly.'
+        : '';
     super(
       'RESTORE_ROLLBACK_INCOMPLETE',
-      'Restore failed and one or more published files could not be rolled back.',
+      'Restore failed after one or more files were published; automatic rollback was not attempted.',
       {
         publishedFileCount,
         residualFileCount: ordered.length,
         residualFiles: ordered,
+        residueCount: residuePaths.length,
+        residuePaths,
+        unverifiedResidueCount: unverifiedResiduePaths.length,
+        unverifiedResiduePaths,
         remedy:
-          'Stop Cursor, inspect the listed archive-relative destinations, and restore them from a known-good backup before retrying.',
+          'Stop Cursor, inspect the listed archive-relative destinations, and restore them from a known-good backup before retrying.' +
+          cleanupRemedy,
       }
     );
     if (cause !== undefined) {

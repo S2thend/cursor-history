@@ -698,10 +698,52 @@ function attachCleanupCause(cleanupError: unknown, operationError: unknown): voi
   }
 }
 
+function combineTemporaryCleanupErrors(
+  first: TemporaryArtifactCleanupError,
+  second: TemporaryArtifactCleanupError
+): TemporaryArtifactCleanupError {
+  const unverifiedResiduePaths = [
+    ...new Set([...first.details.unverifiedResiduePaths, ...second.details.unverifiedResiduePaths]),
+  ];
+  const unverifiedResidueSet = new Set(unverifiedResiduePaths);
+  const residuePaths = [
+    ...new Set([...first.details.residuePaths, ...second.details.residuePaths]),
+  ].filter((path) => !unverifiedResidueSet.has(path));
+  const combined = new TemporaryArtifactCleanupError(residuePaths, unverifiedResiduePaths);
+  Object.defineProperty(combined, 'cause', { configurable: true, value: first });
+  return combined;
+}
+
 function disposePrivateWorkspace(workspace: PrivateTempWorkspace, operationError?: unknown): void {
   try {
     workspace.dispose();
   } catch (cleanupError) {
+    if (
+      operationError instanceof RestoreRollbackError &&
+      cleanupError instanceof TemporaryArtifactCleanupError
+    ) {
+      const originalCause = Object.prototype.hasOwnProperty.call(operationError, 'cause')
+        ? (operationError as Error & { cause: unknown }).cause
+        : undefined;
+      throw new RestoreRollbackError(
+        operationError.details.publishedFileCount,
+        operationError.details.residualFiles,
+        originalCause,
+        [
+          new TemporaryArtifactCleanupError(
+            operationError.details.residuePaths,
+            operationError.details.unverifiedResiduePaths
+          ),
+          cleanupError,
+        ]
+      );
+    }
+    if (
+      operationError instanceof TemporaryArtifactCleanupError &&
+      cleanupError instanceof TemporaryArtifactCleanupError
+    ) {
+      throw combineTemporaryCleanupErrors(operationError, cleanupError);
+    }
     attachCleanupCause(cleanupError, operationError);
     throw cleanupError;
   }
@@ -1314,44 +1356,6 @@ function copyOpenFileContents(sourceDescriptor: number, targetDescriptor: number
   }
 }
 
-/** Snapshot an existing destination without following a leaf link created after path preflight. */
-function snapshotRestoreDestination(sourcePath: string, snapshotPath: string): number {
-  let sourceDescriptor: number | undefined;
-  let snapshotDescriptor: number | undefined;
-  let sourceMode: number | undefined;
-  let failure: unknown;
-  try {
-    sourceDescriptor = openSync(sourcePath, restoreReadFlags());
-    const sourceStats = fstatSync(sourceDescriptor);
-    if (!sourceStats.isFile()) throw new Error('Restore destination is not a regular file.');
-    sourceMode = sourceStats.mode & 0o777;
-
-    snapshotDescriptor = openSync(
-      snapshotPath,
-      constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0)
-    );
-    if (!fstatSync(snapshotDescriptor).isFile()) {
-      throw new Error('Private restore rollback staging is not a regular file.');
-    }
-    if (process.platform !== 'win32') fchmodSync(snapshotDescriptor, 0o600);
-    copyOpenFileContents(sourceDescriptor, snapshotDescriptor);
-    fsyncSync(snapshotDescriptor);
-  } catch (error) {
-    failure = error;
-  } finally {
-    for (const descriptor of [snapshotDescriptor, sourceDescriptor]) {
-      if (descriptor === undefined) continue;
-      try {
-        closeSync(descriptor);
-      } catch (error) {
-        failure ??= error;
-      }
-    }
-  }
-  if (failure !== undefined) throw failure;
-  return sourceMode!;
-}
-
 /**
  * Copy one private validated entry into a new same-directory inode and atomically replace the
  * destination directory entry. Existing destinations are never opened for writing, so force mode
@@ -1472,14 +1476,7 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
   const workspace = createPrivateTempWorkspace({
     prefix: 'cursor-history-restore-',
   });
-  const restoredFiles: Array<{
-    manifestPath: string;
-    trustedRoot: string;
-    destinationPath: string;
-    publishedIdentity: PublishedArchiveIdentity;
-    previousPath?: string;
-    previousMode?: number;
-  }> = [];
+  const restoredFiles: Array<{ manifestPath: string }> = [];
   let operationError: unknown;
   try {
     const inspection = await withBoundedArchive(backupPath, readOptions, (archive) =>
@@ -1541,20 +1538,6 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
       );
     }
 
-    const previousPaths = new Map<string, string>();
-    const previousModes = new Map<string, number>();
-    for (let index = 0; index < restorePlan.length; index++) {
-      const planned = restorePlan[index]!;
-      if (!assertNoLinkedRestorePath(planned.trustedRoot, planned.destinationPath, 'file'))
-        continue;
-      const previousPath = workspace.createFile(`previous-${index}.bin`);
-      previousModes.set(
-        planned.destinationPath,
-        snapshotRestoreDestination(planned.destinationPath, previousPath)
-      );
-      previousPaths.set(planned.destinationPath, previousPath);
-    }
-
     for (let index = 0; index < restorePlan.length; index++) {
       throwIfAborted(signal);
       const staged = restorePlan[index]!;
@@ -1583,23 +1566,14 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
           `Target already has Cursor data at: ${staged.manifestEntry.path}. Use --force to overwrite.`
         );
       }
-      const previousPath = previousPaths.get(staged.destinationPath);
-      const previousMode = previousModes.get(staged.destinationPath);
       throwIfAborted(signal);
       publishRestoreFile(
         staged.trustedRoot,
         staged.temporaryPath,
         staged.destinationPath,
         force,
-        (publishedIdentity) => {
-          restoredFiles.push({
-            manifestPath: staged.manifestEntry.path,
-            trustedRoot: staged.trustedRoot,
-            destinationPath: staged.destinationPath,
-            publishedIdentity,
-            ...(previousPath ? { previousPath } : {}),
-            ...(previousMode === undefined ? {} : { previousMode }),
-          });
+        () => {
+          restoredFiles.push({ manifestPath: staged.manifestEntry.path });
         }
       );
     }
@@ -1622,50 +1596,21 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
     };
   } catch (error) {
     operationError = error;
-    const residualFiles: string[] = [];
-    let rollbackCleanupError: unknown;
-    for (const restored of [...restoredFiles].reverse()) {
-      let rollbackCommitted = false;
-      try {
-        const current = lstatSync(restored.destinationPath, { bigint: true });
-        if (
-          !current.isFile() ||
-          current.dev !== restored.publishedIdentity.device ||
-          current.ino !== restored.publishedIdentity.inode
-        ) {
-          residualFiles.push(restored.manifestPath);
-          continue;
-        }
-        if (restored.previousPath) {
-          publishRestoreFile(
-            restored.trustedRoot,
-            restored.previousPath,
-            restored.destinationPath,
-            true,
-            () => {
-              rollbackCommitted = true;
-            },
-            restored.previousMode ?? 0o600
-          );
-        } else {
-          assertNoLinkedRestorePath(
-            restored.trustedRoot,
-            dirname(restored.destinationPath),
-            'directory'
-          );
-          unlinkSync(restored.destinationPath);
-          rollbackCommitted = true;
-        }
-      } catch (rollbackError) {
-        if (!rollbackCommitted) residualFiles.push(restored.manifestPath);
-        rollbackCleanupError ??= rollbackCommitted ? rollbackError : undefined;
-      }
+    // Portable Node filesystem APIs cannot atomically prove that a pathname still names the inode
+    // published above and then replace or unlink that same directory entry. A check followed by a
+    // mutation therefore has an unavoidable leaf TOCTOU window. Once any entry has crossed its
+    // publication commit point, fail closed: leave every destination pathname untouched, report
+    // every published entry as residual, and let the owner-private workspace cleanup run in the
+    // outer finally block.
+    if (restoredFiles.length > 0) {
+      const restoreError = new RestoreRollbackError(
+        restoredFiles.length,
+        restoredFiles.map(({ manifestPath }) => manifestPath),
+        error
+      );
+      operationError = restoreError;
+      throw restoreError;
     }
-
-    if (residualFiles.length > 0) {
-      throw new RestoreRollbackError(restoredFiles.length, residualFiles, error);
-    }
-    if (rollbackCleanupError !== undefined) throw rollbackCleanupError;
 
     if (shouldPropagateBoundedReadError(error)) throw error;
 

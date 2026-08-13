@@ -28,6 +28,7 @@ import {
   isBackupPublishedCleanupError,
   RestoreRollbackError,
   isRestoreRollbackError,
+  TemporaryArtifactCleanupError,
   NoDataError,
   isNoDataError,
   FileExistsError,
@@ -201,7 +202,7 @@ describe('BackupPublishedCleanupError', () => {
 });
 
 describe('RestoreRollbackError', () => {
-  it('exposes only archive-relative residual entries and a stable recovery code', () => {
+  it('exposes archive-relative published residuals and a stable recovery code', () => {
     const err = new RestoreRollbackError(2, [
       'workspaceStorage/ws/state.vscdb',
       'globalStorage/state.vscdb',
@@ -211,9 +212,41 @@ describe('RestoreRollbackError', () => {
       publishedFileCount: 2,
       residualFileCount: 2,
       residualFiles: ['globalStorage/state.vscdb', 'workspaceStorage/ws/state.vscdb'],
+      residueCount: 0,
+      residuePaths: [],
+      unverifiedResidueCount: 0,
+      unverifiedResiduePaths: [],
     });
     expect(isRestoreRollbackError(err)).toBe(true);
     expect(isRestoreRollbackError(new Error('other'))).toBe(false);
+  });
+
+  it('keeps publication and nested workspace-cleanup residues together at top level', () => {
+    const publicationCleanup = new TemporaryArtifactCleanupError(
+      ['/private/publication-stage'],
+      ['/private/publication-unknown']
+    );
+    const workspaceCleanup = new TemporaryArtifactCleanupError(
+      ['/private/workspace', '/private/publication-unknown'],
+      ['/private/workspace-unknown', '/private/publication-stage']
+    );
+    const err = new RestoreRollbackError(1, ['globalStorage/state.vscdb'], publicationCleanup, [
+      workspaceCleanup,
+    ]);
+
+    expect(err.details).toMatchObject({
+      publishedFileCount: 1,
+      residualFiles: ['globalStorage/state.vscdb'],
+      residueCount: 1,
+      residuePaths: ['/private/workspace'],
+      unverifiedResidueCount: 3,
+      unverifiedResiduePaths: [
+        '/private/publication-stage',
+        '/private/publication-unknown',
+        '/private/workspace-unknown',
+      ],
+    });
+    expect(err.cause).toBe(publicationCleanup);
   });
 });
 

@@ -812,7 +812,7 @@ export function isBackupPublishedCleanupError(
 }
 
 /**
- * Test whether restore publication failed and one or more entries could not be rolled back.
+ * Test whether restore failed after publication and automatic rollback was intentionally skipped.
  *
  * @param error - Unknown caught value.
  * @returns True when the value is a {@link RestoreRollbackError}.

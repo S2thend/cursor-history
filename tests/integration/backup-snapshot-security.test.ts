@@ -1654,7 +1654,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     }
   );
 
-  it('rolls back an already-published file after a later extraction callback fails', async () => {
+  it('fails closed without mutating an already-published file after a later callback fails', async () => {
     const replacementGlobal = Buffer.from('replacement global');
     const replacementWorkspace = Buffer.from('replacement workspace');
     const files = [
@@ -1703,26 +1703,43 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     writeFileSync(globalPath, originalGlobal, { mode: 0o640 });
     const before = currentPrivateTempPaths();
 
-    const result = await restoreBackup({
-      backupPath: path,
-      targetPath,
-      force: true,
-      onProgress: (progress) => {
-        if (progress.phase === 'extracting' && progress.filesCompleted === 1) {
-          expect(readFileSync(globalPath)).toEqual(replacementGlobal);
-          throw new Error('synthetic failure after first publication');
-        }
+    let caught: unknown;
+    try {
+      await restoreBackup({
+        backupPath: path,
+        targetPath,
+        force: true,
+        onProgress: (progress) => {
+          if (progress.phase === 'extracting' && progress.filesCompleted === 1) {
+            expect(readFileSync(globalPath)).toEqual(replacementGlobal);
+            throw new Error('synthetic failure after first publication');
+          }
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(RestoreRollbackError);
+    expect(caught).toMatchObject({
+      code: 'RESTORE_ROLLBACK_INCOMPLETE',
+      details: {
+        publishedFileCount: 1,
+        residualFileCount: 1,
+        residualFiles: ['globalStorage/state.vscdb'],
       },
+      cause: expect.objectContaining({
+        message: 'synthetic failure after first publication',
+      }),
     });
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('synthetic failure after first publication');
-    expect(readFileSync(globalPath)).toEqual(originalGlobal);
-    expect(lstatSync(globalPath).mode & 0o777).toBe(0o640);
+    expect(readFileSync(globalPath)).toEqual(replacementGlobal);
+    expect(lstatSync(globalPath).mode & 0o777).toBe(0o600);
+    expect(readFileSync(globalPath)).not.toEqual(originalGlobal);
     expect(existsSync(workspacePath)).toBe(false);
     expect(currentPrivateTempPaths()).toEqual(before);
   });
 
-  it('rolls back a committed non-force restore before reporting private publication residue', async () => {
+  it('preserves a committed non-force restore while reporting private publication residue', async () => {
     const replacementGlobal = Buffer.from('replacement global');
     const file = {
       path: 'globalStorage/state.vscdb',
@@ -1769,25 +1786,131 @@ describe.sequential('backup plaintext snapshot isolation', () => {
       restorePublicationCleanupFault.enabled = false;
     }
 
-    expect(caught).toBeInstanceOf(TemporaryArtifactCleanupError);
+    expect(caught).toBeInstanceOf(RestoreRollbackError);
     expect(caught).toMatchObject({
+      code: 'RESTORE_ROLLBACK_INCOMPLETE',
+      details: {
+        publishedFileCount: 1,
+        residualFileCount: 1,
+        residualFiles: ['globalStorage/state.vscdb'],
+        residueCount: 1,
+        residuePaths: [expect.stringMatching(/\.cursor-history-restore-[^/]+\.tmp$/u)],
+        unverifiedResidueCount: 0,
+        unverifiedResiduePaths: [],
+      },
+    });
+    const cleanupCause = (caught as Error & { cause: TemporaryArtifactCleanupError }).cause;
+    expect(cleanupCause).toMatchObject({
       code: 'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
       details: {
         residueCount: 1,
         residuePaths: [expect.stringMatching(/\.cursor-history-restore-[^/]+\.tmp$/u)],
       },
-      cause: expect.objectContaining({
-        message: 'synthetic restore publication cleanup failure',
-      }),
     });
-    const [residuePath] = (caught as TemporaryArtifactCleanupError).details.residuePaths;
+    expect((cleanupCause as Error & { cause: unknown }).cause).toMatchObject({
+      message: 'synthetic restore publication cleanup failure',
+    });
+    const [residuePath] = cleanupCause.details.residuePaths;
     expect(residuePath).toBeDefined();
     expect(existsSync(residuePath!)).toBe(true);
-    expect(existsSync(destinationPath)).toBe(false);
+    expect(readFileSync(destinationPath)).toEqual(replacementGlobal);
+  });
+
+  it('keeps publication and outer-workspace cleanup residue in one fail-closed error', async () => {
+    const replacementGlobal = Buffer.from('replacement global');
+    const file = {
+      path: 'globalStorage/state.vscdb',
+      size: replacementGlobal.length,
+      checksum: computeChecksum(replacementGlobal),
+      type: 'global-db',
+    };
+    const manifest = {
+      version: '1.0.0',
+      createdAt: new Date(0).toISOString(),
+      sourcePlatform: 'linux',
+      cursorHistoryVersion: '0.18.0',
+      files: [file],
+      stats: {
+        totalSize: replacementGlobal.length,
+        sessionCount: 0,
+        workspaceCount: 0,
+      },
+    };
+    const path = join(fixtureRoot, 'restore-combined-cleanup-failure.zip');
+    writeFileSync(
+      path,
+      buildZip([
+        { name: file.path, data: replacementGlobal },
+        { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest)) },
+      ]).buffer,
+      { mode: 0o600 }
+    );
+    const targetPath = join(
+      fixtureRoot,
+      'restore-combined-cleanup-failure',
+      'User',
+      'workspaceStorage'
+    );
+    const destinationPath = join(dirname(targetPath), file.path);
+    const before = currentPrivateTempPaths();
+    let injectedWorkspacePath: string | undefined;
+    let caught: unknown;
+    restorePublicationCleanupFault.enabled = true;
+    try {
+      await restoreBackup({
+        backupPath: path,
+        targetPath,
+        force: false,
+        onProgress: (progress) => {
+          if (progress.phase !== 'extracting' || progress.filesCompleted !== 0) return;
+          const currentWorkspace = currentPrivateTempPaths().find(
+            (entry) => !before.includes(entry)
+          );
+          if (!currentWorkspace) throw new Error('private restore workspace not found');
+          injectedWorkspacePath = join(tmpdir(), currentWorkspace);
+          const markerPath = join(injectedWorkspacePath, PRIVATE_TEMP_MARKER_FILENAME);
+          if (!existsSync(markerPath) || lstatSync(markerPath).isDirectory()) return;
+          rmSync(markerPath);
+          mkdirSync(markerPath);
+          writeFileSync(join(markerPath, 'retained'), Buffer.from('force cleanup residue'));
+        },
+      });
+    } catch (error) {
+      caught = error;
+    } finally {
+      restorePublicationCleanupFault.enabled = false;
+    }
+
+    expect(caught).toBeInstanceOf(RestoreRollbackError);
+    const details = (caught as RestoreRollbackError).details;
+    expect(details).toMatchObject({
+      publishedFileCount: 1,
+      residualFiles: ['globalStorage/state.vscdb'],
+      residueCount: 3,
+      unverifiedResidueCount: 0,
+      unverifiedResiduePaths: [],
+    });
+    expect(injectedWorkspacePath).toBeDefined();
+    expect(existsSync(injectedWorkspacePath!)).toBe(true);
+    expect(details.residuePaths).toContain(injectedWorkspacePath);
+    expect(details.residuePaths).toContain(
+      join(injectedWorkspacePath!, PRIVATE_TEMP_MARKER_FILENAME)
+    );
+    expect(
+      details.residuePaths.some((entry) => /\.cursor-history-restore-[^/]+\.tmp$/u.test(entry))
+    ).toBe(true);
+    const publicationCleanup = (caught as Error & { cause: TemporaryArtifactCleanupError }).cause;
+    expect(publicationCleanup.details.residuePaths).toEqual([
+      expect.stringMatching(/\.cursor-history-restore-[^/]+\.tmp$/u),
+    ]);
+    expect(readFileSync(destinationPath)).toEqual(replacementGlobal);
+
+    rmSync(injectedWorkspacePath!, { recursive: true });
+    expect(currentPrivateTempPaths()).toEqual(before);
   });
 
   it.skipIf(process.platform === 'win32')(
-    'throws a typed honest result when a published file cannot be rolled back',
+    'throws a typed fail-closed result when a published path becomes inaccessible',
     async () => {
       const replacementGlobal = Buffer.from('replacement global');
       const replacementWorkspace = Buffer.from('replacement workspace');
@@ -1874,7 +1997,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
   );
 
   it.each([false, true])(
-    'preserves a concurrently replaced restore leaf and reports it as rollback residue (prior=%s)',
+    'preserves a replacement installed immediately after the former rollback identity observation (prior=%s)',
     async (hadPriorDestination) => {
       const replacementGlobal = Buffer.from('replacement global');
       const replacementWorkspace = Buffer.from('replacement workspace');
@@ -1942,8 +2065,12 @@ describe.sequential('backup plaintext snapshot isolation', () => {
           onProgress: (progress) => {
             if (progress.phase === 'extracting' && progress.filesCompleted === 1) {
               expect(readFileSync(globalPath)).toEqual(replacementGlobal);
+              const observedPublishedIdentity = lstatSync(globalPath, { bigint: true });
               writeFileSync(concurrentPath, concurrentBytes, { mode: 0o600 });
               renameSync(concurrentPath, globalPath);
+              const replacementIdentity = lstatSync(globalPath, { bigint: true });
+              expect(replacementIdentity.dev).toBe(observedPublishedIdentity.dev);
+              expect(replacementIdentity.ino).not.toBe(observedPublishedIdentity.ino);
               throw new Error('synthetic failure after concurrent leaf replacement');
             }
           },
@@ -1970,7 +2097,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
   );
 
   it.each(['last-file', 'finalizing'] as const)(
-    'rolls back and cleans private staging when cancellation occurs at %s progress',
+    'fails closed and cleans private staging when cancellation occurs at %s progress',
     async (abortPoint) => {
       const replacementGlobal = Buffer.from('replacement global');
       const replacementWorkspace = Buffer.from('replacement workspace');
@@ -2037,10 +2164,25 @@ describe.sequential('backup plaintext snapshot isolation', () => {
             }
           },
         })
-      ).rejects.toMatchObject({ name: 'AbortError' });
+      ).rejects.toMatchObject({
+        code: 'RESTORE_ROLLBACK_INCOMPLETE',
+        details: {
+          publishedFileCount: abortPoint === 'last-file' ? 1 : 2,
+          residualFileCount: abortPoint === 'last-file' ? 1 : 2,
+          residualFiles:
+            abortPoint === 'last-file'
+              ? ['globalStorage/state.vscdb']
+              : ['globalStorage/state.vscdb', 'workspaceStorage/ws/state.vscdb'],
+        },
+        cause: { name: 'AbortError' },
+      });
 
-      expect(readFileSync(globalPath)).toEqual(originalGlobal);
-      expect(existsSync(workspacePath)).toBe(false);
+      expect(readFileSync(globalPath)).toEqual(replacementGlobal);
+      expect(readFileSync(globalPath)).not.toEqual(originalGlobal);
+      expect(existsSync(workspacePath)).toBe(abortPoint === 'finalizing');
+      if (abortPoint === 'finalizing') {
+        expect(readFileSync(workspacePath)).toEqual(replacementWorkspace);
+      }
       expect(currentPrivateTempPaths()).toEqual(before);
     }
   );
