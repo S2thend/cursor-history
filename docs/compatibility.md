@@ -6,19 +6,27 @@ This document is the canonical shipped compatibility contract for cursor-history
 the CLI, the public library, live and custom Cursor data roots, and supported cursor-history backup
 archives. It describes values that archive and incremental-sync consumers may persist or compare.
 
-Two versioned policies appear below:
+Compatibility-sensitive version tokens below are intentionally independent:
 
 - message identity version `1`; and
-- Source Read Limits policy `source-read-limits/v1` and Compatibility Matrix v1.
+- Source Read Limits policy `source-read-limits/v1`;
+- Compatibility Matrix v1; and
+- backup envelope `manifest.version: "1.0.0"` with optional Composer inventory
+  `schemaVersion: 1`.
 
-Changing either policy's identity inputs, limits, source/carrier cells, or preferred orientation
-requires an explicit version change, release warning, regression fixtures, and migration guidance.
+Changing identity inputs, limits, source/carrier cells, preferred orientation, or either backup
+schema meaning requires the applicable explicit version change, release warning, regression
+fixtures, and migration guidance. Adding the independently versioned optional inventory does not
+change the enclosing v1 backup envelope.
 
 ## Stable identity and physical instances
 
-`Session.id` is the native Cursor conversation UUID. It is the one public logical-session identity
-and is preserved byte-for-byte. A workspace path, source kind, list index, Store location, backup
-path, or duplicate occurrence is never appended to it.
+`Session.id` is the native Cursor conversation UUID. UUID hexadecimal letter case is ignored for
+lookup, grouping, and Composer/Store matching. The returned ID is never manufactured by lowercasing
+or copied from the caller: it preserves one deterministic spelling actually observed in Cursor
+data. A Composer-backed session prefers its Composer spelling so adding a differently-cased Store
+representation cannot rewrite a v0.16-compatible ID. A workspace path, source kind, list index,
+Store location, backup path, or duplicate occurrence is never appended to it.
 
 A logical session can have several physical source instances: Composer global/workspace records,
 Store databases, Store transcripts, or copies in different workspaces. Physical locators are
@@ -26,6 +34,11 @@ private implementation details. Public ambiguity diagnostics may contain an opaq
 reference, but that reference is scoped to one read and is neither a path nor mutation authority.
 Equivalent replicas reconcile into one logical row. Divergent same-role replicas produce one
 explicit ambiguity; cursor-history never picks or unions them silently.
+Case-only source spellings are physical occurrences of that same logical UUID, not separate public
+sessions. Their payloads must therefore pass the same equivalence check; divergent case variants
+are ambiguous, and an exact-case query does not grant authority to select one.
+Case folding applies only to canonical UUID syntax. Compact 32-hex Store directory names and every
+other noncanonical identifier remain byte-for-byte and case-sensitive.
 
 ### Message and tool identity version 1
 
@@ -79,10 +92,12 @@ UUID instead. Unfiltered direct-ID behavior remains unchanged; a direct ID used 
 must belong to that bound workspace or it fails without loading the off-scope conversation.
 
 For unchanged Composer input, equal-`createdAt` rows retain the stable discovery order used by
-v0.16. A Composer-backed merged or ambiguous row keeps that legacy tie position. Store-only and
-other new rows without a v0.16 Composer position follow the legacy tie group and use native UUID as
-their deterministic tie-break. This protects existing unfiltered numeric addresses for the tie
-case without making numeric indices durable across later catalog changes.
+v0.16, including its `String.localeCompare()` workspace-path precedence before the stable timestamp
+sort. A Composer-backed merged or ambiguous row keeps that legacy tie position. Store-only and other
+new rows without a v0.16 Composer position follow the legacy tie group and use locale-independent
+native-UUID/code-point ordering as their deterministic tie-break. This protects existing unfiltered
+numeric addresses for the tie case on the same supported runtime/locale without making numeric
+indices durable across later catalog changes.
 
 Migration resolves both its one-based numeric selectors and native UUID selectors through this
 complete scoped logical catalog, including ambiguous rows. An ambiguous row retains the number
@@ -134,6 +149,15 @@ The CLI `--include-cross-workspace-sources` and library
 selected in the workspace. They do not scan unrelated conversation payload, and every broadened
 source is disclosed.
 
+Destructive migration uses a narrower contract than read reconciliation. It may inspect off-scope
+workspace IDs, array positions, selected IDs, and pane-pointer metadata to establish membership, but
+it does not materialize off-scope Composer conversation values. After binding, it hydrates only the
+selected occurrence. The logical UUID key and exact workspace/global SQLite keys remain separate:
+an opposite-case sole carrier may resolve, but apply mutates only the frozen exact keys; multiple
+case-only global carriers refuse before writes. Session and workspace migration prepare every
+requested target before the first write, so one ambiguous, divergent, changed, or ineligible member
+leaves the entire batch unchanged.
+
 `canonicalWorkspacePath` is the additive normalized full path. The public library's existing
 `workspace` field preserves the released `coreSession.workspacePath` spelling, including v0.16's
 `~/...` home contraction, so it can differ textually from `canonicalWorkspacePath` while identifying
@@ -156,6 +180,34 @@ It does **not** identify the current representation. Additive `resolvedSource` (
 v0.17 source literals remain accepted temporarily by TypeScript declarations, but corrective
 runtime output uses the two fidelity values above.
 
+Resolution role arrays summarize physical contributors, not mutually exclusive logical states. A
+role can therefore appear in both `loadedSourceRoles` and `omittedSourceRoles` or
+`failedSourceRoles` when one representation/occurrence loaded and another did not;
+`sourceInstances` is authoritative for representation-level state.
+
+Workspace-scoped backup reads treat each archived SQLite entry as one physical payload carrier.
+New backups keep the enclosing `manifest.version` at `1.0.0` and add an optional canonical
+metadata-only Composer workspace inventory with its own independently validated `schemaVersion: 1`.
+An existing v1 reader may ignore this additive field. The inventory records
+(workspace path, sorted materialized native UUIDs, verified global-counterpart UUIDs, and verified
+workspace-linked global-only UUIDs) so the selected workspace can be planned without extracting
+another workspace database. Workspace-linked IDs are admitted only when matching key-only metadata
+exists in the snapshotted global DB, so stale/phantom pointers are not surfaced. The shared
+`globalStorage/state.vscdb` entry is never extracted under a
+workspace scope, even with cross-workspace opt-in, because it contains unrelated UUID payloads; a
+workspace-database view is returned as explicit `workspace-fallback`/partial with the global source
+instance marked `omitted-by-scope`. Selected-UUID opt-in may still open a separate off-scope
+workspace database whose inventory declares that same UUID, but never a database containing only
+unrelated UUIDs. Legacy single-workspace archives remain scoped-readable through their workspace
+database. Legacy multi-workspace archives without the new inventory fail before any workspace or
+global database extraction with `BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED`; recreate them with
+cursor-history 0.18.0+ or omit the filter only when reading the whole archive is intended.
+Selected database and legacy workspace-metadata entries are verified lazily against their declared
+manifest size and SHA-256 before use. Scoped `list`, `show`, `search`, and `export` therefore do not
+checksum or decompress unrelated carriers. Explicit whole-archive validation, restore, and backup
+discovery remain unscoped operations. Accordingly, `list --workspaces` cannot be combined with
+`--workspace`; run discovery first and use one returned path for subsequent scoped commands.
+
 When a usable Store database and a transcript coexist and all known relevant Store occurrences are
 inside the permitted scope, this is a Required supported state. The database is the sole Store
 conversation backbone; the transcript is retained as a `superseded` source instance for provenance.
@@ -170,6 +222,12 @@ message identities, roles, content, parent/branch relationships, consumed tool-c
 code blocks, and supported attachment evidence. An unsupported raw attachment that cannot be
 represented losslessly in consumed message/tool fields makes the result partial. cursor-history
 does not dereference external attachment targets merely to identify or compare content.
+
+For a complete Composer-backed merge, both `activeBranchBubbleIds` and
+`activeBranchMessageIds` contain the resolved selected branch. Leading, middle, and trailing
+Store-only active turns appear exactly once, parent/leaf references use their resolved stable IDs,
+and Store sidechains stay outside the active branch. Composer-only legacy branch arrays remain
+unchanged.
 
 A timestamp maximum is not an incremental-sync boundary: a valid new merged message can appear in
 the middle or carry a fallback time older than a stored maximum. Consumers should compare the
@@ -196,11 +254,16 @@ Session creation/update provenance is one of `composer-metadata`, `store-db-meta
 the library always return the timestamp with its provenance. Merge preference and workspace scope
 do not change canonical session times.
 
-### Explicitly versioned v0.16 fallback corrections
+### Explicitly versioned v0.16 compatibility exceptions
 
 The corrective release preserves every v0.16 session/message/tool identity and every identity-to-
-content, relationship, and tool binding. Three scalar fallback values may intentionally differ,
-but only when the corresponding source value was absent:
+content, relationship, and tool binding. One identity-property shape and three scalar fallback
+values may intentionally differ, but only under these predicates:
+
+- When v0.16 omitted a public message `id`, or the source value was null/empty, v0.18 exposes
+  exactly `msg:<zero-based-v0.16-Composer-projection-index>`. This is the same durable key the
+  unchanged consumer already synthesized. Every nonempty native ID remains byte-for-byte exact;
+  no other message-property shape change is allowed by this exception.
 
 - A message with no directly stored timestamp may replace v0.16's historical session-time fallback
   with the deterministic next/previous/session/epoch policy above and an explicit inferred source.
@@ -211,11 +274,12 @@ but only when the corresponding source value was absent:
   `(workspace: <directory-id>)` placeholder as a path. The public library returns `"unknown"`;
   core/CLI structured output returns `workspacePath: null` and omits canonical path metadata.
 
-Compatibility certification for the full-session projection permits only those three
-predicate-guarded scalar changes; the separate search-result coordinate correction below is not a
-session projection or identity change. A changed
-native or compatibility ID, message order/content binding, parent/branch relationship, tool binding,
-direct source timestamp, stored Composer update time, or real workspace path is a regression.
+Compatibility certification for the full-session projection permits only that exact fallback-ID
+materialization and those three predicate-guarded scalar changes; the separate search-result
+coordinate correction below is not a session projection or identity change. A changed native ID,
+wrong compatibility ordinal, message order/content binding, parent/branch relationship, tool
+binding, direct source timestamp, stored Composer update time, real workspace path, or any other
+non-additive own-property/null/omission change is a regression.
 
 ### 0.18.0 public search-coordinate correction
 
@@ -380,12 +444,14 @@ failure is fatal and is never swallowed into an empty/partial session or transcr
 Temporary plaintext SQLite snapshots and staging files live in an exclusive private workspace. On
 POSIX, the directory is `0700` and files are `0600`; cleanup runs through normal, exceptional,
 cancellation, and handled-signal paths. Conservative stale recovery only removes proven-dead,
-owned cursor-history workspaces. On Linux, the marker and recovering process must also have readable,
-equal boot-scoped PID-namespace identities (boot ID plus namespace inode) before numeric PID or
-process-start evidence is interpreted; a different host boot or namespace, a legacy marker without
-that identity, or an unreadable identity is retained as uncertain. `SIGKILL`, power loss, and kernel
-termination cannot guarantee immediate cleanup, so the private directory protects any residue until
-the next safe recovery.
+owned cursor-history workspaces. New markers use format v2 so older v1 binaries reject them before
+interpreting a numeric PID. On Linux, valid v1 markers are retained as legacy/uncertain. For v2, the
+marker and recovering process must also have readable, equal boot-scoped PID-namespace identities
+(boot ID plus namespace inode) before numeric PID or process-start evidence is interpreted; a
+different host boot or namespace or an unreadable identity is retained as uncertain, and malformed
+or unknown marker versions are retained as invalid. `SIGKILL`, power loss, and kernel termination
+cannot guarantee immediate cleanup, so the private directory protects any residue until the next
+safe recovery.
 
 New final backup archives default to `0600` on POSIX. Force-overwriting an archive preserves its
 existing mode unless sharing is explicitly requested. `--shared` or
@@ -420,15 +486,20 @@ payloads, manifest type/path mismatches, duplicate destinations, non-forced coll
 the validated destination set, and observed descendant symlink/path indirection are rejected.
 `--force` permits replacement only after those integrity and confinement checks pass.
 The selected Cursor user root is canonicalized and every descendant path is checked again before
-publication. Non-force publication is atomic no-clobber. Forced replacement and rollback publish a
-new owner-private same-directory inode, so they do not truncate a static hard-linked destination or
-its off-root peer. If a later failure cannot roll every actually published entry back, cursor-history
-throws `RESTORE_ROLLBACK_INCOMPLETE` with safe manifest-relative residual paths instead of reporting
-zero remaining changes. Rollback first verifies the device/inode recorded at publication and leaves
-a concurrently replaced leaf untouched while reporting it as residual. Because Node 20 has no
+publication. Non-force publication is atomic no-clobber. Forced replacement publishes a new
+owner-private same-directory inode, so it does not truncate a static
+hard-linked destination or its off-root peer. After any publication, a later failure performs no
+automatic destination rollback: portable Node path APIs cannot atomically bind an identity check to
+replace or unlink, so every current leaf remains untouched. Cursor-history throws
+`RESTORE_ROLLBACK_INCOMPLETE` with every safe manifest-relative published residual plus separate
+top-level verified and unverified private cleanup residue sets instead of reporting zero remaining
+changes; an unverified classification wins for a path present in both. Stop Cursor and recover from
+a known-good backup. Because Node 20 has no
 portable directory-relative no-follow creation API,
 cursor-history does not claim atomic protection against a hostile local process swapping an
 ancestor between the final check and directory-entry publication; use an owner-controlled tree.
+The established `RestoreRollbackError`/`RESTORE_ROLLBACK_INCOMPLETE` names remain for API
+compatibility and mean manual recovery is required, not that an automatic rollback was attempted.
 This intentionally corrects v0.16/v0.17 behavior in which integrity warnings could still accompany
 restored corrupt bytes. In v0.18.0, `filesRestored` counts only integrity-valid published entries and
 warning paths identify skipped entries; callers must not infer that a warned entry was written.
@@ -460,10 +531,11 @@ existing archive contains only output produced by cursor-history v0.16:
    not cursor-history, owns downstream deletion/insertion, commit, and rollback.
 5. Repeat the same synchronization. Identical input produces zero additional writes.
 
-Store-only insertions may appear at the start or middle, matched messages may gain content/tool
-enrichment, and parent/branch metadata may change without changing old keys. Do not gate this sync
-on `maxTimestamp`; compare the complete view. A partial `workspace-fallback` result must never
-overwrite a complete archived session.
+Store-only insertions may appear at the start, middle, or end of the active branch; matched messages
+may gain content/tool enrichment; and parent/branch/leaf metadata may change without changing old
+keys. Store sidechains remain excluded. Do not gate this sync on `maxTimestamp`; compare the
+complete view. A partial `workspace-fallback` result must never overwrite a complete archived
+session.
 
 The guarantee is deliberately limited to a v0.16 Composer-only archive becoming a complete
 Composer-backed merged session. It is not a general promise for every Store-only or cross-format

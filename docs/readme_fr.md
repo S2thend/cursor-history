@@ -26,8 +26,9 @@
 > le point de publication et les erreurs typées de permissions ou de nettoyage après publication ;
 > un chemin résiduel non vérifié ne doit jamais être supprimé à l'aveugle. La
 > restauration ignore les entrées corrompues et refuse les chemins, destinations dupliquées ou
-> liens non sûrs avant toute écriture ; `--force` ne désactive pas ces contrôles. La restauration
-> arrière ne touche pas une feuille remplacée simultanément et la signale comme résidu.
+> liens non sûrs avant toute écriture ; `--force` ne désactive pas ces contrôles. Après toute
+> publication, un échec ne tente aucun retour arrière automatique : il préserve chaque fichier et
+> renvoie `RESTORE_ROLLBACK_INCOMPLETE` ; arrêtez Cursor et restaurez une sauvegarde fiable.
 
 **L'outil open-source ultime pour parcourir, rechercher, exporter et sauvegarder votre historique de chat Cursor AI.**
 
@@ -588,6 +589,24 @@ Ce projet utilise GitHub Actions pour la publication automatique sur NPM. Pour p
 1. Créez un token d'accès NPM sur https://www.npmjs.com/settings/YOUR_USERNAME/tokens
 2. Allez dans les paramètres de votre dépôt GitHub → Secrets and variables → Actions
 3. Ajoutez un nouveau secret de dépôt nommé `NPM_TOKEN` avec votre token NPM
+
+## Compatibilité de la v0.18
+
+- Les UUID canoniques sont insensibles à la casse pour la recherche et le regroupement, mais l'ID
+  renvoyé conserve l'orthographe réellement observée dans Cursor. Les identifiants non canoniques,
+  notamment les noms Store compacts de 32 caractères hexadécimaux, restent exacts et sensibles à la
+  casse.
+- Une migration avec `--workspace` ne lit hors périmètre que les métadonnées nécessaires, lie les
+  clés physiques exactes et prépare tout le lot avant la première écriture. Une cible ambiguë ou
+  inéligible annule le lot sans modification.
+- Lors de la fusion Composer/Store, les tours Store actifs placés au début, au milieu ou à la fin
+  apparaissent une seule fois ; les branches latérales restent exclues et les anciens ID Composer ne
+  changent pas.
+- À date égale, les lignes Composer conservent l'ordre de découverte de la v0.16 fondé sur
+  `String.localeCompare()` dans le même environnement pris en charge.
+- Le manifeste de sauvegarde conserve `manifest.version: "1.0.0"` ; l'inventaire facultatif utilise
+  son propre `schemaVersion: 1`. Consultez [compatibility.md](compatibility.md) pour le contrat
+  normatif.
 
 ## Contribuer
 

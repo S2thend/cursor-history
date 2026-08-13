@@ -235,6 +235,19 @@ uses its system per-user temporary directory, inherited ACLs, exclusive paths, a
 contract; this release does not claim independently verified cross-user ACL isolation on Windows.
 New manifests record the actual running package version as diagnostic `producer` metadata; it never
 changes session/message identity, replica equivalence, deduplication, or incremental sync.
+New backups keep the enclosing `manifest.version` at `1.0.0` and add an optional canonical
+metadata-only Composer workspace/UUID inventory with its own independently validated
+`schemaVersion: 1`; existing v1 readers may ignore this additive field. This
+lets `--workspace` select an archived workspace without extracting other workspace databases. A
+scoped backup read never extracts the shared global database; it returns the selected workspace
+view as explicitly partial. Legacy backups with one workspace remain scoped-readable, while legacy
+multi-workspace backups without this inventory fail closed with
+`BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED` before database extraction.
+
+Native session UUID lookup is case-insensitive. Returned IDs retain a deterministic spelling that
+was actually stored by Cursor; Composer spelling takes precedence for Composer-backed sessions, so
+a Store case variant cannot rewrite an existing v0.16-compatible public ID. Divergent case-only
+physical variants return an explicit ambiguity instead of being selected by query or scan order.
 
 Rename/link to the requested backup path is the publication commit point. If a later permission
 read, adjustment, or identity check fails, the command exits nonzero with
@@ -255,11 +268,13 @@ Restore rejects empty inventories, unmanifested file payloads, invalid manifest 
 duplicate destinations, and observed links beneath the canonical selected Cursor user root. It
 stages only size/checksum-valid entries and preflights all destinations; `--force` does not bypass
 those checks. Integrity-mismatched entries are reported and skipped. New destinations use an
-atomic no-clobber publication, while forced replacements and rollback publish a new owner-private
-same-directory inode instead of writing through an existing hard link. An incomplete rollback is a
-typed `RESTORE_ROLLBACK_INCOMPLETE` failure that lists safe manifest-relative residual entries.
-Rollback first verifies the device/inode recorded at publication; a concurrently replaced leaf is
-not touched and is reported as residual.
+atomic no-clobber publication, while forced replacements publish a new owner-private same-directory
+inode instead of writing through an existing hard link. Portable Node path APIs cannot atomically
+compare and then replace or unlink a destination, so a failure after any publication never attempts
+automatic rollback. It leaves every published destination untouched and throws typed
+`RESTORE_ROLLBACK_INCOMPLETE` details containing all safe manifest-relative residual entries plus
+any verified or unverified private temporary residue paths. Stop Cursor and recover those entries
+from a known-good backup; never blindly delete an unverified path.
 Use an owner-controlled destination tree: Node 20 has no portable directory-relative no-follow
 creation API, so restore does not claim atomic defense against a hostile process swapping an
 ancestor between the final validation and directory-entry publication.
@@ -406,6 +421,9 @@ cursor-history list -n 10
 # List workspaces only
 cursor-history list --workspaces
 ```
+
+`list --workspaces` is intentionally unscoped discovery and cannot be combined with `--workspace`.
+Choose a path from its output, then use that same `--workspace` value for scoped session commands.
 
 ### View a Session
 

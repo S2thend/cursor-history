@@ -26,6 +26,11 @@ Composer-only.
 | `parser.ts` | UTF-8/BOM validation, unknown-field tolerance, bounded JSONL/SQLite decoding, timestamp/public projection | Heuristic transcoding, unbounded whole-source buffering |
 | `zip-stream.ts` | bounded ZIP32/ZIP64 central reads, path/method validation, STORE/DEFLATE entry streams, CRC/limit checks | Session resolution, manifest trust decisions |
 | `backup.ts` | private archive staging/publication, publication commit-point/mode handling, streamed file hashing, manifest producer metadata, archive orchestration | Session/message identity derived from producer metadata; deletion/rollback of a valid post-commit archive |
+
+Logical UUID map keys use an internal ASCII case-folded form. That key is never returned or used as
+a physical SQLite key. Every bound Composer/Store locator retains its exact native spelling;
+physical reads use that exact value. Public spelling is selected from real source values with
+Composer compatibility precedence, and divergent case-only occurrences remain ambiguous.
 | `database/registry.ts` | capability profiles and per-operation provider selection | Store completeness policy |
 | `migrate.ts` | bind/prepare/revalidate/apply exact eligible target | Numeric rediscovery after preparation |
 
@@ -153,6 +158,16 @@ Every adapter call receives the same immutable `OperationIoContext`; nested Stor
 backup paths do not create an unobserved context. SQLite emits `prepare` before statement
 preparation, `query` before execution/iteration, and `backup` before online snapshot I/O.
 
+For backup input, the enclosing manifest stays at `version: "1.0.0"`; its additive optional
+Composer inventory is independently validated at `schemaVersion: 1` and may be ignored by an older
+v1 reader. That inventory supplies canonical workspace
+path/native-UUID membership
+before any SQLite entry is selected. Workspace scope never extracts the shared global database and
+extracts an off-scope workspace database only under selected-UUID opt-in when that same UUID appears
+in the manifest inventory. A legacy multi-workspace archive without complete inventory fails before
+database extraction; a legacy single-workspace archive may load its one workspace carrier and is
+reported partial when an archived global carrier is omitted.
+
 ## Workspace resolution
 
 ```ts
@@ -211,9 +226,11 @@ export function bindSessionAddress(
 
 Listing rules:
 
-- Exactly one row per native UUID in the bound scope.
+- Exactly one row per canonical native UUID in the bound scope. Canonical UUID syntax groups
+  case-insensitively; noncanonical identifiers remain exact.
 - Sort logical rows by descending `createdAt`. For an equal-time tie, preserve the stable v0.16
-  discovery order of every Composer-backed UUID, including merged and ambiguous Composer rows.
+  discovery order of every Composer-backed UUID, including the original `String.localeCompare()`
+  workspace-path precedence and merged/ambiguous Composer rows.
   Place rows with no v0.16 Composer position after those legacy rows, then use native UUID as the
   deterministic tie-break only among those new-only rows.
 - Assign presentation indices only after grouping/filtering/sorting.
@@ -284,6 +301,10 @@ first, preferred workspace, or preferred source.
 export const MESSAGE_IDENTITY_VERSION = 1 as const;
 export const REPLICA_EQUIVALENCE_VERSION = 1 as const;
 
+export function logicalSessionIdKey(sourceId: string): string;
+
+export function isNativeCursorUuid(sourceId: string): boolean;
+
 export function projectV016ComposerMessages(
   input: ComposerParseInput
 ): ProjectedComposerMessage[];
@@ -328,6 +349,12 @@ Canonical hash v1:
 - finite numbers use JSON number spelling; non-finite values are rejected from identity input;
 - strings remain exact decoded strings with standard JSON escaping;
 - SHA-256 lowercase full 64 hexadecimal characters.
+
+`logicalSessionIdKey()` folds hexadecimal letter case only when `isNativeCursorUuid()` accepts
+canonical UUID syntax. It does not
+fold arbitrary strings or compact 32-hex Store directory names. Physical Composer workspace IDs,
+global SQLite keys, and Store directory tokens are retained byte-for-byte in their private
+locators; a caller's query spelling never replaces an observed physical key.
 
 Transcript message hash input uses keys `role`, `content`, `toolActivity`, and
 `sourceRelationships`. Synthetic Store-only tool hash input may use call name, normalized structured
@@ -379,7 +406,8 @@ bound logical row
  -> compute fixed-orientation alignment
  -> allocate unmatched Store identities/collisions
  -> render preferred semantics and stable tool order
- -> rewrite parent/branch/leaf IDs
+ -> interleave selected leading/middle/trailing Store active turns
+ -> rewrite parent/branch/leaf IDs and exclude Store sidechains
  -> fill deterministic timestamp/provenance
  -> derive deterministic session timestamps/provenance
  -> calculate fidelity + actual provenance + path projections
@@ -557,13 +585,22 @@ export function applySessionMigration(
 ): Promise<SessionMigrationResult>;
 ```
 
-`PreparedSessionMigration` contains the exact private source locator, destination preflight,
+`PreparedSessionMigration` contains the canonical logical UUID key, Composer-compatible public
+spelling, exact workspace record ID, optional exact global SQLite key, destination preflight,
 capability profile, mode, source fingerprint, and proposed copy UUID. It is never public JSON.
 
 Binding requires exactly one eligible Composer locator and a mutation footprint confined to the
 bound source workspace. A representative selected to read equivalent replicas is not reused for
 mutation; equivalent multiple locators, multiple same-workspace records, and a global record shared
 with another membership are rejected before preparation.
+
+Scoped binding performs a metadata-only projection of record IDs, array positions, selected IDs,
+and pane pointers. It may inspect that safe metadata in other workspaces to establish membership,
+but it does not materialize any off-scope `composer.composerData` value. Only the selected workspace
+occurrence is hydrated after binding, and catalog/hydration source-read counters reset separately.
+A pointer-only workspace may bind the sole opposite-case global carrier through the canonical UUID
+key while retaining that carrier's exact key. More than one case-only global physical key refuses
+before payload mutation, even when read-side payload comparison says equivalent.
 
 Both numeric and direct-ID selectors first address the complete scoped logical catalog, including
 ambiguous rows. Ambiguity retains its displayed ordinal; selecting it by number or UUID throws the
@@ -574,6 +611,12 @@ Before first write, `applySessionMigration` rechecks data-source identity, exact
 fingerprint, source/destination state, and required `readWrite` capability. Any mismatch throws
 `MigrationTargetChangedError`; it does not rediscover another record. Dry-run returns a safe
 projection of the same prepared object.
+
+Session and workspace migration build a complete array of `PreparedSessionMigration` values before
+an internal batch apply may mutate any member. One missing, ambiguous, divergent, ineligible, or
+changed member refuses the whole batch with zero source, destination, or global-database mutation.
+Apply uses only the exact prepared `composerLocator.sessionId` and
+`composerLocator.globalSessionId` keys and never a case-folded logical key for SQLite I/O.
 
 ## Private temporary workspace
 
@@ -591,7 +634,7 @@ export function createPrivateTempWorkspace(
 interface PrivateTempWorkspace {
   readonly path: string;
   readonly marker: {
-    formatVersion: 1;
+    formatVersion: 2;
     uid?: number;
     pid: number;
     pidNamespaceToken?: string; // Linux boot ID + namespace inode when procfs is verifiable
@@ -634,15 +677,19 @@ residue in structured details; never report cleanup success.
 Every live workspace is registered in one process-level registry. Coordinated `SIGINT`,
 `SIGTERM`, and `SIGHUP` handlers perform synchronous best-effort disposal once and then preserve
 normal platform signal termination semantics. Before new temporary work, stale recovery examines
-only exact-prefix directories owned by the current user with a valid private marker. On Linux, the
-marker records a boot-scoped PID-namespace token (boot ID plus namespace inode) when procfs exposes
-one. Recovery interprets PID plus process-start token only after the marker and recovering process
-have readable, equal namespace tokens; a different host boot or namespace and missing or unreadable
-namespace provenance remain owner-status-uncertain and are never deleted. Same-namespace death and
-PID reuse remain recoverable. Non-Linux platforms retain their existing process-liveness proof
-without claiming Linux namespace validation. `SIGKILL`, power loss, and kernel termination cannot
-run cleanup, so immediate deletion is not guaranteed; `0700`/`0600` privacy plus conservative
-next-run recovery is the explicit limit.
+only exact-prefix directories owned by the current user with a valid private marker. New workspaces
+emit format v2 so a deployed v1 reader rejects them before it can probe a namespace-local numeric
+PID; unknown fields alone are not a safe version boundary because v1 readers ignore them. The
+current reader recognizes structurally valid v1 markers but retains them as legacy and
+owner-status-uncertain on Linux. V2 records a boot-scoped PID-namespace token (boot ID plus namespace
+inode) when procfs exposes one. Recovery interprets PID plus process-start token only after the v2
+marker and recovering process have readable, equal namespace tokens; a different host boot or
+namespace and missing or unreadable namespace provenance remain owner-status-uncertain and are never
+deleted, while malformed v2 or an unknown version is invalid. Same-namespace v2 death and PID reuse
+remain recoverable. Non-Linux platforms retain their existing process-liveness proof without
+claiming Linux namespace validation. `SIGKILL`, power loss, and kernel termination cannot run
+cleanup, so immediate deletion is not guaranteed; `0700`/`0600` privacy plus conservative next-run
+recovery is the explicit limit.
 
 ### Backup manifest producer contract
 
@@ -702,13 +749,14 @@ next-run recovery is the explicit limit.
   handles observed/static leaf links and multiply linked regular-file destinations but does not
   claim atomic resistance to a hostile concurrent ancestor swap in an owner-controlled tree.
 - A mixed-validity archive may publish its intact subset and report every size or checksum mismatch
-  as skipped. Rollback includes only validated entries actually published before a later failure and
-  records their committed device/inode identity. Rollback touches a destination only while it still
-  matches that identity; a concurrent leaf replacement remains untouched and is reported as a safe
-  manifest-relative residual. Eligible prior bytes are republished through the same private-inode
-  atomic-replacement path. An incomplete
-  rollback throws `RestoreRollbackError`/`RESTORE_ROLLBACK_INCOMPLETE` with the published count and
-  only canonical manifest-relative residual paths, never a false `filesRestored: 0` result.
+  as skipped. After any publication, a later failure performs no automatic destination mutation:
+  portable Node path APIs cannot atomically compare a leaf identity and then replace or unlink the
+  same entry. Preserve every current destination and throw
+  `RestoreRollbackError`/`RESTORE_ROLLBACK_INCOMPLETE` with the published count and every canonical
+  manifest-relative published residual, never a false `filesRestored: 0` result. Aggregate verified
+  and unverified owner-private residue from publication cleanup and outer workspace disposal at top
+  level; unverified classification wins for a path present in both sets. Recovery is explicit from
+  a known-good backup with Cursor stopped.
 
 ## Database capability registry
 
@@ -754,6 +802,9 @@ Adapters must satisfy all of the following:
 - unfiltered direct native-ID behavior remains unchanged;
 - scoped numbers and IDs use the immutable scope;
 - summaries are followed by stable UUID/bound address, never a fresh numeric lookup;
+- UUID caller spelling is case-insensitive only for canonical UUID syntax; the returned value and
+  physical mutation keys preserve observed source spelling;
+- noncanonical identifiers, including compact 32-hex Store directory names, remain exact;
 - old `source` TypeScript literals remain accepted but are not emitted by new resolution;
 - old `setDriver(): void` remains synchronous;
 - no adapter can construct a public physical locator or silently downgrade a typed error.

@@ -32,6 +32,19 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
 - **Workspace contract**: Matching is normalized exact-first, followed only by one unambiguous
   complete-component suffix. A workspace is a conversation-payload I/O boundary by default;
   complementary cross-workspace contributors for already selected UUIDs require explicit opt-in.
+- **UUID case semantics**: Session-ID lookup, grouping, and Composer/Store association now treat
+  hexadecimal letter case as insignificant. Returned IDs preserve a real source-native spelling,
+  prefer Composer spelling for Composer-backed sessions, and report divergent case-only physical
+  variants as ambiguity instead of guessing or normalizing a durable public key.
+- **Workspace-scoped backup boundary**: New backups retain the enclosing manifest version `1.0.0`
+  and add an optional canonical metadata-only inventory with independently validated
+  `schemaVersion: 1`, preserving compatibility with v1 readers that ignore additive fields. It
+  records Composer workspace/UUID inventory, including verified key-only membership for global-only
+  workspace links. Scoped reads use it without extracting unrelated workspace
+  databases and never materialize the shared global database; selected workspace content is
+  disclosed as partial when that carrier is omitted. Legacy single-workspace archives remain
+  scoped-readable, while legacy multi-workspace archives fail before database extraction with
+  `BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED` and actionable recreation guidance.
 - **Backup publication**: Temporary plaintext workspaces are private and exhaustively cleaned. New
   final archives default to owner-only permissions on POSIX; broader final access requires
   `--shared`/`sharedPermissions`, and overwrite preserves the existing mode by default. Windows
@@ -70,12 +83,13 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
   because the packaged native SQLite fallback does not support it. Source checks run on a
   development-tool-compatible Node 24 runtime, while the same checksum-addressed tarball is tested
   separately on every advertised major and the 22.x/23.x SQLite backup capability boundaries.
-- **Versioned v0.16 fallback corrections**: Three source-absent scalar fallbacks are intentionally
-  corrected: inferred message timestamps become deterministic with provenance, missing Composer
-  update times no longer use read time, and pathless `(workspace: <directory-id>)` placeholders
-  become public `"unknown"`/structured `null`. Session, message, and tool identities and their
-  content/relationship bindings remain exact; stored timestamps and real workspace paths do not
-  change under this exception.
+- **Versioned v0.16 compatibility exceptions**: A missing/null/empty Composer message `id` is
+  materialized as exactly `msg:<zero-based-v0.16-Composer-projection-index>`, the same durable key
+  the unchanged consumer already synthesized; every nonempty native ID remains byte-for-byte exact.
+  Three source-absent scalar fallbacks are also intentionally corrected: inferred message timestamps
+  become deterministic with provenance, missing Composer update times no longer use read time, and
+  pathless `(workspace: <directory-id>)` placeholders become public `"unknown"`/structured `null`.
+  All other non-additive public values and own-property/null/omission shapes remain exact.
 
 ### Fixed
 
@@ -108,19 +122,22 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
 - **SQLite capability selection**: Driver selection checks the capability required by each
   operation. Automatic mode can fall back to a capable provider, while an explicitly forced
   incapable driver fails with an actionable typed error rather than silently degrading Store data.
-- **PID-namespace-safe stale cleanup**: Linux temporary-workspace markers carry boot-scoped
-  PID-namespace identity (boot ID plus namespace inode) when procfs exposes it. Recovery interprets
-  numeric PID/start-token evidence only in the same verified namespace; a different host boot or
-  namespace and legacy, missing, or unreadable identity are retained as uncertain instead of risking
+- **Cross-version PID-namespace-safe stale cleanup**: New temporary-workspace markers use format v2
+  and carry boot-scoped Linux PID-namespace identity (boot ID plus namespace inode) when procfs
+  exposes it. The version boundary makes older v1 binaries reject new live markers before any
+  numeric-PID probe. The current reader retains valid v1 Linux markers as legacy/uncertain and
+  interprets v2 PID/start-token evidence only in the same verified namespace; a different host boot
+  or namespace and missing, malformed, or unreadable identity are retained rather than risking
   deletion of another namespace's live private workspace.
 - **Restore integrity and confinement**: Restore now publishes only entries whose manifest size and
   checksum pass, rejects empty inventories and unmanifested file payloads, skips corrupt entries
   without touching their destinations, rejects unsafe type/path combinations and duplicate targets,
-  and preflights every non-forced collision. Non-force publication is atomic no-clobber; forced
-  replacement and rollback use new same-directory inodes instead of writing through hard links.
-  Rollback is bound to the device/inode recorded at publication; a concurrent leaf replacement is
-  untouched and reported as residual. Incomplete rollback is a typed failure with safe residual
-  entries. Destinations should remain
+  and preflights every non-forced collision. Non-force publication is atomic no-clobber and forced
+  replacement uses a new same-directory inode instead of writing through hard links. Because
+  portable Node path APIs cannot atomically compare and mutate a destination entry, any failure
+  after publication fails closed without automatic rollback: all published paths remain untouched
+  and `RESTORE_ROLLBACK_INCOMPLETE` reports every safe manifest-relative residual plus verified and
+  unverified private cleanup residue at top level. Recover from a known-good backup. Destinations should remain
   owner-controlled because Node 20 has no portable directory-relative no-follow primitive against
   a hostile concurrent ancestor swap.
 

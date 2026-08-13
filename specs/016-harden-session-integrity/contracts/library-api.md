@@ -33,6 +33,11 @@ do not need to opt into `sourceReadLimits` for the confirmed upgrade path. The d
 vibe-history archive is exercised only by owner-authorized external T113, not by the recurring
 repository harness or this source-limit preflight.
 
+Canonical UUID arguments are case-insensitive logical selectors, but returned IDs preserve an
+observed source spelling and Composer wins for Composer-backed sessions. This does not generalize
+to arbitrary strings: compact 32-hex Store directory names and every other noncanonical identifier
+remain case-sensitive and byte-exact.
+
 ## Additive public types
 
 ```ts
@@ -316,6 +321,10 @@ export interface Session {
 }
 ```
 
+Role arrays summarize physical contributors rather than mutually exclusive logical states. The
+same role may be both loaded and omitted/failed when different representations or occurrences have
+different outcomes; `sourceInstances` is authoritative at representation level.
+
 Rules:
 
 - `id` never receives a source/workspace/index suffix.
@@ -328,6 +337,10 @@ Rules:
 - `indexWorkspacePath` is required exactly when `indexScope === 'workspace'`.
 - `resolvedSource` reports representation; `source` reports replacement safety. Consumers must not
   infer one from the other.
+- For merged output, `activeBranchBubbleIds` and `activeBranchMessageIds` expose the same resolved
+  selected branch. Leading, middle, and trailing Store-only active turns appear once, parent/leaf
+  references use stable IDs, and Store sidechains are excluded. Composer-only legacy branch arrays
+  remain byte-for-byte unchanged.
 - `resolvedSource: 'store-transcript'` may replace an expected Store DB only after capable provider
   selection and DB snapshot/read setup succeeds and the DB is absent, empty, or
   source-corrupt/unreadable. Provider/capability/snapshot infrastructure failures reject with a
@@ -412,6 +425,10 @@ origin.
 Library projection preserves the released v0.16 own-property shape of the pre-existing optional
 `Message` members `toolCalls`, `thinking`, `tokenUsage`, `model`, `durationMs`, and `metadata`, even
 when their value is `undefined`. Additive identity/provenance members do not replace those keys.
+There is one versioned identity-property exception: when v0.16 omitted `Message.id` or the source ID
+was null/empty, v0.18 materializes exactly `msg:<zero-based-v0.16-Composer-projection-index>`. That
+is the durable key the unchanged consumer already synthesized; a different ordinal, omission in the
+resolved view, or any rewrite/removal of a nonempty native ID is a compatibility failure.
 
 The unchanged consumer has no attachment member, derives code blocks from message `content`, and
 does not consume standalone cursor-history `codeBlocks` or `ToolCall.files`. Supported source
@@ -656,6 +673,18 @@ whose mutation affects another membership are rejected. Divergent, Store-only, a
 also throw `UnsupportedSessionMigrationError` or `SessionAmbiguityError` before any write. Move
 retains UUID; copy returns a new UUID.
 
+Canonical UUID matching binds two identities internally: the logical folded key and the exact
+source-native workspace/global record keys. Dry-run and apply return the Composer-compatible public
+spelling but read and mutate only the frozen exact physical keys. A sole opposite-case global
+carrier may be selected; multiple case-only global carriers refuse before writes even if their
+payloads are equivalent. Noncanonical identifiers are never folded.
+
+Scoped preparation may project off-scope IDs, array positions, selected IDs, and pane pointers as
+metadata, but it never materializes an off-scope `composer.composerData` value. Only the selected
+workspace occurrence is hydrated. Session and workspace migration prepare and revalidate the full
+requested set before the first write; one missing, ambiguous, divergent, ineligible, or changed
+member makes both dry-run and apply refuse with zero mutation.
+
 Workspace-wide migration applies the same eligibility rules and cannot move only one half of a
 merged session. Migration limit overrides are validated and frozen before source reads and never
 weaken the prepare/revalidate/first-write boundary.
@@ -710,6 +739,24 @@ or absent producer values remain readable. This field is diagnostic provenance o
 participates in logical/session/message identity, replica equivalence, deduplication, or
 incremental-sync comparison.
 
+New manifests keep the enclosing `manifest.version` at `1.0.0` and carry an additive, optional,
+canonical metadata-only Composer workspace inventory whose own independently validated
+`schemaVersion` is `1`. Existing v1 readers may ignore the unknown optional field. The inventory contains
+one workspace path, sorted materialized native UUIDs, verified global-counterpart UUIDs, and
+verified workspace-linked global-only UUIDs per archived workspace database. A scoped
+backup read uses this inventory to select physical carriers without extracting unrelated databases;
+it never extracts the shared global database. Legacy single-workspace archives remain scoped
+readable, while a legacy multi-workspace archive lacking this inventory throws
+`BackupWorkspaceScopeMetadataError` before any conversation database extraction. Explicit
+cross-workspace opt-in may open a separate workspace database only for a UUID already admitted by
+the selected workspace inventory.
+
+All public session-ID arguments compare UUID hexadecimal letters case-insensitively. Returned IDs
+retain a deterministic source-native spelling, with Composer spelling preferred for a
+Composer-backed logical session. A differently-cased argument or Store occurrence never rewrites
+that public value. Equivalent case variants reconcile; divergent variants reject resolution with
+the ordinary typed logical-session ambiguity.
+
 Rename/link to the requested final path is the publication commit point. If a later mode read,
 identity check, or mode adjustment fails, `createBackup()` rejects with
 `BackupPublishedPermissionError`; `details.published` is always `true` because that commit point was
@@ -747,13 +794,19 @@ Each admitted payload is copied to a newly created private same-directory inode.
 atomically replaces the destination directory entry without opening or truncating its previous
 inode, so other hard links remain byte-for-byte unchanged. Non-forced restore uses an atomic
 no-clobber commit, including against a destination created after preflight. Private sibling cleanup
-is device/inode-bound and never unlinks a replacement occupant. Rollback republishes prior bytes
-through the same private-inode replacement path only after the destination still has the identity
-recorded at publication. A concurrently replaced leaf remains untouched and is reported as
-residual. If rollback is incomplete,
+is device/inode-bound and never unlinks a replacement occupant. After any publication, a later
+failure performs no automatic destination rollback because portable Node path APIs cannot bind an
+identity comparison atomically to replace or unlink. Every current destination remains untouched.
 `restoreBackup()` throws `RestoreRollbackError` with code `RESTORE_ROLLBACK_INCOMPLETE`, a published
-count, and only safe manifest-relative residual paths; it does not return a misleading
-`filesRestored: 0` result.
+count, every safe manifest-relative published residual, and separate top-level verified and
+unverified private cleanup residue sets from publication and outer workspace disposal. An
+unverified classification dominates a verified classification for the same path. The function does
+not return a misleading `filesRestored: 0` result; callers must stop Cursor and recover from a
+known-good backup.
+
+The exported `RestoreRollbackError` class name and `RESTORE_ROLLBACK_INCOMPLETE` code remain stable
+for compatibility. They signal that manual recovery is required; they do not assert that an
+automatic rollback mutation was attempted.
 
 The selected user root is canonicalized and descendant paths are rechecked immediately before each
 publication. This rejects observed/static leaf links and safely replaces multiply linked regular
@@ -794,7 +847,7 @@ and have exported type guards:
 | `MigrationTargetChangedError` | `MIGRATION_TARGET_CHANGED` | UUID and retry remedy; no locator |
 | `BackupPublishedPermissionError` | `BACKUP_PUBLISHED_PERMISSION_FAILED` | `published: true`, final output path, `pathIdentityVerified`, requested mode, last safely observed archive-inode mode or `null`, and identity-conditional remedy |
 | `BackupPublishedCleanupError` | `BACKUP_PUBLISHED_CLEANUP_FAILED` | `published: true`, final output path, `pathIdentityVerified`, verified residue paths, unverified residue paths, and no-blind-delete/force remedy |
-| `RestoreRollbackError` | `RESTORE_ROLLBACK_INCOMPLETE` | published-file count, residual count, canonical manifest-relative residual paths, and recovery remedy |
+| `RestoreRollbackError` | `RESTORE_ROLLBACK_INCOMPLETE` | published-file count, residual count, canonical manifest-relative residual paths, verified and unverified private cleanup residue counts/paths, and recovery remedy |
 | `TemporaryArtifactCleanupError` | `TEMPORARY_ARTIFACT_CLEANUP_FAILED` | possible residue paths only |
 | `SourceEncodingError` | `SOURCE_ENCODING_INVALID` | source kind, partial/fatal outcome, remedy; no content |
 | `SourceLimitError` | `SOURCE_LIMIT_EXCEEDED` | policy version, source kind, named bound, limit, observed-at-least, unit, partial/fatal outcome, override remedy; no content |
@@ -826,8 +879,10 @@ same identities, timestamp/provenance pairs, digest, and zero replacement writes
 
 Release regressions snapshot a v0.16 Composer fixture's session, message, and ordinal-derived tool
 keys byte-for-byte before and after Store enrichment, preferred-backbone changes, Store-only gaps,
-and a second sync. They also lock stable source/fidelity values, exact pathless aliases, session and
-message timestamp/provenance pairs, parent/branch rewrites, and existing Composer tool order.
+and a second sync. Store-only gaps cover leading, middle, and trailing active-branch positions under
+both preferred backbones. They also lock stable source/fidelity values, exact pathless aliases,
+session and message timestamp/provenance pairs, resolved active-branch parent/leaf rewrites,
+sidechain exclusion, v0.16 `localeCompare()` discovery precedence, and existing Composer tool order.
 
 The finite carrier/source coverage and exclusions for these APIs are normative in
 [`../spec.md`](../spec.md), repeated in the design-time

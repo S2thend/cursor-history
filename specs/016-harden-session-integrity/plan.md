@@ -282,10 +282,11 @@ priority or permit publication without it.
   repository with owner authorization and alone executes its exact adapter, comparison/digest,
   real SQLite import and replacement, forced rollback and reopen, successful retry, and repeated
   synchronization. Publication remains blocked until both the recurring generic gate and T113 pass.
-- Preserve v0.16's stable Composer discovery order when session `createdAt` values tie. Capture the
-  legacy Composer position before replica reconciliation, keep it for merged or ambiguous
-  Composer-backed rows, place new-only rows after that legacy tie group, and use UUID ordering only
-  among rows that have no v0.16 Composer position.
+- Preserve v0.16's Composer discovery order when session `createdAt` values tie, including the
+  exact `String.localeCompare()` workspace-path precedence used before the stable timestamp sort.
+  Capture that legacy Composer position before replica reconciliation, keep it for merged or
+  ambiguous Composer-backed rows, place new-only rows after that legacy tie group, and use
+  locale-independent code-point/UUID ordering only among rows that have no v0.16 Composer position.
 - Treat the owner-private v0.16 full-corpus differential as an exhaustive manual certification, not
   a performance-sensitive recurring test. It may use an independent quadratic all-candidate pass
   to prove one-to-one session/message/tool associations; sampling, record caps, time budgets, and
@@ -309,7 +310,9 @@ priority or permit publication without it.
 
 - Reproduce the exact v0.16 Composer-only emitted message sequence, preserving every nonempty
   native ID and assigning `msg:<zero-based-v0.16-index>` before filtering or Store alignment can
-  affect order.
+  affect order. Treat exposing that exact token for a v0.16 missing/null/empty public `id` as a
+  narrowly versioned own-property exception: it is the same key the unchanged consumer already
+  synthesized, while all native IDs and every unrelated non-additive property shape remain exact.
 - Retain Store DB leaf hashes/traversal order and transcript line order/canonical inputs. Compute
   representation-local candidates and occurrences before alignment; allocate collision suffixes
   only to unmatched Store messages after Composer matches are known.
@@ -333,8 +336,8 @@ priority or permit publication without it.
 - Rebuild parent/branch/leaf relationships from resolved IDs. Keep Composer-only
   `activeBranchBubbleIds` byte-identical; for merged output, populate it with the resolved stable
   active-message sequence required by the frozen public compatibility contract and expose
-  `activeBranchMessageIds` as the
-  clearer additive alias.
+  `activeBranchMessageIds` as the clearer additive alias. Leading, middle, and trailing Store-only
+  turns on the selected Store branch participate once in this sequence; Store sidechains do not.
 
 ### 3. Separate logical catalog discovery from permitted payload hydration
 
@@ -344,6 +347,11 @@ priority or permit publication without it.
   occurrences first; a usable global is the primary content source and Composer-workspace contributes
   membership only, while workspace content is a partial fallback only when no usable permitted
   global exists. Compare replicas only within the same fidelity tier.
+- Fold canonical UUID spelling only for logical grouping and association. Preserve exact
+  source-native spellings in physical locators and public Composer-compatible presentation. A
+  pointer-only workspace may associate with the sole differently cased global carrier, but
+  arbitrary identifiers—including compact 32-hex Store directory names—remain exact and
+  case-sensitive.
 - Classify Store DB expectation as `expected`, `not-expected`, or `unknown` from DB presence and
   explicit metadata before hydration. Apply the complete/partial/fatal DB/transcript state machine
   before comparing same-tier Store replicas; never call a transcript complete when an expected or
@@ -388,12 +396,23 @@ priority or permit publication without it.
 - Replace migration's string-ID rediscovery with an internal `BoundMigrationTarget`. Prepare and
   validate the eligible single Composer occurrence, source/destination, fingerprint, and database
   capabilities before the first write; dry-run and apply share the same preparation.
+- Keep the canonical UUID key used for logical selection separate from the exact workspace record
+  ID and exact global SQLite key used for mutation. Opposite-case lookup may select one sole
+  physical carrier, but multiple case-only global keys refuse before writes; noncanonical IDs are
+  never folded.
+- Restrict scoped migration discovery to metadata-only ID/index/selected-ID/pane-pointer projection
+  until the scope and exact occurrence are bound. Do not materialize off-scope
+  `composer.composerData` values. Reset source-read budgets between catalog projection and selected
+  occurrence hydration.
 - Treat replica reconciliation as read-only evidence, not mutation authority. Migration requires
   exactly one Composer locator with a mutation footprint confined to the bound source workspace;
   equivalent duplicate locators or a shared global record affecting other memberships are rejected
   rather than selecting the read representative.
 - Reject divergent, Store-only, and merged targets, including workspace-wide flows that would move
   only a Composer half. Revalidate the bound locator/fingerprint immediately before mutation.
+- Bind and prepare the complete requested session/workspace migration batch before the first write.
+  One missing, changed, ambiguous, divergent, or otherwise ineligible member aborts dry-run and
+  apply with zero mutation of earlier eligible members.
 
 ### 5. Make resource and failure boundaries explicit
 
@@ -426,10 +445,13 @@ priority or permit publication without it.
   replacement without opening or truncating an existing hard-linked inode, while non-force uses an
   atomic no-clobber commit. After link publication, remove only a private sibling whose lossless
   device/inode identity still matches the committed inode; report verified and unverified temporary
-  residue separately and never unlink a replacement pathname occupant. Bind each rollback action to
-  the device/inode captured at that entry's publication commit. If a leaf was concurrently replaced,
-  leave it untouched and report its safe manifest-relative path through
-  `RESTORE_ROLLBACK_INCOMPLETE`; otherwise republish prior bytes through the same private-inode path.
+  residue separately and never unlink a replacement pathname occupant. After any entry is
+  published, do not attempt automatic rollback on portable Node: no available path API can bind an
+  inode-identity observation atomically to a later replace or unlink. On any subsequent failure,
+  leave every published destination untouched and report all safe manifest-relative paths through
+  `RESTORE_ROLLBACK_INCOMPLETE`. Aggregate verified and unverified temporary residue from
+  publication cleanup and outer workspace disposal into the same top-level error so neither
+  failure masks the other. Recovery requires Cursor to be stopped and a known-good backup.
   Record the portable Node-20 limitation: static leaf links and multiply linked regular-file
   destinations are handled, but this is not an atomic guarantee against a hostile concurrent
   ancestor swap in an owner-controlled destination tree. Keep JSZip only where its streaming creation path can
@@ -445,12 +467,16 @@ priority or permit publication without it.
   exclusive files (`0600`), idempotent all-artifact cleanup, and typed residue reporting. Use it for
   backup creation/extraction and Store snapshots.
 - Register active private workspaces for graceful `SIGINT`/`SIGTERM`/`SIGHUP` cleanup and cooperative
-  cancellation. Mark each workspace with owner/pid/process-start/version metadata plus Linux
-  boot-scoped PID-namespace identity (boot ID plus namespace inode) when procfs exposes it. Before
-  interpreting numeric PID evidence on Linux, require equal readable namespace identities; retain a
-  different host boot or namespace and legacy, missing, or unreadable provenance as uncertain. Recover
-  only same-namespace proven-dead, current-owner stale directories on the next operation; document
-  that `SIGKILL` and power loss cannot guarantee immediate cleanup.
+  cancellation. Emit marker format v2 with owner/pid/process-start metadata plus Linux boot-scoped
+  PID-namespace identity (boot ID plus namespace inode) when procfs exposes it. The version bump is a
+  deletion-safety gate: a v1 binary rejects a v2 marker before it can interpret a namespace-local
+  numeric PID. The v2 reader accepts structurally valid v1 markers but, on Linux, retains them as
+  legacy/uncertain. Before interpreting v2 numeric PID evidence on Linux, require equal readable
+  namespace identities; retain a different host boot or namespace and missing, malformed, or
+  unreadable provenance as uncertain or invalid. Recover only same-namespace v2 proven-dead,
+  current-owner stale directories on the next operation; preserve the available non-Linux proof
+  without claiming namespace validation, and document that `SIGKILL` and power loss cannot guarantee
+  immediate cleanup.
 - Stage final archives privately and publish only a complete archive. New archives are `0600` by
   default; force-overwrite never broadens existing permissions; broader access requires `--shared`
   or the additive library option. Rename/link to the final path is the publication commit point. A
@@ -498,7 +524,13 @@ priority or permit publication without it.
 - Ship CHANGELOG and compatibility documentation, correct the backup manifest producer version,
   and provide comprehensive help/empty-result/ambiguity guidance. The producer is the exact running
   package version, old manifests remain readable, and producer metadata never participates in
-  session/message identity, replica equivalence, or incremental deduplication.
+  session/message identity, replica equivalence, or incremental deduplication. Keep the enclosing
+  manifest envelope at `version: "1.0.0"` for the additive optional Composer workspace inventory;
+  version and validate that member independently as `schemaVersion: 1`.
+- Make the clean-install package smoke use a topology-valid synthetic Store layout whose
+  `/work/a` identity agrees across `meta.cwd`, the MD5 chat directory, and the forward-sanitized
+  project directory. Scoped list/show/search must round-trip the same logical session from the
+  checksum-addressed packed bytes without relaxing workspace discovery.
 - Audit the exact packed package-root declaration graph and add contract JSDoc to every reachable
   symbol, including aliases and re-exports; add full help for every command/option; execute CLI
   examples against the built artifact while typechecking and running library examples.
@@ -523,19 +555,19 @@ priority or permit publication without it.
 
 | Area | Required evidence |
 |------|-------------------|
-| v0.16 compatibility | Recurring CI: native and missing Composer IDs, old tool ordinals, Store insertions at start/middle, both preferred sources, enrichment/parent/tool changes, supported attachment evidence projected into public compatibility fields, ignored standalone attachment/code-block/tool-file fields, collisions, generic complete/degraded/idempotence. External T113 only: exact unchanged adapter/digest/policy, real SQLite replacement/rollback/reopen, and repeat-sync no-op at the recorded authorized upstream revision |
+| v0.16 compatibility | Recurring CI: native and missing Composer IDs, exact legacy `localeCompare()` discovery precedence, old tool ordinals, Store insertions at start/middle/end, both preferred sources, resolved active-branch parents/leaf with sidechains excluded, enrichment/tool changes, supported attachment evidence projected into public compatibility fields, ignored standalone attachment/code-block/tool-file fields, collisions, generic complete/degraded/idempotence. External T113 only: exact unchanged adapter/digest/policy, real SQLite replacement/rollback/reopen, and repeat-sync no-op at the recorded authorized upstream revision |
 | v0.17 convergence | Locked complete Store/merged baselines converge through one full replacement, produce no duplicate logical content, preserve native Composer IDs, then no-op; degraded transition explicitly excluded |
 | Public search coordinates | Tagged v0.16/v0.17 baselines plus the 0.18.0 correction: complete-array message index, complete-content UTF-16 offset, complete source line/context; non-first/multiline/mixed-case/astral/lowercase-expansion cases; identities and non-search fields unchanged |
 | Public JSON export | Tagged v0.16/v0.17 absence plus additive 0.18.0 zero-based library `index`; single and bulk exports agree without mutating the resolved source object |
-| Workspace/I/O | Conflicting A/B global and scoped order; exact and unique-suffix matches; ambiguity before payload open; low-level adapter events plus poison canaries prove zero off-scope payload reads; opt-in disclosure; live/backup/custom paths |
+| Workspace/I/O | Conflicting A/B global and scoped order; v0.16 locale collation ties; exact and unique-suffix matches; pointer-only membership with an opposite-case sole global carrier; ambiguity before payload open; low-level adapter events plus poison canaries prove zero off-scope payload reads; opt-in disclosure; live/backup/custom paths |
 | Replicas | Composer global-primary/workspace-fallback arbitration; equivalent and divergent same-tier occurrences; complementary cross-role merge; every Store DB expectation/availability/transcript state; stable set-like array order; unsupported raw attachments force partial fidelity; one logical result/diagnostic per UUID |
-| Migration | Scoped numeric dry-run/apply same bound occurrence; direct/unfiltered compatibility for eligible Composer targets; equivalent multi-locator/shared-membership, divergent, Store-only, and merged rejection before writes; revalidation race |
-| Security | Real POSIX `umask 000` mode checks and owner-only containment; Windows per-user temp/inherited-ACL, uniqueness, cleanup, and typed-failure checks without an unverified cross-user claim; success/failure/close/cleanup injection, concurrent private directories, graceful-signal cleanup, SIGKILL residue containment and next-run stale recovery; final archive no-op/success, identity-bound permission handling, and `BACKUP_PUBLISHED_CLEANUP_FAILED` with verified/unverified residue sets; restore empty/unmanifested/mixed archives, non-force no-clobber races, forced hard-link replacement, identity-bound publication cleanup, concurrent leaf replacement, and complete/incomplete rollback |
+| Migration | Scoped numeric dry-run/apply bind the same exact physical occurrence behind a canonical logical UUID; compact 32-hex non-UUID keys remain exact; discovery reads off-scope metadata but no Composer payload; direct/unfiltered compatibility for eligible Composer targets; equivalent multi-locator/shared-membership, divergent, Store-only, and merged rejection before writes; complete-batch preparation and revalidation before the first mutation |
+| Security | Real POSIX `umask 000` mode checks and owner-only containment; Windows per-user temp/inherited-ACL, uniqueness, cleanup, and typed-failure checks without an unverified cross-user claim; success/failure/close/cleanup injection, concurrent private directories, graceful-signal cleanup, SIGKILL residue containment and next-run stale recovery; v1-validator rejection of live v2 markers before liveness, Linux v1 legacy retention, malformed/foreign v2 retention, same-namespace dead/PID-reused recovery, and real two-PID-namespace same-number non-deletion; final archive no-op/success, identity-bound permission handling, and `BACKUP_PUBLISHED_CLEANUP_FAILED` with verified/unverified residue sets; restore empty/unmanifested/mixed archives, non-force no-clobber races, forced hard-link replacement, identity-bound publication cleanup, concurrent leaf replacement, and complete/incomplete rollback |
 | Defensive parsing | UTF-8 and leading BOM, ignored unknown fields, typed invalid/mixed-encoding outcomes, below/equal/above every Source Read Limits v1 field, invalid/per-operation override behavior, JSONL and SQLite counter resets, ZIP compressed/entry/count/aggregate/ratio rejection, no automatic raise, and bounded cancellation cleanup |
 | SQLite | Importable `node:sqlite` without backup, automatic capable-provider selection, explicit-driver error, capability/snapshot infrastructure fatality before Store transcript fallback, config propagation, no false partial Store result |
 | Runtime | Source tooling on Node 24.x because Vite 7 requires Node 20.19+; the same packed candidate installed as a production dependency without repository devDependencies on Node 20.0.0 project floor, 22.15.1/22.16.0 and 23.7.0/23.8.0 capability boundaries, 24.x, 25.x, and 26.x; installed-package smoke does not run repository development scripts but does not claim native dependency installation needs no compiler/toolchain; Node 21 explicitly excluded; 24 LTS/26 Current labels are as of the v0.18.0 release date; deterministic simulated capability profiles |
 | Memory/lifecycle | Get-before-list and list-before-get equivalence, scope conflict before I/O, in-flight coalescing, rejected retry, `N`/`2N` within `C+A`, bulk `C=0`, disposal |
-| Release | Typecheck/lint/test/build failures, zero tests, skip, timeout, or cancellation block publish; exact tarball ESM/CJS/CLI/type/JSDoc/help/example/schema smoke and checksum identity; fatal JSON is on stderr with locked object/exit compatibility and migration warning; producer version matches the running artifact; privacy-safe recorded manual checks on maintainer-owned real Cursor live/export/backup data |
+| Release | Typecheck/lint/test/build failures, zero tests, skip, timeout, or cancellation block publish; exact tarball ESM/CJS/CLI/type/JSDoc/help/example/schema smoke with a topology-valid `/work/a` Store fixture and checksum identity; fatal JSON is on stderr with locked object/exit compatibility and migration warning; producer version matches the running artifact; outer manifest stays `1.0.0` while inventory schema is `1`; privacy-safe recorded manual checks on maintainer-owned real Cursor live/export/backup data |
 
 The authoritative finite source/carrier coverage and exclusions are defined by the Matrix v1 table
 in [`spec.md`](spec.md). Packaged `docs/compatibility.md` and design-time
@@ -562,6 +594,8 @@ release gate; implementation capability discovery cannot shrink that matrix.
 | FR-081: corrected public search coordinates | `research.md` §21; public-library/internal-resolution contracts | Quickstart §11 |
 | FR-082: integrity-gated restore publication | `research.md` §22; backup/library/CLI contracts | Quickstart §8 |
 | SC-018–SC-020: search-coordinate, published-archive, and restore-integrity fault evidence | `research.md` §§14, 21–22; library/internal/CLI contracts | Quickstart §§8, 11 |
+| FR-083–FR-089: post-audit collation, exact migration locators, metadata-only atomic migration, pointer-only association, active-branch merge, and exact package smoke | `research.md` §23; data model and internal/library/CLI contracts | Quickstart §§2, 7, 13 |
+| SC-021–SC-026: executable post-audit compatibility and packaged-artifact outcomes | `research.md` §23; implementation checklist | Quickstart §§2, 7, 13 |
 
 ## Complexity Tracking
 

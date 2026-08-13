@@ -68,11 +68,16 @@ key.
 
 **Rationale**: The consumer derived fallback IDs from the final v0.16 Composer array. Assigning them
 after Store insertion, filtering, or merge rendering would shift durable archive keys. Preserving
-nonempty IDs without trimming also matches the released truthiness behavior.
+nonempty IDs without trimming also matches the released truthiness behavior. Although v0.16 could
+omit the public `id` property (or expose a source-level null/empty value), the unchanged consumer
+immediately materialized the same `msg:<index>` token as its durable key. Exposing exactly that token
+in v0.18 is therefore a narrow, versioned own-property exception that makes identity independent of
+later merged-array order; it is not permission to rewrite a native ID or any other optional shape.
 
-**Alternatives considered**: Use final merged position (the reported corruption); hash old content
-(changes all historical fallback keys); decorate IDs with workspace/source (breaks native fidelity
-and public identity).
+**Alternatives considered**: Keep the public ID absent and add only an internal identity (an
+unchanged consumer would recompute from the merged position and corrupt old keys); use final merged
+position (the reported corruption); hash old content (changes all historical fallback keys);
+decorate IDs with workspace/source (breaks native fidelity and public identity).
 
 ## 3. Store message and tool identities
 
@@ -444,18 +449,45 @@ permissions.
 Register every active workspace in one process-level cleanup registry. A single coordinated
 `SIGINT`, `SIGTERM`, and `SIGHUP` handler performs synchronous best-effort cleanup and then preserves
 the platform's signal termination semantics; cooperative `AbortSignal` cancellation still exits
-through normal `finally`. Each directory contains a private marker with format version, current uid
-where available, pid, a process-start token, creation time, and on Linux a boot-scoped PID-namespace
-token (boot ID plus namespace inode) when procfs exposes one. Before a new operation, recover only
+through normal `finally`. Each directory contains a format-v2 private marker with current uid where
+available, pid, a process-start token, creation time, and on Linux a boot-scoped PID-namespace token
+(boot ID plus namespace inode) when procfs exposes one. Version 2 is required because older v1
+readers ignore unknown fields: adding only a namespace field to a v1 marker lets an older binary
+accept the marker and authorize deletion from a namespace-local PID collision. An old reader instead
+rejects format v2 before any liveness probe. Before a new operation, recover only
 directories with the exact application prefix, current owner, a valid marker, and an owner process
-proven dead (including start-token mismatch). Linux PID/start-token evidence is interpreted only
-after marker and current namespace tokens are both readable and equal; a different host boot or
-namespace and missing or unreadable namespace identity remain uncertain and are never deleted. This
+proven dead (including start-token mismatch). The new reader recognizes structurally valid v1
+markers for compatibility but treats them as legacy/uncertain on Linux, even if they contain an
+unknown namespace field from a transitional writer. V2 Linux PID/start-token evidence is interpreted
+only after marker and current namespace tokens are both readable and equal; a different host boot or
+namespace and missing, malformed, or unreadable namespace identity remain uncertain or invalid and
+are never deleted. This
 prevents a numeric PID from another namespace or host using a shared temporary parent from being
 mistaken for a dead or reused local PID. Non-Linux behavior remains based on its available
 process-liveness evidence without claiming namespace validation. `SIGKILL`, power loss, and kernel
 termination cannot guarantee immediate cleanup, so privacy comes from the private directory and the
 next operation performs conservative stale recovery.
+
+**Alternatives considered**: retaining format v1 and requiring the new namespace field was rejected
+because deployed readers ignore unknown fields; renaming only the marker file was unnecessary and
+would complicate recognition of valid legacy residue. Keeping the stable private filename while
+versioning its JSON payload makes both directions conservative: old readers reject v2, while new
+readers can classify v1 without deleting it on Linux.
+
+**Decision**: Treat ASCII case variants of a native Cursor UUID as one logical identity while
+retaining exact physical and public source spelling. Internal grouping, lookup, context caches, and
+Composer/Store association use a folded logical key. SQLite reads and mutations bind one exact
+observed spelling. The public value is selected from actual source IDs, preferring Composer for a
+Composer-backed session; equivalent variants reconcile and divergent variants are typed ambiguity.
+
+**Rationale**: UUID hexadecimal letter case is semantically insignificant, but normalizing the
+public value would rewrite durable v0.16 session keys. Separating the folded logical key from exact
+physical locators and source-native presentation preserves both semantics and compatibility.
+
+**Alternatives considered**: treating case variants as distinct sessions was rejected because it
+contradicts UUID semantics and makes cross-stack association inconsistent. Always lowercasing was
+rejected because it changes stable returned values. Exact-case queries selecting one divergent
+variant were rejected because caller spelling is not mutation authority.
 
 Backup creation writes a complete private sibling staging archive and then publishes it. New final
 archives default to `0600`; force-overwrite cannot broaden the existing mode; broader permissions
@@ -467,6 +499,14 @@ backup manifest producer version comes from the package build rather than the cu
 `0.9.2`. It equals the version of the running packed artifact that created the archive. Older
 manifests remain readable, and this diagnostic provenance field is excluded from session/message
 identity, replica equivalence, archive deduplication, and incremental synchronization decisions.
+
+The metadata-only Composer workspace inventory is an additive optional member of the existing v1
+manifest envelope. Keep the enclosing `manifest.version` at `1.0.0` and independently version and
+validate the member as `composerWorkspaceInventory.schemaVersion: 1`. This lets earlier v1 readers
+ignore the unknown member while the new reader can reject an unsupported inventory schema without
+misrepresenting the whole archive as a new envelope format. Raising the outer version to `1.1.0`
+was rejected because the envelope and existing required members did not change; a capabilities
+registry was rejected as unnecessary new public surface for this finite extension.
 
 The successful rename or hard link to the final output path is the publication commit point. Every
 later mode-observation, identity, or mode-adjustment failure therefore reports
@@ -818,14 +858,16 @@ publication sibling only while its no-follow device/inode identity still matches
 inode. A replacement occupant is never removed; a failed identity observation is reported as
 unverified temporary residue rather than guessed safe-to-delete residue.
 
-Snapshot an existing destination without following a leaf symlink. At each publication commit,
-record the published device/inode identity. On a later failure, rollback first verifies that the
-destination still names that exact inode. Only then may it republish prior bytes through the same
-private-inode replacement path or remove a newly created leaf. A concurrent replacement is left
-untouched and its manifest-relative entry is included in the typed residual set. If any prior state
-cannot be restored, throw `RESTORE_ROLLBACK_INCOMPLETE` with the count of published entries and only
-safe manifest-relative residual paths rather than returning a result that falsely says
-`filesRestored: 0`.
+Portable Node path APIs expose no atomic compare-and-replace or compare-and-unlink operation. An
+`lstat` identity check followed by rename or unlink therefore leaves a leaf TOCTOU window in which a
+concurrent replacement can be overwritten or deleted. After any publication, fail closed on every
+later error: perform no destination rollback mutation, preserve every current leaf (whether it is
+the published inode or an external replacement), and throw `RESTORE_ROLLBACK_INCOMPLETE` with the
+published count and every safe manifest-relative published path rather than returning a result that
+falsely says `filesRestored: 0`. Cleanup remains limited to owner-private staging. Publication-stage
+and outer-workspace cleanup failures contribute verified and unverified private residue paths to
+that same top-level typed error so neither cleanup failure nor its nested cause hides the published
+residual set. Recovery is explicit from a known-good backup with Cursor stopped.
 
 Node 20 does not provide a portable `openat`-style directory descriptor API for binding every
 ancestor and creating the destination relative to it. Canonicalize the explicitly selected user
@@ -846,3 +888,59 @@ archive (unnecessarily loses intact recovery); overwrite corrupt destinations wi
 use a lexical `startsWith` confinement check (both permit off-contract or symlink-directed writes);
 claim atomic ancestor-swap prevention without a directory-relative primitive (not technically
 honest on the supported Node 20 runtime).
+
+## 23. Post-audit collation, physical migration identity, and active-branch compatibility
+
+**Decision**: Preserve two deliberately different ordering contracts. Legacy Composer workspace
+discovery uses the same `String.localeCompare()` precedence as v0.16 before its stable
+descending-`createdAt` sort; this compatibility ordinal survives merge and replica classification.
+New set-like arrays and rows that have no legacy Composer ordinal continue to use
+locale-independent Unicode code-point ordering. The v0.16 promise is evaluated on the same
+supported runtime/locale and source corpus because `localeCompare()` is itself locale-sensitive.
+
+**Decision**: Split session addressing into a canonical UUID logical key and exact source-native
+physical IDs. Canonical UUID syntax is folded case-insensitively for grouping, pointer association,
+and caller lookup, but the public ID comes from an observed source spelling and Composer remains the
+presentation authority. Workspace record IDs and global SQLite keys are retained exactly in the
+bound mutation locator. A sole opposite-case global carrier may satisfy a pointer-only workspace;
+multiple case-only global keys refuse destructive work before writes. Strings that are not
+canonical UUID syntax—including compact 32-hex Store directory identifiers—remain case-sensitive
+and byte-exact.
+
+**Decision**: Treat destructive migration as a two-stage transaction boundary even when its
+storage implementation is not a database transaction. Catalog projection may read only metadata
+needed to identify IDs, array positions, selected IDs, and pane pointers across workspaces. It may
+not materialize off-scope `composer.composerData`; only the selected occurrence is hydrated after
+binding. Session and workspace migration bind and prepare the complete requested set, including
+exact keys and fingerprints, before the first write. Any missing, ambiguous, divergent, changed, or
+ineligible member refuses the whole operation with zero mutation. Source-read budgets reset between
+the catalog and selected-hydration boundaries.
+
+**Decision**: Build the merged active branch from the selected Store branch plus matched Composer
+messages, not from matched messages alone. Leading, middle, and trailing Store-only active turns are
+interleaved once, their parent chain and leaf are rewritten through resolved stable IDs, and Store
+sidechains are excluded. The resolved sequence populates both legacy `activeBranchBubbleIds` and
+additive `activeBranchMessageIds`, so the unchanged v0.16 compatibility consumer observes the same
+complete branch under Composer- and Store-preferred rendering without changing old Composer keys.
+
+**Decision**: The packed-package smoke fixture is a real topology contract, not a path-matching
+shortcut. Its fictional `/work/a` identity must agree across `meta.cwd`, `chats/<md5-cwd>`, and
+`projects/<forward-sanitized-cwd>` so scoped list/show/search exercise production discovery from the
+preserved checksum-addressed tarball. For the additive backup inventory, retain the settled BB
+versioning choice: the enclosing `manifest.version` stays `"1.0.0"`; only
+`composerWorkspaceInventory.schemaVersion` is `1` and independently validated.
+
+**Rationale**: These distinctions preserve released values where callers may persist them while
+still allowing UUID-semantic matching and safe physical mutation. Exact physical locators prevent a
+case-folded logical lookup from deleting the wrong SQLite row. Metadata-only preflight and
+all-or-nothing preparation remove both the off-scope privacy regression and the partially applied
+workspace migration failure. Complete active-branch projection is required because the unchanged
+consumer reconstructs relationships from that legacy array.
+
+**Alternatives considered**: Replace legacy collation with code-point order (changes v0.16 numeric
+positions); lowercase every UUID (rewrites durable public IDs); case-fold compact 32-hex Store names
+(collapses distinct physical names without UUID syntax); hydrate all Composer values during
+preflight (violates the scoped payload boundary); mutate eligible members as they are discovered
+(permits partial workspace migration); append Store gaps without rebuilding the active branch
+(causes the unchanged consumer to omit or mis-parent them); raise the outer backup manifest to
+`1.1.0` (unnecessary incompatibility for an optional independently versioned member).

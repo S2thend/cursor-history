@@ -153,6 +153,11 @@ representation declaration order, lexicographic `workspacePaths`, then state dec
 and diagnostic refs sort by stable payload fingerprint with opaque-ref tie-breaker. Pathless source
 instances emit `workspacePaths: []`. Formatters never apply discovery order.
 
+This canonical ordering does not replace the released Composer catalog order. Equal-`createdAt`
+Composer-backed rows retain the v0.16 workspace discovery ordinal produced by
+`String.localeCompare()` before the stable timestamp sort. Only rows without that legacy ordinal
+use the new code-point/UUID tie-break.
+
 ## `list --json`
 
 The existing top-level object remains and gains additive scope and diagnostics fields:
@@ -376,6 +381,18 @@ Dry-run and execution share one target preparation contract. A scoped number sel
 by scoped list, then binds an exact eligible Composer occurrence. Execution revalidates the same
 occurrence/fingerprint and refuses any change before the first write.
 
+Canonical UUID syntax is case-insensitive only at the logical selection layer. The prepared target
+retains the Composer-compatible public spelling plus the exact workspace record ID and exact global
+SQLite key; apply reads and mutates only those frozen source spellings. A sole opposite-case global
+carrier is eligible, but multiple case-only global keys produce a typed pre-write refusal.
+Noncanonical identifiers, including compact 32-hex Store directory names, remain byte-sensitive.
+
+Scoped preparation may inspect off-scope ID/index/selected-ID/pane-pointer metadata needed for
+membership, but it never loads an off-scope `composer.composerData` value. Only the selected
+occurrence is hydrated. Workspace-wide and multi-selector migration prepare every member before the
+first mutation, so one missing, ambiguous, divergent, changed, or ineligible member leaves all
+sources and destinations unchanged in both dry-run and apply.
+
 The one-based migration catalog includes ambiguous logical rows. Selecting such a row by its shown
 number returns the same `SESSION_AMBIGUOUS` details as selecting its UUID; the row is not omitted,
 later numbers do not shift, and neither selector reads or writes contested content.
@@ -387,6 +404,7 @@ behavior for an eligible single-occurrence Composer session remains compatible.
 
 JSON migration results add `sessionId`, normalized source/matched paths, eligibility, and dry-run
 precondition summary, but never a locator. A changed target returns `MIGRATION_TARGET_CHANGED`.
+`sessionId` always uses the bound source-native Composer spelling rather than caller casing.
 
 ## `backup`
 
@@ -406,6 +424,9 @@ and the same cleanup guarantees without claiming independently verified cross-us
 Every newly created manifest reports the exact running package version as `producer`; older or
 missing producer values remain readable. The field is diagnostic provenance and does not affect
 session/message identity, replica equivalence, deduplication, or incremental synchronization.
+The optional Composer workspace inventory is an additive v1 member: the enclosing
+`manifest.version` remains `1.0.0`, while the inventory independently reports and validates
+`schemaVersion: 1`. Legacy v1 manifests may omit it.
 
 Rename/link to the final output path is the publication commit point. If a later permission read or
 identity/adjustment step fails, the CLI exits nonzero with a fatal
@@ -472,14 +493,17 @@ unsafe/ambiguous destination layout follows the existing restore-failure categor
 Each valid payload is published from a private same-directory inode: `--force` atomically replaces
 the directory entry without writing through an existing hard link, and non-force atomically refuses
 to clobber a destination created after preflight. Private sibling cleanup is device/inode-bound and
-never unlinks a replacement occupant. Prior bytes are rolled back through the same private-inode
-replacement path only after the destination still matches the identity recorded at publication. A
-concurrently replaced leaf is untouched. If rollback is incomplete, the fatal stderr object uses
+never unlinks a replacement occupant. After any publication, a later failure performs no automatic
+destination rollback because portable Node path APIs cannot atomically bind an identity comparison
+to replace or unlink. Every current leaf remains untouched. The fatal stderr object uses
 `RESTORE_ROLLBACK_INCOMPLETE` and safe details `publishedFileCount`, `residualFileCount`,
-manifest-relative `residualFiles`, and `remedy`; it does not emit a misleading successful/failure
-result with `filesRestored: 0`. Static leaf links are rejected and other hard links to a forced
-destination remain unchanged. The documented owner-controlled-tree limitation still excludes a
-hostile concurrent ancestor swap on runtimes without directory-relative no-follow creation.
+manifest-relative `residualFiles`, verified `residueCount`/`residuePaths`, unverified
+`unverifiedResidueCount`/`unverifiedResiduePaths`, and `remedy`; unverified classification dominates
+for the same temporary path. It does not emit a misleading result with `filesRestored: 0` and
+directs recovery from a known-good backup. Static leaf links are rejected and other hard links to a
+forced destination remain unchanged. The documented owner-controlled-tree limitation still
+excludes a hostile concurrent ancestor swap on runtimes without directory-relative no-follow
+creation.
 
 | Category | Exit code |
 |----------|-----------|

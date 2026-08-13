@@ -18,10 +18,11 @@ before the exact-revision release gates
   68,024,448 message pairs, and 443,556 tool pairs.
 - That exhaustive differential found zero duplicate, missing, ambiguous, reverse-unmatched, or
   cross-associated session/message/tool identities and zero ordering inversions.
-- Every then-documented non-excepted v0.16 public value and own-property shape matched. The differences
-  were 60 missing-source message timestamps, 81 missing-source session update values, and two
-  pathless workspace sentinels; every occurrence satisfied its documented predicate and none
-  changed an identity or content/relationship/tool binding.
+- Every then-documented non-excepted v0.16 public value and own-property shape matched. The
+  differences were 343 exact missing/null/empty-ID compatibility materializations, 60
+  missing-source message timestamps, 81 missing-source session update values, and two pathless
+  workspace sentinels; every occurrence satisfied its documented predicate and none changed a
+  durable identity or content/relationship/tool binding.
 - The prior one-time owner-authorized external pinned-consumer SQLite transition retained all 7,480 logical persisted
   rows; both candidate upgrade and repeated sync wrote zero rows and produced an identical logical
   database snapshot.
@@ -30,7 +31,7 @@ before the exact-revision release gates
 
 Those observations are historical evidence only. Subsequent high-priority fixes changed runtime,
 tests, package metadata, contracts, and release workflow behavior. Every `PASS` token in the tables
-below records that prior run and is **not** current release approval. T116–T134 are now
+below records that prior run and is **not** current release approval. T116–T147 are now
 implemented in the current tree; the reopened T110–T115 gates must complete from the corrected 0.18.0
 revision before any table can be refrozen.
 
@@ -46,7 +47,7 @@ the owning tasks are complete and their required test/document evidence passed t
 | FR-003 fixed interface-specific index bases and scopes | T006, T032–T034, T041, T043, T046, T048, T053, T099–T100, T105–T107, T119, T124, T127 | PASS |
 | FR-004 v0.16 Composer projection precedes merging | T002, T011–T015, T021, T110, T116, T125, T132 | PASS |
 | FR-005 native Composer message IDs remain unchanged | T012, T014–T017, T021, T023, T028, T110, T116, T125, T132 | PASS |
-| FR-006 null-ID Composer compatibility IDs remain unchanged | T002, T011–T015, T017, T021, T110, T116, T125, T132 | PASS |
+| FR-006 null-ID Composer compatibility IDs remain unchanged | T002, T011–T015, T017, T021, T110, T116, T125, T132, T137 | REVALIDATION REQUIRED |
 | FR-007 matched messages inherit Composer identity | T015, T018, T023, T110, T116 | PASS |
 | FR-008 Store synthetic identity and collision policy | T012, T015, T017, T021–T023, T110 | PASS |
 | FR-009 occurrence and transcript canonical-input policy | T017, T021–T022, T110 | PASS |
@@ -93,9 +94,9 @@ the owning tasks are complete and their required test/document evidence passed t
 | FR-050 existing unambiguous migration remains compatible | T048–T055, T110, T124, T127 | PASS |
 | FR-051 temporary plaintext privacy is platform-qualified | T004, T020, T057–T064, T110, T114–T115 | PASS pending exact-tarball repetition in T115 |
 | FR-052 temporary workspaces are unique/exclusive | T001, T057–T064, T110 | PASS |
-| FR-053 exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115, T121, T129–T131, T133 | PASS pending exact-tarball repetition in T115 |
+| FR-053 exhaustive cleanup and conservative recovery | T003–T004, T057–T064, T110, T114–T115, T121, T129–T131, T133, T135–T136 | REVALIDATION REQUIRED |
 | FR-054 final archives are private by default where supported | T057, T060, T069, T110, T114–T115, T121, T131 | PASS pending exact-tarball repetition in T115 |
-| FR-055 overwrite/parent permissions and publication identity remain safe | T057, T060, T069, T110, T121, T127–T131 | REVALIDATION REQUIRED |
+| FR-055 overwrite/parent permissions and publication identity remain safe | T057, T060, T069, T110, T121, T127–T131, T136 | REVALIDATION REQUIRED |
 | FR-056 provider selection probes requested capabilities | T056, T059, T065, T067–T068, T071, T095 | PASS |
 | FR-057 automatic selection falls back to a capable provider | T056, T059, T065, T067–T068, T071, T095 | PASS |
 | FR-058 forced incapable providers fail actionably | T007–T009, T056, T059, T065, T067–T068, T071 | PASS |
@@ -106,48 +107,61 @@ the owning tasks are complete and their required test/document evidence passed t
 | FR-063 read context binds immutable source/scope | T006, T083–T089, T110 | PASS |
 | FR-064 context misuse returns typed errors | T007–T009, T083–T089 | PASS |
 | FR-065 rejected resolution remains retryable/isolated | T083–T090, T110 | PASS |
-| FR-066 shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115, T126–T127, T134 | PASS pending exact-tarball repetition in T115 |
-| FR-067 complete changelog and upgrade warnings | T013, T092, T105, T108, T118–T119, T127 | REVALIDATION REQUIRED |
+| FR-066 shipped JSDoc/help/docs and executable examples | T003, T034, T043, T093, T099–T100, T102, T105–T108, T115, T126–T127, T134, T136 | REVALIDATION REQUIRED |
+| FR-067 complete changelog and upgrade warnings | T013, T092, T105, T108, T118–T119, T127, T135–T136 | REVALIDATION REQUIRED |
 | FR-068 actionable empty/ambiguity diagnostics | T007–T009, T030, T032, T034, T047, T079–T080, T099, T105 | PASS |
 | FR-069 exact-artifact gates and actual manifest producer | T005, T060, T070, T093–T096, T101–T104, T114–T115, T123, T126–T127, T134 | PASS in contract tests; exact candidate remains T115 |
 | FR-070 runtime capability-boundary validation | T005, T056, T059, T065, T094–T095, T103–T104, T114–T115, T126–T127 | PASS in workflow contract; hosted runtime matrix remains release gate |
-| FR-071 stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113, T118–T119, T127–T128, T132–T134 | REVALIDATION REQUIRED |
+| FR-071 stable-return/source-fidelity review contract | T006, T010–T018, T021–T029, T033, T039–T040, T046, T081, T096, T100, T105, T109, T113, T118–T119, T127–T128, T132–T137 | REVALIDATION REQUIRED |
 | FR-072 distributed end-to-end off-scope evidence | T003–T004, T031–T034, T037, T042–T047, T093, T111, T114–T115 | PASS pending exact-tarball repetition in T115 |
-| FR-073 locked v0.16/v0.17 backward-compatibility suite | T002, T011–T016, T021–T029, T110, T114, T125, T132 | PASS |
+| FR-073 locked v0.16/v0.17 backward-compatibility suite | T002, T011–T016, T021–T029, T110, T114, T125, T132, T137 | REVALIDATION REQUIRED |
 | FR-074 cross-source/layout/runtime validation fixture matrix | T001, T012–T020, T030–T034, T048–T050, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T124, T126 | PASS pending hosted/exact-tarball repetition |
-| FR-075 mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110, T123, T130–T134 | PASS |
+| FR-075 mutation-proven integrity/release gates | T004, T010, T015–T018, T030–T033, T048, T057, T083, T092–T095, T110, T123, T130–T136 | REVALIDATION REQUIRED |
 | FR-076 tool activity rendering and message filtering | T017–T018, T091, T098, T110–T111 | PASS |
-| FR-077 v0.16 identity/completeness/idempotency faults | T002, T005, T012, T015, T017–T018, T021–T029, T110, T114, T125, T132 | PASS |
+| FR-077 v0.16 identity/completeness/idempotency faults | T002, T005, T012, T015, T017–T018, T021–T029, T110, T114, T125, T132, T137 | REVALIDATION REQUIRED |
 | FR-078 locked v0.17 corrective convergence | T013, T016, T023–T029, T092, T108, T110, T114–T115 | PASS pending exact-tarball repetition in T115 |
 | FR-079 unknown fields and deterministic UTF-8/BOM policy | T007–T009, T020, T022, T025, T105, T110 | PASS |
 | FR-080 versioned bounded JSONL, SQLite, and ZIP source parsing | T004, T006–T009, T020, T022, T037, T060, T063, T069, T088, T099, T105, T110–T112, T114, T120 | PASS |
 | FR-081 corrected complete-message public search coordinates | T118, T127–T128, T110, T113–T115 | REVALIDATION REQUIRED |
-| FR-082 integrity-gated and confined restore publication | T127–T130, T110, T114–T115 | REVALIDATION REQUIRED |
+| FR-082 integrity-gated and confined restore publication | T127–T130, T136, T110, T114–T115 | REVALIDATION REQUIRED |
+| FR-083 v0.16 locale collation controls equal-time Composer discovery | T141, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| FR-084 canonical UUID logical selection remains separate from exact physical migration keys | T142, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| FR-085 scoped migration discovery reads metadata but no off-scope Composer payload | T143, T147, T110, T114–T115 | REVALIDATION REQUIRED |
+| FR-086 complete migration batches prepare before the first write | T143, T147, T110, T114–T115 | REVALIDATION REQUIRED |
+| FR-087 pointer-only workspace membership associates with a sole opposite-case global carrier | T144, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| FR-088 leading/middle/trailing Store turns form one resolved active branch | T145, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| FR-089 exact package smoke uses valid Store topology and the BB manifest version split | T146–T147, T110, T114–T115 | REVALIDATION REQUIRED |
 
 ## Success Criterion Traceability
 
 | Criterion | Owning tasks | Historical result (current gate is reopened) |
 |---|---|---|
-| SC-001 v0.16 session/message/tool identities remain stable | T002, T011–T015, T017–T018, T021–T024, T027–T029, T110, T116, T125, T132 | PASS |
+| SC-001 v0.16 session/message/tool identities remain stable | T002, T011–T015, T017–T018, T021–T024, T027–T029, T110, T116, T125, T132, T137 | REVALIDATION REQUIRED |
 | SC-002 upgraded complete replacement is lossless/idempotent | T002, T012, T015–T016, T023–T029, T110, T113, T132 | PASS |
 | SC-003 scoped reads hydrate zero unrelated payloads | T001, T004, T031–T047, T110–T111, T117, T122–T123 | PASS |
 | SC-004 scoped indices round-trip without global regressions | T003, T032–T034, T038–T043, T046, T048, T052–T053, T110, T117, T119, T124, T127 | PASS |
 | SC-005 ambiguity and ineligible migration stop before writes | T048–T055, T072, T079, T110, T124 | PASS |
 | SC-006 equivalent/divergent/complementary groups and logical pagination are honest | T034, T043, T072–T082, T110–T111 | PASS |
-| SC-007 platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115, T121, T129–T131, T133 | PASS pending exact-tarball repetition |
+| SC-007 platform-qualified private artifacts and cleanup | T057–T064, T069, T110, T114–T115, T121, T129–T131, T133, T135–T136 | REVALIDATION REQUIRED |
 | SC-008 capable driver or one actionable error | T056, T059, T065–T068, T071, T095, T110, T114–T115, T126 | PASS pending hosted matrix |
 | SC-009 context and Source Read Limits v1 boundaries hold | T020, T022, T063, T069, T083–T090, T105, T110, T112, T114, T120 | PASS |
 | SC-010 timestamps/provenance are deterministic and honest | T015–T016, T091, T097–T100, T110 | PASS |
-| SC-011 shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115, T126–T127, T134 | PASS pending exact-tarball repetition |
-| SC-012 every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115, T123, T126–T127, T134 | PASS in contract/fault tests; protected release gate remains |
+| SC-011 shipped surfaces explain the compatibility contract | T093, T099–T100, T105–T108, T115, T126–T127, T134–T136 | REVALIDATION REQUIRED |
+| SC-012 every validation and registered fatal path blocks exact-artifact publish | T005, T092–T096, T099, T101–T104, T114–T115, T123, T126–T127, T134–T136 | REVALIDATION REQUIRED |
 | SC-013 every `required` Compatibility Matrix v1 cell passes | T001, T004, T020, T030–T034, T048, T056–T060, T072–T075, T083–T085, T091–T096, T111, T114–T115, T122, T126–T127 | REVALIDATION REQUIRED |
-| SC-014 100% of feature 016 public changes have evidence | T005, T109, T113, T115–T134 | REVALIDATION REQUIRED |
+| SC-014 100% of feature 016 public changes have evidence | T005, T109, T113, T115–T147 | REVALIDATION REQUIRED |
 | SC-015 structured tools remain visible/filterable | T017–T018, T091, T098, T110–T111 | PASS |
-| SC-016 required suite catches specified v0.16 regressions | T002, T005, T011–T015, T017–T018, T021–T029, T110, T114, T132 | PASS |
+| SC-016 required suite catches specified v0.16 regressions | T002, T005, T011–T015, T017–T018, T021–T029, T110, T114, T132, T137 | REVALIDATION REQUIRED |
 | SC-017 required suite proves v0.17 one-replacement convergence | T005, T013, T016, T023–T029, T092, T110, T114–T115 | PASS pending exact-tarball repetition |
 | SC-018 search coordinates exactly identify complete returned data | T118, T127–T128, T110, T113–T115 | REVALIDATION REQUIRED |
 | SC-019 post-publication permission failure reports final-path identity honestly | T121, T127–T128, T131, T110, T114–T115 | REVALIDATION REQUIRED |
-| SC-020 corrupt or unsafe restore entries never reach a destination | T127–T130, T110, T114–T115 | REVALIDATION REQUIRED |
+| SC-020 corrupt or unsafe restore entries never reach a destination | T127–T130, T136, T110, T114–T115 | REVALIDATION REQUIRED |
+| SC-021 non-ASCII equal-time Composer rows retain v0.16 locale order | T141, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| SC-022 UUID spelling and exact migration keys round-trip without collateral mutation | T142, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| SC-023 migration performs no off-scope payload read and refuses a mixed batch atomically | T143, T147, T110, T114–T115 | REVALIDATION REQUIRED |
+| SC-024 pointer-only opposite-case global carrier resolves as one scoped session | T144, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| SC-025 active Store gaps survive both backbones and unchanged-consumer synchronization | T145, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| SC-026 exact packed bytes pass topology-valid scope and BB manifest smoke | T146–T147, T110, T114–T115 | REVALIDATION REQUIRED |
 
 ## Compatibility Matrix v1 Historical Result Map (Revalidation Required)
 
@@ -182,18 +196,21 @@ successful carrier fixture is permitted.
 |---|---|---|
 | `Session.id` | Preserved native Cursor UUID; locators remain separate | `tests/integration/session-integrity-faults.test.ts`, FR-001–FR-002 |
 | Numeric indices | Existing per-interface bases preserved; additive scope metadata; v0.16 equal-time order restored | `tests/integration/workspace-index-roundtrip.test.ts`, `tests/unit/storage.test.ts` |
+| Equal-time Composer ordering | Preserve v0.16 `String.localeCompare()` workspace discovery before stable timestamp sorting; code-point order remains only for new set-like/new-only values | `tests/integration/session-replica-reconciliation.test.ts`, `tests/unit/storage.test.ts` |
+| Canonical UUID versus physical ID | UUID lookup/grouping is case-insensitive, returned Composer spelling remains source-native, exact workspace/global keys alone authorize migration, and compact 32-hex non-UUID names stay exact | Composer case-sensitivity and scoped-migration integration tests |
 | Native Composer `Message.id` | Preserved byte-for-byte | `tests/compatibility/v016-composer-upgrade.test.ts` |
-| Missing-ID Composer message key | Explicit `msg:<v0.16-index>` compatibility identity | `tests/compatibility/v016-fixture-safety.test.ts` |
+| Missing/null/empty-ID Composer message | Versioned own-property materialization of exactly `msg:<v0.16-index>`, the key the unchanged consumer already synthesized; omission, wrong ordinal, and native-ID rewriting fail | `tests/compatibility/v016-versioned-exceptions.test.ts`, `tests/compatibility/v016-fixture-safety.test.ts` |
 | Store-only message identity | New versioned namespace; no public session-ID mutation | `tests/unit/store-stack-merge.test.ts`, identity contracts |
 | Composer tool identity/order | Existing order and ordinal-derived keys preserved | v0.16 projector/consumer regressions |
 | Relationship and branch references | Rewritten only through stable message identities | v0.16 merge and relationship fault tests |
+| Merged active branch | Legacy and additive branch arrays share one resolved sequence containing leading/middle/trailing Store active turns once and excluding Store sidechains | Store-stack merge and unchanged-consumer regressions |
 | `source` | Legacy fidelity signal retained for unchanged-consumer replacement policy | Generic recurring complete/degraded contract plus owner-authorized external T113 certification |
 | `resolvedSource`, `sources`, `resolution` | Additive actual provenance | library/CLI contract and schema tests |
 | `workspace` and workspace paths | Real v0.16 spelling retained; additive canonical/matched/source paths | library compatibility and scoped-path tests |
 | Pathless workspace placeholder | Versioned correction to public `"unknown"` / structured `null` | `tests/compatibility/v016-versioned-exceptions.test.ts` |
 | Message timestamp | Direct source values retained; missing-source fallback is deterministic and labeled | timestamp provenance tests and versioned-exception mutations |
 | `metadata.lastModified` | Stored update retained; missing-source read-time value is deterministically corrected | timestamp/session provenance tests and full-corpus source validation |
-| Optional own-property/null/omission shape | v0.16 legacy fields retained; new provenance fields additive | `tests/compatibility/v016-fixture-safety.test.ts`, exhaustive differential |
+| Optional own-property/null/omission shape | v0.16 legacy fields retained except the exact missing/null/empty-ID materialization above; new provenance fields are additive | `tests/compatibility/v016-versioned-exceptions.test.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, exhaustive differential |
 | Set-like provenance arrays | Additive and canonically ordered | public API shape and replica-order tests |
 | Ambiguity/partial diagnostics | Additive typed state; never a silently selected payload | replica reconciliation and CLI schema tests |
 | Fatal CLI JSON stream | Explicit versioned stdout-to-stderr migration; locked fields/exit meaning retained | `tests/e2e/cli-json-schema.test.ts`, changelog warning |
@@ -208,7 +225,8 @@ successful carrier fixture is permitted.
 | `BackupPublishedPermissionError.details` | Additive typed post-commit failure with `published: true`, `pathIdentityVerified`, final path, requested mode, last safely observed archive mode or `null`, and a conditional remedy; only a verified path is described as the published archive | None: new in v0.18.0 | `tests/unit/backup-publication.test.ts`, `tests/integration/backup-snapshot-security.test.ts`, CLI error tests | If verified, inspect/correct that archive; if unverified, treat the pathname as untrusted and do not chmod it from the error; never assume rollback or blindly force-retry |
 | `BackupPublishedCleanupError.details` | Additive typed post-commit failure with `published: true`, independently verified final-path identity, verified residue paths, unverified residue paths, counts, and a conditional remedy; force rename abandons the old staging name, while non-force cleanup is device/inode-bound | None: new in v0.18.0 | `tests/unit/backup-archive-publication.test.ts`, `tests/integration/backup-snapshot-security.test.ts`, library/CLI error tests | Keep/inspect the output only when verified; delete only verified residue paths after confirming no operation is active; never blindly delete unverified paths or retry with `--force` |
 | Coexisting DB/transcript `sourceInstances` | Required normal result: DB contributes backbone and transcript is `superseded` provenance | v0.17 did not expose the finalized provenance contract | Matrix/store-expectation live and custom carrier fixtures | No content union; consumers may ignore additive provenance, but must not reject the session as unsupported |
-| Restore `filesRestored`/`warnings` and `RESTORE_ROLLBACK_INCOMPLETE` | Count only validated published entries; integrity-mismatched entries are skipped; empty/unmanifested inventories reject; hard-linked leaves are replaced without write-through; publication/rollback are committed-inode-bound; a concurrent destination replacement is left untouched and reported as a typed manifest-relative residual instead of a false zero-change result | v0.16.0 and v0.17.0 could warn yet restore corrupt bytes; typed rollback error is new in v0.18.0 | `tests/unit/restore-publication.test.ts` and `tests/integration/backup-snapshot-security.test.ts` mixed/all-corrupt, empty/unmanifested, hard-link, actual rollback, rollback-failure, concurrent-replacement, path/type/collision/duplicate/confinement fixtures | Treat warnings as skipped; on typed rollback failure stop Cursor, do not alter a concurrent replacement, and recover listed entries from a known-good backup |
+| Backup inventory version | Outer `manifest.version` remains `1.0.0`; optional inventory alone declares `schemaVersion: 1` | None: additive inventory in v0.18.0 | backup manifest/library/packed-package smoke | Do not interpret the inventory schema as a new outer manifest version; legacy v1 manifests remain readable |
+| Restore `filesRestored`/`warnings` and `RESTORE_ROLLBACK_INCOMPLETE` | Count only validated published entries; integrity-mismatched entries are skipped; empty/unmanifested inventories reject; hard-linked leaves are replaced without write-through; after any later failure automatic multi-file rollback is not attempted because portable path APIs cannot atomically compare and mutate a leaf; every current destination is left untouched and all published manifest-relative entries plus verified/unverified temporary residue are reported at top level | v0.16.0 and v0.17.0 could warn yet restore corrupt bytes; typed fail-closed residual error is new in v0.18.0 | `tests/unit/restore-publication.test.ts`, `tests/unit/backup.test.ts`, and `tests/integration/backup-snapshot-security.test.ts` mixed/all-corrupt, empty/unmanifested, hard-link, callback/cancellation failure, cleanup-failure, concurrent-replacement, path/type/collision/duplicate/confinement fixtures | Treat warnings as skipped; on typed post-publication failure stop Cursor, leave all current target leaves untouched, delete only verified temporary residue after confirming no operation is active, and recover every listed entry from a known-good backup |
 
 ## Reopened Gates
 
@@ -232,7 +250,8 @@ successful carrier fixture is permitted.
 
 ## Current Decision
 
-The previous freeze is revoked. T116–T134, including artifact/ledger reconciliation T127–T128,
-are implemented in the current tree; T110–T115 remain reopened. Neither freeze nor publication is approved until every
+The previous freeze is revoked. T116–T147, including artifact/ledger reconciliation T127–T128 and
+post-audit compatibility reconciliation T141–T147, are implemented in the current tree; T110–T115
+remain reopened. Neither freeze nor publication is approved until every
 unchecked gate above is satisfied from one unchanged 0.18.0 revision and the checklist is
 deliberately refrozen.

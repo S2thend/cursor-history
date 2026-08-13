@@ -30,6 +30,14 @@ is available. Jobs fail on a wrong provider, wrong capability outcome, checksum/
 or smoke failure. Protected approval depends on both this complete runtime matrix and the full
 package/declaration/documentation verification.
 
+The exact-candidate smoke uses one topology-valid fictional Store workspace: `meta.cwd` is
+`/work/a`, the chat directory is keyed by MD5 of `/work/a`, and the project directory uses the
+forward-sanitized `/work/a` token. Scoped list/show/search must round-trip the same session without
+relaxing workspace discovery. Its backup assertion preserves the settled BB version split: outer
+`manifest.version` is exactly `"1.0.0"`, optional
+`composerWorkspaceInventory.schemaVersion` is exactly `1`, and a legacy v1 manifest without the
+inventory remains readable.
+
 ## Source Read Limits v1 preflight
 
 The preflight reads metadata only and retains no conversation content. For recognized Composer
@@ -103,6 +111,14 @@ import the v0.16 view, apply the candidate view, and apply it again. All old key
 original message/tool bindings, no row may be lost or duplicated, and the final repeated
 synchronization must write nothing. Force one transaction failure and reopen the real external
 database to prove complete rollback before the successful retry.
+
+The structural synthetic regressions run before this private pass and cover v0.16
+`String.localeCompare()` equal-time workspace discovery, canonical UUID lookup versus exact
+physical Composer keys, pointer-only membership with one opposite-case global carrier, and leading,
+middle, and trailing Store-only active-branch turns under both preferred backbones. Compact 32-hex
+non-UUID identifiers remain exact. Migration evidence also shows metadata-only off-scope projection
+and complete-batch refusal before any write. The private pass confirms that these fixes introduce no
+unclassified public-value drift; it never derives a committed fixture from real data.
 
 Do not introduce sampling, record caps, time budgets, or early success exits for this certification.
 It is an infrequent manual release gate, so exhaustive validation takes precedence over runtime: use

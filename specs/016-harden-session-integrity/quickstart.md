@@ -84,21 +84,28 @@ The fixture must contain:
 - one native Cursor session UUID;
 - native-ID and null/empty-ID Composer messages;
 - multiple existing Composer tool calls;
-- a Store-only turn at the start and another in the middle;
+- Store-only active-branch turns at the start, middle, and end plus one Store sidechain turn;
 - matched Store enrichment;
 - parent/branch/leaf changes;
 - both preferred merge-source settings;
-- a synthetic Store collision.
+- a synthetic Store collision; and
+- equal-time Composer rows under non-ASCII workspace paths whose v0.16 `localeCompare()` order
+  differs from Unicode code-point order on the test runtime.
 
 The recurring test imports the locked v0.16 Composer output through the generic downstream contract,
 resolves the upgraded complete merge, applies it, then repeats the same input. It must prove:
 
 - every old downstream session/message/tool key is byte-for-byte unchanged;
 - native Composer IDs are unchanged;
-- fallback Composer IDs still use the v0.16 zero-based Composer-only projection;
+- a v0.16 missing/null/empty public message ID is materialized only as the exact fallback key the
+  unchanged consumer already used, `msg:<zero-based-v0.16-Composer-only-projection-index>`;
+- every other non-additive public own-property/null/omission shape remains unchanged;
 - matched messages use Composer IDs under both preferred sources;
 - old Composer tool order is unchanged;
-- new messages, enrichment, tools, and resolved parent/leaf data are present exactly once;
+- leading, middle, and trailing Store-only active turns, enrichment, tools, and resolved
+  parent/leaf data are present exactly once under both preferred backbones;
+- Store sidechains are absent from both resolved active-branch arrays;
+- equal-time Composer rows retain their v0.16 discovery/numeric order;
 - incoming legacy `source` is `global` for the complete view;
 - cursor-history emits one complete replacement-safe projection and compatibility signal;
 - the next unchanged generic application performs zero writes.
@@ -293,6 +300,12 @@ node /workspaces/patcomm/cursor-history/dist/cli/index.js \
 Expected:
 
 - the preview binds A's exact eligible Composer occurrence;
+- canonical UUID lookup is case-insensitive but the preview/public result preserves the observed
+  Composer spelling and apply touches only the exact workspace/global record keys;
+- one sole opposite-case global carrier is eligible, while multiple case-only global keys refuse
+  before writes and compact 32-hex non-UUID identifiers remain distinct;
+- off-scope workspaces contribute only record-ID/index/selected-ID/pane-pointer metadata; no
+  off-scope `composer.composerData` value is materialized;
 - execution revalidates that occurrence and cannot switch to global index 1/B;
 - direct unfiltered eligible Composer ID and numeric behavior remain compatible;
 - the numeric catalog includes ambiguous rows in their displayed positions; selecting one by index
@@ -302,6 +315,8 @@ Expected:
   rejected rather than selecting the read representative;
 - divergent, Store-only, and merged sessions fail in both preview/execution before source or
   destination writes;
+- a workspace batch containing an earlier eligible target and a later divergent/ineligible target
+  is completely prepared first and leaves every source, destination, and global DB byte unchanged;
 - move retains UUID and copy receives a new UUID.
 
 ## 8. Snapshot/archive security
@@ -346,11 +361,13 @@ On POSIX the test runs a child process under `umask 000` and observes artifacts 
 - every admitted payload is copied into a private same-directory inode; force atomically replaces
   the directory entry without writing through an existing hard link, while non-force atomically
   no-clobbers a destination that appears after preflight;
-- rollback revalidates the device/inode recorded at each publication commit before touching its
-  destination and republishes prior bytes through the same private-inode replacement path; a
-  concurrently replaced leaf remains untouched, and an injected incomplete rollback throws
-  `RESTORE_ROLLBACK_INCOMPLETE` with only safe manifest-relative residuals instead of returning
-  `filesRestored: 0`;
+- after any publication, an injected later failure performs zero destination rollback mutations and
+  leaves both cursor-history-published and concurrently replaced leaves untouched; it throws
+  `RESTORE_ROLLBACK_INCOMPLETE` with every safe manifest-relative published residual instead of
+  returning `filesRestored: 0`;
+- simultaneous publication-stage and outer-workspace cleanup failures retain verified and
+  unverified private residue at top level without masking the published residual set; unverified
+  classification dominates for the same path and recovery guidance requires a known-good backup;
 - the selected user root is canonicalized and descendants are rechecked before each publication; tests
   prove static leaf-link rejection and unchanged sibling hard links but do not claim to eliminate a
   hostile concurrent ancestor swap in an owner-controlled tree on Node 20, which lacks a portable
@@ -370,14 +387,22 @@ signaling the Vitest worker itself:
   claimed: any residue remains inside a current-owner `0700` directory with `0600` files and a valid
   private marker;
 - start the next operation and verify conservative stale recovery removes that directory only after
-  checking the exact application prefix, marker version, current owner, and, on Linux, matching
-  readable PID-namespace tokens before PID/process-start evidence proves the owner process dead;
+  checking the exact application prefix, v2 marker, current owner, and, on Linux, matching readable
+  PID-namespace tokens before PID/process-start evidence proves the owner process dead;
+- run the pre-v2 marker-validation predicate against a live v2 marker and assert it rejects the
+  marker before the injected liveness probe is called;
 - inject a different Linux PID-namespace token while reusing a locally meaningful numeric PID and a
   mismatched start token, and verify the directory is retained as owner-status-uncertain; likewise
-  retain a legacy Linux marker without namespace identity; and
-- include malformed namespace/other markers, live-owner markers, wrong-owner candidates where
-  testable, and symlink traps. Uncertain or unrelated paths must remain untouched and must never be
-  followed recursively.
+  retain a valid v1 Linux marker, including the transitional v1 shape with an ignored namespace
+  field;
+- prove a same-namespace v2 dead or PID-reused owner remains recoverable and a live two-process owner
+  remains untouched; and
+- run owner and recovery in two real Linux PID namespaces sharing one temporary parent, arrange the
+  same namespace-local numeric PID, and verify both the old v1 reader (`invalid-marker`) and current
+  reader (`owner-status-uncertain`) leave the live v2 workspace and plaintext untouched; and
+- include malformed v2 namespace markers, unknown versions, live-owner markers, wrong-owner
+  candidates where testable, and symlink traps. Uncertain or unrelated paths must remain untouched
+  and must never be followed recursively.
 
 The catchable-signal children must leave zero plaintext residue. The `SIGKILL` child must demonstrate
 privacy containment followed by next-run recovery, not an impossible immediate-cleanup guarantee.
@@ -593,11 +618,25 @@ The automated release workflow must:
 The smoke must also confirm a newly created backup manifest reports the exact packed artifact's
 package version rather than the historical hard-coded `0.9.2`, that locked old/absent producer
 metadata remains readable, and that changing only `producer` changes no identity, equivalence,
-deduplication, or incremental-sync result.
+deduplication, or incremental-sync result. It must also assert that adding the optional Composer
+workspace inventory leaves the enclosing `manifest.version` at `1.0.0`, that the member reports
+`schemaVersion: 1`, and that legacy v1 manifests without the member remain readable.
+
+The Store smoke fixture uses one coherent fictional workspace topology: `meta.cwd` is `/work/a`,
+its chat directory is `chats/<md5("/work/a")>`, and its project directory is
+`projects/<forward-sanitized("/work/a")>`. Scoped list, show, and search must round-trip the same
+logical session from the exact packed bytes. A smoke test must not pass by weakening strict
+workspace discovery or by using mutually inconsistent fixture paths.
 
 Structured list/show/search/export fixtures are validated against
 `/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/contracts/session-output.schema.json`
 as part of the e2e suite.
+
+Include one uppercase/lowercase UUID pair in direct-ID, scoped list/show/search/export, merged
+Composer/Store, and migration tests. A single observed spelling must resolve from either query case
+and return the source-native spelling; Composer must remain the presentation authority when Store
+uses another case. Equivalent physical variants collapse to one row. Divergent variants must return
+typed ambiguity and produce zero destructive writes.
 
 The package smoke must lock pathless compatibility rather than normalizing both surfaces to the same
 sentinel. For a pathless resolved session:

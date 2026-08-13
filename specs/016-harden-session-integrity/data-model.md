@@ -102,6 +102,11 @@ type IndexScope = 'global' | 'workspace';
 type WorkspaceMatchKind = 'exact' | 'unique-suffix';
 type ReplicaState = 'single' | 'equivalent' | 'divergent';
 
+// Folded only when the source token satisfies canonical UUID syntax.
+type LogicalSessionKey = string;
+// Exact source-native record/key spelling; never derived from caller casing.
+type PhysicalSessionId = string;
+
 type TextEncodingState = 'utf8' | 'utf8-bom' | 'invalid-or-mixed';
 type JsonlSourceBoundKind =
   | 'jsonl-record-bytes'
@@ -198,7 +203,9 @@ Represents one discoverable occurrence before logical reconciliation.
 
 | Field | Type | Rules |
 |-------|------|-------|
-| `logicalSessionId` | string | Native Cursor UUID, nonempty, undecorated. |
+| `logicalSessionId` | string | Deterministic source-native spelling returned publicly. |
+| `logicalSessionKey` | `LogicalSessionKey` | Canonical UUID key used for case-insensitive logical grouping; a noncanonical identifier remains exact. |
+| `physicalSessionId` | `PhysicalSessionId` | Exact workspace record ID, SQLite key, or Store directory token used by the locator; never case-folded for I/O. |
 | `sourceRole` | `SourceRole` | Composer or resolved Store contribution. |
 | `representation` | `SourceRepresentation` | Describes physical encoding, not fidelity. |
 | `locator` | discriminated private union | Exact DB/record/file location; never serialized. |
@@ -211,7 +218,9 @@ Represents one discoverable occurrence before logical reconciliation.
 | `occurrenceRef` | opaque string or absent | Generated only for diagnostic output inside one bound source/context. |
 
 Internal locator variants include Composer global DB/record, Composer workspace DB/record, Store DB,
-Store transcript, and Store metadata. No formatter or public-library mapper accepts a locator type.
+Store transcript, and Store metadata. Composer locators preserve both the exact workspace record ID
+and exact global SQLite key when both participate. No formatter or public-library mapper accepts a
+locator type. Compact 32-hex identifiers without canonical UUID separators are not UUID-folded.
 
 ## 3. WorkspaceMembership
 
@@ -355,6 +364,8 @@ transcript fallback; a divergent selected transcript group is likewise ambiguous
 ```ts
 interface LogicalSessionRecord {
   id: string;
+  logicalSessionKey: LogicalSessionKey;
+  legacyComposerDiscoveryOrdinal?: number;
   canonicalWorkspacePath?: string;
   workspaceMemberships: WorkspaceMembership[];
   composerGlobalGroups: ReplicaGroup[];
@@ -371,6 +382,11 @@ interface LogicalSessionRecord {
 Rules:
 
 - `id` is the sole public logical ID and is always the native UUID.
+- Canonical UUID syntax groups by `logicalSessionKey` case-insensitively, but `id` retains one
+  observed source spelling with Composer precedence. Noncanonical IDs use their exact bytes as the
+  key.
+- `legacyComposerDiscoveryOrdinal` captures the v0.16 `localeCompare()` workspace-discovery
+  position before reconciliation and controls equal-`createdAt` compatibility order.
 - Composer global/workspace groups and Store DB/transcript groups first obey their fixed
   primary/fallback arbitration; different fidelity tiers are not compared as replicas or merged
   blindly.
@@ -477,6 +493,11 @@ Identity allocation order:
 Native-versus-compatibility Composer collisions remain visible because changing either token would
 break released keys. Internal processing uses `(logical session, physical occurrence, source
 ordinal)` to distinguish them; it does not silently mutate public identity.
+
+For a v0.16 message whose public `id` was missing, null, or empty, step 2 also materializes that exact
+compatibility token in the resolved public `id` property. This is the same key the unchanged
+consumer already synthesized and is the sole permitted non-additive message-ID shape transition;
+every nonempty native ID and every unrelated pre-existing property shape remain exact.
 
 ## 8. StableToolIdentity
 
@@ -683,6 +704,9 @@ Compatibility aliases:
   compatibility consumer owns its exact adapter, digest, policy, persistence transaction, and
   rollback; only owner-authorized external T113 at the recorded upstream revision claims exact
   downstream replacement and repeated-sync behavior.
+- For merged sessions, `activeBranchBubbleIds` and `activeBranchMessageIds` contain the same
+  resolved selected-branch sequence. Leading, middle, and trailing Store-only active turns appear
+  once; Store sidechains do not. Parent and leaf references use those resolved IDs.
 - Deprecated v0.17 literals remain accepted by declarations during transition but are not emitted by
 new resolution.
 
@@ -929,9 +953,12 @@ State transition:
 ```text
 selector + immutable scope
   -> resolve numeric or direct-ID selector in the complete scoped logical catalog, including ambiguity rows
-  -> bind logical row and exact Composer occurrence
+  -> project only ID/index/selected-ID/pane-pointer metadata across candidate workspaces
+  -> bind logical row and exact Composer workspace/global occurrence spellings
   -> reject multiple physical targets, shared mutation footprint, ambiguity, Store-only, or merged
-  -> validate source, destination, driver capabilities, fingerprint
+  -> hydrate only the selected occurrence and validate source, destination, driver capabilities, fingerprint
+  -> bind and prepare every requested batch member
+  -> if any member refuses or changes, stop with zero writes
   -> dry-run returns immutable plan OR execution revalidates
   -> first write
   -> move keeps UUID; copy assigns a new UUID
@@ -945,6 +972,12 @@ reference cannot be converted to a `BoundMigrationTarget`.
 An ambiguous row never becomes a `BoundMigrationTarget`: its one-based numeric position remains
 occupied, and numeric/UUID selection returns the same typed ambiguity before destination preflight
 or any write.
+Logical UUID matching never substitutes for physical authority: the logical key is derived with
+`logicalSessionIdKey(logicalSessionId)`, while apply reads, copies, moves, and deletes only the exact
+`composerLocator.sessionId` and optional `composerLocator.globalSessionId`. More than one case-only
+global key is a pre-write ambiguity even when read reconciliation judged the payloads equivalent.
+Catalog and selected-hydration source-read counters are separate boundaries. A migration batch is
+the complete prepared array of these targets; no member is applied until the whole array passes.
 
 ## 17. PrivateTempWorkspace and BackupSnapshot (internal)
 
@@ -958,7 +991,7 @@ interface PrivateTempWorkspace {
 }
 
 interface PrivateTempMarker {
-  formatVersion: 1;
+  formatVersion: 2;
   uid?: number;
   pid: number;
   pidNamespaceToken?: string; // Linux boot ID + namespace inode; absence is uncertain
@@ -998,10 +1031,14 @@ interface StagedRestoreEntry {
 interface PublishedRestoreEntry {
   manifestPath: string;
   destinationPath: string;
-  publishedIdentity: { device: bigint; inode: bigint };
-  previousPrivatePath?: string;
-  previousMode?: number;
-  state: 'published' | 'rolled-back' | 'rollback-residual';
+  state: 'published' | 'recovery-required';
+}
+
+interface RestoreRecoveryFailure {
+  publishedFileCount: number;
+  residualFiles: string[]; // canonical manifest-relative paths
+  residuePaths: string[]; // verified owner-private cleanup residue only
+  unverifiedResiduePaths: string[]; // dominates verified classification for the same path
 }
 ```
 
@@ -1017,12 +1054,16 @@ Rules:
   `SIGINT`, `SIGTERM`, and `SIGHUP` perform synchronous best-effort disposal once, then preserve the
   platform's signal termination semantics. Cooperative cancellation still uses normal `finally`.
 - Before a new operation, stale recovery considers only exact application-prefix directories owned
-  by the current user with a valid marker. On Linux it first requires a readable marker and current
-  boot-scoped PID-namespace token (boot ID plus namespace inode) with an exact match; a host-boot or
-  namespace mismatch, a legacy marker without the token, or an unreadable identity is retained as
-  owner-status-uncertain. Only within that verified namespace may the marker's PID/start token prove
-  that the creating process is dead or the PID has been reused. Non-Linux platforms retain their
-  platform-specific owner-process proof without claiming Linux PID-namespace validation.
+  by the current user with a valid marker. New workspaces emit format v2; the version is an
+  authorization boundary so a v1 reader rejects the marker before probing a namespace-local PID.
+  The current reader accepts valid v1 markers for recognition, but on Linux retains them as
+  legacy/owner-status-uncertain even if they carry an unknown namespace field. For v2 on Linux it
+  first requires a readable marker and current boot-scoped PID-namespace token (boot ID plus
+  namespace inode) with an exact match; a host-boot or namespace mismatch or an unreadable identity
+  is retained as owner-status-uncertain, while malformed v2 and unknown versions are invalid. Only
+  within a verified v2 namespace may the marker's PID/start token prove that the creating process is
+  dead or the PID has been reused. Non-Linux platforms retain their platform-specific owner-process
+  proof without claiming Linux PID-namespace validation.
 - `SIGKILL`, power loss, and kernel termination cannot run handlers, so immediate cleanup is not
   guaranteed. The `0700`/`0600` boundary contains residue until conservative next-run recovery.
 - A possible residue produces `TEMPORARY_ARTIFACT_CLEANUP_FAILED` with paths only.
@@ -1070,19 +1111,25 @@ Rules:
   an unverifiable name is reported as unverified temporary residue rather than guessed removable.
 - A mixed-validity restore may publish intact entries with warnings. Skipped corrupt destinations
   are not opened, copied, truncated, backed up, or included in rollback, even when force is enabled.
-- Rollback tracks only validated entries actually published during the current operation and binds
-  each action to that entry's recorded published device/inode. It changes a destination only after
-  verifying that identity; a concurrently replaced leaf remains untouched and becomes a safe
-  manifest-relative residual. Eligible prior bytes are republished through the same private-inode
-  atomic-replacement path. An incomplete rollback throws `RESTORE_ROLLBACK_INCOMPLETE` with the
-  published count and a canonical set of safe manifest-relative residual paths; it never returns a
-  false `filesRestored: 0` result.
+- Failure recovery tracks only validated entries actually published during the current operation.
+  Once any entry is published, portable Node implementations perform no automatic destination
+  rollback because identity observation cannot be atomically coupled to replace or unlink. Every
+  current leaf remains untouched and every published manifest-relative path becomes a residual.
+  `RESTORE_ROLLBACK_INCOMPLETE` carries the published count, canonical residual set, and separate
+  top-level verified/unverified owner-private cleanup residue sets from both publication and outer
+  workspace disposal; it never returns a false `filesRestored: 0` result or lets cleanup mask the
+  destination recovery requirement.
 
 ## 18. BackupManifest and source parsing policy
 
 ```ts
 interface BackupManifest {
+  version: '1.0.0'; // additive optional members do not change the v1 envelope
   producer?: string; // exact package version for new archives; absent/legacy values remain readable
+  composerWorkspaceInventory?: {
+    schemaVersion: 1; // independently versioned and validated optional member
+    workspaces: BackupComposerWorkspaceInventoryEntry[];
+  };
   // existing manifest members remain
 }
 
@@ -1167,6 +1214,8 @@ type SourceParsingDiagnostic =
 Rules:
 
 - Every newly created manifest uses the version of the running package artifact as `producer`.
+- The optional Composer workspace inventory retains the enclosing `manifest.version` at `1.0.0`
+  and independently carries `schemaVersion: 1`; an older v1 reader may ignore the additive member.
   Missing or historical values remain readable. `producer` is diagnostic provenance only and is
   excluded from logical/message identity, replica equivalence, deduplication, and incremental-sync
   comparisons.
@@ -1199,6 +1248,12 @@ interface DatabaseCapabilityProfile {
   unavailableReason?: string;
 }
 ```
+
+Logical session maps use a private ASCII case-folded UUID key. `Session.id` and every physical
+locator retain an exact spelling observed in source data. Composer spelling wins for a
+Composer-backed row; otherwise selection is deterministic among the preferred source tier.
+Equivalent case variants reconcile, while divergent variants enter the ordinary ambiguous state.
+The caller's letter case is never used as a physical-occurrence selector.
 
 Selection rules:
 
@@ -1236,3 +1291,11 @@ Selection rules:
     snippets never define them.
 15. Publication is irreversible at rename/link: a later permission failure remains an explicit
     typed partial failure with the valid archive preserved.
+16. Legacy equal-time Composer order is derived from the v0.16 `localeCompare()` discovery ordinal;
+    new set-like code-point ordering never rewrites that ordinal.
+17. UUID casing may collapse logical identity but never exact physical mutation keys; noncanonical
+    and compact 32-hex identifiers remain byte-sensitive.
+18. A migration batch performs zero writes until every target is bound, hydrated within scope,
+    eligible, and revalidated.
+19. A merged active branch includes every selected leading/middle/trailing Store-only turn once,
+    excludes Store sidechains, and exposes one resolved parent/leaf chain through both branch fields.

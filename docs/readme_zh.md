@@ -23,7 +23,8 @@
 > 从零开始的索引。规范兼容性文档还定义了备份发布提交点，以及备份已发布后权限失败的
 > 权限或清理失败的类型化错误语义；不得盲目删除身份未经验证的残留路径。恢复时会跳过损坏条目，
 > 并在写入前拒绝非法路径、重复目标或不安全链接；`--force` 不会绕过这些完整性与路径限制检查。
-> 回滚不会触碰被并发替换的叶文件，而会将其报告为残留。
+> 任一文件发布后的失败都不会尝试自动回滚，而会保留所有当前目标并返回
+> `RESTORE_ROLLBACK_INCOMPLETE`；请停止 Cursor 并从可信备份恢复。
 
 **终极开源工具，用于浏览、搜索、导出和备份您的 Cursor AI 聊天历史。**
 
@@ -582,6 +583,19 @@ npm run test:watch    # 监视模式
 1. 在 https://www.npmjs.com/settings/YOUR_USERNAME/tokens 创建 NPM 访问令牌
 2. 转到您的 GitHub 仓库设置 → Secrets and variables → Actions
 3. 添加名为 `NPM_TOKEN` 的新仓库 secret，值为您的 NPM 令牌
+
+## v0.18 兼容性说明
+
+- 标准 UUID 在查询和逻辑分组时不区分大小写，但返回的 ID 保留 Cursor 数据中实际存在的
+  拼写；非标准标识符（包括 32 位紧凑十六进制 Store 目录名）仍按字节精确且区分大小写。
+- 使用 `--workspace` 的迁移只允许读取作用域外的必要元数据，绑定精确物理键，并在首次写入前
+  准备完整批次。任一目标歧义、变化或不符合条件时，整个批次保持零修改。
+- Composer/Store 合并后，活动分支开头、中间和结尾的 Store-only 消息各出现一次；Store
+  侧分支不会混入，既有 Composer ID 不变。
+- `createdAt` 相同的 Composer 记录在同一受支持运行时/区域环境下继续使用 v0.16 的
+  `String.localeCompare()` 发现顺序。
+- 备份外层版本保持 `manifest.version: "1.0.0"`，可选库存成员独立使用
+  `schemaVersion: 1`。完整规范请参阅 [compatibility.md](compatibility.md)。
 
 ## 贡献
 

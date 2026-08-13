@@ -26,8 +26,9 @@
 > el punto de publicación y los errores tipados de permisos o limpieza posteriores a una copia de
 > seguridad ya publicada; las rutas de residuo no verificadas nunca deben borrarse a ciegas.
 > La restauración omite entradas corruptas y rechaza rutas, destinos duplicados o enlaces inseguros
-> antes de escribir; `--force` no desactiva estas comprobaciones de integridad y confinamiento. La
-> reversión no toca una hoja reemplazada concurrentemente y la informa como residuo.
+> antes de escribir; `--force` no desactiva estas comprobaciones de integridad y confinamiento. Tras
+> publicar cualquier archivo, un fallo no intenta una reversión automática: conserva todas las
+> hojas y devuelve `RESTORE_ROLLBACK_INCOMPLETE`; detenga Cursor y recupere desde una copia fiable.
 
 **La herramienta de código abierto definitiva para navegar, buscar, exportar y respaldar tu historial de chat de Cursor AI.**
 
@@ -588,6 +589,24 @@ Este proyecto usa GitHub Actions para publicación automática en NPM. Para publ
 1. Crea un token de acceso NPM en https://www.npmjs.com/settings/YOUR_USERNAME/tokens
 2. Ve a configuración de tu repositorio GitHub → Secrets and variables → Actions
 3. Agrega un nuevo secreto de repositorio llamado `NPM_TOKEN` con tu token NPM
+
+## Compatibilidad de v0.18
+
+- Los UUID canónicos no distinguen mayúsculas de minúsculas para búsqueda y agrupación, pero el ID
+  devuelto conserva la grafía real de Cursor. Los identificadores no canónicos, incluidos los
+  nombres Store compactos de 32 caracteres hexadecimales, siguen siendo exactos y sensibles a
+  mayúsculas.
+- La migración con `--workspace` solo inspecciona metadatos fuera del ámbito, fija las claves físicas
+  exactas y prepara todo el lote antes de escribir. Un destino ambiguo o no elegible cancela el lote
+  sin cambios.
+- Al combinar Composer y Store, los mensajes Store de la rama activa al principio, en medio y al
+  final aparecen una sola vez; las ramas laterales quedan excluidas y los ID antiguos de Composer no
+  cambian.
+- Los índices de Composer con la misma fecha conservan el orden de descubrimiento de v0.16 mediante
+  `String.localeCompare()` en el mismo entorno compatible.
+- El manifiesto de copia de seguridad conserva `manifest.version: "1.0.0"`; el inventario opcional
+  usa su propio `schemaVersion: 1`. Consulte [compatibility.md](compatibility.md) para el contrato
+  normativo.
 
 ## Contribuir
 
