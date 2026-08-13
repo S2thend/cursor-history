@@ -7,7 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![npm downloads](https://img.shields.io/npm/dm/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2C%2022--26-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
 
 🇺🇸 [English](./README.md) | 🇨🇳 [中文](./docs/readme_zh.md) | 🇫🇷 [Français](./docs/readme_fr.md) | 🇪🇸 [Español](./docs/readme_es.md)
@@ -140,8 +140,8 @@ cursor-history output should read that contract before changing versions.
 
 v0.17 introduced transitional Store/merged behavior that can change positional message keys,
 replacement signals, and timestamp-watermark assumptions. If your application incrementally stores
-library output—such as a vibe-history archive—pin cursor-history v0.16 or validate and wait for the
-corrective release before upgrading. Back up the downstream archive first.
+library output—such as a vibe-history archive—keep cursor-history v0.16 pinned until you can validate
+the 0.18.0 corrective path. Back up the downstream archive before upgrading.
 
 The confirmed no-consumer-change upgrade path is deliberately narrower: an archive populated from
 v0.16 Composer-only data can become a complete Composer-backed merged view while retaining every
@@ -163,6 +163,9 @@ degraded v0.17 result must be pinned, retried from complete sources, or migrated
 - CLI/core indices are one-based, public-library read indices are zero-based, and public-library
   migration selectors are one-based. All are ephemeral within the exact data source, workspace,
   catalog snapshot, and invocation that produced them; persist the native UUID instead.
+- Migration resolves both numbers and UUIDs through the complete scoped logical catalog. Ambiguous
+  rows retain their displayed positions and return the same typed ambiguity by either selector;
+  they are never skipped, shifted, treated as not found, or mutated.
 - For unchanged Composer input, sessions tied on `createdAt` retain v0.16's stable discovery
   order. Composer-backed merged or ambiguous rows keep that tie position; new-only rows follow the
   legacy tie group in deterministic UUID order.
@@ -179,6 +182,10 @@ degraded v0.17 result must be pinned, retried from complete sources, or migrated
 - Every resolved message includes deterministic timestamp provenance. Human output marks inferred
   times as approximate; JSON/library consumers receive `timestampSource`. A legacy timestamp of
   unprovable origin is retained as `unknown`, not presented as directly stored.
+- When a usable Store database and transcript coexist inside the permitted scope, this is a
+  supported normal case: the database is the sole Store conversation backbone and the transcript
+  is retained as superseded provenance rather than merged heuristically. A known representation
+  outside the workspace I/O boundary is not opened and makes the scoped view explicitly partial.
 
 Round-trip a CLI index only inside the same workspace scope:
 
@@ -210,6 +217,14 @@ on stdout. Existing error fields/types/values and exit-category meanings are pre
 fixture, with only documented safe additive fields allowed. Scripts that parsed fatal JSON from
 stdout must read stderr after a nonzero exit.
 
+Public-library search correction in 0.18.0: existing `messageIndex` now identifies the matched
+message in the complete returned `session.messages` array, `offset` is a zero-based UTF-16
+code-unit position in that message's complete original content, and `match`/context values are
+complete original source lines. v0.16/v0.17 returned placeholder or snippet-relative values;
+consumers that persisted those coordinates must recompute them after upgrade. Session, message, and
+tool identities do not change under this correction. Public-library JSON exports also gain an
+additive zero-based `index`; v0.16/v0.17 exports omitted that property.
+
 ### Backup permissions
 
 Temporary plaintext snapshot workspaces are owner-only (`0700` directories and `0600` files on
@@ -220,6 +235,34 @@ uses its system per-user temporary directory, inherited ACLs, exclusive paths, a
 contract; this release does not claim independently verified cross-user ACL isolation on Windows.
 New manifests record the actual running package version as diagnostic `producer` metadata; it never
 changes session/message identity, replica equivalence, deduplication, or incremental sync.
+
+Rename/link to the requested backup path is the publication commit point. If a later permission
+read, adjustment, or identity check fails, the command exits nonzero with
+`BACKUP_PUBLISHED_PERMISSION_FAILED`. `details.published: true` means the commit point was crossed;
+trust the reported pathname and inspect/correct its mode only when
+`details.pathIdentityVerified: true`. When it is false, the pathname may have been replaced or
+become unverifiable: do not chmod it based on the error, do not assume rollback, and do not blindly
+retry with `--force`.
+On POSIX the permission step follows no links: it verifies the published regular file has the same
+lossless device/inode identity as private staging, changes mode only through that open descriptor,
+and rechecks the final path. A replacement race fails without chmodding the replacement.
+If non-force publication commits but its private sibling cannot be removed safely,
+`BACKUP_PUBLISHED_CLEANUP_FAILED` reports output-path identity plus verified and unverified residue
+paths. Never blindly delete, chmod, or force-retry an unverified path; a concurrent replacement is
+left untouched.
+
+Restore rejects empty inventories, unmanifested file payloads, invalid manifest type/path pairs,
+duplicate destinations, and observed links beneath the canonical selected Cursor user root. It
+stages only size/checksum-valid entries and preflights all destinations; `--force` does not bypass
+those checks. Integrity-mismatched entries are reported and skipped. New destinations use an
+atomic no-clobber publication, while forced replacements and rollback publish a new owner-private
+same-directory inode instead of writing through an existing hard link. An incomplete rollback is a
+typed `RESTORE_ROLLBACK_INCOMPLETE` failure that lists safe manifest-relative residual entries.
+Rollback first verifies the device/inode recorded at publication; a concurrently replaced leaf is
+not touched and is reported as residual.
+Use an owner-controlled destination tree: Node 20 has no portable directory-relative no-follow
+creation API, so restore does not claim atomic defense against a hostile process swapping an
+ancestor between the final validation and directory-entry publication.
 
 ## Installation
 
@@ -276,7 +319,7 @@ node dist/cli/index.js show 1 --json
 
 ## Requirements
 
-- Node.js 20+ (Node.js 22.5+ recommended for built-in SQLite support)
+- Node.js 20.x or 22.x–26.x (Node 21 is not supported; Node.js 22.5+ is recommended for built-in SQLite support)
 - Cursor IDE (with existing chat history)
 
 ## SQLite Driver Configuration
@@ -286,7 +329,7 @@ cursor-history supports two SQLite drivers for maximum compatibility:
 | Driver | Description | Node.js capability boundary |
 |--------|-------------|----------------------------|
 | `node:sqlite` | Built-in module; selected only when it provides every API required by the operation | Import/read support starts in 22.5; online backup starts in 22.16.0 and 23.8.0 |
-| `better-sqlite3` | Native binding and automatic fallback when capable | Supported project floor: Node 20+ |
+| `better-sqlite3` | Native binding and automatic fallback when capable | Supported project majors: 20 and 22–26 |
 
 ### Automatic Driver Selection
 
@@ -506,7 +549,11 @@ When browsing your chat history, you'll see:
 - **Complete conversations** - All messages exchanged with Cursor AI
 - **Every message rendered** - Each resolved message is shown once in order; consecutive duplicates are not folded, so distinct tool calls, provenance, and token data are never hidden
 - **Timestamps** - Composer sessions retain their historical timestamp recovery and interpolation; Store messages show a time only when Cursor provides a directly mapped turn timestamp
-- **Merged cross-stack sessions** - When the same session exists in both the Composer (vscdb) and Store (~/.cursor) stacks, the two representations are merged field by field (neither is discarded), with the backbone source chosen per platform (WSL prefers Store; Windows/macOS/native Linux prefer Composer)
+- **Resolved cross-stack sessions** - When one UUID exists in Composer and Store, compatible
+  Composer identities are preserved while permitted sources produce one provenance-rich resolved
+  view. Workspace scope is applied before payload reads: known off-scope sources remain unopened and
+  make the result partial; permitted sources follow the documented backbone/alignment policy rather
+  than an unconditional field union.
 - **AI tool actions** - Detailed view of what Cursor AI did:
   - **File edits/writes** - Full diff display with syntax highlighting showing exactly what changed
   - **File reads** - File paths and content previews (use `--fullread` for complete content)
@@ -539,7 +586,12 @@ A natural-language assistant response that also contains structured tool calls m
 | Windows | `%APPDATA%/Cursor/User/` | `%USERPROFILE%\.cursor\` |
 | Linux / WSL | `~/.config/Cursor/User/` | `~/.cursor/` |
 
-The tool automatically finds and reads both stacks. Per-session `store.db` is the primary Store message source; the transcript is used only as a fallback when `store.db` is absent, unreadable, or yields no messages. It does not heuristically merge the two sources.
+The tool automatically finds and reads both stacks. Per-session `store.db` is the primary Store
+message source. After a capable snapshot/read setup succeeds, the transcript may be a fallback
+when the database is absent, contains no usable messages, or has a source-data corruption/read
+failure. Driver capability and snapshot-infrastructure failures are fatal and never become a
+transcript fallback. A usable database remains the sole Store backbone; a coexisting transcript is
+retained only as superseded provenance.
 
 Use `--data-path <path>` or `CURSOR_DATA_PATH` to point at a custom Cursor data tree. Use `CURSOR_STORE_ROOT` to configure the Store root independently. A Store root itself, or its `chats`, `projects`, or `acp-sessions` child, is accepted and normalized to the same root.
 
@@ -574,12 +626,17 @@ console.log(session.messages);
 // Search across all sessions
 const results = await searchSessions('authentication', { context: 2 });
 for (const match of results) {
-  console.log(match.match);
+  // Complete message-array index, UTF-16 offset in complete content, and complete source line.
+  console.log(match.messageIndex, match.offset, match.match);
 }
 
 // Export to Markdown
 const markdown = await exportSessionToMarkdown(0);
 ```
+
+These search-coordinate semantics are corrected in 0.18.0. If you persisted values returned by
+v0.16/v0.17, recompute them after upgrading; they are not message identities. Library JSON exports
+include an additive zero-based session `index`, consistent with the read API.
 
 ### Migration API
 
@@ -646,6 +703,7 @@ const restoreResult = await restoreBackup({
   force: true
 });
 console.log(`Restored ${restoreResult.filesRestored} files`);
+// Check restoreResult.warnings: corrupt entries are skipped, never restored.
 
 // List available backups
 const backups = await listBackups();  // Scans ~/cursor-history-backups/
@@ -702,11 +760,14 @@ interface LibraryConfig {
 import {
   listSessions,
   createBackup,
+  restoreBackup,
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
   isBackupError,
+  isBackupPublishedPermissionError,
+  isRestoreRollbackError,
   isRestoreError,
   isInvalidBackupError,
   validateMessageTypes
@@ -726,6 +787,19 @@ try {
   }
 }
 
+try {
+  await createBackup({ outputPath: '/private/backups/cursor.zip' });
+} catch (err) {
+  if (isBackupPublishedPermissionError(err)) {
+    if (err.details.pathIdentityVerified) {
+      console.error('Verified published backup needs a mode correction:', err.details.outputPath);
+    } else {
+      // The commit point was crossed, but this pathname is untrusted. Do not chmod it from here.
+      console.error('Published backup path requires identity recovery:', err.details.outputPath);
+    }
+  }
+}
+
 // Validate untyped filter values before passing them to a read operation
 const invalidTypes = validateMessageTypes(['invalid']);
 if (invalidTypes.length > 0) {
@@ -734,7 +808,7 @@ if (invalidTypes.length > 0) {
 
 // Backup-specific errors
 try {
-  const result = await createBackup();
+  await createBackup();
 } catch (err) {
   if (isBackupError(err)) {
     console.error('Backup failed:', err.message);
@@ -742,6 +816,15 @@ try {
     console.error('Invalid backup file');
   } else if (isRestoreError(err)) {
     console.error('Restore failed:', err.message);
+  }
+}
+
+try {
+  await restoreBackup({ backupPath: '/private/backups/cursor.zip', force: true });
+} catch (err) {
+  if (isRestoreRollbackError(err)) {
+    // These are manifest-relative paths, never private physical locators.
+    console.error('Manual recovery required for:', err.details.residualFiles);
   }
 }
 ```

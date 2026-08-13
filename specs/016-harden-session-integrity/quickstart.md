@@ -42,29 +42,31 @@ npx vitest run tests/compatibility/v016-fixture-safety.test.ts
 npx vitest run tests/compatibility/v016-composer-upgrade.test.ts
 ```
 
-The compatibility oracle is the released `v0.16.0` tag at commit
+The cursor-history compatibility oracle is the released `v0.16.0` tag at commit
 `e8a7abf8cea3419a9dda911e174a05f82a9b260e`, not a golden file produced by the
 current implementation. The projector-provenance test must:
 
-- verify the tag resolves to that exact commit and that the vendored test-only projector records the
+- verify the tag resolves to that exact commit and that the cursor-history-owned test projector records the
   tag, commit, relevant source paths, and source-blob hashes;
 - exercise both tagged global projection and tagged workspace-fallback parser branches, including
   SQLite `rowid ASC`, placeholders, inclusion/filtering, branch handling, and bubble-ID selection;
-- run the tagged projection through the unchanged test-only vibe-history adapter and replacement
-  policy before comparing any upgraded output;
-- verify the consumer manifest pins `S2thend/vibe-history` revision
-  `698701775144f7d8875330e1f8caec9ddfc27744`, every copied source path and Git blob listed in
-  `research.md`, and the synthetic archive's schema/migration assumptions; hash and behavior-check
-  the vendored adapter, digest, replacement policy, schema, and SQLite transaction without reading
-  a live adjacent vibe-history checkout;
-- create the downstream fixture as a deterministic synthetic SQLite database using that pinned
-  schema, inject failure after replacement deletion but before insertion, close and reopen the file,
-  and prove it contains the complete old state; then complete one replacement and prove the reopened
-  file contains only the complete new state;
-- compare the vendored projector against independently captured tagged-source results and fail if
+- run the tagged projection through the generic cursor-history-owned downstream model and verify
+  stable session/message/tool keys and their content/relationship/tool bindings, complete replacement
+  eligibility, degraded non-overwrite, and repeated-input idempotence;
+- verify the external-consumer reference records the owner-authorized upstream revision and declares
+  that exact third-party adapter, digest, policy, SQLite transaction, rollback, and repeat-sync
+  behavior are excluded from recurring CI and owned by release-blocking T113;
+- compare the test projector against independently captured tagged-source results and fail if
   either the provenance or behavior drifts; and
 - treat locked raw databases/JSON and expected-output fixtures as validation cases only. Fixtures
   MUST NOT define, regenerate, or silently update the projector algorithm.
+
+Recurring CI MUST NOT copy, vendor, emulate, or execute a third-party adapter, digest, policy,
+SQLite schema/transaction, rollback, or downstream archive. Before release, T113 uses the
+owner-authorized external checkout at the recorded revision to run those exact behaviors: import the
+v0.16 view, apply the complete candidate, force a mid-transaction failure and reopen the database,
+retry successfully, then repeat synchronization and require zero writes. The no-consumer-change
+guarantee is not approved until T113 passes.
 
 The committed raw-layout SQLite fixture is generated deterministically from wholly synthetic
 values. Its manifest records reproducible generation instructions, logical content, and SHA-256;
@@ -88,8 +90,8 @@ The fixture must contain:
 - both preferred merge-source settings;
 - a synthetic Store collision.
 
-The test imports the locked v0.16 Composer output through the unchanged test-only consumer, resolves
-the upgraded complete merge, synchronizes again, then repeats the same sync. It must prove:
+The recurring test imports the locked v0.16 Composer output through the generic downstream contract,
+resolves the upgraded complete merge, applies it, then repeats the same input. It must prove:
 
 - every old downstream session/message/tool key is byte-for-byte unchanged;
 - native Composer IDs are unchanged;
@@ -99,10 +101,11 @@ the upgraded complete merge, synchronizes again, then repeats the same sync. It 
 - new messages, enrichment, tools, and resolved parent/leaf data are present exactly once;
 - incoming legacy `source` is `global` for the complete view;
 - cursor-history emits one complete replacement-safe projection and compatibility signal;
-- the unchanged test-only vibe-history adapter owns the downstream real SQLite transaction, so the
-  first changed sync is one atomic replacement and a forced mid-transaction failure followed by DB
-  reopen leaves the old complete view intact;
-- the next unchanged sync performs zero writes.
+- the next unchanged generic application performs zero writes.
+
+T113 separately proves the unchanged external consumer's exact key/digest comparison and real
+SQLite replacement/rollback/reopen/retry/repeat-sync behavior. Repository results must not be
+described as proving that external transaction.
 
 ## 3. Locked v0.17 convergence
 
@@ -243,10 +246,11 @@ The `StoreDbExpectation` is fixed from metadata before payload hydration:
 
 | Expectation | DB outcome | Transcript outcome | Required result |
 |---|---|---|---|
-| `expected` | usable and complete | any | complete `store-db`, legacy `source: "global"`; transcript is unused |
+| `expected` | usable and complete | any, with all known relevant Store occurrences permitted | complete `store-db`, legacy `source: "global"`; transcript is `superseded` provenance |
+| any | usable in the selected scope | a known DB or transcript occurrence is outside the default I/O boundary | explicit partial Store view; off-scope representation is omitted and never opened, even if normally `superseded` |
 | `expected` | usable but partial | any | partial `store-db`, `source: "workspace-fallback"`; transcript does not replace it |
-| `expected` | missing, empty, or source-corrupt | usable | degraded `store-transcript`, `source: "workspace-fallback"`, with expected-DB reason |
-| `expected` | capability/snapshot infrastructure failure | any | one fatal typed error; no transcript fallback and no empty/partial success |
+| `expected` | missing, empty, or source-corrupt/unreadable after capable provider and snapshot/read setup | usable | degraded `store-transcript`, `source: "workspace-fallback"`, with expected-DB reason |
+| `expected` | provider-selection, capability, snapshot-setup, or other DB infrastructure failure | any | one fatal typed error; no transcript fallback and no empty/partial success |
 | `not-expected` | absent | complete | complete `store-transcript`, `source: "global"` |
 | `not-expected` | absent | incomplete | degraded `store-transcript`, `source: "workspace-fallback"` |
 | `not-expected` | absent | present but unusable/corrupt | degraded `store-metadata`, `source: "workspace-fallback"`; the transcript file is positive conversation evidence |
@@ -291,6 +295,8 @@ Expected:
 - the preview binds A's exact eligible Composer occurrence;
 - execution revalidates that occurrence and cannot switch to global index 1/B;
 - direct unfiltered eligible Composer ID and numeric behavior remain compatible;
+- the numeric catalog includes ambiguous rows in their displayed positions; selecting one by index
+  or UUID returns the same typed ambiguity and zero writes, without shifting later indices;
 - a changed fingerprint fails before any write;
 - equivalent multiple Composer locators and a global record shared with another membership are
   rejected rather than selecting the read representative;
@@ -302,6 +308,7 @@ Expected:
 
 ```bash
 cd /workspaces/patcomm/cursor-history
+npx vitest run tests/unit/backup-publication.test.ts
 npx vitest run tests/integration/backup-snapshot-security.test.ts
 ```
 
@@ -313,6 +320,41 @@ On POSIX the test runs a child process under `umask 000` and observes artifacts 
 - `--shared` affects only the final archive;
 - parent directory mode is unchanged;
 - force-overwrite does not broaden an existing archive unexpectedly;
+- rename/link is the publication commit point; a later injected mode failure keeps a valid readable
+  archive inode and raises `BACKUP_PUBLISHED_PERMISSION_FAILED` with `published: true`,
+  `pathIdentityVerified`, requested mode, and the last safely observed archive-inode mode or `null`;
+- a true identity flag proves `outputPath` still names that inode and permits inspect/correct mode
+  advice; a false flag makes the path untrusted, never reports a replacement-path mode, and requires
+  identity recovery before the user modifies anything;
+- the post-publication failure exits nonzero, leaves no unpublished staging residue, never claims
+  rollback or recommends blind `--force`, and a matching published mode causes zero `chmod` calls;
+- after a non-force link commit, private sibling cleanup verifies the published device/inode before
+  unlinking; exhausted or unverifiable cleanup raises `BACKUP_PUBLISHED_CLEANUP_FAILED` with
+  `published: true`, output `pathIdentityVerified`, verified `residuePaths`, and
+  `unverifiedResiduePaths`, never touches a replacement occupant, and never recommends blind delete,
+  chmod, or force retry;
+- permission handling uses a no-follow open, lossless device/inode match to the private staging
+  archive, descriptor-only chmod, and final descriptor/path revalidation; injected replacement and
+  nonregular-path races fail without changing the replacement mode;
+- mixed-validity restore publishes only entries whose manifest size and checksum pass, reports each
+  size or checksum mismatch as skipped, and leaves its existing destination unchanged with and
+  without force; empty/no-intact archives and unmanifested non-directory entries are rejected before
+  destination mutation;
+- manifest type/path mismatches, duplicate destinations, any initial non-force collision in the
+  complete validated destination set, and symlink/path-indirection escapes fail before the first
+  publication;
+- every admitted payload is copied into a private same-directory inode; force atomically replaces
+  the directory entry without writing through an existing hard link, while non-force atomically
+  no-clobbers a destination that appears after preflight;
+- rollback revalidates the device/inode recorded at each publication commit before touching its
+  destination and republishes prior bytes through the same private-inode replacement path; a
+  concurrently replaced leaf remains untouched, and an injected incomplete rollback throws
+  `RESTORE_ROLLBACK_INCOMPLETE` with only safe manifest-relative residuals instead of returning
+  `filesRestored: 0`;
+- the selected user root is canonicalized and descendants are rechecked before each publication; tests
+  prove static leaf-link rejection and unchanged sibling hard links but do not claim to eliminate a
+  hostile concurrent ancestor swap in an owner-controlled tree on Node 20, which lacks a portable
+  directory-relative no-follow creation primitive;
 - ZIP parse, snapshot, DB open, parse, close, and cleanup failure injections attempt all cleanup;
 - successful/failing/concurrent runs leave zero plaintext residue;
 - a forced removal failure returns `TEMPORARY_ARTIFACT_CLEANUP_FAILED` with paths but no content.
@@ -359,9 +401,16 @@ Required simulated profile:
 - capability failure never returns a successful zero-message or false partial Store session;
 - `setDriver(): void` remains synchronous and the next awaited operation observes the forced choice.
 
-CI additionally exercises Node 20.0.0, 22.15.1, 22.16.0, focused 23.7.0/23.8.0 boundaries,
-current 24.x LTS, and the latest 26.x Current release. Node 20 is upstream EOL but remains the
-project's explicit compatibility floor and therefore cannot be skipped.
+CI runs source-level install/typecheck/lint/full tests/build on Node 24.x, because the Vite 7
+development toolchain requires Node 20.19+. It then installs the same checksum-addressed packed
+candidate as a production dependency without repository development dependencies and exercises it on Node 20.0.0,
+22.15.1/22.16.0, 23.7.0/23.8.0, 24.x, 25.x, and 26.x. The runtime smoke observes automatic backup
+provider selection and forced `node:sqlite` unavailable/missing/supported outcomes. Those jobs do
+not run repository development scripts, but package installation may still build a native runtime
+dependency and require its platform compiler/toolchain. Node 20 is
+upstream EOL but remains the explicit project floor; Node 21 is not part of the advertised
+`20.x || 22.x || 23.x || 24.x || 25.x || 26.x` contract. The 24 LTS and 26 Current labels are
+release-date facts for v0.18.0, not an evergreen alias for a different major.
 
 ## 10. Read-context order and memory
 
@@ -396,6 +445,27 @@ Verify direct timestamp tokens are unchanged; missing values use next direct, pr
 session fallback, then fixed epoch/unknown; identical input is byte-deterministic; no wall-clock read
 time appears. Human output marks inferred time approximate. Error/thinking messages remain selected
 by their real type and render all structured tool calls.
+
+Run the locked public search-coordinate correction and library export-index regressions:
+
+```bash
+cd /workspaces/patcomm/cursor-history
+npx vitest run tests/compatibility/v017-fixture-provenance.test.ts
+npx vitest run tests/unit/lib-index.test.ts
+```
+
+For tagged v0.16/v0.17, verify the locked legacy search result used placeholder
+`messageIndex: 0`, a snippet-relative `offset`, and an ellipsized `match`. For 0.18.0, verify the
+existing fields directly report the zero-based complete `session.messages` position, the first
+case-insensitive match's zero-based UTF-16 offset in complete original content, and the complete
+original line plus bounded complete neighboring lines. Cover non-first/multiline/mixed-case,
+astral-character, and lowercase-expansion inputs; compare every session/message/tool identity and
+non-search value unchanged. Consumers that persisted v0.16/v0.17 search coordinates must recompute
+them after upgrade.
+
+Also assert single and bulk public-library JSON export add the same zero-based `index` without
+mutating the source object. Tagged v0.16/v0.17 exports omitted this field; do not treat it as a
+released one-based-value migration.
 
 Session-level timestamp provenance is part of the same deterministic test. Assert
 `createdAtSource`/`lastUpdatedAtSource` use valid Composer metadata first for Composer-backed views;
@@ -498,14 +568,23 @@ npm pack --json
 The automated release workflow must:
 
 1. verify the tag equals `package.json` version;
-2. require install, typecheck, lint, tests, and build on its matrix;
+2. run source `npm ci`, typecheck, lint, the complete nonempty test suite, and build on Node 24,
+   whose runtime satisfies the development toolchain;
 3. fail on nonzero commands, zero tests, unexpected skip, timeout, or cancellation;
-4. pack exactly once and record the tarball SHA-256;
-5. install that tarball in a clean temporary project;
-6. smoke ESM import, CommonJS `require`, public declarations, CLI `--version`, and a real fixture
-   command;
-7. verify README, LICENSE, CHANGELOG, and canonical compatibility documentation are included;
-8. publish the exact tested tarball without rebuilding.
+4. bind tag, revision, package version, tarball path, and a directly computed trusted SHA-256, then
+   pack exactly once;
+5. install only that checksum-addressed tarball as a production dependency without repository
+   development dependencies on Node 20.0.0,
+   22.15.1, 22.16.0, 23.7.0, 23.8.0, 24.x, 25.x, and 26.x and assert the automatic/forced SQLite
+   capability outcome at each boundary; run no repository development script there, while allowing
+   ordinary native dependency installation to use a compiler/toolchain when the platform requires it;
+6. run the full clean-install ESM import, CommonJS `require`, public declaration/JSDoc, CLI,
+   documentation-example, frozen-schema, real SQLite backup, and fixture smoke on Node 24 against
+   those exact bytes;
+7. verify README, LICENSE, CHANGELOG, localized documentation/logo, and canonical compatibility
+   documentation are included;
+8. make protected approval depend on both source/full-package gates and every runtime-candidate job;
+9. publish the preserved checksum-addressed tarball bytes without rebuilding or repacking.
 
 The smoke must also confirm a newly created backup manifest reports the exact packed artifact's
 package version rather than the historical hard-coded `0.9.2`, that locked old/absent producer
@@ -566,7 +645,9 @@ Each surface must explain logical UUID versus physical occurrence, scoped index 
 bases, exact/unique-suffix workspace matching, default I/O boundary, explicit related-source opt-in,
 complete versus partial fidelity, actual provenance, inferred timestamps, v0.17 warning/pinning, and
 the safe v0.16 Composer-only incremental-upgrade path. It also documents the fatal JSON stderr
-migration, Composer-only backup scope in Compatibility Matrix v1, and producer-version semantics.
+migration, the 0.18.0 public-search coordinate correction and additive export index, the backup
+publication commit/failure contract, Composer-only backup scope in Compatibility Matrix v1, usable
+DB/transcript coexistence, and producer-version semantics.
 
 Walk every symbol reachable from the exact packed package-root declaration graph—including aliases
 and re-exports—and require contract JSDoc; callable and constructable exports cover parameters,
@@ -616,7 +697,7 @@ Source Read Limits v1 preflight over
 maintainer-authorized Cursor source carriers actually readable by cursor-history v0.16: live/custom
 Composer roots and cursor-history backup ZIP/SQLite inputs. It may inspect ZIP central metadata and
 SQLite length/count aggregates but must not retain decoded content. Do not point it at the downstream
-vibe-history database/archive; that artifact is validated by the unchanged-consumer harness. If any
+vibe-history database/archive; that artifact is validated only by owner-authorized external T113. If any
 legitimate count, size, or ratio exceeds a v1 default, stop the release and raise that default before
 rerunning the gates; synchronize the normative spec, design/data model, all three contracts, this
 quickstart, tasks, implementation constant, and packaged documentation, then pass the exact-policy

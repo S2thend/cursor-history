@@ -325,6 +325,12 @@ Search opens only permitted payload. Each ambiguous group is skipped once and pr
 diagnostic. `count` and `totalMatches` count resolved search results only. An empty result preserves
 the existing envelope and includes scope/diagnostics.
 
+CLI snippet `matchPositions` remain relative to each displayed snippet for highlighting. They are
+not the public-library `SearchResult.offset`. In 0.18.0 the library directly corrects its released
+fields to use the complete returned message array, complete original content in UTF-16 code units,
+and complete original source lines; the CLI envelope and its one-based session row address retain
+their existing bases.
+
 ## `export --json`
 
 Each export-result file item gains its bound address:
@@ -353,6 +359,10 @@ The session JSON written to disk contains the same identity, index-scope, path, 
 timestamp, relationship, and tool metadata as `show --json`. Markdown includes human-readable
 fidelity and approximate-timestamp labels.
 
+This CLI file-result/session index remains one-based. Separately, JSON strings returned by the
+public-library export functions add a zero-based session `index`; tagged v0.16/v0.17 library
+exports omitted that key, so this is additive metadata rather than a released-value correction.
+
 ## `migrate-session`
 
 The command consumes the parent `--workspace` option:
@@ -365,6 +375,10 @@ cursor-history --workspace /work/a migrate-session 1 /work/destination
 Dry-run and execution share one target preparation contract. A scoped number selects the row shown
 by scoped list, then binds an exact eligible Composer occurrence. Execution revalidates the same
 occurrence/fingerprint and refuses any change before the first write.
+
+The one-based migration catalog includes ambiguous logical rows. Selecting such a row by its shown
+number returns the same `SESSION_AMBIGUOUS` details as selecting its UUID; the row is not omitted,
+later numbers do not shift, and neither selector reads or writes contested content.
 
 Equivalent duplicate physical locators, a global record shared with another workspace membership,
 Store-only, merged, and divergent sessions fail in preview and execution. A read representative or
@@ -392,6 +406,28 @@ and the same cleanup guarantees without claiming independently verified cross-us
 Every newly created manifest reports the exact running package version as `producer`; older or
 missing producer values remain readable. The field is diagnostic provenance and does not affect
 session/message identity, replica equivalence, deduplication, or incremental synchronization.
+
+Rename/link to the final output path is the publication commit point. If a later permission read or
+identity/adjustment step fails, the CLI exits nonzero with a fatal
+stderr object whose `code` is `BACKUP_PUBLISHED_PERMISSION_FAILED`. Safe `details` contain
+`published: true`, `outputPath`, `pathIdentityVerified`, `requestedMode`, and `actualMode`, which is
+the last safely observed staged-archive inode mode or `null` and never a possible replacement-path
+mode. Publication always crossed its commit point. Only `pathIdentityVerified: true` proves that
+`outputPath` still names the completed archive and permits inspect/correct advice for that file; a
+false value makes the path untrusted and requires identity recovery first. The command neither
+claims rollback nor advises a blind `--force` retry. If the verified published mode already equals
+the requested mode, no permission-change call is made.
+The permission step is bound to the published regular-file inode rather than merely the pathname:
+no-follow open, lossless device/inode comparison, descriptor-only mode adjustment, and final
+descriptor/path revalidation prevent a replacement path from receiving the chmod. Identity or
+nonregular-path failure uses the same typed nonzero post-publication result.
+
+If non-force link publication commits but its private sibling name cannot be removed safely, the CLI
+instead emits `BACKUP_PUBLISHED_CLEANUP_FAILED`. Its details contain `published: true`,
+`outputPath`, output `pathIdentityVerified`, `residuePaths` only for names verified to remain bound
+to the completed archive inode, and `unverifiedResiduePaths` for names whose identity could not be
+established. The CLI never deletes or chmods a replacement occupant, never treats an unverified path
+as safe to remove, and never recommends blind deletion, chmod, or `--force` retry.
 
 ## Diagnostics and fatal errors
 
@@ -428,6 +464,23 @@ category to a built-process fixture or a registry-backed proof. Adding a command
 without such coverage fails the release gate. This inventory is separate from Compatibility Matrix
 v1, which covers source representations and carriers.
 
+Restore warnings are successful result data, not fatal diagnostics. For a mixed-validity archive,
+structured and human output report every size- or checksum-mismatched path as skipped and
+`filesRestored` counts only integrity-valid entries. A corrupt entry never modifies its destination,
+including under `--force`; an empty/no-intact archive, an unmanifested non-directory entry, or an
+unsafe/ambiguous destination layout follows the existing restore-failure category before mutation.
+Each valid payload is published from a private same-directory inode: `--force` atomically replaces
+the directory entry without writing through an existing hard link, and non-force atomically refuses
+to clobber a destination created after preflight. Private sibling cleanup is device/inode-bound and
+never unlinks a replacement occupant. Prior bytes are rolled back through the same private-inode
+replacement path only after the destination still matches the identity recorded at publication. A
+concurrently replaced leaf is untouched. If rollback is incomplete, the fatal stderr object uses
+`RESTORE_ROLLBACK_INCOMPLETE` and safe details `publishedFileCount`, `residualFileCount`,
+manifest-relative `residualFiles`, and `remedy`; it does not emit a misleading successful/failure
+result with `filesRestored: 0`. Static leaf links are rejected and other hard links to a forced
+destination remain unchanged. The documented owner-controlled-tree limitation still excludes a
+hostile concurrent ancestor swap on runtimes without directory-relative no-follow creation.
+
 | Category | Exit code |
 |----------|-----------|
 | Existing success category | 0 |
@@ -436,6 +489,8 @@ v1, which covers source representations and carriers.
 | Existing not-found category | 3 |
 | Existing I/O-error category | 4 |
 | `SOURCE_LIMIT_CONFIGURATION_INVALID` | 2 (usage error) |
+| `BACKUP_PUBLISHED_CLEANUP_FAILED` | 4 (I/O error) |
+| `RESTORE_ROLLBACK_INCOMPLETE` | 4 (I/O error) |
 | Fatal `SOURCE_ENCODING_INVALID` | 4 (I/O error) |
 | Fatal `SOURCE_LIMIT_EXCEEDED` | 4 (I/O error) |
 | Explicit safe-fallback partial result for encoding/limit diagnostics | 0 (successful result envelope) |

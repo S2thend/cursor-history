@@ -90,7 +90,8 @@ const MATRIX_V1 = Object.freeze([
     expected: 'Complete transcript primary',
   },
   {
-    scenario: 'Store transcript after an expected database fails',
+    scenario:
+      'Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable',
     'Live default path': 'Required',
     'Custom data path': 'Required',
     'Supported backup': 'N/A',
@@ -225,11 +226,12 @@ const MATRIX_EVIDENCE = Object.freeze({
     'Custom data path': required('transcript-primary/custom-data-path'),
     'Supported backup': notApplicable('backup-exclusion/store-transcript-primary'),
   },
-  'Store transcript after an expected database fails': {
-    'Live default path': required('transcript-fallback/live-default'),
-    'Custom data path': required('transcript-fallback/custom-data-path'),
-    'Supported backup': notApplicable('backup-exclusion/store-transcript-fallback'),
-  },
+  'Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable':
+    {
+      'Live default path': required('transcript-fallback/live-default'),
+      'Custom data path': required('transcript-fallback/custom-data-path'),
+      'Supported backup': notApplicable('backup-exclusion/store-transcript-fallback'),
+    },
   'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted':
     {
       'Live default path': required('usable-database-with-transcript/live-default'),
@@ -485,7 +487,7 @@ async function executeComposerCell(
 type StoreScenario =
   | 'Store database conversation'
   | 'Store transcript with no discovered or expected database'
-  | 'Store transcript after an expected database fails'
+  | 'Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable'
   | 'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted'
   | 'Store metadata indicating a possible conversation but no usable payload';
 
@@ -514,7 +516,8 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
     }
     if (
       scenario === 'Store transcript with no discovered or expected database' ||
-      scenario === 'Store transcript after an expected database fails' ||
+      scenario ===
+        'Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable' ||
       scenario ===
         'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted'
     ) {
@@ -526,7 +529,8 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
       ]);
     }
     if (
-      scenario === 'Store transcript after an expected database fails' ||
+      scenario ===
+        'Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable' ||
       scenario === 'Store metadata indicating a possible conversation but no usable payload'
     ) {
       writeStoreMeta(join(fixture.storeRoot, 'chats', 'matrix', id), {
@@ -556,7 +560,10 @@ async function executeStoreCell(scenario: StoreScenario, carrier: Carrier): Prom
         resolvedSource: 'store-transcript',
         resolution: { state: 'complete' },
       });
-    } else if (scenario === 'Store transcript after an expected database fails') {
+    } else if (
+      scenario ===
+      'Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable'
+    ) {
       expect(resolved).toMatchObject({
         source: 'workspace-fallback',
         resolvedSource: 'store-transcript',
@@ -1194,7 +1201,8 @@ async function executeCellEvidence(cell: ReturnType<typeof cells>[number]): Prom
   } else if (
     scenario === 'Store database conversation' ||
     scenario === 'Store transcript with no discovered or expected database' ||
-    scenario === 'Store transcript after an expected database fails' ||
+    scenario ===
+      'Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable' ||
     scenario ===
       'Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted' ||
     scenario === 'Store metadata indicating a possible conversation but no usable payload'

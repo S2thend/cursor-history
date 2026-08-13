@@ -7,7 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![npm downloads](https://img.shields.io/npm/dm/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2C%2022--26-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
 
 > **Contrat de compatibilité :** le document canonique en anglais
@@ -16,10 +16,18 @@
 > les horodatages inférés, les limites de lecture, les permissions de sauvegarde et les exemples
 > CLI/bibliothèque vérifiés. En cas de divergence, ce contrat fait autorité.
 >
-> Les consommateurs incrémentaux de la bibliothèque doivent épingler v0.16 ou attendre/valider la
-> version corrective avant une mise à niveau depuis v0.17. Le chemin sans modification du
+> Les consommateurs incrémentaux de la bibliothèque doivent épingler v0.16 jusqu'à validation de
+> v0.18.0 avant une mise à niveau depuis v0.17. Le chemin sans modification du
 > consommateur est garanti pour les archives v0.16 Composer uniquement ; il ne promet pas de
 > conserver les ID Store synthétiques instables de v0.17.
+>
+> v0.18.0 corrige directement les coordonnées publiques de recherche de v0.16/v0.17 et ajoute
+> l'index zéro-basé aux exports JSON comme nouvelle métadonnée. Le contrat canonique définit aussi
+> le point de publication et les erreurs typées de permissions ou de nettoyage après publication ;
+> un chemin résiduel non vérifié ne doit jamais être supprimé à l'aveugle. La
+> restauration ignore les entrées corrompues et refuse les chemins, destinations dupliquées ou
+> liens non sûrs avant toute écriture ; `--force` ne désactive pas ces contrôles. La restauration
+> arrière ne touche pas une feuille remplacée simultanément et la signale comme résidu.
 
 **L'outil open-source ultime pour parcourir, rechercher, exporter et sauvegarder votre historique de chat Cursor AI.**
 
@@ -81,7 +89,7 @@ cursor-history list
 
 ## Prérequis
 
-- Node.js 20+ (Node.js 22.5+ recommandé pour le support SQLite intégré)
+- Node.js 20.x ou 22.x–26.x (Node 21 n'est pas pris en charge ; Node.js 22.5+ est recommandé pour SQLite intégré)
 - Cursor IDE (avec un historique de chat existant)
 
 ## Configuration du pilote SQLite
@@ -91,7 +99,7 @@ cursor-history supporte deux pilotes SQLite pour une compatibilité maximale :
 | Pilote | Description | Limite de capacité Node.js |
 |--------|-------------|----------------------------|
 | `node:sqlite` | Module intégré ; sélectionné uniquement s'il fournit toutes les API requises | Lecture dès 22.5 ; sauvegarde en ligne dès 22.16.0 et 23.8.0 |
-| `better-sqlite3` | Binding natif et repli automatique lorsqu'il est capable | Node.js 20+ |
+| `better-sqlite3` | Binding natif et repli automatique lorsqu'il est capable | Versions majeures 20 et 22–26 |
 
 ### Sélection automatique du pilote
 
@@ -307,7 +315,7 @@ En parcourant votre historique de chat, vous verrez :
 - **Conversations complètes** - Tous les messages échangés avec Cursor AI
 - **Chaque message rendu** - Chaque message résolu est affiché une fois dans l'ordre ; les doublons consécutifs ne sont pas pliés, afin que les appels d'outils, la provenance et les données de tokens distincts ne soient jamais masqués
 - **Horodatages** - L'heure directement stockée d'un message quand elle est disponible (format HH:MM:SS) ; les messages sans heure directement stockée n'affichent pas d'horodatage plutôt qu'un repli fabriqué
-- **Sessions fusionnées entre piles** - Quand la même session existe à la fois dans la pile Composer (vscdb) et Store (~/.cursor), les deux représentations sont fusionnées champ par champ (aucune n'est écartée), la source principale étant choisie par plateforme (WSL préfère Store ; Windows/macOS/Linux natif préfèrent Composer)
+- **Sessions résolues entre piles** - Quand le même UUID existe dans Composer et Store, cursor-history conserve les identités Composer compatibles et produit une vue à provenance explicite. La portée de l'espace de travail est appliquée avant la lecture du contenu : une source connue hors frontière n'est pas ouverte et rend la vue partielle ; les sources permises suivent la politique canonique de backbone et d'enrichissement, pas une fusion aveugle champ par champ.
 - **Actions des outils IA** - Vue détaillée de ce que Cursor AI a fait :
   - **Modifications/écritures de fichiers** - Affichage complet des diff avec coloration syntaxique montrant exactement ce qui a changé
   - **Lectures de fichiers** - Chemins de fichiers et aperçus du contenu (utilisez `--fullread` pour le contenu complet)

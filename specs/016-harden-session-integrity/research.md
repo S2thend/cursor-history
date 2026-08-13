@@ -3,7 +3,7 @@
 <!-- source-read-limits/v1 policy-sha256: b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108 -->
 
 **Branch**: `016-harden-session-integrity`<br>
-**Date**: 2026-08-05<br>
+**Date**: 2026-08-13<br>
 **Scope**: Resolve the implementation choices required by
 `/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/spec.md`.
 
@@ -14,62 +14,46 @@ technical contracts so design and implementation can proceed without open questi
 
 **Decision**: Treat the released cursor-history `v0.16.0` tag at commit
 `e8a7abf8cea3419a9dda911e174a05f82a9b260e` as the authoritative Composer projection algorithm.
-Vendor a provenance-recorded, test-only port of the relevant projector/parser branches instead of
-inferring behavior from fixtures. The global projector queries `bubbleId:<id>:%` in SQLite
-`rowid ASC` order, emits one output message per row, preserves the released `[corrupted message]`
-and `[empty message]` placeholders, and chooses `data.bubbleId` or the row-key suffix exactly as the
-tag did. The workspace fallback freezes the tagged `parseChatData`, `parseComposerFormat`,
-`parseSession`, and `parseMessage` branch behavior. Locked fixtures validate this oracle; they do
-not define it.
+Keep a provenance-recorded, cursor-history-owned test projector for the relevant released
+projector/parser branches rather than inferring behavior from fixtures. The global projector queries
+`bubbleId:<id>:%` in SQLite `rowid ASC` order, emits one output message per row, preserves the
+released `[corrupted message]` and `[empty message]` placeholders, and chooses `data.bubbleId` or the
+row-key suffix exactly as the tag did. The workspace fallback freezes the tagged `parseChatData`,
+`parseComposerFormat`, `parseSession`, and `parseMessage` branch behavior. Locked wholly synthetic
+Cursor fixtures validate this cursor-history oracle; they do not define it.
 
-Run that projector through a test-only copy of the unchanged vibe-history Cursor adapter and
-replacement policy pinned to repository `S2thend/vibe-history` revision
-`698701775144f7d8875330e1f8caec9ddfc27744`. This revision is copied into the test oracle by
-content, not loaded from an adjacent checkout. Its required source-blob inventory is:
+Recurring repository CI then passes those projections through a deliberately generic downstream
+model owned by cursor-history. For session UUID `S`, that model freezes the public compatibility
+key `cursor:S:<source-message-id>` when the source ID is nonempty, otherwise
+`cursor:S:msg:<zero-based-final-array-index>`, and the tool key
+`<normalized-message-key>:tc:<zero-based-tool-index>`. It verifies each key's content,
+relationship, and tool binding, complete-view replacement eligibility, degraded non-overwrite, and
+repeated-input idempotence. It is explicitly not an implementation or emulation of vibe-history or
+another third-party consumer, and its internal fingerprint is not a third-party digest contract.
+Repository tests and fixtures do not contain copied third-party adapter, digest, comparison policy,
+persistence engine, SQLite schema/transaction, rollback, or downstream archive bytes.
 
-| Source path | Git blob |
-|---|---|
-| `packages/core/src/providers/cursor/index.ts` | `cb986058e481bebe6a902d80519f17813b53bc8f` |
-| `packages/core/src/providers/utils.ts` | `e0326b4c104d00d3672d25b77298afcdd702105a` |
-| `packages/core/src/types/message.ts` | `cab7fa684c7685b4b0c7a6813391c53eee8c1d31` |
-| `packages/core/src/types/session.ts` | `c8c337fc34da8c28cb9adc9f063135339a92ac9b` |
-| `packages/core/src/sync/state.ts` | `ce51f1429f7169f5586dcc5e66eed9df22c46d22` |
-| `packages/core/src/sync/policy.ts` | `d5a16bca2b3169c00ba08076422a7f44b6627b4f` |
-| `packages/core/src/sync/engine.ts` | `48b82557d32225f6489f329e2a349aa93d0d149f` |
-| `packages/core/src/sync/targets/sql/base.ts` | `893f60fcd0abf85d4eebfc728c0d70836006f316` |
-| `packages/core/src/sync/targets/sql/sqlite.ts` | `cb9e7e6ba4126fba14192af88bbd3b33f3f42348` |
-| `packages/core/src/sync/targets/sql/schema.sqlite.ts` | `6e20c92853765086c9bb8b3d0395882817f6b556` |
-| `drizzle/sqlite/0000_light_hellfire_club.sql` | `15a9ba96e3629310277ed5da41a17047c921ab9b` |
+The exact no-vibe-history-change guarantee is a separate release-blocking T113 certification. With
+owner authorization, T113 uses an external checkout at the recorded upstream revision and runs that
+project's unchanged adapter, exact comparison policy and digest, and real SQLite persistence path.
+It imports the v0.16 view, applies the complete candidate view, forces a mid-transaction failure,
+reopens the database to prove full old-state rollback, retries successfully, and repeats the sync to
+prove zero further writes. The revision/license reference may be recorded in the repository, but no
+third-party implementation or downstream database is copied into recurring CI. cursor-history owns
+only the complete, replacement-safe projection and compatibility signal supplied to that consumer;
+it does not claim an arbitrary consumer's transactional persistence.
 
-The checked-in consumer manifest records this revision/table and the SQLite schema/migration
-assumptions exercised by the deterministic synthetic archive: persisted session/message/tool
-relationships, the sync metadata digest, the complete-`global` versus
-degraded-`workspace-fallback` replacement rule, and one transaction that deletes prior children and
-inserts the complete replacement. A conformance test hashes the vendored oracle inputs and executes
-the pinned SQL transaction against a real synthetic SQLite database. It injects a failure after
-delete and before replacement insertion, closes and reopens the database, and accepts only the full
-old state; after success it accepts only the full new state. It never treats a
-hand-maintained golden output as proof of equivalence and never consults a mutable live
-vibe-history checkout during the required test run.
+**Rationale**: The compatibility promise concerns durable keys and actual replacement behavior in
+the existing archive. A repository-owned generic model provides deterministic recurring regression
+coverage for everything cursor-history controls without copying all-rights-reserved third-party
+implementation. Owner-authorized T113 provides the exact integration evidence that a generic model
+cannot honestly supply. Both gates are required, so this separation does not weaken the
+no-consumer-change guarantee.
 
-For session UUID `S`, that consumer creates message key
-`cursor:S:<source-message-id>` when the source ID is nonempty, otherwise
-`cursor:S:msg:<zero-based-final-array-index>`, and tool key
-`<normalized-message-key>:tc:<zero-based-tool-index>`. The harness exercises the actual atomic
-session-replacement transaction and complete-message digest. The unchanged test-only vibe-history
-adapter owns that transaction and rollback; cursor-history owns only the complete,
-replacement-safe projection and compatibility signal supplied to it. This is a combined-system
-acceptance oracle, not a new cursor-history persistence API.
-
-**Rationale**: The compatibility promise concerns durable keys and replacement behavior actually
-used by the existing archive, not an approximation reconstructed from current code. Pinning both
-upstream projector and downstream consumer source makes the oracle reproducible. A golden consumer
-harness then verifies session, message, tool, parent, digest, transaction/rollback, and idempotency
-behavior together without adding a runtime dependency on vibe-history.
-
-**Alternatives considered**: Snapshot only cursor-history JSON (insufficient to prove downstream
-keys or replacement); depend on the live vibe-history repository (not reproducible); preserve every
-v0.17 Store ID (explicitly outside the agreed contract).
+**Alternatives considered**: Copy or vendor the third-party implementation and downstream archive
+(licensing and provenance risk); claim the generic model proves the exact third-party transaction
+(false); depend on an adjacent checkout during recurring CI (not reproducible or self-contained);
+preserve every v0.17 Store ID (explicitly outside the agreed contract).
 
 ## 2. Composer identity projection
 
@@ -190,11 +174,12 @@ payload:
   answers the question.
 
 A fully usable expected DB is complete; a usable but partial DB remains degraded and is not replaced
-by a transcript. If an expected DB is missing, empty, or source-corrupt/unreadable, a usable
-transcript may recover content but remains degraded. A complete transcript is replacement-safe only
-in `not-expected`; in `unknown` it remains degraded. An incomplete transcript is always degraded.
-Driver-capability and snapshot-infrastructure failures are fatal typed failures, never transcript
-fallback. Metadata without usable conversation content emits a degraded `store-metadata` row when
+by a transcript. Only after capable provider selection and DB snapshot/read setup succeeds may an
+expected data/source outcome—DB missing, empty, or source-corrupt/unreadable—select a usable
+transcript, and that result remains degraded. A complete transcript is replacement-safe only in
+`not-expected`; in `unknown` it remains degraded. An incomplete transcript is always degraded.
+Driver-capability, provider-selection, snapshot-setup, and other database-infrastructure failures
+are fatal typed failures, never transcript fallback. Metadata without usable conversation content emits a degraded `store-metadata` row when
 there is evidence a conversation may exist, or is omitted when metadata explicitly says there is no
 conversation and no positive representation evidence. A present but unreadable/corrupt transcript
 is positive conversation evidence even when the DB was `not-expected`, so it yields degraded
@@ -380,6 +365,10 @@ replicas is not mutation authority: an eligible target must have exactly one Com
 the bound mutation footprint. Equivalent duplicate locators, two records in one matched workspace,
 or a shared global record whose mutation would affect another membership are rejected. Divergent,
 Store-only, and merged sessions are rejected for both single-session and workspace-wide migration.
+Numeric and direct-ID selectors resolve through the same complete scoped logical catalog, including
+ambiguous rows. An ambiguous row retains the presentation index shown by list and produces the same
+`SessionAmbiguityError` (UUID and opaque occurrence references) whether selected by number or UUID;
+it is never skipped, shifted, treated as not found, or converted into mutation authority.
 
 **Rationale**: UUID alone cannot identify which physical record to mutate, and rediscovery can turn
 a safe preview into a different destructive target. The feature deliberately has no Store or
@@ -473,6 +462,34 @@ backup manifest producer version comes from the package build rather than the cu
 manifests remain readable, and this diagnostic provenance field is excluded from session/message
 identity, replica equivalence, archive deduplication, and incremental synchronization decisions.
 
+The successful rename or hard link to the final output path is the publication commit point. Every
+later mode-observation, identity, or mode-adjustment failure therefore reports
+`BACKUP_PUBLISHED_PERMISSION_FAILED` with `published: true`; the error does not mean publication was
+rolled back. Its details include the final output path, `pathIdentityVerified`, requested mode, and
+`actualMode`, which is only the last mode safely observed on the staged archive inode (or `null`)
+and never describes an unverified replacement path. A true identity flag proves the path still
+names that archive and permits an inspect/correct remedy. A false flag makes the path untrusted and
+requires the user to establish which file, if any, is the completed archive before recovery. The
+operation exits nonzero and never recommends a blind `--force` retry. Read the published mode before
+changing it and skip `chmod` when it already matches, avoiding an unnecessary new failure surface. Bind this work to the archive itself: open
+the final path without following links, compare regular-file device/inode identity to the private
+stage with lossless bigint values, apply any mode change through that descriptor, then recheck both
+descriptor and final path. A nonregular path or replacement race is the same typed post-publication
+failure and must never change permissions on the replacement.
+
+Non-force publication uses a hard link as the commit point, so the private sibling name may still
+refer to the same completed archive inode afterward. Cleanup retries only while a no-follow stat
+proves that the sibling's lossless device/inode identity still matches the published archive; if a
+concurrent actor replaced the sibling pathname, cleanup leaves that replacement untouched. An
+exhausted or unverifiable cleanup fails distinctly with `BACKUP_PUBLISHED_CLEANUP_FAILED`, because
+the archive was published successfully and this is not a permission-adjustment failure. Safe
+details contain `published: true`, `outputPath`, output `pathIdentityVerified`, verified
+`residuePaths`, and `unverifiedResiduePaths`. Verified residue paths are names proven still bound to
+the completed archive inode; unverified paths are merely possible temporary residue and must not be
+deleted, chmodded, or force-retried until identity is established. The output path is likewise
+trusted only when `pathIdentityVerified` is true. The CLI exits nonzero and never describes either
+post-commit error as rollback.
+
 On Windows, create each operation under the system-provided user temporary directory and inherit
 its ACLs; still require unique exclusive paths, collision resistance, complete cleanup, and typed
 residue failures. Do not claim an independently verified cross-user unreadability guarantee until
@@ -481,11 +498,15 @@ therefore scoped to permission-aware POSIX platforms.
 
 **Rationale**: A private parent closes the exposure window during SQLite backup, while explicit
 modes protect each plaintext file. Process umask is global and unsafe under concurrent operations.
-Staged publication prevents deletion of a valid old archive before the replacement is complete.
+Staged publication prevents deletion of a valid old archive before the replacement is complete;
+the explicit commit point also makes a post-publication partial failure honest without destroying
+the usable result.
 
 **Alternatives considered**: Shared timestamp filenames (predictable/collision-prone); rely only on
-umask (often produces `0644`); swallow cleanup errors (claims success with residue); change parent
-directory permissions (outside authority).
+umask (often produces `0644`); swallow cleanup errors (claims success with residue); delete or roll
+back a valid archive after publication (destructive and may lose the only completed copy); advise
+blind `--force` retry (can overwrite the valid archive); change parent-directory permissions
+(outside authority).
 
 ## 15. SQLite capability selection
 
@@ -517,16 +538,28 @@ Primary references:
 
 ## 16. Runtime/dependency and release pipeline
 
-**Decision**: Keep `engines.node >=20.0.0`. The release matrix covers Node 20.0.0, exact capability
-boundaries 22.15.1/22.16.0 and 23.7.0/23.8.0 in focused driver tests, current 24.x LTS, and the latest
-26.x Current release. Node 20 is upstream EOL at this release date but remains an explicit project
-compatibility contract and therefore stays in the required matrix. Update `better-sqlite3` within
-major v12 to a release that supports Node 26 while retaining and testing its Node 20 source-build
-path; v12.10.0 is the minimum researched candidate. Do not adopt v13 because it would violate the
-settled Node 20 contract.
+**Decision**: Declare the finite engine range
+`20.x || 22.x || 23.x || 24.x || 25.x || 26.x`, with Node 20.0.0 as the exact floor. Node 21 is
+excluded because the packaged `better-sqlite3` v12 line does not advertise it; a broad `>=20.0.0`
+claim would therefore promise a runtime that cannot satisfy the fallback contract. The release
+matrix runs the same packed candidate on Node 20.0.0, exact capability boundaries
+22.15.1/22.16.0 and 23.7.0/23.8.0, and 24.x/25.x/26.x. Node 20 is upstream EOL at this release date
+but remains an explicit project compatibility contract. Update `better-sqlite3` within major v12
+to a release that supports Node 26 while retaining and testing its Node 20 source-build path;
+v12.10.0 is the minimum researched candidate. Do not adopt v13 because it would violate the settled
+Node 20 contract.
 
-Split publication into required validation jobs, a pack-once candidate stage, a protected
-verification approval, and a dependent publish job. Remove all failure swallowing. Before repository
+Run source-level install/typecheck/lint/full-test/build gates on Node 24, a runtime supported by the
+Vite 7 development toolchain (which requires Node 20.19+), rather than trying to execute that
+toolchain on the Node 20.0 product floor. Split publication into required source validation, a
+pack-once candidate stage, a fail-closed exact-candidate runtime matrix, full package verification,
+a protected verification approval, and a dependent publish job. The runtime matrix installs the
+checksum-addressed package as a production dependency without the repository's development
+dependencies and executes its public CLI/library on every supported boundary. It does not run
+repository development scripts there, but it also does not claim that a native runtime dependency
+can never build from source or require its platform compiler/toolchain. The jobs observe both
+automatic provider choice and forced `node:sqlite` backup behavior.
+Remove all failure swallowing. Before repository
 freeze, run the metadata-only authorized source-limit preflight and relock all affected artifacts if
 a legitimate source exceeds a default. Freeze tracked evidence, then run install, typecheck, lint,
 nonempty tests, and build. Pack once; record tag/version and SHA-256; install the exact tarball into a
@@ -682,7 +715,8 @@ overrides avoid converting the defaults into hard compatibility ceilings. Before
 metadata-only preflight over maintainer-authorized live/custom Composer roots and cursor-history
 backup ZIP/SQLite inputs records counts/sizes/ratios; any legitimate exceedance raises the v1
 default before release so an unchanged incremental consumer needs no configuration. The downstream
-vibe-history database/archive is validated by its compatibility harness, not this parser preflight.
+vibe-history database/archive is validated only by owner-authorized external T113, not by the
+recurring repository harness or this parser preflight.
 
 **Alternatives considered**: Replacement decoding (changes content/identity); heuristic charset
 detection (nondeterministic and adds dependency); whole-file JSONL/SQLite materialization (unbounded);
@@ -703,9 +737,106 @@ live and custom data roots, not to backup archives. Capability discovery cannot 
 cell. A materially new representation/carrier or changed supported outcome advances the matrix
 version.
 
+The live/custom row for a usable Store DB coexisting with a transcript is `Required`, not
+`Unsupported`. The DB is the sole Store conversation backbone and the transcript remains visible
+only as a `superseded` source instance. This is ordinary discovery/arbitration, not heuristic
+content union and not a reason to reject an otherwise complete session. That complete result assumes
+all known relevant Store occurrences are permitted by the active scope. Scope projection occurs
+first: a known DB or transcript occurrence outside the default payload-I/O boundary is omitted,
+never opened, and makes the scoped Store view explicitly partial even when it would normally be
+superseded. Explicit selected-UUID cross-workspace loading may restore completeness only while
+disclosing the broadened contributor.
+
 **Rationale**: A dynamic phrase such as “all applicable combinations” lets the implementation
 silently shrink its own test surface. A versioned finite table makes omissions and future scope
 changes reviewable.
 
 **Alternatives considered**: Full Cartesian product (includes impossible combinations and obscures
 real gaps); implementation-discovered matrix (self-fulfilling); prose-only examples (not finite).
+
+## 21. Corrective public search coordinates and additive export indices
+
+**Decision**: Release 0.18.0 directly corrects the existing public-library `SearchResult` fields
+whose v0.16 and v0.17 implementation returned placeholder or snippet-relative values.
+`messageIndex` is the zero-based index of the matched message in the complete returned
+`session.messages` array. `offset` is the zero-based UTF-16 code-unit offset of the first
+case-insensitive match in that message's complete original `content`. `match` is the complete
+original line containing that position; `contextBefore` and `contextAfter` are complete adjacent
+original lines, bounded by the requested line count. Snippet truncation and ellipses remain an
+internal/core CLI concern and never define public coordinates.
+
+Lock both tagged releases by tag, commit, and source-blob identity. The correction suite covers a
+non-first message, multiline content, mixed case, astral characters, and a lowercase mapping that
+expands in UTF-16. It compares identity and all non-search session values separately and permits no
+collateral change. Migration guidance tells consumers that persisted search coordinates from
+v0.16/v0.17 must be recomputed after upgrading; they were not stable content identifiers.
+
+Library JSON exports in 0.18.0 include an `index` whose base is the existing zero-based public-read
+base. This is additive metadata: tagged v0.16 and v0.17 JSON exports omitted `index` entirely. The
+single- and bulk-export projections must agree and must not mutate a shared core session object.
+Accordingly, release notes must not describe this as correcting released one-based leakage; that
+leak existed only on the unreleased feature branch.
+
+**Rationale**: Keeping knowingly wrong search values under new aliases would leave existing callers
+on the broken fields and create two competing coordinate systems. A narrow, versioned corrective
+exception is easier to validate and migrate. UTF-16 explicitly matches JavaScript string indexing,
+while complete source lines make `match` and context useful without coupling them to display
+snippet width. Additive export metadata can adopt the already documented library base without a
+breaking migration.
+
+**Alternatives considered**: Preserve the wrong fields and add corrected aliases (permanent
+ambiguity); define offsets inside snippets (not stable under context/truncation); count Unicode
+scalar values (incompatible with JavaScript string offsets); call export `index` a v0.16/v0.17
+correction (refuted by tagged output evidence); omit export indices forever (loses useful scoped
+metadata).
+
+## 22. Integrity-gated partial restore
+
+**Decision**: Treat manifest size and checksum validation as the admission boundary for restore
+publication. An entry is added to the staged restore set only after both checks pass. Every
+non-directory ZIP entry other than `manifest.json` must appear exactly once in the manifest; an
+empty manifest, unmanifested file entry, or archive with no intact restorable entry is rejected
+before destination mutation. A mixed-validity archive restores its intact subset and reports every
+size or checksum mismatch as skipped; it never copies a corrupt staged payload and never touches a
+pre-existing destination for that entry, including with force enabled. Independently validate the
+finite mapping from backup-file type to normalized path, reject duplicate/aliased destinations, and
+preflight the complete destination set and its existing ancestors without following symlinks before
+the first write.
+
+Copy every admitted entry into a newly created private same-directory inode and publish by an atomic
+directory-entry operation. Without force, a hard-link commit provides no-clobber semantics, so a
+destination created after preflight wins with no overwrite. With force, rename atomically replaces
+the destination entry without opening or truncating its old inode; if that inode has another hard
+link, the other name and bytes are unaffected. After a non-force link commit, clean the private
+publication sibling only while its no-follow device/inode identity still matches the committed
+inode. A replacement occupant is never removed; a failed identity observation is reported as
+unverified temporary residue rather than guessed safe-to-delete residue.
+
+Snapshot an existing destination without following a leaf symlink. At each publication commit,
+record the published device/inode identity. On a later failure, rollback first verifies that the
+destination still names that exact inode. Only then may it republish prior bytes through the same
+private-inode replacement path or remove a newly created leaf. A concurrent replacement is left
+untouched and its manifest-relative entry is included in the typed residual set. If any prior state
+cannot be restored, throw `RESTORE_ROLLBACK_INCOMPLETE` with the count of published entries and only
+safe manifest-relative residual paths rather than returning a result that falsely says
+`filesRestored: 0`.
+
+Node 20 does not provide a portable `openat`-style directory descriptor API for binding every
+ancestor and creating the destination relative to it. Canonicalize the explicitly selected user
+root, reject links and non-directories beneath that trust boundary, preflight the complete set, and
+repeat the descendant-chain check immediately before each directory-entry publication. Document
+honestly that this handles static/dangling leaf links and multiply linked regular-file destinations
+but cannot prove atomic resistance to a hostile local process swapping an ancestor in the final
+check/commit interval. Restore destinations therefore remain an owner-controlled-tree requirement.
+The separate final-backup permission step can and does bind its chmod to an already-open inode.
+
+**Rationale**: Reporting a checksum mismatch while subsequently publishing the same bytes converts
+an integrity warning into known data corruption. Filtering at admission makes validation and
+mutation share one source of truth and preserves useful recovery from otherwise mixed archives.
+
+**Alternatives considered**: Restore corrupt bytes after warning (unsafe); reject every mixed
+archive (unnecessarily loses intact recovery); overwrite corrupt destinations with placeholders
+(destructive and not present in the archive contract); trust the manifest's declared file type or
+use a lexical `startsWith` confinement check (both permit off-contract or symlink-directed writes);
+claim atomic ancestor-swap prevention without a directory-relative primitive (not technically
+honest on the supported Node 20 runtime).

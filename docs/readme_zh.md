@@ -7,7 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![npm downloads](https://img.shields.io/npm/dm/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2C%2022--26-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
 
 > **兼容性契约：**英文版
@@ -15,9 +15,15 @@
 > 索引基数与作用域、工作区 I/O 边界、完整性/来源、推断时间、读取上限、备份权限，以及经过
 > 验证的 CLI/库示例。如其他说明与其不一致，以该契约为准。
 >
-> 增量存储库输出的使用方应固定在 v0.16，或等待并验证修正版后再从 v0.17 升级。无需修改
+> 增量存储库输出的使用方应固定在 v0.16，直到能够验证 v0.18.0 后再从 v0.17 升级。无需修改
 > 消费方的升级保证仅覆盖 v0.16 Composer-only 档案；它不承诺保留 v0.17 不稳定的 Store
 > 合成 ID。
+>
+> v0.18.0 直接修正 v0.16/v0.17 的公共搜索坐标，并以新增元数据形式在 JSON 导出中加入
+> 从零开始的索引。规范兼容性文档还定义了备份发布提交点，以及备份已发布后权限失败的
+> 权限或清理失败的类型化错误语义；不得盲目删除身份未经验证的残留路径。恢复时会跳过损坏条目，
+> 并在写入前拒绝非法路径、重复目标或不安全链接；`--force` 不会绕过这些完整性与路径限制检查。
+> 回滚不会触碰被并发替换的叶文件，而会将其报告为残留。
 
 **终极开源工具，用于浏览、搜索、导出和备份您的 Cursor AI 聊天历史。**
 
@@ -79,7 +85,7 @@ cursor-history list
 
 ## 系统要求
 
-- Node.js 20+（推荐 Node.js 22.5+ 以获得内置 SQLite 支持）
+- Node.js 20.x 或 22.x–26.x（不支持 Node 21；推荐 Node.js 22.5+ 以获得内置 SQLite 支持）
 - Cursor IDE（已有聊天历史）
 
 ## SQLite 驱动配置
@@ -89,7 +95,7 @@ cursor-history 支持两种 SQLite 驱动，以获得最大兼容性：
 | 驱动 | 描述 | Node.js 能力边界 |
 |------|------|------------------|
 | `node:sqlite` | 内置模块；仅在具备当前操作所需全部 API 时选择 | 22.5 起可读取；22.16.0 和 23.8.0 起支持在线备份 |
-| `better-sqlite3` | 原生绑定；具备能力时作为自动回退 | Node.js 20+ |
+| `better-sqlite3` | 原生绑定；具备能力时作为自动回退 | 支持主版本 20 和 22–26 |
 
 ### 自动驱动选择
 
@@ -303,7 +309,7 @@ cursor-history --workspace /path/to/project list
 - **完整对话** - 与 Cursor AI 交换的所有消息
 - **逐条渲染消息** - 每条解析出的消息按顺序单独显示一次，连续重复不再折叠，因此不同的工具调用、来源与 token 数据不会被隐藏
 - **时间戳** - 消息有直接存储时间时显示（HH:MM:SS 格式）；没有直接时间的消息不显示时间，而不是用兜底时间填充
-- **跨栈合并会话** - 当同一会话同时存在于 Composer（vscdb）与 Store（~/.cursor）两个栈时，两侧表示会按字段合并（任一侧都不丢弃），骨干来源按平台选择（WSL 偏好 Store；Windows/macOS/原生 Linux 偏好 Composer）
+- **跨栈解析会话** - 当同一 UUID 同时存在于 Composer 与 Store 时，cursor-history 保留兼容的 Composer 身份并输出带明确来源的解析视图。读取内容前先应用工作区范围：已知但越界的来源不会被打开，并会使结果明确标为 partial；允许范围内的来源遵循规范的骨干与增强规则，而不是盲目逐字段合并。
 - **AI 工具操作** - 详细查看 Cursor AI 执行的操作：
   - **文件编辑/写入** - 带语法高亮的完整 diff 显示，准确展示更改内容
   - **文件读取** - 文件路径和内容预览（使用 `--fullread` 查看完整内容）

@@ -9,10 +9,12 @@
 ## Compatibility policy
 
 This increment preserves existing function names, parameter positions, array/string result shapes,
-native Cursor IDs, v0.16 Composer-derived keys, direct timestamp provenance tokens, and numeric bases.
-New metadata is additive. Deprecated v0.17 source literals remain in declarations temporarily so
-existing TypeScript consumers compile, but corrective runtime output uses the legacy fidelity values
-`global` and `workspace-fallback`.
+native Cursor IDs, v0.16 Composer-derived keys, direct timestamp provenance tokens, and numeric
+bases. New metadata is additive except for one explicit 0.18.0 corrective exception: released
+v0.16/v0.17 public search-coordinate fields are corrected in place under locked affected-version
+fixtures and migration guidance. Deprecated v0.17 source literals remain in declarations
+temporarily so existing TypeScript consumers compile, but corrective runtime output uses the legacy
+fidelity values `global` and `workspace-fallback`.
 
 Every symbol reachable from the exact packed package-root declaration graph—including aliases and
 re-exports—has shipped JSDoc describing its purpose and public contract. Callable and constructable
@@ -28,8 +30,8 @@ An unchanged consumer receives Source Read Limits v1 defaults automatically. The
 raise any default exceeded by an authorized Cursor source carrier actually readable by v0.16
 (live/custom Composer roots or cursor-history backup ZIP/SQLite input) before publication; callers
 do not need to opt into `sourceReadLimits` for the confirmed upgrade path. The downstream
-vibe-history archive is exercised by the compatibility harness, not parsed by this source-limit
-preflight.
+vibe-history archive is exercised only by owner-authorized external T113, not by the recurring
+repository harness or this source-limit preflight.
 
 ## Additive public types
 
@@ -282,7 +284,7 @@ export interface Session {
   indexWorkspacePath?: string;
 
   /**
-   * Compatibility/fidelity signal. Runtime output in the corrective release is
+   * Compatibility/fidelity signal. Runtime output in v0.18.0 is
    * 'global' when complete/replacement-safe and 'workspace-fallback' when degraded.
    * Other literals are retained as deprecated v0.17 transition declarations.
    */
@@ -326,6 +328,10 @@ Rules:
 - `indexWorkspacePath` is required exactly when `indexScope === 'workspace'`.
 - `resolvedSource` reports representation; `source` reports replacement safety. Consumers must not
   infer one from the other.
+- `resolvedSource: 'store-transcript'` may replace an expected Store DB only after capable provider
+  selection and DB snapshot/read setup succeeds and the DB is absent, empty, or
+  source-corrupt/unreadable. Provider/capability/snapshot infrastructure failures reject with a
+  typed error; they never return transcript fallback or `store-metadata` success.
 - A complete changed session can be compared/replaced as a whole. Timestamp maxima are not an
   incremental correctness boundary.
 - `timestamp`/`createdAtSource` and `metadata.lastModified`/`lastUpdatedAtSource` are deterministic
@@ -516,6 +522,36 @@ Read API numeric selectors remain zero-based. Under a workspace configuration, b
 native-ID selectors verify the bound membership; an ID from another workspace throws
 `SessionScopeMismatchError` without hydrating it. Unfiltered direct-ID behavior is unchanged.
 
+The released public search shape remains, with corrected field semantics in 0.18.0:
+
+```ts
+export interface SearchResult {
+  session: Session;
+  /** Complete original source line containing the first case-insensitive match. */
+  match: string;
+  /** Zero-based index of the matched message in the complete `session.messages` array. */
+  messageIndex: number;
+  /** Complete adjacent source lines before the match, bounded by `config.context`. */
+  contextBefore?: string[];
+  /** Complete adjacent source lines after the match, bounded by `config.context`. */
+  contextAfter?: string[];
+  /** Zero-based UTF-16 code-unit offset in the complete original message content. */
+  offset?: number;
+}
+```
+
+Every emitted result contains `offset`. It points to the first case-insensitive match in original
+content even when the query is in a non-first message, the message is multiline, earlier content
+contains astral characters, or lowercasing expands a source code point. Snippet ellipses never
+participate. v0.16/v0.17 callers that persisted the old placeholder `messageIndex`, snippet-relative
+`offset`, or truncated `match` must recompute those search coordinates after upgrading; they are
+not stable content identities. No session, message, tool, or non-search value changes under this
+exception.
+
+JSON produced by `exportSessionToJson()` and `exportAllSessionsToJson()` includes the session's
+zero-based public-library `index`, consistent with list/get/export selectors. This field is additive:
+tagged v0.16 and v0.17 JSON exports omitted `index`; neither released a one-based export value.
+
 `PaginatedResult<T>` may add a `diagnostics?: SessionDiagnostic[]` member without altering `data` or
 `pagination`. A new additive summary API exposes ambiguous catalog rows without fabricating an empty
 full session:
@@ -611,7 +647,10 @@ export interface MigrateWorkspaceConfig {
 ```
 
 Migration's existing documented numeric selectors remain one-based, unlike the public read APIs.
-Dry-run and execution bind the same eligible Composer occurrence. A read-side equivalent-replica
+Numeric and native-ID migration selectors resolve through the same complete scoped logical catalog,
+including ambiguous rows. An ambiguous row retains its listed ordinal and throws the same
+`SessionAmbiguityError` by number or UUID before any write; it is never skipped or shifted. Dry-run
+and execution bind the same eligible Composer occurrence. A read-side equivalent-replica
 winner is not mutation authority: multiple physical Composer locators or a shared global record
 whose mutation affects another membership are rejected. Divergent, Store-only, and merged sessions
 also throw `UnsupportedSessionMigrationError` or `SessionAmbiguityError` before any write. Move
@@ -671,6 +710,58 @@ or absent producer values remain readable. This field is diagnostic provenance o
 participates in logical/session/message identity, replica equivalence, deduplication, or
 incremental-sync comparison.
 
+Rename/link to the requested final path is the publication commit point. If a later mode read,
+identity check, or mode adjustment fails, `createBackup()` rejects with
+`BackupPublishedPermissionError`; `details.published` is always `true` because that commit point was
+crossed. Details also include `pathIdentityVerified`, `requestedMode`, and `actualMode`, which is the
+last mode safely observed on the staged archive inode or `null`, never the mode of an unverified
+replacement path. Only `pathIdentityVerified: true` proves that `details.outputPath` still names the
+completed archive and permits the remedy to advise inspection/correction of that file. When false,
+the path is untrusted and the remedy requires establishing which file, if any, is the completed
+archive before recovery. Callers must not interpret either branch as rollback or blindly retry with
+force. When the verified inode already has the requested mode, the implementation skips `chmod`.
+On permission-aware platforms, mode handling opens the final path without following links, verifies
+that its regular-file device/inode identity exactly matches the private staging inode using lossless
+bigint values, applies any change only through the bound descriptor, and rechecks descriptor and
+path. A nonregular or replaced path raises the same typed post-publication failure without changing
+the replacement's mode.
+
+If non-force link publication commits but cleanup of its private sibling cannot be completed
+safely, `createBackup()` rejects with `BackupPublishedCleanupError` and code
+`BACKUP_PUBLISHED_CLEANUP_FAILED`. Details include `published: true`, output
+`pathIdentityVerified`, verified `residuePaths`, and `unverifiedResiduePaths`. Verified paths still
+name the completed archive inode; unverified paths must not be deleted or chmodded until their
+identity is established. This error is distinct from permission adjustment failure, and callers
+must not blindly delete, chmod, or force-retry either the output or a residue path.
+
+`validateBackup()` reports manifest size/checksum mismatches in `corruptedFiles`. `restoreBackup()`
+uses the same inspection result as its mutation admission set: a mixed-validity archive may return
+success with warnings after restoring only intact entries, while every size- or checksum-invalid
+entry is reported as skipped and its destination remains untouched even when `force` is true. An
+empty/no-intact archive or any non-directory ZIP entry absent from the manifest is rejected before
+destination mutation. Before publication, restore also validates the finite type/path layout,
+rejects duplicate destinations and path indirection outside the Cursor user root, and—unless
+forced—rejects if any validated destination already exists.
+
+Each admitted payload is copied to a newly created private same-directory inode. Forced restore
+atomically replaces the destination directory entry without opening or truncating its previous
+inode, so other hard links remain byte-for-byte unchanged. Non-forced restore uses an atomic
+no-clobber commit, including against a destination created after preflight. Private sibling cleanup
+is device/inode-bound and never unlinks a replacement occupant. Rollback republishes prior bytes
+through the same private-inode replacement path only after the destination still has the identity
+recorded at publication. A concurrently replaced leaf remains untouched and is reported as
+residual. If rollback is incomplete,
+`restoreBackup()` throws `RestoreRollbackError` with code `RESTORE_ROLLBACK_INCOMPLETE`, a published
+count, and only safe manifest-relative residual paths; it does not return a misleading
+`filesRestored: 0` result.
+
+The selected user root is canonicalized and descendant paths are rechecked immediately before each
+publication. This rejects observed/static leaf links and safely replaces multiply linked regular
+files without writing through their old inode. On supported runtimes without a portable
+directory-relative no-follow creation primitive, it is not an atomic security boundary against a
+hostile local process swapping an ancestor between that check and the final commit; callers must
+use an owner-controlled destination tree.
+
 ## Driver selection compatibility
 
 ```ts
@@ -701,6 +792,9 @@ and have exported type guards:
 | `NoCapableDriverError` | `NO_CAPABLE_DATABASE_DRIVER` | operation, required capabilities, remedies |
 | `UnsupportedSessionMigrationError` | `UNSUPPORTED_SESSION_MIGRATION` | UUID and source category |
 | `MigrationTargetChangedError` | `MIGRATION_TARGET_CHANGED` | UUID and retry remedy; no locator |
+| `BackupPublishedPermissionError` | `BACKUP_PUBLISHED_PERMISSION_FAILED` | `published: true`, final output path, `pathIdentityVerified`, requested mode, last safely observed archive-inode mode or `null`, and identity-conditional remedy |
+| `BackupPublishedCleanupError` | `BACKUP_PUBLISHED_CLEANUP_FAILED` | `published: true`, final output path, `pathIdentityVerified`, verified residue paths, unverified residue paths, and no-blind-delete/force remedy |
+| `RestoreRollbackError` | `RESTORE_ROLLBACK_INCOMPLETE` | published-file count, residual count, canonical manifest-relative residual paths, and recovery remedy |
 | `TemporaryArtifactCleanupError` | `TEMPORARY_ARTIFACT_CLEANUP_FAILED` | possible residue paths only |
 | `SourceEncodingError` | `SOURCE_ENCODING_INVALID` | source kind, partial/fatal outcome, remedy; no content |
 | `SourceLimitError` | `SOURCE_LIMIT_EXCEEDED` | policy version, source kind, named bound, limit, observed-at-least, unit, partial/fatal outcome, override remedy; no content |

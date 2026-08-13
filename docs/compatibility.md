@@ -84,6 +84,12 @@ other new rows without a v0.16 Composer position follow the legacy tie group and
 their deterministic tie-break. This protects existing unfiltered numeric addresses for the tie
 case without making numeric indices durable across later catalog changes.
 
+Migration resolves both its one-based numeric selectors and native UUID selectors through this
+complete scoped logical catalog, including ambiguous rows. An ambiguous row retains the number
+shown by list and returns the same typed ambiguity (with the same safe UUID and opaque occurrence
+references) by number or ID. It is never skipped, shifted, treated as not found, hydrated, or
+mutated.
+
 Every reusable structured index declares either:
 
 ```json
@@ -150,6 +156,15 @@ It does **not** identify the current representation. Additive `resolvedSource` (
 v0.17 source literals remain accepted temporarily by TypeScript declarations, but corrective
 runtime output uses the two fidelity values above.
 
+When a usable Store database and a transcript coexist and all known relevant Store occurrences are
+inside the permitted scope, this is a Required supported state. The database is the sole Store
+conversation backbone; the transcript is retained as a `superseded` source instance for provenance.
+cursor-history neither rejects this combination nor heuristically unions transcript content into
+the usable database view. Scope projection happens first: a known DB or transcript outside the
+default workspace payload-I/O boundary is omitted, never opened, and makes the scoped Store view
+explicitly partial even if that representation would normally be superseded. Explicit selected-UUID
+cross-workspace loading may restore completeness only while disclosing the broadened source.
+
 A complete changed view is compared and replaced as a whole. The comparison covers ordered stable
 message identities, roles, content, parent/branch relationships, consumed tool-call data, derived
 code blocks, and supported attachment evidence. An unsupported raw attachment that cannot be
@@ -196,9 +211,33 @@ but only when the corresponding source value was absent:
   `(workspace: <directory-id>)` placeholder as a path. The public library returns `"unknown"`;
   core/CLI structured output returns `workspacePath: null` and omits canonical path metadata.
 
-Compatibility certification permits only those three predicate-guarded scalar changes. A changed
+Compatibility certification for the full-session projection permits only those three
+predicate-guarded scalar changes; the separate search-result coordinate correction below is not a
+session projection or identity change. A changed
 native or compatibility ID, message order/content binding, parent/branch relationship, tool binding,
 direct source timestamp, stored Composer update time, or real workspace path is a regression.
+
+### 0.18.0 public search-coordinate correction
+
+v0.16 and v0.17 returned placeholder/snippet-relative values in existing public-library search
+fields. 0.18.0 directly corrects those fields under a locked, versioned exception:
+
+- `messageIndex` is the zero-based index of the matched message in the complete returned
+  `session.messages` array;
+- `offset` is the zero-based UTF-16 code-unit offset of the first case-insensitive match in that
+  message's complete original `content`;
+- `match` is the complete original source line containing that position; and
+- `contextBefore` and `contextAfter` contain complete adjacent source lines, bounded by the
+  requested line count.
+
+Truncated display snippets, ellipses, mixed case, astral characters, and lowercase expansion do not
+change the coordinate space. Consumers that persisted v0.16/v0.17 search coordinates must
+recompute them after upgrading. These values are not identities; the correction changes no
+session, message, or tool ID and no non-search session field.
+
+Public-library JSON exports in 0.18.0 also include an additive zero-based session `index`, matching
+the library read APIs. Tagged v0.16/v0.17 exports omitted `index`; there is no released one-based
+export value to migrate.
 
 ## Defensive text decoding
 
@@ -322,11 +361,13 @@ Unchanged consumers receive the defaults and need no override for the supported 
 
 ## SQLite driver capability
 
-The supported project runtime remains Node 20+. Driver choice is made per operation from the actual
-capabilities required (`read`, `readWrite`, or `onlineBackup`), not merely from successful module
-import. In automatic mode, cursor-history prefers `node:sqlite` when capable and otherwise falls back
-to an installed, capable `better-sqlite3`. The `node:sqlite` online-backup API begins at Node 22.16.0
-and 23.8.0; earlier runtimes may import the module without that capability.
+The v0.18.0 supported runtime majors are Node 20.x and 22.x–26.x. Node 20.0.0 remains the exact
+project floor; Node 21 is not advertised because the packaged native SQLite dependency does not
+support it. Driver choice is made per operation from the actual capabilities required (`read`,
+`readWrite`, or `onlineBackup`), not merely from successful module import. In automatic mode,
+cursor-history prefers `node:sqlite` when capable and otherwise falls back to an installed, capable
+`better-sqlite3`. The `node:sqlite` online-backup API begins at Node 22.16.0 and 23.8.0; earlier
+runtimes may import the module without that capability.
 
 An explicitly forced driver never falls back. A missing capability produces
 `DATABASE_CAPABILITY_MISSING`; no capable automatic provider produces
@@ -347,6 +388,47 @@ existing mode unless sharing is explicitly requested. `--shared` or
 `sharedPermissions: true` selects `0666 & ~currentUmask`; it never broadens temporary plaintext,
 changes the process umask, or changes parent-directory permissions.
 
+Rename/link to the requested final path is the publication commit point. If a subsequent mode read
+or adjustment fails, the operation returns `BACKUP_PUBLISHED_PERMISSION_FAILED`. Its safe details
+report `published: true`, the output path, `pathIdentityVerified`, requested mode, and the last mode
+safely observed on the archive inode (or `null`). `published` means the commit point was crossed;
+only `pathIdentityVerified: true` proves that the output path still names that inode and permits an
+inspect/correct-mode remedy. When it is false, callers must treat the pathname as untrusted, must
+not chmod it based on this error, and must establish which file—if any—is the completed archive.
+The CLI exits nonzero; this is not proof of rollback and is not a reason to blindly retry with
+`--force`. When the verified published inode already has the requested mode, cursor-history skips
+`chmod`.
+Permission handling is bound to the archive inode rather than only its pathname: cursor-history
+opens the final path without following links, compares lossless device/inode identity with private
+staging, changes mode only through that descriptor, and rechecks both descriptor and final path.
+A nonregular target or replacement race returns the same typed post-publication failure and never
+changes the replacement's permissions.
+If non-force publication commits but its private sibling cannot be removed safely,
+`BACKUP_PUBLISHED_CLEANUP_FAILED` reports output-path identity plus verified `residuePaths` and
+`unverifiedResiduePaths`. Never blindly delete, chmod, or force-retry an unverified path; a
+concurrent replacement is left untouched.
+
+Restore uses the same integrity result for validation and mutation. It restores only entries whose
+manifest size and checksum pass, reports integrity mismatches as skipped, and leaves skipped
+destinations untouched even with `--force`. A mixed-validity archive may restore its intact subset;
+an empty inventory or archive with no intact entries fails with zero writes. Unmanifested file
+payloads, manifest type/path mismatches, duplicate destinations, non-forced collisions anywhere in
+the validated destination set, and observed descendant symlink/path indirection are rejected.
+`--force` permits replacement only after those integrity and confinement checks pass.
+The selected Cursor user root is canonicalized and every descendant path is checked again before
+publication. Non-force publication is atomic no-clobber. Forced replacement and rollback publish a
+new owner-private same-directory inode, so they do not truncate a static hard-linked destination or
+its off-root peer. If a later failure cannot roll every actually published entry back, cursor-history
+throws `RESTORE_ROLLBACK_INCOMPLETE` with safe manifest-relative residual paths instead of reporting
+zero remaining changes. Rollback first verifies the device/inode recorded at publication and leaves
+a concurrently replaced leaf untouched while reporting it as residual. Because Node 20 has no
+portable directory-relative no-follow creation API,
+cursor-history does not claim atomic protection against a hostile local process swapping an
+ancestor between the final check and directory-entry publication; use an owner-controlled tree.
+This intentionally corrects v0.16/v0.17 behavior in which integrity warnings could still accompany
+restored corrupt bytes. In v0.18.0, `filesRestored` counts only integrity-valid published entries and
+warning paths identify skipped entries; callers must not infer that a warned entry was written.
+
 On Windows, cursor-history uses the system per-user temporary directory, inherited access controls,
 exclusive paths, and the same cleanup/error contract. This release does not claim independently
 verified cross-user ACL isolation on Windows. The strict `0700`/`0600` owner-only guarantee is
@@ -359,7 +441,7 @@ transcripts, metadata-only rows, and merged source sets are not present in that 
 
 ## Upgrade guidance for incremental consumers
 
-### v0.16 Composer-only archive to the corrective release
+### v0.16 Composer-only archive to v0.18.0
 
 This is the confirmed no-consumer-change path, including consumers such as vibe-history whose
 existing archive contains only output produced by cursor-history v0.16:
@@ -387,7 +469,7 @@ transition.
 
 v0.17 introduced transitional Store, merged-source, positional-message, and timestamp behavior.
 Projects that persist cursor-history library output for incremental backup should pin v0.16 or
-validate and delay upgrading until the corrective release is available.
+validate the 0.18.0 corrective transition before upgrading.
 
 For a complete affected v0.17 Store/merged fixture, the corrective path is one whole-session
 replacement, no duplicate logical content, and no writes on the next unchanged sync. Unstable v0.17
@@ -397,8 +479,8 @@ manually. Back up the downstream archive before this one-time convergence.
 
 ## Fatal JSON stream migration from v0.17
 
-Some v0.17 command-owned fatal JSON branches wrote their error object to stdout. In the corrective
-release, every fatal JSON object is written to stderr and stdout is empty. Successful result bytes
+Some v0.17 command-owned fatal JSON branches wrote their error object to stdout. In 0.18.0, every
+fatal JSON object is written to stderr and stdout is empty. Successful result bytes
 remain on stdout; nonfatal best-effort diagnostics remain inside their successful JSON envelope.
 Existing human-readable fatal errors already use stderr.
 
@@ -465,8 +547,9 @@ if (first) {
 | Composer workspace fallback | Required | Required | Required | Degraded Composer fallback |
 | Store database conversation | Required | Required | N/A | Complete Store database |
 | Store transcript with no discovered or expected database | Required | Required | N/A | Complete transcript primary |
-| Store transcript after an expected database fails | Required | Required | N/A | Degraded transcript fallback |
-| Store transcript selected instead of a usable Store database | Unsupported | Unsupported | N/A | Reject; database remains Store backbone |
+| Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable | Required | Required | N/A | Degraded transcript fallback |
+| Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted | Required | Required | N/A | Complete Store database backbone; transcript retained as superseded provenance |
+| Workspace-scoped Store UUID has a known database or transcript occurrence outside the default I/O boundary | Required | Required | N/A | Explicit partial Store view; off-scope representation omitted and never opened, even when otherwise superseded |
 | Complete Composer/Store merge, Composer-preferred ordering | Required | Required | N/A | Complete merged, Composer-preferred |
 | Complete Composer/Store merge, Store-preferred ordering | Required | Required | N/A | Complete merged, Store-preferred |
 | Scoped merged UUID with a known contributor outside the default workspace I/O boundary | Required | Required | N/A | Explicit partial with omitted contributor; never silent single-source completeness |

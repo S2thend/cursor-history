@@ -48,14 +48,17 @@
   CLI coverage to closed package/command registries, made the specification the sole compatibility
   matrix authority, added executable synthetic-fixture safety checks, and fixed exact configurable
   Source Read Limits v1 defaults plus a real v0.16-readable Cursor-source preflight compatibility
-  gate distinct from the downstream vibe-history archive harness.
-- Final remediation pinned the unchanged vibe-history consumer oracle to revision
-  `698701775144f7d8875330e1f8caec9ddfc27744` with copied-path/blob provenance, replaced JSON-only
-  persistence emulation with a deterministic real SQLite rollback/reopen test, made all 13
-  source-limit diagnostic dimensions exact (including fractional ZIP-ratio observations), and
-  ordered preflight, repository freeze, final validation, pack-once smoke, manual approval, and
-  exact-byte publication so every failure is fail-closed.
+  gate distinct from the owner-authorized external T113 downstream certification.
+- Final remediation records the authorized external vibe-history revision, source-blob inventory,
+  and license classification without copying its adapter, digest, policy, database schema, or
+  generated archive into this repository. Recurring CI owns only the generic key/binding,
+  complete/degraded replacement, and idempotence contract; owner-authorized external T113 alone
+  verifies the exact adapter, digest, SQLite transaction, rollback/reopen/retry, and repeated sync.
+  It also made all 13 source-limit diagnostic dimensions exact (including fractional ZIP-ratio
+  observations) and ordered preflight, repository freeze, final validation, pack-once smoke,
+  protected approval, and exact-byte publication so every failure is fail-closed.
 - Exact public field names, identity formats, existing provenance tokens, JSON shape, and supported
   runtime range are externally observable compatibility constraints, not implementation design.
 - Constitution v1.2.0 adds Stable Public Contracts and Source Fidelity as an ongoing project
-  principle. Final independent reviews found no unresolved decisions or quality blockers.
+  principle. Specification-quality review found no unresolved product decisions; implementation
+  and release remain blocked until the explicitly open T110–T115 validation gates pass.

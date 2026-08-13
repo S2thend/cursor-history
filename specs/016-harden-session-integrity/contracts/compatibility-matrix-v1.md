@@ -21,8 +21,9 @@ merged source sets.
 | Composer workspace fallback | Required | Required | Required | Degraded Composer fallback |
 | Store database conversation | Required | Required | N/A | Complete Store database |
 | Store transcript with no discovered or expected database | Required | Required | N/A | Complete transcript primary |
-| Store transcript after an expected database fails | Required | Required | N/A | Degraded transcript fallback |
-| Store transcript selected instead of a usable Store database | Unsupported | Unsupported | N/A | Reject; database remains Store backbone |
+| Store transcript fallback after capable DB setup: expected DB absent, empty, or source-corrupt/unreadable | Required | Required | N/A | Degraded transcript fallback |
+| Usable Store database coexists with a Store transcript and all known relevant Store occurrences are permitted | Required | Required | N/A | Complete Store database backbone; transcript retained as superseded provenance |
+| Workspace-scoped Store UUID has a known database or transcript occurrence outside the default I/O boundary | Required | Required | N/A | Explicit partial Store view; off-scope representation omitted and never opened, even when otherwise superseded |
 | Complete Composer/Store merge, Composer-preferred ordering | Required | Required | N/A | Complete merged, Composer-preferred |
 | Complete Composer/Store merge, Store-preferred ordering | Required | Required | N/A | Complete merged, Store-preferred |
 | Scoped merged UUID with a known contributor outside the default workspace I/O boundary | Required | Required | N/A | Explicit partial with omitted contributor; never silent single-source completeness |
@@ -45,9 +46,11 @@ test cannot remove or reclassify a cell.
 - Both preferred merge orientations preserve matched Composer identity, v0.16 Composer fallback
   keys, Composer tool order, and rewritten relationships.
 - The confirmed no-consumer-change archive transition remains v0.16 Composer-only to a complete
-  Composer-backed merged live/custom-path view. The unchanged test-only vibe-history adapter owns
-  persistence, transaction, and rollback; its revision/source blobs and SQLite schema are pinned,
-  and rollback is verified against a deterministic synthetic database after close/reopen.
+  Composer-backed merged live/custom-path view. Recurring CI validates only the generic
+  cursor-history-owned key/binding and complete/degraded/idempotence contract. Release-blocking
+  T113 alone runs the unchanged consumer's exact adapter, digest, policy, real SQLite
+  transaction/rollback/reopen, and repeated sync from an owner-authorized external checkout at the
+  recorded upstream revision; no third-party implementation or downstream archive is copied here.
 - The committed v0.16 raw-layout SQLite fixture is deterministic and wholly synthetic, with a
   logical-content manifest, reproducible generation instructions, SHA-256, and a sensitive-pattern
   scan.

@@ -4,6 +4,32 @@ This procedure is for the maintainer who owns and is authorized to inspect the C
 the release check. It is not suitable for CI, contributor data, shared-machine data, customer data,
 or an attached issue/PR artifact.
 
+## Automated exact-candidate gates
+
+The v0.18.0 product runtime contract is finite: Node 20.x and 22.x–26.x, with Node 20.0.0 as the
+exact minimum. Node 21 is not supported because the packaged native SQLite dependency does not
+advertise that major. Source-level `npm ci`, typecheck, lint, the complete nonempty test suite, and
+build run on Node 24.x, which satisfies the Vite 7 development-tool requirement. Those tools are not
+used to judge whether the packed product runs on Node 20.0.0.
+
+After source validation, the workflow builds and packs once, records the revision and SHA-256, and
+runs that same checksum-addressed tarball on all of these profiles:
+
+- Node 20.0.0: `node:sqlite` unavailable; automatic backup uses `better-sqlite3` and forcing
+  `node:sqlite` fails explicitly;
+- Node 22.15.1 and 23.7.0: `node:sqlite` reads but lacks online backup; automatic backup falls back
+  to `better-sqlite3` and forcing `node:sqlite` reports the missing `onlineBackup` capability;
+- Node 22.16.0 and 23.8.0: `node:sqlite` online backup is supported and selected automatically; and
+- Node 24.x, 25.x, and 26.x: the packaged CLI, ESM/CJS library, real SQLite backup, archive
+  validation, and scoped session operations all run successfully with capable `node:sqlite`.
+
+The 24 LTS and 26 Current labels describe the v0.18.0 release date; the explicit versions above are
+the durable gate. Runtime jobs perform a production tarball install without repository
+devDependencies; a native dependency may still use host build tooling when no compatible prebuild
+is available. Jobs fail on a wrong provider, wrong capability outcome, checksum/metadata mismatch,
+or smoke failure. Protected approval depends on both this complete runtime matrix and the full
+package/declaration/documentation verification.
+
 ## Source Read Limits v1 preflight
 
 The preflight reads metadata only and retains no conversation content. For recognized Composer
@@ -20,7 +46,7 @@ Accepted inputs are limited to source carriers that cursor-history v0.16 could r
 - cursor-history backup ZIPs containing `manifest.json` and Composer `state.vscdb` entries.
 
 Never pass a vibe-history database or archive. The downstream archive is covered by the pinned
-unchanged-consumer compatibility harness; it is deliberately outside this parser preflight. Store
+owner-authorized external T113 certification; it is deliberately outside this parser preflight. Store
 databases, Store transcripts, exports, arbitrary SQLite files, and arbitrary ZIPs are also outside
 this v0.16 compatibility measurement.
 
@@ -62,15 +88,21 @@ through release-candidate sequence.
 Before repository freeze, compare the official `v0.16.0` tag and the candidate against the same
 maintainer-owned Composer-only source in an owner-private directory outside this repository. This is
 a one-time manual release certification, not a CI dependency on vibe-history or another checkout.
-The repository's recurring CI remains self-contained and uses only deterministic synthetic fixtures.
+The repository's recurring CI remains self-contained and uses only deterministic synthetic Cursor
+fixtures plus its generic public key/binding and complete/degraded/idempotence contract. The
+owner-authorized external checkout must resolve to the recorded authorized revision (ARR); no exact
+third-party adapter, digest, policy, SQLite schema/transaction, rollback, or downstream archive is
+copied into recurring CI.
 
 The private differential must cover every discovered session, not a sample. Compare every
 pre-existing public library field, optional own-property, ordering rule, null/omission shape, message
 binding, and tool binding separately from allowlisted additive fields and individually documented
-versioned exceptions. Then pass every normalized session through the pinned unchanged vibe-history
-adapter and its real sync policy/SQLite transaction: import the v0.16 view, apply the candidate view,
-and apply it again. All old keys must retain their original message/tool bindings, no row may be lost
-or duplicated, and the final repeated synchronization must write nothing.
+versioned exceptions. Then, in that owner-authorized external ARR checkout, pass every normalized
+session through the unchanged vibe-history adapter and its real sync policy/SQLite transaction:
+import the v0.16 view, apply the candidate view, and apply it again. All old keys must retain their
+original message/tool bindings, no row may be lost or duplicated, and the final repeated
+synchronization must write nothing. Force one transaction failure and reopen the real external
+database to prove complete rollback before the successful retry.
 
 Do not introduce sampling, record caps, time budgets, or early success exits for this certification.
 It is an infrequent manual release gate, so exhaustive validation takes precedence over runtime: use

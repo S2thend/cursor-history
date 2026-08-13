@@ -25,7 +25,7 @@ Composer-only.
 | `source-read-limits.ts` | v1 defaults, override validation/freezing, scoped counters, safe typed limit details | Content identity, automatic limit escalation |
 | `parser.ts` | UTF-8/BOM validation, unknown-field tolerance, bounded JSONL/SQLite decoding, timestamp/public projection | Heuristic transcoding, unbounded whole-source buffering |
 | `zip-stream.ts` | bounded ZIP32/ZIP64 central reads, path/method validation, STORE/DEFLATE entry streams, CRC/limit checks | Session resolution, manifest trust decisions |
-| `backup.ts` | private archive staging/publication, streamed file hashing, manifest producer metadata, archive orchestration | Session/message identity derived from producer metadata |
+| `backup.ts` | private archive staging/publication, publication commit-point/mode handling, streamed file hashing, manifest producer metadata, archive orchestration | Session/message identity derived from producer metadata; deletion/rollback of a valid post-commit archive |
 | `database/registry.ts` | capability profiles and per-operation provider selection | Store completeness policy |
 | `migrate.ts` | bind/prepare/revalidate/apply exact eligible target | Numeric rediscovery after preparation |
 
@@ -253,14 +253,20 @@ Processing order:
    `hasConversation:true` is `expected`; explicit false or a fully inventoried transcript-only
    UUID with no directory/metadata is `not-expected`; unresolved/conflicting evidence is
    `unknown`, with positive evidence winning.
-4. Attempt Store DB first. A usable partial DB remains selected and transcript never fills it. An
-   absent/empty/source-corrupt expected DB may fall back to transcript but remains partial;
+4. Project known Store occurrences through the workspace payload-I/O scope before hydration. Any
+   omitted DB or transcript makes the scoped Store view partial and is never opened, even when it
+   would otherwise be superseded; selected-UUID cross-workspace opt-in may admit it only with
+   disclosure. Then attempt the permitted Store DB first. A usable complete or partial DB remains
+   the sole Store conversation backbone; when every known relevant Store occurrence is permitted,
+   a coexisting transcript is a Required input retained as `superseded` provenance and never fills DB gaps. An
+   after capable provider selection and DB snapshot/read setup, an absent/empty/source-corrupt or
+   unreadable expected DB may fall back to transcript but remains partial;
    transcript is complete only for `not-expected`; `unknown` remains partial. When conversation
    may exist but none is usable, including a `not-expected` session with an unusable transcript or
    other positive conversation evidence, resolve degraded `store-metadata`. Omission is allowed
    only for explicit `hasConversation:false` with no positive conversation evidence. A divergent
-   DB group is ambiguous and never falls through to transcript. Capability or snapshot failures are
-   fatal, never fallback.
+   DB group is ambiguous and never falls through to transcript. Provider-selection, capability,
+   snapshot-setup, and other database-infrastructure failures are fatal, never fallback.
 5. Hydrate same-tier competitors only when necessary to establish equivalence.
 6. Hash ordered stable identities, roles, directly stored timestamp values, content, relationships,
    tools, code derived from message content, and attachment evidence already losslessly projected
@@ -393,9 +399,11 @@ No parser/formatter independently infers `source`. Complete transcript-only with
 be `global`; transcript used after an expected DB failure is `workspace-fallback`.
 
 cursor-history guarantees the completeness and replacement-safety of this projection and signal;
-it does not persist an arbitrary consumer's database. The unchanged test-only vibe-history adapter
-owns the downstream transaction/rollback, and only that combined compatibility harness asserts
-atomic archive replacement.
+it does not persist an arbitrary consumer's database. Recurring repository CI validates only the
+generic public key/binding and complete/degraded/idempotence contract. The unchanged consumer owns
+its exact adapter, digest, policy, transaction, rollback, and repeat-sync behavior; only
+release-blocking T113 may assert those behaviors after running the owner-authorized external
+checkout at the recorded upstream revision.
 
 Session `createdAt`/`lastUpdatedAt` are independent of preferred rendering. A Composer-backed
 view uses valid stored metadata from its selected Composer contribution. A Store-only view uses
@@ -497,6 +505,26 @@ interface OperationResult<T> {
 }
 ```
 
+Core search snippets carry both display-relative ranges and authoritative complete-content ranges:
+
+```ts
+interface SearchSnippet {
+  messageRole: MessageRole;
+  text: string;
+  matchPositions: [number, number][]; // relative to display text only
+  messageIndex: number; // zero-based complete session message array
+  contentMatchPositions: [number, number][]; // UTF-16 ranges in original content
+}
+```
+
+Case-insensitive matching maps lowercase-expanded positions back to the original JavaScript string.
+The library adapter uses the first `contentMatchPositions` start, finds its complete original source
+line, and selects complete adjacent lines; it never reverse-engineers coordinates from ellipsized
+`text`. The v0.16/v0.17 placeholder/snippet-relative result is locked separately as an affected-
+release baseline for the 0.18.0 corrective exception. JSON export projection maps the core
+one-based row index to a zero-based public-library `index` without mutating the cached core object;
+tagged v0.16/v0.17 exports had no `index` field.
+
 The internal result envelope is not the public-library return shape. CLI can serialize diagnostics;
 library adapters call `onDiagnostic` or throw according to the public contract.
 
@@ -536,6 +564,11 @@ Binding requires exactly one eligible Composer locator and a mutation footprint 
 bound source workspace. A representative selected to read equivalent replicas is not reused for
 mutation; equivalent multiple locators, multiple same-workspace records, and a global record shared
 with another membership are rejected before preparation.
+
+Both numeric and direct-ID selectors first address the complete scoped logical catalog, including
+ambiguous rows. Ambiguity retains its displayed ordinal; selecting it by number or UUID throws the
+same `SessionAmbiguityError` with the same safe UUID/occurrence references. Binding never filters an
+ambiguity first, shifts later indices, reports a false not-found, or reads contested payload.
 
 Before first write, `applySessionMigration` rechecks data-source identity, exact record/UUID,
 fingerprint, source/destination state, and required `readWrite` capability. Any mismatch throws
@@ -615,6 +648,62 @@ is the explicit limit.
   replica equivalence, deduplication, and incremental-sync comparisons.
 - The packed-artifact smoke creates and rereads an archive and asserts the producer equals the exact
   artifact under test.
+
+### Backup publication commit contract
+
+- Publishing the complete staging inode by rename/link to the final path is the commit point.
+- Capture the private stage's lossless bigint device/inode identity. Open the final path without
+  following links, require the same regular-file identity, change mode only through that descriptor,
+  and recheck descriptor and final path afterward. A nonregular path or replacement race fails and
+  never chmods the replacement.
+- Read the verified published mode and return without `chmod` when it equals the requested mode.
+- A mode read, identity, or adjustment failure after commit never unlinks or rolls back the archive
+  inode that crossed the commit point. Throw `BackupPublishedPermissionError` with code
+  `BACKUP_PUBLISHED_PERMISSION_FAILED`, `published: true`, output path,
+  `pathIdentityVerified`, requested mode, and `actualMode` as the last safely observed staged-archive
+  inode mode or `null`, never a possible replacement-path mode. Preserve the filesystem cause.
+- Only `pathIdentityVerified: true` proves the final path still names the staged archive and permits
+  an inspect/correct remedy for that file. A false value makes the path untrusted and requires the
+  user to establish which file, if any, is the completed archive before recovery.
+- The CLI maps this typed failure to a nonzero I/O exit and stderr fatal output. It must not report
+  rollback or recommend a blind `--force` retry. All unpublished private staging paths are still
+  disposed in `finally`.
+- After non-force link publication, clean the private sibling only while its no-follow device/inode
+  identity matches the committed archive. Exhausted or unverifiable cleanup throws
+  `BackupPublishedCleanupError`/`BACKUP_PUBLISHED_CLEANUP_FAILED` with `published: true`, output
+  `pathIdentityVerified`, verified `residuePaths`, and `unverifiedResiduePaths`. Never unlink a
+  replacement occupant or blindly delete, chmod, or force-retry an unverified path.
+
+### Restore admission and destination contract
+
+- Normalize each manifest path and require an exact type/path shape from the finite Composer backup
+  layout before extraction. Every non-directory ZIP entry other than `manifest.json` must be
+  represented exactly once. Reject an empty manifest, no-intact archive, unmanifested file entry,
+  traversal, aliases that resolve to one destination, type/path mismatches, and unsupported files.
+- Stream each entry into private staging, but admit it to the publication set only after both its
+  manifest size and checksum pass. A corrupt entry remains a warning/diagnostic and never receives
+  a destination.
+- Derive all destinations beneath the Cursor user root, then preflight the complete set before the
+  first publication. Reject symlink or other path indirection that can escape confinement. Without
+  force, any existing validated destination rejects the whole restore with zero writes; force does
+  not relax path, integrity, duplicate, or confinement validation.
+- Copy each validated payload into a newly created private same-directory inode. Forced publication
+  uses atomic rename to replace the directory entry without opening/truncating its old inode, so
+  other hard links remain unchanged. Non-forced publication uses an atomic hard-link no-clobber
+  commit and fails if a destination appears after preflight.
+- Canonicalize the explicitly selected user root, inspect descendants without following links, and
+  repeat that inspection immediately before each directory-entry commit. On the supported Node 20
+  runtime there is no portable directory-relative no-follow creation primitive, so this contract
+  handles observed/static leaf links and multiply linked regular-file destinations but does not
+  claim atomic resistance to a hostile concurrent ancestor swap in an owner-controlled tree.
+- A mixed-validity archive may publish its intact subset and report every size or checksum mismatch
+  as skipped. Rollback includes only validated entries actually published before a later failure and
+  records their committed device/inode identity. Rollback touches a destination only while it still
+  matches that identity; a concurrent leaf replacement remains untouched and is reported as a safe
+  manifest-relative residual. Eligible prior bytes are republished through the same private-inode
+  atomic-replacement path. An incomplete
+  rollback throws `RestoreRollbackError`/`RESTORE_ROLLBACK_INCOMPLETE` with the published count and
+  only canonical manifest-relative residual paths, never a false `filesRestored: 0` result.
 
 ## Database capability registry
 

@@ -1,6 +1,6 @@
 # Implementation Plan: Session Integrity and Compatibility Hardening
 
-**Branch**: `016-harden-session-integrity` | **Date**: 2026-08-05 | **Spec**: [spec.md](/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/spec.md)<br>
+**Branch**: `016-harden-session-integrity` | **Date**: 2026-08-13 | **Target release**: `0.18.0` | **Spec**: [spec.md](/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/spec.md)<br>
 **Input**: Feature specification from `/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/spec.md`
 
 ## Summary
@@ -12,9 +12,11 @@ physical replicas, freeze Composer and Store identities before merge rendering, 
 provenance, paths, timestamp origin, and index scope as separate additive contracts. Complete views
 continue to emit legacy `source: "global"` so an unchanged v0.16-compatible consumer performs its
 existing atomic full-session replacement; degraded views emit `workspace-fallback` and cannot
-overwrite complete data. cursor-history owns the complete replacement-safe projection and signal;
-the unchanged vibe-history-compatible harness owns downstream persistence, transaction, and
-rollback.
+overwrite complete data. cursor-history owns the complete replacement-safe projection and signal.
+Recurring repository CI validates only a generic cursor-history-owned downstream key/binding plus
+complete/degraded/idempotence contract. The exact unchanged-consumer adapter, comparison policy,
+digest, persistence transaction, rollback, and repeat synchronization remain a release-blocking T113
+certification from an owner-authorized external checkout at the recorded upstream revision.
 
 The same increment also binds destructive migration to an eligible Composer occurrence, centralizes
 private temporary-file handling, selects SQLite drivers by required capability, bounds decoded
@@ -22,16 +24,21 @@ session retention, restores deterministic timestamp provenance, and applies cons
 parsing to every changed Store/transcript/archive path. It also migrates every fatal JSON object to
 stderr with a documented v0.17 script transition, ships tested public JSDoc/help/examples and a
 versioned compatibility matrix, and makes the exact packed artifact pass all release gates before
-publication.
+publication. The 0.18.0 corrective contract also fixes released public-library search coordinates
+in place: message indices address the complete returned message array, offsets address the complete
+original string in UTF-16 code units, and match/context values are complete source lines. This is a
+locked, documented v0.16/v0.17 exception and changes no identity or non-search session value. JSON
+bulk exports gain a zero-based public-library `index` as additive metadata; released v0.16/v0.17
+exports omitted that key.
 
 ## Technical Context
 
-**Language/Version**: TypeScript 5.9.3 in strict mode; Node.js `>=20.0.0`; ES2022 and NodeNext ESM<br>
+**Language/Version**: TypeScript 5.9.3 in strict mode; Node.js `20.x || 22.x || 23.x || 24.x || 25.x || 26.x` with exact floor 20.0.0; ES2022 and NodeNext ESM<br>
 **Primary Dependencies**: Node standard library, Commander 14, JSZip 3.10, picocolors 1.1, better-sqlite3 v12 (no new runtime dependencies)<br>
 **Storage**: Cursor Composer SQLite databases, Cursor Store `store.db`, Store JSONL transcripts, ZIP backup archives, and local filesystem metadata<br>
 **Testing**: Vitest 4 unit/integration/compatibility/e2e tests, synthetic SQLite and JSZip fixtures,
-built-CLI child-process tests, packed-package smoke tests, fault injection, and locked v0.16/v0.17
-consumer baselines<br>
+built-CLI child-process tests, packed-package smoke tests, fault injection, locked v0.16/v0.17
+cursor-history baselines, and an external owner-authorized T113 consumer certification<br>
 **Target Platform**: Linux, macOS, Windows, and WSL; permission-bit assertions are POSIX-specific
 while uniqueness, system-user-temp/ACL inheritance, cleanup, and typed failures apply on every
 platform; no unverified Windows cross-user-readability guarantee is made<br>
@@ -62,9 +69,9 @@ exception remains.*
 | III. Documentation-Driven | PASS | Every symbol reachable from the exact packed package-root declaration graph receives contract JSDoc, including aliases and re-exports; every command/option receives complete help; README/library examples are executable/typechecked tests; compatibility docs, localized guidance, changelog history, v0.17 warning, and corrective-release migration guidance are package-smoke inputs. |
 | IV. Incremental Delivery | PASS | The design orders executable compatibility baselines before identity changes, then catalog/scope, mutation, security/runtime, and release surfaces. Each stage has an independently runnable regression gate. |
 | V. Defensive Parsing | PASS | Changed parsers accept UTF-8 with optional BOM, ignore unknown fields, reject invalid/mixed encodings through typed partial/fatal outcomes without heuristic transcoding, and enforce JSONL/SQLite/ZIP entry and aggregate bounds. Malformed source data yields explicit partial fidelity where recoverable; infrastructure/capability failures remain typed failures. Discovery is metadata-only and decoded retention is bounded. |
-| VI. Stable Public Contracts and Source Fidelity | PASS | Native UUIDs/IDs are untouched, the tagged v0.16 projector is the identity oracle, synthetic IDs are deterministic and versioned before merge, fidelity is separate from provenance, v0.16/v0.17 transitions are release-blocking, and existing public shapes change additively. Privacy-safe manual testing on maintainer-owned real Cursor live/export/backup data is a recorded release gate. |
+| VI. Stable Public Contracts and Source Fidelity | PASS | Native UUIDs/IDs are untouched, the tagged v0.16 projector is the identity oracle, synthetic IDs are deterministic and versioned before merge, fidelity is separate from provenance, and v0.16/v0.17 transitions are release-blocking. Public shapes remain additive except for individually versioned corrective exceptions with affected-release fixtures, unchanged-field checks, and migration guidance; the only additional 0.18.0 exception is the released public search-coordinate correction. Privacy-safe manual testing on maintainer-owned real Cursor live/export/backup data is a recorded release gate. |
 
-Technical standards also pass: the design keeps strict TypeScript, Node 20+, Vitest, minimal
+Technical standards also pass: the design keeps strict TypeScript, the explicit Node 20/22–26 runtime contract, Vitest, minimal
 dependencies, and core logic independent from CLI formatting.
 
 ## Project Structure
@@ -155,17 +162,16 @@ tests/
 │   ├── io-probe.ts
 │   ├── run-cli.ts
 │   ├── session-integrity-fixtures.ts
-│   └── v016-consumer.ts
+│   └── v016-downstream-contract.ts # generic cursor-history-owned key/binding contract only
 ├── compatibility/
 │   ├── fixtures/
 │   │   ├── v016/
 │   │   │   ├── composer-global-state.vscdb # deterministic synthetic raw-layout fixture
 │   │   │   ├── projector-manifest.json
-│   │   │   ├── vibe-history-consumer-manifest.json # pinned revision/source blobs/schema assumptions
+│   │   │   ├── vibe-history-consumer-manifest.json # external T113 revision/license reference only
 │   │   │   ├── fixture-manifest.json       # logical inventory/generation/hash/privacy record
 │   │   │   ├── workspace-fallback.json
 │   │   │   ├── tagged-output.json
-│   │   │   ├── legacy-consumer-archive.sqlite # pinned vibe-history schema, synthetic data only
 │   │   │   └── merged-store-source.json
 │   │   └── v017/
 │   │       ├── provenance.json
@@ -264,17 +270,18 @@ priority or permit publication without it.
 
 ### 1. Lock released behavior before changing resolution
 
-- Vendor a provenance-recorded, test-only port of the exact cursor-history `v0.16.0` projector at
+- Keep a provenance-recorded, test-only port of the exact cursor-history `v0.16.0` projector at
   commit `e8a7abf8cea3419a9dda911e174a05f82a9b260e`, including global row ordering,
   placeholder/malformed-message behavior, and all tagged workspace parser branches. Fixtures
-  validate the port; they do not define it. Run its output through the minimal unchanged
-  vibe-history identity, digest, parent, and atomic-replacement harness pinned to
-  `S2thend/vibe-history` revision `698701775144f7d8875330e1f8caec9ddfc27744`. Record the copied
-  adapter/type/digest/policy/engine/SQLite-target/schema source paths and Git blob hashes plus the
-  archive schema/migration assumptions in a checked-in manifest, and make conformance tests reject
-  vendored-consumer drift without consulting a live adjacent repository. Execute the pinned
-  replacement statements against a real deterministic SQLite archive, inject a failure between
-  deletion and insertion, reopen it, and accept only complete old-or-new state.
+  validate the port; they do not define it. Run its output in recurring CI only through the generic
+  cursor-history-owned downstream model that freezes public session/message/tool keys and their
+  content/relationship/tool bindings, complete replacement eligibility, degraded non-overwrite,
+  and repeated-sync idempotence. Do not copy, vendor, or emulate the third party's adapter, digest,
+  policy, schema, transaction, rollback, or downstream archive. Record the authorized upstream
+  revision as an external-certification reference. T113 checks out that revision outside the
+  repository with owner authorization and alone executes its exact adapter, comparison/digest,
+  real SQLite import and replacement, forced rollback and reopen, successful retry, and repeated
+  synchronization. Publication remains blocked until both the recurring generic gate and T113 pass.
 - Preserve v0.16's stable Composer discovery order when session `createdAt` values tie. Capture the
   legacy Composer position before replica reconciliation, keep it for merged or ambiguous
   Composer-backed rows, place new-only rows after that legacy tie group, and use UUID ordering only
@@ -285,6 +292,16 @@ priority or permit publication without it.
   early-success exits are forbidden.
 - Lock representative v0.17 complete Store/merged output separately. Its test promises one
   replacement and convergence, not preservation of unstable Store positional IDs.
+- Lock v0.16 and v0.17 public-search baselines proving the released placeholder `messageIndex`,
+  snippet-relative `offset`, and truncated `match`, then require 0.18.0 to correct those existing
+  fields directly. `messageIndex` is zero-based in the complete returned `session.messages` array;
+  `offset` is a zero-based UTF-16 code-unit offset in complete original message content; `match`
+  and requested context are complete original lines. Exercise non-first messages, multiline text,
+  mixed case, astral characters, and lowercase expansion while asserting all identities and
+  non-search fields are unchanged.
+- Treat the public-library `index` added to JSON exports as additive zero-based metadata. Tagged
+  v0.16/v0.17 exports omitted the key, so this is not a released-value correction and must not be
+  described as one-based leakage in a published release.
 - Make both suites part of the ordinary `npm test` command and prove they fail under identity,
   source-fidelity, tool-order, append-only, and idempotency fault injections.
 
@@ -306,14 +323,17 @@ priority or permit publication without it.
   `params`, then name-only only when one side lacks `params`; use one-to-one native occurrence order
   and never match differing present `params`. Standalone `files` never affect compatibility pairing
   or equivalence; project semantically required file evidence into a consumed field or mark partial.
-- Do not add a standalone attachment field that the unchanged compatibility consumer would ignore.
+- Do not add a standalone attachment field that the confirmed unchanged compatibility consumer
+  ignores according to the external T113 contract.
   Losslessly project supported attachment evidence into message `content` (including fenced code)
-  or the tool-call name/status/params/result/error fields consumed by the unchanged adapter; a
+  or the tool-call name/status/params/result/error fields in the frozen public compatibility
+  projection; a
   standalone code-block/files field is insufficient. Mark any unrepresentable raw attachment block
   partial and never dereference an external target merely to parse or compare it.
 - Rebuild parent/branch/leaf relationships from resolved IDs. Keep Composer-only
   `activeBranchBubbleIds` byte-identical; for merged output, populate it with the resolved stable
-  active-message sequence for the unchanged consumer and expose `activeBranchMessageIds` as the
+  active-message sequence required by the frozen public compatibility contract and expose
+  `activeBranchMessageIds` as the
   clearer additive alias.
 
 ### 3. Separate logical catalog discovery from permitted payload hydration
@@ -327,7 +347,15 @@ priority or permit publication without it.
 - Classify Store DB expectation as `expected`, `not-expected`, or `unknown` from DB presence and
   explicit metadata before hydration. Apply the complete/partial/fatal DB/transcript state machine
   before comparing same-tier Store replicas; never call a transcript complete when an expected or
-  unknown DB is absent/unusable.
+  unknown DB is absent/unusable. Establish a capable provider and DB snapshot/read path before
+  permitting transcript fallback. Only expected data/source outcomes—DB absent, empty, or
+  source-corrupt/unreadable—may select a degraded transcript; capability, provider-selection,
+  snapshot-setup, and other infrastructure failures are fatal. A usable DB plus transcript is a Required coexistence scenario:
+  the DB is the sole Store conversation backbone and the transcript is retained only as
+  `superseded` provenance, not rejected as unsupported and not merged heuristically, when all known
+  relevant Store occurrences are permitted. Apply workspace-scope projection first; an omitted DB
+  or transcript occurrence makes the Store view explicitly partial and must not be opened unless
+  selected-UUID cross-workspace loading is authorized and disclosed.
 - Collapse equivalent replicas under equivalence contract v1 while retaining occurrence
   provenance. Represent divergent groups as one ambiguous summary; never hydrate or resolve them
   through a normal read path.
@@ -388,7 +416,23 @@ priority or permit publication without it.
   bounded filesystem ranges and streams: validate ZIP32/ZIP64 central records and safe normalized
   entry names, support the existing backup contract's STORE and DEFLATE methods, reject encryption
   or unknown methods, stream CRC/checksum verification and extraction, and never expose partially
-  materialized archive content as valid. Keep JSZip only where its streaming creation path can
+  materialized archive content as valid. Admit a restore entry to the publication set only after
+  both its manifest size and checksum pass; mixed-validity archives may publish the intact subset
+  with size-or-checksum warnings, but skipped destinations remain untouched. Reject empty/no-intact
+  archives and every non-directory ZIP entry not represented exactly once by the manifest.
+  Canonicalize the selected Cursor user root, reject observed descendant links/indirection,
+  preflight all destinations, and repeat the path-chain validation before each publication. Copy
+  each admitted entry into a private same-directory inode: force uses atomic directory-entry
+  replacement without opening or truncating an existing hard-linked inode, while non-force uses an
+  atomic no-clobber commit. After link publication, remove only a private sibling whose lossless
+  device/inode identity still matches the committed inode; report verified and unverified temporary
+  residue separately and never unlink a replacement pathname occupant. Bind each rollback action to
+  the device/inode captured at that entry's publication commit. If a leaf was concurrently replaced,
+  leave it untouched and report its safe manifest-relative path through
+  `RESTORE_ROLLBACK_INCOMPLETE`; otherwise republish prior bytes through the same private-inode path.
+  Record the portable Node-20 limitation: static leaf links and multiply linked regular-file
+  destinations are handled, but this is not an atomic guarantee against a hostile concurrent
+  ancestor swap in an owner-controlled destination tree. Keep JSZip only where its streaming creation path can
   consume file streams and emit a file stream without aggregate buffers; it is not the trusted
   extraction/preflight boundary.
 - Derive session creation/update times only from valid stored Composer metadata, then Store DB/meta
@@ -406,7 +450,20 @@ priority or permit publication without it.
   `SIGKILL` and power loss cannot guarantee immediate cleanup.
 - Stage final archives privately and publish only a complete archive. New archives are `0600` by
   default; force-overwrite never broadens existing permissions; broader access requires `--shared`
-  or the additive library option.
+  or the additive library option. Rename/link to the final path is the publication commit point. A
+  later mode-read, identity, or mode-adjustment failure returns typed
+  `BACKUP_PUBLISHED_PERMISSION_FAILED` with `published: true`, `pathIdentityVerified`, requested
+  mode, and the last safely observed archive-inode mode or `null`, and makes the CLI exit nonzero
+  without rollback or a blind `--force` recommendation. Only a true identity flag proves the output
+  path still names the staged archive and permits inspect/correct advice; otherwise the path is
+  untrusted and no replacement-path mode is reported. Open the final path without following links, compare lossless bigint
+  device/inode identity with the private staging inode, chmod only the bound descriptor, and
+  revalidate descriptor and path so replacement races cannot redirect permission changes. Skip
+  `chmod` when the verified published mode already matches. For non-force link publication, clean
+  the remaining private sibling only after its device/inode is verified against the published
+  archive. If cleanup remains incomplete, throw distinct `BACKUP_PUBLISHED_CLEANUP_FAILED` with
+  `published: true`, output-path `pathIdentityVerified`, verified `residuePaths`, and
+  `unverifiedResiduePaths`; never blindly delete, chmod, or force-retry an unverified path.
 - Select a SQLite provider per requested `read`, `readWrite`, and `onlineBackup` capabilities.
   Automatic mode falls back; an explicit incapable choice yields one actionable typed error.
   Preserve synchronous `setDriver(): void` by recording preference synchronously and validating it
@@ -422,6 +479,10 @@ priority or permit publication without it.
 - Preserve library array/string return shapes. Deliver continuation diagnostics through a callback;
   without one, a public operation that cannot safely continue throws a typed error. Existing CLI
   JSON envelopes may add a `diagnostics` member.
+- Correct released public search coordinates under one versioned 0.18.0 exception: expose the
+  complete-array zero-based `messageIndex`, complete-content UTF-16 `offset`, and complete original
+  match/context lines. Add a zero-based `index` to library JSON exports as new metadata; do not
+  characterize this addition as a released one-based correction.
 - Freeze pathless compatibility as library `workspace: "unknown"` versus core/CLI JSON
   `workspacePath: null`. Keep existing human-readable fatal output on stderr and migrate every fatal
   JSON object to stderr. For each locked fixture,
@@ -459,15 +520,17 @@ priority or permit publication without it.
 
 | Area | Required evidence |
 |------|-------------------|
-| v0.16 compatibility | Native and missing Composer IDs, old tool ordinals, Store insertions at start/middle, both preferred sources, enrichment/parent/tool changes, supported attachment evidence projected into message content or consumed tool-call fields, ignored standalone attachment/code-block/tool-file fields, collisions, atomic replacement, third-sync no-op |
+| v0.16 compatibility | Recurring CI: native and missing Composer IDs, old tool ordinals, Store insertions at start/middle, both preferred sources, enrichment/parent/tool changes, supported attachment evidence projected into public compatibility fields, ignored standalone attachment/code-block/tool-file fields, collisions, generic complete/degraded/idempotence. External T113 only: exact unchanged adapter/digest/policy, real SQLite replacement/rollback/reopen, and repeat-sync no-op at the recorded authorized upstream revision |
 | v0.17 convergence | Locked complete Store/merged baselines converge through one full replacement, produce no duplicate logical content, preserve native Composer IDs, then no-op; degraded transition explicitly excluded |
+| Public search coordinates | Tagged v0.16/v0.17 baselines plus the 0.18.0 correction: complete-array message index, complete-content UTF-16 offset, complete source line/context; non-first/multiline/mixed-case/astral/lowercase-expansion cases; identities and non-search fields unchanged |
+| Public JSON export | Tagged v0.16/v0.17 absence plus additive 0.18.0 zero-based library `index`; single and bulk exports agree without mutating the resolved source object |
 | Workspace/I/O | Conflicting A/B global and scoped order; exact and unique-suffix matches; ambiguity before payload open; low-level adapter events plus poison canaries prove zero off-scope payload reads; opt-in disclosure; live/backup/custom paths |
 | Replicas | Composer global-primary/workspace-fallback arbitration; equivalent and divergent same-tier occurrences; complementary cross-role merge; every Store DB expectation/availability/transcript state; stable set-like array order; unsupported raw attachments force partial fidelity; one logical result/diagnostic per UUID |
 | Migration | Scoped numeric dry-run/apply same bound occurrence; direct/unfiltered compatibility for eligible Composer targets; equivalent multi-locator/shared-membership, divergent, Store-only, and merged rejection before writes; revalidation race |
-| Security | Real POSIX `umask 000` mode checks and owner-only containment; Windows per-user temp/inherited-ACL, uniqueness, cleanup, and typed-failure checks without an unverified cross-user claim; success/failure/close/cleanup injection, concurrent private directories, graceful-signal cleanup, SIGKILL residue containment and next-run stale recovery, final archive permissions |
+| Security | Real POSIX `umask 000` mode checks and owner-only containment; Windows per-user temp/inherited-ACL, uniqueness, cleanup, and typed-failure checks without an unverified cross-user claim; success/failure/close/cleanup injection, concurrent private directories, graceful-signal cleanup, SIGKILL residue containment and next-run stale recovery; final archive no-op/success, identity-bound permission handling, and `BACKUP_PUBLISHED_CLEANUP_FAILED` with verified/unverified residue sets; restore empty/unmanifested/mixed archives, non-force no-clobber races, forced hard-link replacement, identity-bound publication cleanup, concurrent leaf replacement, and complete/incomplete rollback |
 | Defensive parsing | UTF-8 and leading BOM, ignored unknown fields, typed invalid/mixed-encoding outcomes, below/equal/above every Source Read Limits v1 field, invalid/per-operation override behavior, JSONL and SQLite counter resets, ZIP compressed/entry/count/aggregate/ratio rejection, no automatic raise, and bounded cancellation cleanup |
-| SQLite | Importable `node:sqlite` without backup, automatic fallback, explicit-driver error, config propagation, no false partial Store result |
-| Runtime | Node 20.0.0 project-compatibility floor (upstream EOL); 22.15.1 and 22.16.0 capability boundary; current 24.x LTS; latest 26.x Current release; deterministic simulated capability profiles |
+| SQLite | Importable `node:sqlite` without backup, automatic capable-provider selection, explicit-driver error, capability/snapshot infrastructure fatality before Store transcript fallback, config propagation, no false partial Store result |
+| Runtime | Source tooling on Node 24.x because Vite 7 requires Node 20.19+; the same packed candidate installed as a production dependency without repository devDependencies on Node 20.0.0 project floor, 22.15.1/22.16.0 and 23.7.0/23.8.0 capability boundaries, 24.x, 25.x, and 26.x; installed-package smoke does not run repository development scripts but does not claim native dependency installation needs no compiler/toolchain; Node 21 explicitly excluded; 24 LTS/26 Current labels are as of the v0.18.0 release date; deterministic simulated capability profiles |
 | Memory/lifecycle | Get-before-list and list-before-get equivalence, scope conflict before I/O, in-flight coalescing, rejected retry, `N`/`2N` within `C+A`, bulk `C=0`, disposal |
 | Release | Typecheck/lint/test/build failures, zero tests, skip, timeout, or cancellation block publish; exact tarball ESM/CJS/CLI/type/JSDoc/help/example/schema smoke and checksum identity; fatal JSON is on stderr with locked object/exit compatibility and migration warning; producer version matches the running artifact; privacy-safe recorded manual checks on maintainer-owned real Cursor live/export/backup data |
 
@@ -487,12 +550,15 @@ release gate; implementation capability discovery cannot shrink that matrix.
 | FR-029–FR-040: workspace matching, payload boundary, paths, scoped indices and additive summaries | `research.md` §§7, 9–10; catalog/scope/library/CLI contracts | Quickstart §§4–5 |
 | FR-041–FR-045: source roles, equivalent/divergent replicas, diagnostics | `research.md` §8; replica and ambiguous-summary models | Quickstart §6 |
 | FR-046–FR-050: bound destructive migration | `research.md` §11; migration model/internal/library/CLI contracts | Quickstart §7 |
-| FR-051–FR-055: private temp data and final archives | `research.md` §14; private-temp/backup models | Quickstart §8 |
+| FR-051–FR-055: private temp data, final archives, and publication commit point | `research.md` §14; private-temp/backup models and internal/library contracts | Quickstart §8 |
 | FR-056–FR-060: capability-aware SQLite and Node support | `research.md` §§15–16; database capability contract | Quickstart §9 |
 | FR-061–FR-065: bounded, order-independent read contexts | `research.md` §12; read-context model/internal contract | Quickstart §10 |
 | FR-066–FR-075: shipped docs/JSDoc/examples, producer metadata, release gates, compatibility/fault evidence | `research.md` §§14, 16–18; package/library/CLI contracts | Quickstart §§12–14 |
 | FR-076–FR-078: tool rendering and locked v0.16/v0.17 regressions | merge/render contracts and compatibility oracle | Quickstart §§2–3, 11–12 |
 | FR-079–FR-080: encoding forward compatibility and bounded source parsing | `research.md` §19; parser/internal contracts | Quickstart §12 |
+| FR-081: corrected public search coordinates | `research.md` §21; public-library/internal-resolution contracts | Quickstart §11 |
+| FR-082: integrity-gated restore publication | `research.md` §22; backup/library/CLI contracts | Quickstart §8 |
+| SC-018–SC-020: search-coordinate, published-archive, and restore-integrity fault evidence | `research.md` §§14, 21–22; library/internal/CLI contracts | Quickstart §§8, 11 |
 
 ## Complexity Tracking
 

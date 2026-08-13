@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.18.0] - 2026-08-13
 
 This is the corrective release following v0.17.0. Its canonical compatibility and migration
 contract is [docs/compatibility.md](./docs/compatibility.md).
@@ -18,9 +18,11 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
 - **Bounded source reads**: Added deterministic UTF-8/BOM handling and the inclusive
   `source-read-limits/v1` policy for JSONL, SQLite, and ZIP inputs, with validated per-operation CLI
   and library overrides.
-- **Release compatibility gates**: Added locked v0.16/v0.17 fixtures, unchanged-consumer
-  synchronization checks, rollback/idempotence checks, exact-package validation, and a fail-closed
-  publish path.
+- **Release compatibility gates**: Added locked v0.16/v0.17 fixtures and a recurring
+  cursor-history-owned key/binding, complete/degraded replacement, and idempotence contract. Exact
+  unchanged-consumer adapter, digest, SQLite transaction, rollback/reopen/retry, and repeated-sync
+  certification remains an owner-authorized external pre-release gate. Exact-package validation and
+  a fail-closed publish path prevent unverified bytes from being released.
 
 ### Changed
 
@@ -35,11 +37,39 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
   `--shared`/`sharedPermissions`, and overwrite preserves the existing mode by default. Windows
   uses the system per-user temporary location and inherited ACLs without claiming independently
   verified cross-user isolation.
+- **Backup publication commit point**: Rename/link to the final path commits the valid archive. A
+  later mode/identity failure returns typed `BACKUP_PUBLISHED_PERMISSION_FAILED` details with
+  `published: true`, `pathIdentityVerified`, requested mode, and the last safely observed archive
+  mode or `null`. Only a verified path may receive manual-mode guidance; an unverified/replaced path
+  is explicitly untrusted. CLI exits nonzero without claiming rollback or recommending blind
+  `--force`. Matching modes skip redundant `chmod`; descriptor binding prevents a replacement from
+  receiving the permission change. A committed non-force archive whose private sibling cannot be
+  cleaned safely returns distinct `BACKUP_PUBLISHED_CLEANUP_FAILED` with verified and unverified
+  residue paths; replacement occupants are never deleted or chmodded and unverified paths must not
+  be handled blindly.
 - **Fatal JSON stream migration**: Every fatal `--json` object now goes to stderr and leaves stdout
   empty. Successful output remains on stdout and nonfatal diagnostics remain in successful result
   envelopes. For the same locked v0.17 failure fixture, existing error field names, types, values,
   and exit-category meaning are preserved; documented safe fields may be added. Scripts that parsed
   fatal JSON from stdout must parse stderr after a nonzero exit.
+- **Public search-coordinate correction**: Existing public-library `messageIndex`, `offset`,
+  `match`, and context fields now address the complete returned message array, complete original
+  content in zero-based UTF-16 code units, and complete original source lines. v0.16/v0.17 returned
+  placeholder or snippet-relative values; consumers that persisted those coordinates must
+  recompute them. Locked affected-release fixtures prove identities and non-search session values
+  do not change.
+- **Public JSON export index**: Library JSON exports now include an additive zero-based `index`
+  consistent with library read selectors. Tagged v0.16/v0.17 exports omitted this field; this is
+  not a migration from a released one-based export value.
+- **Restore-warning correction**: v0.16/v0.17 could report an integrity warning and still restore
+  the invalid entry. v0.18.0 treats size and checksum validation as the publication gate:
+  `filesRestored` counts only intact published entries, warnings identify skipped paths, and callers
+  must no longer assume a warned file was written.
+- **Explicit Node runtime range**: The package now advertises Node 20.x and 22.x–26.x rather than
+  the overbroad `>=20` range. Node 20.0.0 remains the exact compatibility floor; Node 21 is excluded
+  because the packaged native SQLite fallback does not support it. Source checks run on a
+  development-tool-compatible Node 24 runtime, while the same checksum-addressed tarball is tested
+  separately on every advertised major and the 22.x/23.x SQLite backup capability boundaries.
 - **Versioned v0.16 fallback corrections**: Three source-absent scalar fallbacks are intentionally
   corrected: inferred message timestamps become deterministic with provenance, missing Composer
   update times no longer use read time, and pathless `(workspace: <directory-id>)` placeholders
@@ -64,19 +94,36 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
   preserved. Partial/degraded data never overwrites a complete archive.
 - **Workspace-scoped integrity**: Follow-up reads and migration targets bind the scoped UUID and
   eligible physical occurrence. Returned content, session ID, workspace path, dry-run, and mutation
-  cannot drift to an unfiltered row.
+  cannot drift to an unfiltered row. Numeric and UUID migration selectors use the same complete
+  scoped logical catalog, so ambiguous rows retain their displayed index and produce the same typed
+  zero-write refusal instead of shifting later targets.
 - **Replica and memory behavior**: Equivalent physical replicas reconcile once; divergent replicas
   produce a typed ambiguity. Read contexts have explicit immutable scope and bounded completed-value
   retention so search and bulk export need not pin the decoded corpus.
+- **Store DB/transcript coexistence**: A usable Store database plus transcript is a supported
+  Required scenario when all known relevant occurrences are permitted. The database remains the
+  sole Store conversation backbone and the transcript is retained as superseded provenance rather
+  than rejected or heuristically merged. A known off-scope representation is never opened and makes
+  a workspace-scoped view explicitly partial.
 - **SQLite capability selection**: Driver selection checks the capability required by each
   operation. Automatic mode can fall back to a capable provider, while an explicitly forced
   incapable driver fails with an actionable typed error rather than silently degrading Store data.
+- **Restore integrity and confinement**: Restore now publishes only entries whose manifest size and
+  checksum pass, rejects empty inventories and unmanifested file payloads, skips corrupt entries
+  without touching their destinations, rejects unsafe type/path combinations and duplicate targets,
+  and preflights every non-forced collision. Non-force publication is atomic no-clobber; forced
+  replacement and rollback use new same-directory inodes instead of writing through hard links.
+  Rollback is bound to the device/inode recorded at publication; a concurrent leaf replacement is
+  untouched and reported as residual. Incomplete rollback is a typed failure with safe residual
+  entries. Destinations should remain
+  owner-controlled because Node 20 has no portable directory-relative no-follow primitive against
+  a hostile concurrent ancestor swap.
 
 ### Upgrade warning and migration
 
-- Incremental library consumers that persist cursor-history output should keep v0.16 pinned or
-  validate and wait for this corrective release before adopting v0.17 Store/merge output. Back up
-  the downstream archive before the first corrective sync.
+- Incremental library consumers that persist cursor-history output should keep v0.16 pinned until
+  they can validate the 0.18.0 corrective transition. Back up the downstream archive before the
+  first corrective sync.
 - The no-consumer-change guarantee is scoped to confirmed v0.16 Composer-only archives becoming
   complete Composer-backed merged sessions. It does not claim preservation of every v0.17
   Store-only or cross-format synthetic ID.
@@ -86,6 +133,9 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
 - Numeric indices remain presentation addresses: CLI/core and library migration selectors are
   one-based, while public-library reads are zero-based. Reuse native session IDs, not numbers, across
   invocations or scopes.
+- Recompute any persisted v0.16/v0.17 public search `messageIndex`, `offset`, `match`, or context
+  values after upgrading; 0.18.0 corrects their coordinate space directly. Treat the newly emitted
+  zero-based library JSON export `index` as additive metadata.
 
 ## [0.17.0] - 2026-08-03
 
@@ -106,8 +156,8 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
   transitional merged `source` values may not trigger an existing consumer's replacement policy,
   and timestamp-watermark ingestion can miss valid middle insertions or Store fallback times.
 - Existing v0.16 Composer-only archives should remain pinned to v0.16, or consumers should wait for
-  the corrective release and its unchanged-consumer regression suite. Back up downstream data before
-  testing an upgrade.
+  the corrective release after its owner-authorized external unchanged-consumer certification has
+  passed. Back up downstream data before testing an upgrade.
 - Some command-owned fatal `--json` paths in v0.17 write their error object to stdout. The corrective
   release intentionally normalizes all fatal JSON to stderr while preserving the locked fields and
   exit-category semantics. Automation must account for that documented stream migration.

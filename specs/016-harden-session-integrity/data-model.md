@@ -261,9 +261,10 @@ Equivalence v1 participates:
 
 It excludes physical paths/locators, discovery order, `timestampSource` and all other
 provenance-only annotations, workspace match, and inferred/session-fallback/epoch display timestamp
-values. It also excludes standalone cursor-history `codeBlocks` and tool `files` ignored by the
-unchanged consumer; semantically required evidence from either must already be projected into a
-consumed field or the contribution is partial. Thus changing only provenance annotations or ignored
+values. It also excludes standalone cursor-history `codeBlocks` and tool `files` outside the frozen
+generic downstream compatibility projection; semantically required evidence from either must
+already be projected into a covered public field or the contribution is partial. Thus changing only
+provenance annotations or ignored
 standalone values is equivalent, but changing an actually stored timestamp or consumed value is
 divergent. Equivalent candidates select a deterministic representative and retain all
 source-instance provenance. Divergent candidates have no selected payload.
@@ -324,11 +325,14 @@ read. The classification is deterministic and uses this precedence:
 Evidence for `expected` wins conflicting negative evidence. Filesystem modification time, message
 content, read time, and a failed payload open never participate in expectation classification.
 
-The selected Store representation follows this exhaustive table:
+The selected Store representation follows this exhaustive table. Transcript fallback rows apply
+only after capable provider selection and DB snapshot/read setup succeeds; capability,
+provider-selection, snapshot-setup, or other infrastructure failures take the fatal final row:
 
 | Expectation | DB outcome | Transcript outcome | Selected representation | Resolution consequence |
 |-------------|------------|--------------------|-------------------------|------------------------|
-| any | complete with recoverable conversation | any | `store-db` | Complete on the Store side; transcript is `superseded`. |
+| any | complete with recoverable conversation | any, with all known relevant Store occurrences permitted by scope | `store-db` | Complete on the Store side; transcript is `superseded`. |
+| any | complete with recoverable conversation | a known DB or transcript occurrence omitted by scope | `store-db` when the DB is permitted; otherwise the permitted fallback | Partial with omitted-source reason; the off-scope occurrence is never opened even if it would otherwise be `superseded`. |
 | any | partial with recoverable conversation | any | `store-db` | Partial with `source-partial`; transcript never fills DB gaps. |
 | `expected` | absent, empty, or source-corrupt/unreadable | complete transcript | `store-transcript` | Partial with `expected-store-db-unavailable`. |
 | `expected` | absent, empty, or source-corrupt/unreadable | partial transcript | `store-transcript` | Partial with unavailability and `source-partial`. |
@@ -674,9 +678,11 @@ Compatibility aliases:
   `lastUpdatedAt`; their additive source fields carry the provenance above.
 - Complete/replacement-safe maps to `source: 'global'`; any degraded/unsafe view maps to
   `source: 'workspace-fallback'`.
-- cursor-history's ownership ends at this complete replacement-safe projection and signal. The
-  unchanged compatibility consumer owns its persistence transaction and rollback; only the
-  combined regression harness claims atomic downstream replacement.
+- cursor-history's ownership ends at this complete replacement-safe projection and signal. Recurring
+  CI models only its public key/binding and complete/degraded/idempotence contract. The unchanged
+  compatibility consumer owns its exact adapter, digest, policy, persistence transaction, and
+  rollback; only owner-authorized external T113 at the recorded upstream revision claims exact
+  downstream replacement and repeated-sync behavior.
 - Deprecated v0.17 literals remain accepted by declarations during transition but are not emitted by
 new resolution.
 
@@ -749,8 +755,35 @@ interface IndexAddress {
 
 - Core/CLI read indices are one-based.
 - Public library list/get/show/export read indices remain zero-based.
+- Public-library JSON exports add the same zero-based `index`. Tagged v0.16/v0.17 exports omitted
+  that property, so it is additive metadata rather than a released one-based-value correction.
 - Public migration configuration retains its documented one-based numeric selectors.
 - The bound address cannot be reused with another context, data path, backup, or workspace.
+
+### 13.1 PublicSearchResultProjection
+
+```ts
+interface PublicSearchResultProjection {
+  session: Session;
+  match: string; // complete original source line
+  messageIndex: number; // zero-based in session.messages
+  offset?: number; // zero-based UTF-16 code units in complete message content
+  contextBefore?: string[]; // complete adjacent source lines
+  contextAfter?: string[]; // complete adjacent source lines
+}
+```
+
+Rules:
+
+- Locate the first case-insensitive match against complete original message content before any
+  snippet truncation or ellipsis is introduced.
+- Map lowercase-expansion positions back to the original string; the exposed offset always indexes
+  the returned message's original JavaScript string in UTF-16 code units.
+- `match` contains the full original line that contains `offset`. Context arrays contain full
+  neighboring lines and at most the requested line count on each side.
+- The 0.18.0 values directly replace the released v0.16/v0.17 placeholder/snippet-relative values
+  under one versioned corrective exception. Session/message/tool identities and every non-search
+  session field remain unchanged.
 
 ## 14. SessionDiagnostic and typed errors
 
@@ -807,6 +840,32 @@ Context errors additionally use `READ_CONTEXT_SOURCE_MISMATCH`,
 `READ_CONTEXT_SCOPE_MISMATCH`, `READ_CONTEXT_OPTIONS_MISMATCH`, and `READ_CONTEXT_DISPOSED`;
 migration revalidation uses
 `MIGRATION_TARGET_CHANGED`; driver exhaustion uses `NO_CAPABLE_DATABASE_DRIVER`.
+Post-publication archive mode failure uses `BACKUP_PUBLISHED_PERMISSION_FAILED` and safe details:
+
+```ts
+interface BackupPublishedPermissionErrorDetails {
+  published: true;
+  outputPath: string;
+  pathIdentityVerified: boolean;
+  requestedMode: number;
+  actualMode: number | null; // null only when post-commit mode observation failed
+  remedy: string;
+}
+
+interface BackupPublishedCleanupErrorDetails {
+  published: true;
+  outputPath: string;
+  pathIdentityVerified: boolean;
+  residueCount: number;
+  residuePaths: string[]; // verified to remain bound to the published archive inode
+  unverifiedResidueCount: number;
+  unverifiedResiduePaths: string[]; // identity unknown; never delete/chmod blindly
+  remedy: string;
+}
+```
+
+Both post-commit errors mean publication committed, not that it rolled back. Only
+`pathIdentityVerified: true` proves that `outputPath` still names the completed archive.
 
 ## 15. SessionReadContext (internal with public factory)
 
@@ -869,6 +928,7 @@ State transition:
 
 ```text
 selector + immutable scope
+  -> resolve numeric or direct-ID selector in the complete scoped logical catalog, including ambiguity rows
   -> bind logical row and exact Composer occurrence
   -> reject multiple physical targets, shared mutation footprint, ambiguity, Store-only, or merged
   -> validate source, destination, driver capabilities, fingerprint
@@ -882,6 +942,9 @@ equivalence may choose a deterministic representative but never authorizes mutat
 several equivalent locators. A global Composer record shared by another workspace membership is not
 confined to the requested mutation scope and is likewise rejected. A diagnostic occurrence
 reference cannot be converted to a `BoundMigrationTarget`.
+An ambiguous row never becomes a `BoundMigrationTarget`: its one-based numeric position remains
+occupied, and numeric/UUID selection returns the same typed ambiguity before destination preflight
+or any write.
 
 ## 17. PrivateTempWorkspace and BackupSnapshot (internal)
 
@@ -908,6 +971,37 @@ interface BackupSnapshot {
   database?: Database;
   state: 'created' | 'open' | 'closed' | 'cleaned' | 'residue';
 }
+
+interface PublishedBackupArchive {
+  outputPath: string;
+  identity: { device: bigint; inode: bigint };
+  pathIdentityVerified: boolean;
+  requestedMode: number;
+  actualMode: number | null; // last safely observed archive-inode mode, never replacement mode
+  state:
+    | 'staged'
+    | 'published'
+    | 'published-permission-failed'
+    | 'published-cleanup-failed';
+  residuePaths?: string[];
+  unverifiedResiduePaths?: string[];
+}
+
+interface StagedRestoreEntry {
+  manifestPath: string;
+  temporaryPath: string;
+  integrity: 'size-and-checksum-valid';
+  destinationPath?: string; // assigned only after archive-wide preflight permits restore
+}
+
+interface PublishedRestoreEntry {
+  manifestPath: string;
+  destinationPath: string;
+  publishedIdentity: { device: bigint; inode: bigint };
+  previousPrivatePath?: string;
+  previousMode?: number;
+  state: 'published' | 'rolled-back' | 'rollback-residual';
+}
 ```
 
 Rules:
@@ -931,6 +1025,54 @@ Rules:
 - Newly created final archives are `0600` unless explicit shared permission was requested; default
   overwrite preserves the existing mode, explicit POSIX sharing uses `0666 & ~currentUmask`, and no
   path changes a parent directory or the process umask.
+- Rename/link to `outputPath` transitions `staged -> published` and is the commit point. Every
+  `BACKUP_PUBLISHED_PERMISSION_FAILED` therefore reports `published: true`; the operation does not
+  delete or roll back the archive inode that crossed that point.
+- Permission work opens the final path without following links, requires a regular file whose
+  lossless bigint device/inode identity equals the private staging identity, operates only through
+  that bound descriptor, and rechecks descriptor plus final path. A replacement/nonregular target
+  fails without chmodding the replacement.
+- If the published inode already has `requestedMode`, the operation succeeds without `chmod`.
+  Otherwise a failed mode read/identity check/adjustment transitions to
+  `published-permission-failed`, removes unpublished staging residue, and raises details with
+  `published: true`, `pathIdentityVerified`, and the last safely observed archive-inode mode or
+  `null`. Only a true identity flag proves `outputPath` still names the staged archive and permits
+  inspect/correct advice; a false flag makes the path untrusted and `actualMode` never describes its
+  possible replacement. CLI exits nonzero and never recommends a blind force overwrite.
+- After non-force hard-link publication, sibling cleanup operates only while a no-follow identity
+  check proves that the private name still refers to the published archive device/inode. A changed
+  pathname occupant is never deleted. Exhausted or unverifiable cleanup transitions to
+  `published-cleanup-failed` and throws `BACKUP_PUBLISHED_CLEANUP_FAILED` with
+  `pathIdentityVerified`, verified `residuePaths`, and `unverifiedResiduePaths`. The error never
+  advises blind deletion, chmod, or force retry.
+- A restore entry enters the staged publication collection only after its streamed bytes match both
+  the manifest size and checksum. Invalid entries remain diagnostics only and never receive a
+  destination path.
+- Manifest file type and normalized path must agree with the finite backup layout. Every
+  non-directory ZIP entry other than the manifest must appear exactly once in the manifest; an
+  empty/no-intact archive or unmanifested file entry is rejected before destination mutation. All
+  destinations, duplicate aliases, existing collisions, and ancestor confinement are preflighted
+  before the first write; symlinks or other path indirection that could escape the Cursor user root
+  fail closed.
+- The explicitly selected user root is canonicalized, descendants are inspected without following
+  links, and that chain is checked again before each publication. Every admitted payload is first
+  copied into a private same-directory inode. Force commits by atomic rename, replacing only the
+  directory entry and leaving other hard links to the old inode unchanged; non-force commits by an
+  atomic no-clobber link. Static leaf links are rejected. This is observed-path confinement, not a
+  claim of atomic protection against a hostile concurrent ancestor swap in an owner-controlled tree
+  on Node 20, which lacks a portable directory-relative no-follow creation primitive.
+- Non-force restore publication cleans its private sibling only while the sibling's no-follow
+  device/inode identity matches the committed inode. A concurrently replaced sibling is untouched;
+  an unverifiable name is reported as unverified temporary residue rather than guessed removable.
+- A mixed-validity restore may publish intact entries with warnings. Skipped corrupt destinations
+  are not opened, copied, truncated, backed up, or included in rollback, even when force is enabled.
+- Rollback tracks only validated entries actually published during the current operation and binds
+  each action to that entry's recorded published device/inode. It changes a destination only after
+  verifying that identity; a concurrently replaced leaf remains untouched and becomes a safe
+  manifest-relative residual. Eligible prior bytes are republished through the same private-inode
+  atomic-replacement path. An incomplete rollback throws `RESTORE_ROLLBACK_INCOMPLETE` with the
+  published count and a canonical set of safe manifest-relative residual paths; it never returns a
+  false `filesRestored: 0` result.
 
 ## 18. BackupManifest and source parsing policy
 
@@ -1086,3 +1228,7 @@ Selection rules:
     source bound produce deterministic typed outcomes without silent truncation or guessed text.
 13. Backup producer metadata reports the creating artifact but never participates in identity or
     incremental equality.
+14. Public search coordinates address complete original returned data in UTF-16 units; display
+    snippets never define them.
+15. Publication is irreversible at rename/link: a later permission failure remains an explicit
+    typed partial failure with the valid archive preserved.
