@@ -5,7 +5,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Command } from 'commander';
-import { SessionAmbiguityError, SessionNotFoundError } from '../../src/lib/errors.js';
+import {
+  BackupPublishedPermissionError,
+  SessionAmbiguityError,
+  SessionNotFoundError,
+} from '../../src/lib/errors.js';
 
 // --- Mock functions ---
 const mockListSessions = vi.fn();
@@ -31,6 +35,7 @@ const mockFormatCursorNotFound = vi.fn(() => 'Cursor not found');
 const mockFilterMessages = vi.fn((messages: unknown[]) => messages);
 const mockValidateMessageTypes = vi.fn(() => []);
 const mockExistsSync = vi.fn(() => true);
+const mockExpandPath = vi.fn((path: string) => path);
 const mockReleaseSession = vi.fn();
 const mockDisposeReadContext = vi.fn(async () => undefined);
 const mockReadContext = {
@@ -92,7 +97,7 @@ vi.mock('../../src/cli/formatters/index.js', () => ({
 }));
 
 vi.mock('../../src/lib/platform.js', () => ({
-  expandPath: (p: string) => p,
+  expandPath: (p: string) => mockExpandPath(p),
   contractPath: (p: string) => p,
   getCursorDataPath: () => '/mock/cursor/data',
   getStoreStackRoot: () => '/mock/cursor/store',
@@ -142,6 +147,7 @@ let exitSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockExpandPath.mockImplementation((path: string) => path);
   mockListSessionSummaries.mockImplementation((...args: unknown[]) => mockListSessions(...args));
   mockFormatOperationDiagnostics.mockReturnValue('');
   mockFormatExportSuccess.mockReturnValue('Export done');
@@ -1675,6 +1681,40 @@ describe('migrate command', () => {
       })
     );
   });
+
+  it('expands a literal home-relative custom data path before migration resolution', async () => {
+    mockExpandPath.mockImplementation((path: string) =>
+      path === '~/Cursor/User/workspaceStorage' ? '/home/test/Cursor/User/workspaceStorage' : path
+    );
+    mockMigrateWorkspace.mockResolvedValue({
+      success: true,
+      source: '/source',
+      destination: '/dest',
+      mode: 'move',
+      totalSessions: 0,
+      successCount: 0,
+      failureCount: 0,
+      results: [],
+      dryRun: true,
+    });
+
+    const program = createProgram();
+    registerMigrateCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--data-path',
+      '~/Cursor/User/workspaceStorage',
+      'migrate',
+      '/source',
+      '/dest',
+      '--dry-run',
+    ]);
+
+    expect(mockMigrateWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ dataPath: '/home/test/Cursor/User/workspaceStorage' })
+    );
+  });
 });
 
 // ==================== MIGRATE-SESSION COMMAND ====================
@@ -1784,6 +1824,30 @@ describe('migrate-session command', () => {
     });
     expect(applyOptions.selectors).toEqual(dryRunOptions.selectors);
     expect(applyOptions.workspacePath).toBe(dryRunOptions.workspacePath);
+  });
+
+  it('expands a literal home-relative custom data path before binding selectors', async () => {
+    mockExpandPath.mockImplementation((path: string) =>
+      path === '~/Cursor/User/workspaceStorage' ? '/home/test/Cursor/User/workspaceStorage' : path
+    );
+    mockMigrateSessions.mockResolvedValue([successfulResult('1', true)]);
+
+    const program = createProgram();
+    registerMigrateSessionCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--data-path',
+      '~/Cursor/User/workspaceStorage',
+      'migrate-session',
+      '1',
+      '/workspace/destination',
+      '--dry-run',
+    ]);
+
+    expect(mockMigrateSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ dataPath: '/home/test/Cursor/User/workspaceStorage' })
+    );
   });
 
   it('prints an ordinary migration failure result before exiting with partial-failure status', async () => {
@@ -2023,6 +2087,23 @@ describe('backup command', () => {
     await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
 
     expect(consoleErrorSpy).toHaveBeenCalled();
+  });
+
+  it('reports a safely published archive permission failure and exits with I/O status', async () => {
+    mockCreateBackup.mockRejectedValue(
+      new BackupPublishedPermissionError('/backups/published.zip', 0o640, 0o600)
+    );
+
+    const program = createProgram();
+    registerBackupCommand(program);
+
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+    const output = consoleErrorSpy.mock.calls.map(([value]) => String(value)).join('\n');
+    expect(output).toContain('Backup archive was published at /backups/published.zip');
+    expect(output).toContain('requested 0o640, actual 0o600');
+    expect(output).toContain('Do not retry with --force');
   });
 });
 

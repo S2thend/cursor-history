@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, readdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   createSessionIntegrityFixtureRoot,
   seedConflictingWorkspaceCorpus,
@@ -259,6 +260,49 @@ describe('built migrate-session workspace integrity', () => {
     expect(exported).toMatchObject({ count: 0, files: [] });
     expect(ambiguityDiagnostics(exported)).toHaveLength(1);
     expect(readdirSync(exportDir)).toEqual([]);
+
+    const destination = join(fixture.root, 'workspaces', 'ambiguity-destination');
+    mkdirSync(destination, { recursive: true });
+    const destinationDb = writeComposerWorkspaceSummary(
+      fixture,
+      'workspace-ambiguity-destination',
+      destination,
+      []
+    );
+    const sourceDatabases = ['workspace-left', 'workspace-right'].map((workspaceId) =>
+      join(fixture.workspaceStorage, workspaceId, 'state.vscdb')
+    );
+    const mutationSnapshot = (): Buffer[] =>
+      [...sourceDatabases, destinationDb].map((path) => readFileSync(path));
+    const beforeMigration = mutationSnapshot();
+
+    for (const selector of ['1', sessionId]) {
+      const migrateRun = await runBuiltCli(
+        ['--json', ...common, 'migrate-session', selector, destination],
+        { env, timeoutMs: 20_000 }
+      );
+      expect(migrateRun).toMatchObject({ status: 1, stdout: '', timedOut: false });
+      const fatal = JSON.parse(migrateRun.stderr) as {
+        code: string;
+        details: {
+          sessionId: string;
+          occurrenceCount: number;
+          occurrenceRefs: string[];
+        };
+      };
+      expect(fatal).toMatchObject({
+        code: 'SESSION_AMBIGUOUS',
+        details: {
+          sessionId,
+          occurrenceCount: 2,
+          occurrenceRefs: [
+            expect.stringMatching(/^occurrence:v1:/u),
+            expect.stringMatching(/^occurrence:v1:/u),
+          ],
+        },
+      });
+    }
+    expect(mutationSnapshot()).toEqual(beforeMigration);
   });
 
   it('binds the parent --workspace and applies the exact target reported by dry-run', async () => {

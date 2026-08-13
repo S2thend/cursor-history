@@ -1356,6 +1356,16 @@ export async function bindMigrationTargets(
     );
     return summariesPromise;
   };
+  const logicalCatalog = async () => {
+    await scopedSummaries();
+    return operationContext.logicalSummaries ?? [];
+  };
+  const ambiguityOccurrenceRefs = async (sessionId: string): Promise<string[] | undefined> => {
+    const row = (await logicalCatalog()).find(
+      (candidate) => candidate.id === sessionId && candidate.resolutionState === 'ambiguous'
+    );
+    return row?.resolutionState === 'ambiguous' ? [...row.diagnosticOccurrenceRefs] : undefined;
+  };
   const numericBase = options.numericBase ?? 1;
   const targets: BoundMigrationTarget[] = [];
 
@@ -1374,10 +1384,13 @@ export async function bindMigrationTargets(
       if (numeric === undefined) {
         sessionId = String(selector);
       } else {
-        const summary = (await scopedSummaries()).find(
+        const summary = (await logicalCatalog()).find(
           (candidate) => candidate.index === numeric + (numericBase === 0 ? 1 : 0)
         );
         if (!summary) throw new SessionNotFoundError(selector);
+        if (summary.resolutionState === 'ambiguous') {
+          throw new SessionAmbiguityError(summary.id, summary.diagnosticOccurrenceRefs);
+        }
         sessionId = summary.id;
       }
 
@@ -1403,9 +1416,13 @@ export async function bindMigrationTargets(
         throw new UnsupportedSessionMigrationError(sessionId, 'incomplete-store-inventory');
       }
       if (storeInventory.exists && (occurrences.length > 0 || globalRows.length > 0)) {
+        const occurrenceRefs = await ambiguityOccurrenceRefs(sessionId);
+        if (occurrenceRefs) throw new SessionAmbiguityError(sessionId, occurrenceRefs);
         throw new UnsupportedSessionMigrationError(sessionId, 'merged');
       }
       if (storeInventory.exists) {
+        const occurrenceRefs = await ambiguityOccurrenceRefs(sessionId);
+        if (occurrenceRefs) throw new SessionAmbiguityError(sessionId, occurrenceRefs);
         throw new UnsupportedSessionMigrationError(sessionId, 'store-only');
       }
 
@@ -1415,7 +1432,10 @@ export async function bindMigrationTargets(
       if (occurrences.length > 1) {
         const fingerprints = new Set(occurrences.map((occurrence) => occurrence.fingerprint));
         if (fingerprints.size > 1) {
-          throw new SessionAmbiguityError(sessionId, opaqueOccurrenceRefs(occurrences));
+          throw new SessionAmbiguityError(
+            sessionId,
+            (await ambiguityOccurrenceRefs(sessionId)) ?? opaqueOccurrenceRefs(occurrences)
+          );
         }
         throw new UnsupportedSessionMigrationError(sessionId, 'multiple-composer-occurrences');
       }

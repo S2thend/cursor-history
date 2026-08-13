@@ -50,7 +50,7 @@ export function registerMigrateCommand(program: Command): void {
         json?: boolean;
         sourceLimit?: SourceReadLimitsOverride;
       };
-      const dataPath = globalOptions.dataPath;
+      const dataPath = globalOptions.dataPath ? expandPath(globalOptions.dataPath) : undefined;
       const jsonOutput = globalOptions.json || options.json;
 
       try {

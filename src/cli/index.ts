@@ -45,7 +45,14 @@ export const CLI_COMMAND_REGISTRY = Object.freeze({
   }),
   backup: Object.freeze({
     sourceReadLimits: true,
-    fatalCategories: Object.freeze(['general', 'usage', 'notFound', 'io', 'unexpected'] as const),
+    fatalCategories: Object.freeze([
+      'general',
+      'usage',
+      'notFound',
+      'io',
+      'backupPublishedPermission',
+      'unexpected',
+    ] as const),
   }),
   restore: Object.freeze({
     sourceReadLimits: true,
@@ -105,7 +112,7 @@ program
       `  --workspace is an exact-first, unambiguous component-suffix membership and payload-I/O boundary.\n` +
       `  An ambiguous suffix fails with candidates; use a longer path. For an empty scope, run list --workspaces.\n` +
       `  Scoped results can be explicitly partial. Cross-workspace reads require the opt-in and remain UUID-selected.\n` +
-      `  migrate-session binds one Composer-only target; Store, merged, or ambiguous occurrences are refused.\n` +
+      `  migrate-session binds each selected Composer-only target; Store, merged, or ambiguous occurrences are refused.\n` +
       `  --source-limit uses FIELD=positive-integer or byte FIELD=number{KiB|MiB|GiB}; repeat fields are refused.\n` +
       `  Raising a source bound increases resource exposure and never changes session or message identity.\n` +
       `  Backup archives are private by default; use backup --shared only when shared access is intended.\n\n` +

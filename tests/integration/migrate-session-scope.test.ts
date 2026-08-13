@@ -53,7 +53,11 @@ interface ContractMigrationTarget {
 interface MigrationPipelineContract {
   bindMigrationTargets(
     selectors: readonly (number | string)[],
-    options: { numericBase: 0 | 1 },
+    options: {
+      numericBase: 0 | 1;
+      workspacePath?: string;
+      dataPath?: string;
+    },
     context: unknown
   ): Promise<ContractMigrationTarget[]>;
   prepareSessionMigration(
@@ -2079,6 +2083,64 @@ describe.sequential('ambiguous and unsupported migration targets', () => {
       ),
       code
     );
+    expect(mutationSnapshot(fixture)).toBe(before);
+  });
+
+  it('reuses an ambiguous scoped row index and returns the same typed occurrence diagnostics', async () => {
+    const pipeline = requireMigrationPipeline();
+    const fixture = newFixture();
+    const sessionId = 'dddddddd-1111-4000-8000-000000000016';
+    const left = composerSession(fixture, sessionId, 'Divergent indexed left');
+    const right = composerSession(fixture, sessionId, 'Divergent indexed right');
+    writeComposerWorkspaceSummary(fixture, 'workspace-a', fixture.projectA, [left]);
+    writeComposerWorkspaceSummary(fixture, 'workspace-a-copy', fixture.projectA, [right]);
+    const destination = addDestination(fixture);
+    const before = mutationSnapshot(fixture);
+
+    const directError = await captureRejection(
+      pipeline.bindMigrationTargets(
+        [sessionId],
+        {
+          numericBase: 1,
+          workspacePath: fixture.projectA,
+          dataPath: fixture.workspaceStorage,
+        },
+        undefined
+      )
+    );
+    const numericError = await captureRejection(
+      pipeline.bindMigrationTargets(
+        [1],
+        {
+          numericBase: 1,
+          workspacePath: fixture.projectA,
+          dataPath: fixture.workspaceStorage,
+        },
+        undefined
+      )
+    );
+    const libraryError = await captureRejection(
+      migrateLibrarySession(
+        sessionConfig(fixture, destination, 1, {
+          workspace: fixture.projectA,
+          dryRun: false,
+        })
+      )
+    );
+
+    for (const error of [directError, numericError, libraryError]) {
+      expect(error).toMatchObject({
+        code: 'SESSION_AMBIGUOUS',
+        details: {
+          sessionId,
+          occurrenceCount: 2,
+          occurrenceRefs: [
+            expect.stringMatching(/^occurrence:v1:/u),
+            expect.stringMatching(/^occurrence:v1:/u),
+          ],
+        },
+      });
+    }
     expect(mutationSnapshot(fixture)).toBe(before);
   });
 
