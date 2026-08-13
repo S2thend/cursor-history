@@ -135,6 +135,7 @@ export function mapSessionIntegrityError(error: SessionIntegrityError): CliError
       : error.code === 'SOURCE_ENCODING_INVALID' ||
           error.code === 'SOURCE_LIMIT_EXCEEDED' ||
           error.code === 'TEMPORARY_ARTIFACT_CLEANUP_FAILED' ||
+          error.code === 'BACKUP_PUBLISHED_PERMISSION_FAILED' ||
           error.code === 'DATABASE_CAPABILITY_MISSING' ||
           error.code === 'NO_CAPABLE_DATABASE_DRIVER'
         ? ExitCode.IO_ERROR
@@ -182,6 +183,7 @@ export const CLI_FATAL_CATEGORY_REGISTRY = Object.freeze({
   sourceEncoding: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   sourceLimitExceeded: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   databaseCapability: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  backupPublishedPermission: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
   temporaryArtifactCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
 });
 

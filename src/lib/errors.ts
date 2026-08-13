@@ -6,6 +6,7 @@
  */
 
 import {
+  BackupPublishedPermissionError,
   DatabaseCapabilityError,
   MigrationTargetChangedError,
   NoCapableDriverError,
@@ -695,6 +696,7 @@ export {
   NoCapableDriverError,
   DatabaseCapabilityError as DatabaseCapabilityMissingError,
   NoCapableDriverError as NoCapableDatabaseDriverError,
+  BackupPublishedPermissionError,
   TemporaryArtifactCleanupError,
   ReadContextError,
   ReadContextSourceMismatchError,
@@ -779,6 +781,18 @@ export function isDatabaseCapabilityError(error: unknown): error is DatabaseCapa
  */
 export function isNoCapableDriverError(error: unknown): error is NoCapableDriverError {
   return error instanceof NoCapableDriverError;
+}
+
+/**
+ * Test whether a completed backup was published but its requested final permissions failed.
+ *
+ * @param error - Unknown caught value.
+ * @returns True when the value is a {@link BackupPublishedPermissionError}.
+ */
+export function isBackupPublishedPermissionError(
+  error: unknown
+): error is BackupPublishedPermissionError {
+  return error instanceof BackupPublishedPermissionError;
 }
 
 /**

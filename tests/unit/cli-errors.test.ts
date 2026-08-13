@@ -12,6 +12,7 @@ import {
   mapSessionIntegrityError,
 } from '../../src/cli/errors.js';
 import {
+  BackupPublishedPermissionError,
   SessionAmbiguityError,
   SourceLimitConfigurationError,
   SourceLimitExceededError,
@@ -244,6 +245,18 @@ describe('feature-016 typed error mapping', () => {
     const encoding = mapSessionIntegrityError(new SourceEncodingError('jsonl', 'fatal'));
     expect(encoding.code).toBe('SOURCE_ENCODING_INVALID');
     expect(encoding.exitCode).toBe(ExitCode.IO_ERROR);
+
+    const published = mapSessionIntegrityError(
+      new BackupPublishedPermissionError('/backups/published.zip', 0o640, 0o600)
+    );
+    expect(published.code).toBe('BACKUP_PUBLISHED_PERMISSION_FAILED');
+    expect(published.exitCode).toBe(ExitCode.IO_ERROR);
+    expect(published.details).toMatchObject({
+      published: true,
+      outputPath: '/backups/published.zip',
+      requestedMode: 0o640,
+      actualMode: 0o600,
+    });
   });
 
   it('keeps ambiguity details opaque and content-free', () => {

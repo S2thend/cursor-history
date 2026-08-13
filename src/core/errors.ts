@@ -7,6 +7,7 @@ export type SessionIntegrityErrorCode =
   | 'MIGRATION_TARGET_CHANGED'
   | 'DATABASE_CAPABILITY_MISSING'
   | 'NO_CAPABLE_DATABASE_DRIVER'
+  | 'BACKUP_PUBLISHED_PERMISSION_FAILED'
   | 'TEMPORARY_ARTIFACT_CLEANUP_FAILED'
   | 'READ_CONTEXT_SOURCE_MISMATCH'
   | 'READ_CONTEXT_SCOPE_MISMATCH'
@@ -270,6 +271,65 @@ export {
   DatabaseCapabilityError as DatabaseCapabilityMissingError,
   NoCapableDriverError as NoCapableDatabaseDriverError,
 };
+
+/** Safe structured details for a completed backup whose final mode could not be applied. */
+export type BackupPublishedPermissionErrorDetails = {
+  published: true;
+  outputPath: string;
+  requestedMode: number;
+  /** Observed permission bits, or null when the post-publication observation itself failed. */
+  actualMode: number | null;
+  remedy: string;
+};
+
+function formatPermissionMode(mode: number): string {
+  return `0o${mode.toString(8).padStart(3, '0')}`;
+}
+
+/**
+ * Reports that a complete backup archive reached its final path but its requested mode did not.
+ *
+ * The rename or link is the publication commit point. The valid archive remains at `outputPath`;
+ * callers must not retry blindly or assume that a thrown error means no archive was created.
+ *
+ * @param outputPath - Final path containing the safely published archive.
+ * @param requestedMode - Permission bits requested for the completed archive.
+ * @param actualMode - Permission bits observed after failure, or null when mode inspection failed.
+ * @param cause - Filesystem failure raised while inspecting or applying the requested mode.
+ */
+export class BackupPublishedPermissionError extends SessionIntegrityError<
+  'BACKUP_PUBLISHED_PERMISSION_FAILED',
+  BackupPublishedPermissionErrorDetails
+> {
+  override readonly name = 'BackupPublishedPermissionError';
+
+  constructor(
+    outputPath: string,
+    requestedMode: number,
+    actualMode: number | null,
+    cause?: unknown
+  ) {
+    const requested = formatPermissionMode(requestedMode);
+    const actual =
+      actualMode === null ? 'unknown (mode inspection failed)' : formatPermissionMode(actualMode);
+    super(
+      'BACKUP_PUBLISHED_PERMISSION_FAILED',
+      `Backup archive was published at ${outputPath}, but its requested permissions could not be applied (requested ${requested}, actual ${actual}).`,
+      {
+        published: true,
+        outputPath,
+        requestedMode,
+        actualMode,
+        remedy:
+          `Keep or inspect the valid published archive, then apply ${requested} permissions manually. ` +
+          'Do not retry with --force unless replacing this archive is intentional.',
+      }
+    );
+    if (cause !== undefined) {
+      Object.defineProperty(this, 'cause', { configurable: true, value: cause });
+    }
+  }
+}
 
 /**
  * Reports owner-private temporary paths that remained after exhaustive cleanup attempts.

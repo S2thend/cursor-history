@@ -21,17 +21,21 @@ import packageJson from '../../package.json';
 
 import type { Database } from '../../src/core/database/types.js';
 import {
+  BackupPublishedPermissionError,
   SourceLimitConfigurationError,
   SourceLimitExceededError,
   TemporaryArtifactCleanupError,
 } from '../../src/core/errors.js';
 import type { SourceReadLimitsOverride, ZipSourceBoundKind } from '../../src/core/types.js';
 
-const { backupDatabaseMock, openDatabaseMock, openSyncMock } = vi.hoisted(() => ({
-  backupDatabaseMock: vi.fn(),
-  openDatabaseMock: vi.fn(),
-  openSyncMock: vi.fn(),
-}));
+const { backupDatabaseMock, openDatabaseMock, openSyncMock, publicationModeFault } = vi.hoisted(
+  () => ({
+    backupDatabaseMock: vi.fn(),
+    openDatabaseMock: vi.fn(),
+    openSyncMock: vi.fn(),
+    publicationModeFault: { enabled: false },
+  })
+);
 
 vi.mock('../../src/core/database/registry.js', () => ({
   registry: {
@@ -43,6 +47,57 @@ vi.mock('../../src/core/database/index.js', () => ({
   backupDatabase: backupDatabaseMock,
   openDatabase: openDatabaseMock,
 }));
+
+vi.mock('../../src/core/backup-publication.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/core/backup-publication.js')>(
+    '../../src/core/backup-publication.js'
+  );
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return {
+    ...actual,
+    enforcePublishedArchiveMode: (
+      outputPath: string,
+      requestedMode: number,
+      expectedIdentity: import('../../src/core/backup-publication.js').PublishedArchiveIdentity
+    ): void => {
+      if (!publicationModeFault.enabled) {
+        actual.enforcePublishedArchiveMode(outputPath, requestedMode, expectedIdentity);
+        return;
+      }
+      const descriptorOperations = {
+        openNoFollow: (path: string) => fs.openSync(path, fs.constants.O_RDONLY),
+        statDescriptor: (descriptor: number) => {
+          const stat = fs.fstatSync(descriptor, { bigint: true });
+          return {
+            device: stat.dev,
+            inode: stat.ino,
+            mode: Number(stat.mode) & 0o777,
+            regularFile: stat.isFile(),
+          };
+        },
+        chmodDescriptor: () => {
+          throw new Error('synthetic post-publication chmod failure');
+        },
+        statPathNoFollow: (path: string) => {
+          const stat = fs.lstatSync(path, { bigint: true });
+          return {
+            device: stat.dev,
+            inode: stat.ino,
+            mode: Number(stat.mode) & 0o777,
+            regularFile: stat.isFile(),
+          };
+        },
+        close: (descriptor: number) => fs.closeSync(descriptor),
+      };
+      actual.enforcePublishedArchiveMode(
+        outputPath,
+        requestedMode,
+        expectedIdentity,
+        descriptorOperations
+      );
+    },
+  };
+});
 
 import {
   computeChecksum,
@@ -349,6 +404,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    publicationModeFault.enabled = false;
     backupDatabaseMock.mockResolvedValue(undefined);
     openSyncMock.mockImplementation(() => databaseWithClose(vi.fn()));
     openDatabaseMock.mockImplementation(() => databaseWithClose(vi.fn()));
@@ -767,6 +823,44 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     expect(error.details.observedAtLeast).toBe((compressedSize + 1) / compressedSize);
     expect(Number.isInteger(error.details.observedAtLeast)).toBe(false);
   });
+
+  it.each([
+    ['ZIP32', false],
+    ['ZIP64', true],
+  ] as const)(
+    'rejects %s entries claiming nonempty output from zero compressed bytes during preflight',
+    async (label, zip64) => {
+      const path = join(fixtureRoot, `zero-compressed-${label.toLowerCase()}.zip`);
+      writeFileSync(
+        path,
+        buildZip(
+          [
+            {
+              name: 'impossible.bin',
+              data: Buffer.from('x'),
+              method: 8,
+              claimedCompressedSize: 0,
+              claimedUncompressedSize: 1,
+            },
+          ],
+          { zip64 }
+        ).buffer,
+        { mode: 0o600 }
+      );
+
+      await expect(openBoundedZipArchive(path)).rejects.toMatchObject({
+        code: 'SOURCE_LIMIT_EXCEEDED',
+        details: {
+          sourceKind: 'zip',
+          bound: 'zip-compression-ratio',
+          unit: 'ratio',
+          limit: SOURCE_READ_LIMITS_V1_DEFAULTS.zipCompressionRatio,
+          observedAtLeast: SOURCE_READ_LIMITS_V1_DEFAULTS.zipCompressionRatio + 1,
+          outcome: 'fatal',
+        },
+      });
+    }
+  );
 
   it('rejects invalid limit overrides before opening source content', async () => {
     const missingPath = join(fixtureRoot, 'does-not-exist.zip');
@@ -1225,6 +1319,48 @@ describe.sequential('backup plaintext snapshot isolation', () => {
         process.umask(originalUmask);
       }
       expect(lstatSync(outputPath).mode & 0o777).toBe(0o644);
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'keeps a valid published archive and reports its actual mode when post-publication chmod fails',
+    async () => {
+      const sourcePath = join(fixtureRoot, 'permission-failure-source', 'User', 'workspaceStorage');
+      const globalDirectory = join(dirname(sourcePath), 'globalStorage');
+      mkdirSync(sourcePath, { recursive: true });
+      mkdirSync(globalDirectory, { recursive: true });
+      writeFileSync(join(globalDirectory, 'state.vscdb'), Buffer.from('permission fixture'));
+      backupDatabaseMock.mockImplementation(async (from: string, to: string) => {
+        copyFileSync(from, to);
+      });
+      const outputPath = join(fixtureRoot, 'published-before-permission-failure.zip');
+      const originalUmask = process.umask(0o022);
+      publicationModeFault.enabled = true;
+      let caught: unknown;
+      try {
+        await createBackup({ sourcePath, outputPath, sharedPermissions: true });
+      } catch (error) {
+        caught = error;
+      } finally {
+        publicationModeFault.enabled = false;
+        process.umask(originalUmask);
+      }
+
+      expect(caught).toBeInstanceOf(BackupPublishedPermissionError);
+      expect(caught).toMatchObject({
+        details: {
+          published: true,
+          outputPath,
+          requestedMode: 0o644,
+          actualMode: 0o600,
+        },
+      });
+      expect(existsSync(outputPath)).toBe(true);
+      expect(lstatSync(outputPath).mode & 0o777).toBe(0o600);
+      expect((await validateBackup(outputPath)).status).toBe('valid');
+      expect(
+        readdirSync(fixtureRoot).some((name) => name.startsWith('.cursor-history-backup-'))
+      ).toBe(false);
     }
   );
 

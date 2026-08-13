@@ -29,7 +29,9 @@ import type {
  * @param config - Optional backup configuration
  * @returns Promise resolving to backup result
  * @throws {BackupError} If source discovery, output validation, or archive creation fails.
- * @throws {SessionIntegrityError} If a driver, source limit, cancellation, or cleanup contract fails.
+ * @throws {SessionIntegrityError} If a driver, source limit, cancellation, cleanup, or final archive
+ * permission contract fails. A `BACKUP_PUBLISHED_PERMISSION_FAILED` error means the valid archive
+ * already exists at `details.outputPath`; inspect or correct its mode instead of retrying blindly.
  *
  * @example
  * ```typescript

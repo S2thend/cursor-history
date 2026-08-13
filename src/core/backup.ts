@@ -55,6 +55,10 @@ import {
   SourceLimitExceededError,
   TemporaryArtifactCleanupError,
 } from './errors.js';
+import {
+  enforcePublishedArchiveMode,
+  type PublishedArchiveIdentity,
+} from './backup-publication.js';
 import type {
   BackupManifest,
   BackupFileEntry,
@@ -436,6 +440,14 @@ async function writeAndPublishBackupArchive(
     const requestedMode = config.sharedPermissions
       ? 0o666 & ~process.umask()
       : (existingMode ?? 0o600);
+    const stagedArchive = lstatSync(stagePath, { bigint: true });
+    if (!stagedArchive.isFile()) {
+      throw new Error('Completed backup stage is not a regular file.');
+    }
+    const publishedIdentity: PublishedArchiveIdentity = {
+      device: stagedArchive.dev,
+      inode: stagedArchive.ino,
+    };
 
     if (config.force) {
       renameSync(stagePath, outputPath);
@@ -445,11 +457,18 @@ async function writeAndPublishBackupArchive(
       linkSync(stagePath, outputPath);
       unlinkSync(stagePath);
     }
-    // Keep the unpublished sibling owner-only. Broader permissions, when explicitly requested or
-    // inherited from an overwritten archive, are applied only after the complete inode is visible
-    // at its final path.
-    if (process.platform !== 'win32') chmodSync(outputPath, requestedMode);
-    syncParentDirectory(outputPath);
+    // Rename/link is the publication commit point. Keep the unpublished sibling owner-only and
+    // apply broader or inherited permissions only after the complete inode is visible. A redundant
+    // chmod is skipped; a post-publication failure reports that the valid archive already exists.
+    try {
+      if (process.platform !== 'win32') {
+        enforcePublishedArchiveMode(outputPath, requestedMode, publishedIdentity);
+      }
+    } finally {
+      // The final directory durability attempt still belongs to the completed publication even
+      // when applying its requested permissions fails afterward.
+      syncParentDirectory(outputPath);
+    }
   } catch (error) {
     operationError = error;
     throw error;

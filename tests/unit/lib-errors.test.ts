@@ -22,6 +22,8 @@ import {
   isNestedPathError,
   BackupError,
   isBackupError,
+  BackupPublishedPermissionError,
+  isBackupPublishedPermissionError,
   NoDataError,
   isNoDataError,
   FileExistsError,
@@ -151,6 +153,23 @@ describe('BackupError', () => {
     expect(err.name).toBe('BackupError');
     expect(err.message).toBe('backup failed');
     expect(err).toBeInstanceOf(Error);
+  });
+});
+
+describe('BackupPublishedPermissionError', () => {
+  it('exposes the completed publication state and requested/actual modes', () => {
+    const err = new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600);
+    expect(err.name).toBe('BackupPublishedPermissionError');
+    expect(err.code).toBe('BACKUP_PUBLISHED_PERMISSION_FAILED');
+    expect(err.details).toMatchObject({
+      published: true,
+      outputPath: '/backup.zip',
+      requestedMode: 0o640,
+      actualMode: 0o600,
+    });
+    expect(err.message).toContain('requested 0o640, actual 0o600');
+    expect(isBackupPublishedPermissionError(err)).toBe(true);
+    expect(isBackupPublishedPermissionError(new Error('other'))).toBe(false);
   });
 });
 
@@ -319,6 +338,11 @@ describe('type guards', () => {
       name: 'isNestedPathError',
     },
     { guard: isBackupError, instance: new BackupError('msg'), name: 'isBackupError' },
+    {
+      guard: isBackupPublishedPermissionError,
+      instance: new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600),
+      name: 'isBackupPublishedPermissionError',
+    },
     { guard: isNoDataError, instance: new NoDataError('p'), name: 'isNoDataError' },
     { guard: isFileExistsError, instance: new FileExistsError('p'), name: 'isFileExistsError' },
     {

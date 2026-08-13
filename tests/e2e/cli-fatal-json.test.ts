@@ -300,6 +300,7 @@ describe('closed CLI fatal and Source Read Limits coverage', () => {
       '--include-cross-workspace-sources',
       'one-based, ephemeral',
       'exact-first, unambiguous component-suffix',
+      'migrate-session binds each selected Composer-only target',
       'backup --shared',
     ]) {
       expect(help).toContain(text);
@@ -309,6 +310,9 @@ describe('closed CLI fatal and Source Read Limits coverage', () => {
       expect(command, commandName).toBeDefined();
       expect(command!.description(), commandName).not.toBe('');
       expect(command!.helpInformation(), commandName).toContain('Options:');
+      if (commandName === 'migrate-session') {
+        expect(command!.helpInformation()).toContain('comma-separated for multiple');
+      }
     }
   });
 
