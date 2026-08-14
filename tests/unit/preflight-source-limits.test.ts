@@ -27,6 +27,7 @@ import {
   preflightComposerDatabase,
   readSourcePolicy,
   runPreflight,
+  validatePolicyArtifactInventory,
 } from '../../scripts/preflight-source-limits.mjs';
 
 const roots: string[] = [];
@@ -100,6 +101,7 @@ describe('Source Read Limits v1 policy lock', () => {
     expect(result.policy).toEqual(readSourcePolicy());
     expect(result.artifacts).toEqual(POLICY_ARTIFACTS);
     expect(Object.keys(POLICY_ARTIFACT_SHA256)).toEqual(POLICY_ARTIFACTS);
+    expect(validatePolicyArtifactInventory()).toEqual(POLICY_ARTIFACTS);
     for (const [relativePath, expectedHash] of Object.entries(POLICY_ARTIFACT_SHA256)) {
       expect(
         createHash('sha256')
@@ -143,6 +145,23 @@ describe('Source Read Limits v1 policy lock', () => {
     );
     expect(readFileSync(artifactPath, 'utf8')).toContain(POLICY_FINGERPRINT);
     expect(() => checkPolicyArtifacts(artifactMutation)).toThrow(/artifact content drift/u);
+  });
+
+  it('rejects spread tokens in the defaults object and deletion from the literal artifact inventory', () => {
+    const spreadMutation = copyPolicyRepository();
+    const sourcePath = join(spreadMutation, 'src/core/source-read-limits.ts');
+    writeFileSync(
+      sourcePath,
+      readFileSync(sourcePath, 'utf8').replace(
+        "  policyVersion: 'source-read-limits/v1',",
+        "  ...spreadOverride,\n  policyVersion: 'source-read-limits/v1',"
+      )
+    );
+    expect(() => readSourcePolicy(spreadMutation)).toThrow(/exactly 14 canonical declarations/u);
+
+    expect(() =>
+      validatePolicyArtifactInventory(POLICY_ARTIFACTS.slice(0, -1), POLICY_ARTIFACT_SHA256)
+    ).toThrow(/artifact inventory drift/u);
   });
 });
 
@@ -209,6 +228,7 @@ describe('aggregate evidence boundary', () => {
     const backupPath = join(root, 'backup.zip');
     await createBackup(backupPath);
     const evidencePath = join(root, 'evidence', 'aggregate.json');
+    mkdirSync(dirname(evidencePath), { mode: 0o700 });
 
     const { evidence, outputPath } = await runPreflight({
       composerRoots: [cursorRoot, cursorRoot],
@@ -270,6 +290,17 @@ describe('aggregate evidence boundary', () => {
       ).rejects.toThrow(/outside the repository/u);
       expect(existsSync(join(policyRepository, 'specs', 'evidence.json'))).toBe(false);
 
+      const missingRepositoryChild = join(policyRepository, 'missing-evidence-parent');
+      expect(existsSync(missingRepositoryChild)).toBe(false);
+      await expect(
+        runPreflight({
+          composerRoots: [databasePath],
+          output: join(repositoryLink, 'missing-evidence-parent', 'evidence.json'),
+          repositoryRoot: policyRepository,
+        })
+      ).rejects.toThrow(/parent must already exist/u);
+      expect(existsSync(missingRepositoryChild)).toBe(false);
+
       const privateTarget = join(root, 'private-target');
       mkdirSync(privateTarget, { mode: 0o700 });
       const parentLink = join(root, 'linked-parent');
@@ -314,7 +345,7 @@ describe('authorized Composer carrier discovery', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'rejects nested global database and workspace-instance symlinks before opening them',
+    'rejects nested global database and global or workspace container symlinks before opening them',
     async () => {
       const root = privateRoot('cursor-history-preflight-carrier-symlinks-');
 
@@ -330,6 +361,34 @@ describe('authorized Composer carrier discovery', () => {
         })
       ).rejects.toThrow(/globalStorage\/state\.vscdb must not be a symlink/u);
 
+      const globalContainerUserRoot = join(root, 'global-container-case', 'Cursor', 'User');
+      const outsideGlobalContainer = join(root, 'outside-global-container');
+      createComposerDatabase(join(outsideGlobalContainer, 'state.vscdb'));
+      mkdirSync(globalContainerUserRoot, { recursive: true, mode: 0o700 });
+      symlinkSync(outsideGlobalContainer, join(globalContainerUserRoot, 'globalStorage'), 'dir');
+      await expect(
+        runPreflight({
+          composerRoots: [globalContainerUserRoot],
+          output: join(root, 'global-container-symlink-evidence.json'),
+        })
+      ).rejects.toThrow(/globalStorage must not be a symlink/u);
+
+      const workspaceContainerUserRoot = join(root, 'workspace-container-case', 'Cursor', 'User');
+      const outsideWorkspaceContainer = join(root, 'outside-workspace-container');
+      createComposerDatabase(join(outsideWorkspaceContainer, 'fictional-workspace', 'state.vscdb'));
+      mkdirSync(workspaceContainerUserRoot, { recursive: true, mode: 0o700 });
+      symlinkSync(
+        outsideWorkspaceContainer,
+        join(workspaceContainerUserRoot, 'workspaceStorage'),
+        'dir'
+      );
+      await expect(
+        runPreflight({
+          composerRoots: [workspaceContainerUserRoot],
+          output: join(root, 'workspace-container-symlink-evidence.json'),
+        })
+      ).rejects.toThrow(/workspaceStorage must not be a symlink/u);
+
       const workspaceRoot = join(root, 'workspace-case', 'User', 'workspaceStorage');
       const outsideWorkspace = join(root, 'outside-workspace');
       createComposerDatabase(join(outsideWorkspace, 'state.vscdb'));
@@ -341,6 +400,28 @@ describe('authorized Composer carrier discovery', () => {
           output: join(root, 'workspace-symlink-evidence.json'),
         })
       ).rejects.toThrow(/workspaceStorage entries must not be symlinks/u);
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a workspace state database symlink before opening it',
+    async () => {
+      const root = privateRoot('cursor-history-preflight-workspace-db-symlink-');
+      const workspaceRoot = join(root, 'User', 'workspaceStorage');
+      const workspaceInstance = join(workspaceRoot, 'fictional-workspace');
+      const outsideDatabase = join(root, 'outside-workspace.vscdb');
+      createComposerDatabase(outsideDatabase);
+      mkdirSync(workspaceInstance, { recursive: true, mode: 0o700 });
+      symlinkSync(outsideDatabase, join(workspaceInstance, 'state.vscdb'), 'file');
+
+      await expect(
+        runPreflight({
+          composerRoots: [workspaceRoot],
+          output: join(root, 'workspace-db-symlink-evidence.json'),
+        })
+      ).rejects.toThrow(
+        /workspaceStorage\/fictional-workspace\/state\.vscdb must not be a symlink/u
+      );
     }
   );
 });

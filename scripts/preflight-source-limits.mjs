@@ -8,7 +8,6 @@ import {
   fchmodSync,
   fstatSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readFileSync,
   readSync,
@@ -26,6 +25,18 @@ export const REPOSITORY_ROOT = resolve(SCRIPT_DIR, '..');
 export const POLICY_VERSION = 'source-read-limits/v1';
 export const POLICY_FINGERPRINT =
   'b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108';
+
+export const POLICY_ARTIFACTS = Object.freeze([
+  'specs/016-harden-session-integrity/spec.md',
+  'specs/016-harden-session-integrity/research.md',
+  'specs/016-harden-session-integrity/data-model.md',
+  'specs/016-harden-session-integrity/contracts/internal-resolution.md',
+  'specs/016-harden-session-integrity/contracts/library-api.md',
+  'specs/016-harden-session-integrity/contracts/cli-json.md',
+  'specs/016-harden-session-integrity/quickstart.md',
+  'specs/016-harden-session-integrity/tasks.md',
+  'docs/compatibility.md',
+]);
 
 export const POLICY_ARTIFACT_SHA256 = Object.freeze({
   'specs/016-harden-session-integrity/spec.md':
@@ -46,8 +57,6 @@ export const POLICY_ARTIFACT_SHA256 = Object.freeze({
     'e3b44c3fdea725e2b2a5c59b9c97d62fb764c75276619d2038f2461431dcb34b',
   'docs/compatibility.md': '0804ad937106d36b8630f0e3d3564699f8b25a9b973497179e420665237d5675',
 });
-
-export const POLICY_ARTIFACTS = Object.freeze(Object.keys(POLICY_ARTIFACT_SHA256));
 
 const POLICY_FIELDS = Object.freeze([
   'jsonlRecordBytes',
@@ -88,6 +97,21 @@ function parseNumericLiteral(text) {
   return Number(text.replaceAll('_', ''));
 }
 
+export function validatePolicyArtifactInventory(
+  artifacts = POLICY_ARTIFACTS,
+  artifactHashes = POLICY_ARTIFACT_SHA256
+) {
+  const hashPaths = Object.keys(artifactHashes);
+  if (
+    artifacts.length !== hashPaths.length ||
+    new Set(artifacts).size !== artifacts.length ||
+    artifacts.some((path, index) => path !== hashPaths[index])
+  ) {
+    throw new Error('Source Read Limits policy artifact inventory drift');
+  }
+  return [...artifacts];
+}
+
 export function readSourcePolicy(repositoryRoot = REPOSITORY_ROOT) {
   const sourcePath = join(repositoryRoot, 'src/core/source-read-limits.ts');
   const source = readFileSync(sourcePath, 'utf8');
@@ -100,30 +124,22 @@ export function readSourcePolicy(repositoryRoot = REPOSITORY_ROOT) {
     throw new Error(`Expected one SOURCE_READ_LIMITS_V1_DEFAULTS object in ${sourcePath}`);
   }
   const body = defaultObjects[0][1];
-  const propertyNames = [...body.matchAll(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:/gmu)].map(
-    (match) => match[1]
-  );
-  const expectedNames = ['policyVersion', ...POLICY_FIELDS];
-  if (
-    propertyNames.length !== expectedNames.length ||
-    new Set(propertyNames).size !== expectedNames.length ||
-    expectedNames.some((name) => !propertyNames.includes(name))
-  ) {
-    throw new Error(`SOURCE_READ_LIMITS_V1_DEFAULTS does not contain the exact locked fields`);
+  const declarationPatterns = [
+    `policyVersion\\s*:\\s*(?<policyQuote>['"])(?<policyVersion>[^'"\\r\\n]+)\\k<policyQuote>`,
+    ...POLICY_FIELDS.map((field) => `${field}\\s*:\\s*(?<${field}>[0-9]+(?:_[0-9]+)*)`),
+  ];
+  const declarations = new RegExp(
+    `^\\s*${declarationPatterns.join('\\s*,\\s*')}\\s*,?\\s*$`,
+    'u'
+  ).exec(body);
+  if (!declarations?.groups) {
+    throw new Error(
+      'SOURCE_READ_LIMITS_V1_DEFAULTS must contain exactly 14 canonical declarations'
+    );
   }
-  const versionMatches = [...body.matchAll(/\bpolicyVersion\s*:\s*(['"])([^'"\r\n]+)\1\s*[,\n]/gu)];
-  if (versionMatches.length !== 1) {
-    throw new Error(`Policy field policyVersion is missing or duplicated in ${sourcePath}`);
-  }
-  const policy = { policyVersion: versionMatches[0][2] };
+  const policy = { policyVersion: declarations.groups.policyVersion };
   for (const field of POLICY_FIELDS) {
-    const matches = [
-      ...body.matchAll(new RegExp(`\\b${field}\\s*:\\s*([0-9][0-9_]*)\\s*[,\\n]`, 'gu')),
-    ];
-    if (matches.length !== 1) {
-      throw new Error(`Policy field ${field} is missing or duplicated in ${sourcePath}`);
-    }
-    const value = parseNumericLiteral(matches[0][1]);
+    const value = parseNumericLiteral(declarations.groups[field]);
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`Policy field ${field} is not a positive safe integer`);
     }
@@ -133,6 +149,7 @@ export function readSourcePolicy(repositoryRoot = REPOSITORY_ROOT) {
 }
 
 export function checkPolicyArtifacts(repositoryRoot = REPOSITORY_ROOT) {
+  validatePolicyArtifactInventory();
   const policy = readSourcePolicy(repositoryRoot);
   const fingerprint = fingerprintPolicy(policy);
   if (fingerprint !== POLICY_FINGERPRINT) {
@@ -501,8 +518,10 @@ function assertPrivateOutput(outputPath, repositoryRoot) {
     throw new Error('Preflight evidence must be written outside the repository');
   }
   const parent = dirname(resolvedOutput);
-  if (!lstatIfExists(parent)) mkdirSync(parent, { recursive: true, mode: 0o700 });
-  const parentStats = lstatSync(parent);
+  const parentStats = lstatIfExists(parent);
+  if (!parentStats) {
+    throw new Error('Preflight evidence parent must already exist');
+  }
   if (parentStats.isSymbolicLink()) {
     throw new Error('Preflight evidence parent must not be a symlink');
   }
