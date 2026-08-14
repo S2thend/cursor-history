@@ -10,7 +10,6 @@ import {
   listSessions,
   searchSessions,
 } from '../../src/core/storage.js';
-import { SessionAmbiguityError } from '../../src/core/errors.js';
 import { createBackup, readBackupManifest } from '../../src/core/backup.js';
 import { migrateSession } from '../../src/lib/index.js';
 import {
@@ -57,8 +56,8 @@ afterEach(() => {
   else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
 });
 
-describe('case-insensitive logical UUID identity with exact physical reads', () => {
-  it('treats a differently-cased divergent bubble stream as ambiguity', async () => {
+describe('v0.16 byte-exact session-ID identity', () => {
+  it('does not attach a differently-cased bubble stream to a session', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Upper', 'owned-upper', 1_700_000_000_000);
     writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, [upper]);
@@ -76,24 +75,18 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
 
     const logical = await listSessionSummaries({ all: true, limit: 0 }, root.workspaceStorage);
     expect(logical).toEqual([
-      expect.objectContaining({
-        id: UPPER_ID,
-        resolutionState: 'ambiguous',
-        occurrenceCount: 2,
-      }),
+      expect.objectContaining({ id: UPPER_ID, resolutionState: 'partial' }),
     ]);
-    await expect(getSession(UPPER_ID, root.workspaceStorage)).rejects.toBeInstanceOf(
-      SessionAmbiguityError
-    );
-    await expect(getSession(LOWER_ID, root.workspaceStorage)).rejects.toBeInstanceOf(
-      SessionAmbiguityError
-    );
+    await expect(getSession(UPPER_ID, root.workspaceStorage)).resolves.toMatchObject({
+      id: UPPER_ID,
+    });
+    await expect(getSession(LOWER_ID, root.workspaceStorage)).resolves.toBeNull();
     await expect(
       searchSessions('foreign-lower', { limit: 0, contextChars: 40 }, root.workspaceStorage)
-    ).rejects.toMatchObject({ code: 'SESSION_AMBIGUOUS' });
+    ).resolves.toEqual([]);
   });
 
-  it('reports divergent case variants once independent of insertion and query order', async () => {
+  it('keeps differently-cased UUIDs as two independently addressable sessions', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Upper', 'needle-upper', 1_800_000_000_000);
     const lower = session(root, LOWER_ID, 'Lower', 'needle-lower', 1_700_000_000_000);
@@ -102,39 +95,37 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
     writeComposerGlobalSessions(root, [lower, upper]);
 
     const logical = await listSessionSummaries({ all: true, limit: 0 }, root.workspaceStorage);
-    expect(logical).toEqual([
-      expect.objectContaining({
-        id: UPPER_ID,
-        resolutionState: 'ambiguous',
-        occurrenceCount: 2,
-      }),
-    ]);
-    for (const query of [LOWER_ID, UPPER_ID]) {
-      await expect(getSession(query, root.workspaceStorage)).rejects.toMatchObject({
-        code: 'SESSION_AMBIGUOUS',
-        details: { sessionId: UPPER_ID, occurrenceCount: 2 },
-      });
-    }
+    expect(logical.map(({ id }) => id)).toEqual([UPPER_ID, LOWER_ID]);
+    await expect(getSession(UPPER_ID, root.workspaceStorage)).resolves.toMatchObject({
+      id: UPPER_ID,
+      messages: [expect.objectContaining({ content: 'needle-upper' })],
+    });
+    await expect(getSession(LOWER_ID, root.workspaceStorage)).resolves.toMatchObject({
+      id: LOWER_ID,
+      messages: [expect.objectContaining({ content: 'needle-lower' })],
+    });
     await expect(
       searchSessions('needle-upper', { limit: 0, contextChars: 40 }, root.workspaceStorage)
-    ).rejects.toMatchObject({ code: 'SESSION_AMBIGUOUS' });
+    ).resolves.toEqual([expect.objectContaining({ sessionId: UPPER_ID })]);
     await expect(
       searchSessions('needle-lower', { limit: 0, contextChars: 40 }, root.workspaceStorage)
-    ).rejects.toMatchObject({ code: 'SESSION_AMBIGUOUS' });
+    ).resolves.toEqual([expect.objectContaining({ sessionId: LOWER_ID })]);
   });
 
-  it('resolves an opposite-case direct query to the sole observed native spelling', async () => {
+  it('does not resolve an opposite-case direct query', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Upper', 'single-content', 1_700_000_000_000);
     writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, [upper]);
     writeComposerGlobalSessions(root, [upper]);
 
-    const selected = await getSession(LOWER_ID, root.workspaceStorage);
-    expect(selected).toMatchObject({ id: UPPER_ID });
-    expect(selected?.messages.map(({ content }) => content)).toEqual(['single-content']);
+    await expect(getSession(UPPER_ID, root.workspaceStorage)).resolves.toMatchObject({
+      id: UPPER_ID,
+      messages: [expect.objectContaining({ content: 'single-content' })],
+    });
+    await expect(getSession(LOWER_ID, root.workspaceStorage)).resolves.toBeNull();
   });
 
-  it('keeps the workspace spelling while hydrating a sole opposite-case global carrier', async () => {
+  it('does not hydrate a workspace record from an opposite-case global carrier', async () => {
     const root = fixture();
     const workspace = session(root, UPPER_ID, 'Workspace authority', 'unused', 1_700_000_000_000);
     const global = session(
@@ -153,18 +144,18 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
         backupPath ? undefined : root.workspaceStorage,
         backupPath
       );
-      expect(listed).toHaveLength(1);
-      expect(listed[0]).toMatchObject({
+      expect(listed.map(({ id }) => id)).toEqual([UPPER_ID, LOWER_ID]);
+      expect(listed.find(({ id }) => id === UPPER_ID)).toMatchObject({
         id: UPPER_ID,
-        source: 'global',
-        resolutionState: 'complete',
+        source: 'workspace-fallback',
+        resolutionState: 'partial',
       });
       const selected = await getSession(
         LOWER_ID,
         backupPath ? undefined : root.workspaceStorage,
         backupPath
       );
-      expect(selected).toMatchObject({ id: UPPER_ID, source: 'global' });
+      expect(selected).toMatchObject({ id: LOWER_ID, source: 'global' });
       expect(selected?.messages.map(({ content }) => content)).toEqual(['global-carrier-content']);
     };
 
@@ -176,7 +167,7 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
     await assertResolved(backupPath);
   });
 
-  it('collapses equivalent case variants and preserves deterministic native spelling', async () => {
+  it('does not collapse equivalent payloads whose IDs differ by case', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Same', 'same-content', 1_700_000_000_000);
     const lower = { ...upper, id: LOWER_ID, workspacePath: root.projectB };
@@ -185,14 +176,13 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
     writeComposerGlobalSessions(root, [lower, upper]);
 
     const listed = await listSessions({ all: true, limit: 0 }, root.workspaceStorage);
-    expect(listed).toHaveLength(1);
-    expect(listed[0]).toMatchObject({ id: UPPER_ID });
+    expect(new Set(listed.map(({ id }) => id))).toEqual(new Set([UPPER_ID, LOWER_ID]));
     const selected = await getSession(LOWER_ID, root.workspaceStorage);
-    expect(selected).toMatchObject({ id: UPPER_ID });
+    expect(selected).toMatchObject({ id: LOWER_ID });
     expect(selected?.messages.map(({ content }) => content)).toEqual(['same-content']);
   });
 
-  it('reconciles equivalent unlinked global-only case variants independent of insertion order', async () => {
+  it('keeps equivalent unlinked global-only case variants independently addressable', async () => {
     for (const lowerFirst of [true, false]) {
       const root = fixture();
       const upper = session(root, UPPER_ID, 'Same', 'global-only-same', 1_700_000_000_000);
@@ -203,23 +193,17 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
       writeComposerGlobalSessions(root, lowerFirst ? [lower, upper] : [upper, lower]);
 
       const listed = await listSessions({ all: true, limit: 0 }, root.workspaceStorage);
-      expect(listed).toEqual([
-        expect.objectContaining({
-          id: UPPER_ID,
-          source: 'global',
-          resolutionState: 'complete',
-        }),
-      ]);
+      expect(new Set(listed.map(({ id }) => id))).toEqual(new Set([UPPER_ID, LOWER_ID]));
       for (const query of [LOWER_ID, UPPER_ID]) {
         await expect(getSession(query, root.workspaceStorage)).resolves.toMatchObject({
-          id: UPPER_ID,
+          id: query,
           messages: [expect.objectContaining({ content: 'global-only-same' })],
         });
       }
     }
   });
 
-  it('does not let a bubble-only case variant rewrite a global-only public session ID', async () => {
+  it('does not let a bubble-only case variant become addressable through another ID', async () => {
     const root = fixture();
     const lower = session(
       root,
@@ -250,7 +234,8 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
         resolutionState: 'complete',
       }),
     ]);
-    await expect(getSession(UPPER_ID, root.workspaceStorage)).resolves.toMatchObject({
+    await expect(getSession(UPPER_ID, root.workspaceStorage)).resolves.toBeNull();
+    await expect(getSession(LOWER_ID, root.workspaceStorage)).resolves.toMatchObject({
       id: LOWER_ID,
       title: 'Lower metadata authority',
       messages: [expect.objectContaining({ content: 'equivalent-bubble-content' })],
@@ -267,14 +252,15 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
         resolutionState: 'complete',
       }),
     ]);
-    await expect(getSession(UPPER_ID, undefined, backupPath)).resolves.toMatchObject({
+    await expect(getSession(UPPER_ID, undefined, backupPath)).resolves.toBeNull();
+    await expect(getSession(LOWER_ID, undefined, backupPath)).resolves.toMatchObject({
       id: LOWER_ID,
       title: 'Lower metadata authority',
       messages: [expect.objectContaining({ content: 'equivalent-bubble-content' })],
     });
   });
 
-  it('reports divergent unlinked global-only case variants once for live and backup reads', async () => {
+  it('returns divergent unlinked global-only case variants separately for live and backup reads', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Upper', 'global-only-upper', 1_800_000_000_000);
     const lower = session(root, LOWER_ID, 'Lower', 'global-only-lower', 1_700_000_000_000);
@@ -288,21 +274,19 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
         backupPath ? undefined : root.workspaceStorage,
         backupPath
       );
-      expect(listed).toEqual([
-        expect.objectContaining({
-          id: UPPER_ID,
-          resolutionState: 'ambiguous',
-          occurrenceCount: 2,
-        }),
-      ]);
-      for (const query of [LOWER_ID, UPPER_ID]) {
-        await expect(
-          getSession(query, backupPath ? undefined : root.workspaceStorage, backupPath)
-        ).rejects.toMatchObject({
-          code: 'SESSION_AMBIGUOUS',
-          details: { sessionId: UPPER_ID, occurrenceCount: 2 },
-        });
-      }
+      expect(listed.map(({ id }) => id)).toEqual([UPPER_ID, LOWER_ID]);
+      await expect(
+        getSession(UPPER_ID, backupPath ? undefined : root.workspaceStorage, backupPath)
+      ).resolves.toMatchObject({
+        id: UPPER_ID,
+        messages: [expect.objectContaining({ content: 'global-only-upper' })],
+      });
+      await expect(
+        getSession(LOWER_ID, backupPath ? undefined : root.workspaceStorage, backupPath)
+      ).resolves.toMatchObject({
+        id: LOWER_ID,
+        messages: [expect.objectContaining({ content: 'global-only-lower' })],
+      });
     };
 
     await assertAmbiguous();
@@ -314,7 +298,7 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
     await assertAmbiguous(backupPath);
   });
 
-  it('does not drop a global-only payload when the preferred spelling has metadata only', async () => {
+  it('does not borrow payload from an opposite-case global-only session', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Metadata only', 'remove-me', 1_800_000_000_000);
     const lower = session(root, LOWER_ID, 'Payload', 'surviving-lower-payload', 1_700_000_000_000);
@@ -330,15 +314,11 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
 
     await expect(
       listSessionSummaries({ all: true, limit: 0 }, root.workspaceStorage)
-    ).resolves.toEqual([
-      expect.objectContaining({
-        id: UPPER_ID,
-        resolutionState: 'ambiguous',
-        occurrenceCount: 2,
-      }),
-    ]);
-    await expect(getSession(LOWER_ID, root.workspaceStorage)).rejects.toMatchObject({
-      code: 'SESSION_AMBIGUOUS',
+    ).resolves.toEqual([expect.objectContaining({ id: LOWER_ID })]);
+    await expect(getSession(UPPER_ID, root.workspaceStorage)).resolves.toBeNull();
+    await expect(getSession(LOWER_ID, root.workspaceStorage)).resolves.toMatchObject({
+      id: LOWER_ID,
+      messages: [expect.objectContaining({ content: 'surviving-lower-payload' })],
     });
 
     const backupPath = join(root.root, 'metadata-only-preferred-spelling.zip');
@@ -347,19 +327,15 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
     ).resolves.toMatchObject({ success: true });
     await expect(
       listSessionSummaries({ all: true, limit: 0 }, undefined, backupPath)
-    ).resolves.toEqual([
-      expect.objectContaining({
-        id: UPPER_ID,
-        resolutionState: 'ambiguous',
-        occurrenceCount: 2,
-      }),
-    ]);
-    await expect(getSession(UPPER_ID, undefined, backupPath)).rejects.toMatchObject({
-      code: 'SESSION_AMBIGUOUS',
+    ).resolves.toEqual([expect.objectContaining({ id: LOWER_ID })]);
+    await expect(getSession(UPPER_ID, undefined, backupPath)).resolves.toBeNull();
+    await expect(getSession(LOWER_ID, undefined, backupPath)).resolves.toMatchObject({
+      id: LOWER_ID,
+      messages: [expect.objectContaining({ content: 'surviving-lower-payload' })],
     });
   });
 
-  it('keeps Composer spelling when Store uses the opposite case', async () => {
+  it('does not merge Composer and Store sessions whose IDs differ by case', async () => {
     const root = fixture();
     const composer = session(root, LOWER_ID, 'Composer', 'composer-content', 1_700_000_000_000);
     writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, [composer]);
@@ -378,16 +354,22 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
     });
 
     const listed = await listSessions({ all: true, limit: 0 }, root.workspaceStorage);
-    expect(listed).toHaveLength(1);
-    expect(listed[0]).toMatchObject({ id: LOWER_ID, resolvedSource: 'merged' });
+    expect(new Set(listed.map(({ id }) => id))).toEqual(new Set([UPPER_ID, LOWER_ID]));
+    expect(listed.find(({ id }) => id === LOWER_ID)).toMatchObject({
+      id: LOWER_ID,
+      resolvedSource: 'composer',
+    });
+    expect(listed.find(({ id }) => id === UPPER_ID)).toMatchObject({ id: UPPER_ID });
     const selected = await getSession(UPPER_ID, root.workspaceStorage);
-    expect(selected).toMatchObject({ id: LOWER_ID, resolvedSource: 'merged' });
-    expect(selected?.messages.map(({ content }) => content)).toEqual(
-      expect.arrayContaining(['composer-content', 'store-content'])
-    );
+    expect(selected).toMatchObject({ id: UPPER_ID });
+    expect(selected?.messages.map(({ content }) => content)).toEqual(['store-content']);
+    await expect(getSession(LOWER_ID, root.workspaceStorage)).resolves.toMatchObject({
+      id: LOWER_ID,
+      messages: [expect.objectContaining({ content: 'composer-content' })],
+    });
   });
 
-  it('hydrates an opted-in off-scope Composer occurrence by its exact native spelling', async () => {
+  it('does not hydrate an opted-in Store session from an opposite-case Composer occurrence', async () => {
     const root = fixture();
     const composer = session(
       root,
@@ -428,7 +410,7 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
         context
       );
       expect(listed).toHaveLength(1);
-      expect(listed[0]).toMatchObject({ id: LOWER_ID, resolvedSource: 'merged' });
+      expect(listed[0]).toMatchObject({ id: UPPER_ID, resolvedSource: 'store-metadata' });
       const hydrated = await getSession(
         UPPER_ID,
         root.workspaceStorage,
@@ -436,16 +418,14 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
         context,
         listed[0]!.index
       );
-      expect(hydrated).toMatchObject({ id: LOWER_ID, resolvedSource: 'merged' });
-      expect(hydrated!.messages.map(({ content }) => content)).toEqual(
-        expect.arrayContaining(['Off-scope Composer', 'in-scope-store-content'])
-      );
+      expect(hydrated).toMatchObject({ id: UPPER_ID });
+      expect(hydrated!.messages.map(({ content }) => content)).toEqual(['in-scope-store-content']);
     } finally {
       await context.dispose();
     }
   });
 
-  it('opens one off-scope workspace once when it contains divergent UUID spellings', async () => {
+  it('hydrates only the exact off-scope Composer spelling selected by Store', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Upper off-scope', 'upper', 1_800_000_000_000);
     const lower = session(root, LOWER_ID, 'Lower off-scope', 'lower', 1_700_000_000_000);
@@ -469,34 +449,41 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
       includeCrossWorkspaceSources: true,
     });
     try {
-      await expect(
-        listSessionSummaries(
-          {
-            all: true,
-            limit: 0,
-            workspacePath: root.projectA,
-            includeCrossWorkspaceSources: true,
-          },
-          root.workspaceStorage,
-          undefined,
-          context
-        )
-      ).resolves.toEqual([
+      const listed = await listSessionSummaries(
+        {
+          all: true,
+          limit: 0,
+          workspacePath: root.projectA,
+          includeCrossWorkspaceSources: true,
+        },
+        root.workspaceStorage,
+        undefined,
+        context
+      );
+      expect(listed).toEqual([
         expect.objectContaining({
           id: UPPER_ID,
-          resolutionState: 'ambiguous',
-          occurrenceCount: 2,
+          resolvedSource: 'merged',
         }),
       ]);
       await expect(
+        getSession(UPPER_ID, root.workspaceStorage, undefined, context, listed[0]!.index)
+      ).resolves.toMatchObject({
+        id: UPPER_ID,
+        messages: expect.arrayContaining([
+          expect.objectContaining({ content: 'Upper off-scope' }),
+          expect.objectContaining({ content: 'in-scope-store-content' }),
+        ]),
+      });
+      await expect(
         getSession(LOWER_ID, root.workspaceStorage, undefined, context)
-      ).rejects.toMatchObject({ code: 'SESSION_AMBIGUOUS' });
+      ).resolves.toBeNull();
     } finally {
       await context.dispose();
     }
   });
 
-  it('writes case-folded backup pointer membership with a deterministic native spelling', async () => {
+  it('writes backup pointer membership with its exact native spelling', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Same', 'same-content', 1_700_000_000_000);
     const lower = { ...upper, id: LOWER_ID };
@@ -527,7 +514,7 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
           expect.objectContaining({
             workspaceId: 'workspace-a',
             sessionIds: [],
-            linkedGlobalSessionIds: [UPPER_ID],
+            linkedGlobalSessionIds: [LOWER_ID],
           }),
         ],
       },
@@ -536,7 +523,7 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
       listSessions({ all: true, limit: 0, workspacePath: root.projectA }, undefined, backupPath)
     ).resolves.toEqual([
       expect.objectContaining({
-        id: UPPER_ID,
+        id: LOWER_ID,
         source: 'workspace-fallback',
         resolutionState: 'partial',
         resolution: expect.objectContaining({
@@ -546,7 +533,7 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
     ]);
   });
 
-  it('links a lower-case pointer-only workspace to an uppercase unstamped live global carrier', async () => {
+  it('does not link a lower-case pointer-only workspace to an uppercase global carrier', async () => {
     const root = fixture();
     const workspaceDbPath = writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, []);
     const workspaceDb = new BetterSqlite3(workspaceDbPath);
@@ -587,12 +574,80 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
       globalDb.close();
     }
 
+    await expect(findWorkspaces(root.workspaceStorage)).resolves.toEqual([]);
+
+    const context = createSessionReadContext({
+      dataPath: root.workspaceStorage,
+      workspacePath: root.projectA,
+    });
+    try {
+      const listed = await listSessions(
+        { all: true, limit: 0, workspacePath: root.projectA },
+        root.workspaceStorage,
+        undefined,
+        context
+      );
+      expect(listed).toEqual([]);
+      await expect(
+        getSession(UPPER_ID, root.workspaceStorage, undefined, context)
+      ).resolves.toBeNull();
+      await expect(
+        searchSessions(
+          'pointer-case-live-needle',
+          { limit: 0, contextChars: 40, workspacePath: root.projectA },
+          root.workspaceStorage,
+          undefined,
+          context
+        )
+      ).resolves.toEqual([]);
+    } finally {
+      await context.dispose();
+    }
+  });
+
+  it('links an exact-case pointer-only workspace to an unstamped global carrier', async () => {
+    const root = fixture();
+    const workspaceDbPath = writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, []);
+    const workspaceDb = new BetterSqlite3(workspaceDbPath);
+    try {
+      workspaceDb
+        .prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)')
+        .run(
+          `workbench.panel.composerChatViewPane.${UPPER_ID}`,
+          JSON.stringify({ selectedComposerId: UPPER_ID })
+        );
+    } finally {
+      workspaceDb.close();
+    }
+
+    const carrier = session(
+      root,
+      UPPER_ID,
+      'Exact unstamped global carrier',
+      'exact-pointer-live-needle',
+      1_700_000_000_000
+    );
+    const globalPath = writeComposerGlobalSessions(root, [carrier]);
+    const globalDb = new BetterSqlite3(globalPath);
+    try {
+      const key = `composerData:${UPPER_ID}`;
+      const row = globalDb.prepare('SELECT value FROM cursorDiskKV WHERE key = ?').get(key) as {
+        value: string;
+      };
+      const metadata = JSON.parse(row.value) as Record<string, unknown>;
+      delete metadata['composerId'];
+      delete metadata['workspaceIdentifier'];
+      delete metadata['workspaceId'];
+      delete metadata['workspacePath'];
+      globalDb
+        .prepare('UPDATE cursorDiskKV SET value = ? WHERE key = ?')
+        .run(JSON.stringify(metadata), key);
+    } finally {
+      globalDb.close();
+    }
+
     await expect(findWorkspaces(root.workspaceStorage)).resolves.toEqual([
-      expect.objectContaining({
-        id: 'workspace-a',
-        path: root.projectA,
-        sessionCount: 1,
-      }),
+      expect.objectContaining({ id: 'workspace-a', path: root.projectA, sessionCount: 1 }),
     ]);
 
     const context = createSessionReadContext({
@@ -611,36 +666,32 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
           id: UPPER_ID,
           source: 'global',
           resolutionState: 'complete',
-          messageCount: 1,
-          preview: 'pointer-case-live-needle',
+          preview: 'exact-pointer-live-needle',
         }),
       ]);
       await expect(
         getSession(UPPER_ID, root.workspaceStorage, undefined, context, listed[0]!.index)
       ).resolves.toMatchObject({
         id: UPPER_ID,
-        messages: [expect.objectContaining({ content: 'pointer-case-live-needle' })],
+        messages: [expect.objectContaining({ content: 'exact-pointer-live-needle' })],
       });
       await expect(
         searchSessions(
-          'pointer-case-live-needle',
+          'exact-pointer-live-needle',
           { limit: 0, contextChars: 40, workspacePath: root.projectA },
           root.workspaceStorage,
           undefined,
           context
         )
       ).resolves.toEqual([
-        expect.objectContaining({
-          sessionId: UPPER_ID,
-          workspacePath: root.projectA,
-        }),
+        expect.objectContaining({ sessionId: UPPER_ID, workspacePath: root.projectA }),
       ]);
     } finally {
       await context.dispose();
     }
   });
 
-  it('rejects migration of divergent case variants without mutating either occurrence', async () => {
+  it('does not migrate an opposite-case bubble-only occurrence', async () => {
     const root = fixture();
     const upper = session(root, UPPER_ID, 'Upper', 'move-upper', 1_700_000_000_000);
     writeComposerWorkspaceSummary(root, 'workspace-a', root.projectA, [upper]);
@@ -674,7 +725,7 @@ describe('case-insensitive logical UUID identity with exact physical reads', () 
         dataPath: root.workspaceStorage,
         sourceReadLimits: { sqlitePageRows: 2, sqliteRowCount: 64 },
       })
-    ).rejects.toMatchObject({ code: 'SESSION_AMBIGUOUS' });
+    ).rejects.toMatchObject({ code: 'SESSION_SCOPE_MISMATCH' });
     const verify = new BetterSqlite3(globalPath, { readonly: true });
     try {
       expect(

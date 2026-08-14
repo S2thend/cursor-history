@@ -6,19 +6,18 @@ export function isNativeCursorUuid(sessionId: string): boolean {
 }
 
 /**
- * Canonical key for one native Cursor session UUID.
+ * Exact key for one Cursor session ID.
  *
- * UUID hexadecimal digits are ASCII and case-insensitive. Non-UUID legacy/test identifiers remain
- * exact: the UUID policy must never collapse arbitrary public strings. Keep this key private;
- * public IDs and physical locators retain a real spelling observed in a Cursor source.
+ * v0.16 treated every session ID as a byte-exact public value, including canonical UUID syntax.
+ * Preserve that compatibility rule for lookup, grouping, and cross-source association.
  */
 export function logicalSessionIdKey(sessionId: string): string {
-  return isNativeCursorUuid(sessionId) ? sessionId.toLowerCase() : sessionId;
+  return sessionId;
 }
 
-/** Compare two native UUID spellings by their case-insensitive logical identity. */
+/** Compare two session IDs using the byte-exact v0.16 identity rule. */
 export function sessionIdsEqual(left: string, right: string): boolean {
-  return logicalSessionIdKey(left) === logicalSessionIdKey(right);
+  return left === right;
 }
 
 /** Unicode code-point ordering without locale/process dependence. */
@@ -43,7 +42,7 @@ export function selectNativeSessionIdSpelling(sessionIds: Iterable<string>): str
   return [...new Set(sessionIds)].sort(compareSessionIdSpellings)[0];
 }
 
-/** Group native source spellings without losing any physical spelling. */
+/** Group source IDs without folding or rewriting their spelling. */
 export function groupSessionIdSpellings(
   sessionIds: Iterable<string>
 ): ReadonlyMap<string, readonly string[]> {

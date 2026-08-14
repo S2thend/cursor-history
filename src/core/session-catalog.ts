@@ -354,9 +354,9 @@ export function buildSessionCatalog<TLocator>(
     [...bySession.entries()]
       .sort(([left], [right]) => compareCodePoints(left, right))
       .map(([_logicalKey, unsortedInstances]) => {
-        // Composer is the compatibility authority for a cross-stack logical UUID. Within that
-        // role, prefer the highest-fidelity/representation tier before choosing a deterministic
-        // real spelling. A Store case variant must never rewrite a v0.16 Composer public ID.
+        // Composer is the compatibility authority for one byte-exact cross-stack session ID.
+        // Within that role, prefer the highest-fidelity/representation tier before choosing a
+        // deterministic real spelling.
         const preferredRole = unsortedInstances.some(({ sourceRole }) => sourceRole === 'composer')
           ? 'composer'
           : 'store';
@@ -385,9 +385,8 @@ export function buildSessionCatalog<TLocator>(
         const instances = Object.freeze([...unsortedInstances].sort(compareInstances));
         const grouped = new Map<string, PhysicalSessionInstance<TLocator>[]>();
         for (const instance of instances) {
-          // Case spelling is a physical occurrence detail, not another representation. Candidates
-          // from one logical UUID must compete inside the same replica group so divergence cannot
-          // be hidden behind two differently cased map keys.
+          // Only candidates with the same byte-exact v0.16 session ID reach this group. Case
+          // variants remain separate logical records rather than competing physical replicas.
           const key = [instance.sourceRole, instance.representation, instance.fidelityTier].join(
             '\0'
           );

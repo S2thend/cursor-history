@@ -105,7 +105,7 @@ function groupFor(
 }
 
 describe('metadata-only session catalog', () => {
-  it('folds only UUID spelling case and leaves arbitrary IDs distinct', () => {
+  it('keeps UUID and arbitrary session-ID spelling byte-exact', () => {
     const uuidUpper = 'AAAAAAAA-0000-4000-8000-000000000016';
     const uuidLower = uuidUpper.toLowerCase();
     const catalog = buildSessionCatalog([
@@ -115,8 +115,8 @@ describe('metadata-only session catalog', () => {
       makeInstance('legacy-lower', { sessionId: 'legacy-session' }),
     ]);
 
-    expect(catalog).toHaveLength(3);
-    expect(catalog.filter(({ id }) => id === uuidUpper || id === uuidLower)).toHaveLength(1);
+    expect(catalog).toHaveLength(4);
+    expect(catalog.filter(({ id }) => id === uuidUpper || id === uuidLower)).toHaveLength(2);
     expect(catalog.map(({ id }) => id)).toEqual(
       expect.arrayContaining(['Legacy-Session', 'legacy-session'])
     );

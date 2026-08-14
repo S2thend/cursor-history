@@ -271,7 +271,7 @@ function assertMigrationBinding(evidence: Readonly<MigrationBindingEvidence>): v
       logicalSessionIdKey(evidence.authoritativePublicId) ||
     !sessionIdsEqual(evidence.authoritativePublicId, evidence.physicalId)
   ) {
-    throw new Error('Migration logical UUID binding changed.');
+    throw new Error('Migration byte-exact session-ID binding changed.');
   }
   if (evidence.selectedPhysicalId !== evidence.physicalId) {
     throw new Error('Migration no longer retains the exact physical SQLite spelling.');
@@ -288,17 +288,17 @@ function assertMigrationBinding(evidence: Readonly<MigrationBindingEvidence>): v
   }
 }
 
-function assertPointerOnlyAssociation(evidence: {
+function assertPointerOnlyCaseIsolation(evidence: {
   readonly pointerId: string;
   readonly globalCarrierId: string;
-  readonly returnedId: string;
+  readonly returnedId?: string;
   readonly resultCount: number;
 }): void {
-  if (!sessionIdsEqual(evidence.pointerId, evidence.globalCarrierId)) {
-    throw new Error('Pointer and global carrier no longer share one logical UUID.');
+  if (sessionIdsEqual(evidence.pointerId, evidence.globalCarrierId)) {
+    throw new Error('Opposite-case pointer and global carrier were collapsed.');
   }
-  if (evidence.resultCount !== 1 || evidence.returnedId !== evidence.globalCarrierId) {
-    throw new Error('Pointer-only membership no longer resolves the sole native global spelling.');
+  if (evidence.resultCount !== 0 || evidence.returnedId !== undefined) {
+    throw new Error('Opposite-case pointer resolved a global carrier.');
   }
 }
 
@@ -664,7 +664,7 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
     expect(Object.isFrozen(explicitlyRaised)).toBe(true);
   });
 
-  it('detects post-audit collation, UUID binding, scoped migration, and pointer mutations', () => {
+  it('detects post-audit collation, exact-ID binding, scoped migration, and pointer mutations', () => {
     const suffixes = ['Z', 'ä', 'é', 'z', 'Å', 'a', 'Ω'];
     const codePointCompare = (left: string, right: string): number =>
       left < right ? -1 : left > right ? 1 : 0;
@@ -684,7 +684,7 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
     );
 
     const authoritativePublicId = 'ABABABAB-0000-4000-8000-000000000016';
-    const physicalId = authoritativePublicId.toLowerCase();
+    const physicalId = authoritativePublicId;
     const migration: MigrationBindingEvidence = {
       logicalId: physicalId,
       authoritativePublicId,
@@ -697,7 +697,10 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
     };
     assertMigrationBinding(migration);
     expect(() =>
-      assertMigrationBinding({ ...migration, selectedPhysicalId: authoritativePublicId })
+      assertMigrationBinding({ ...migration, physicalId: physicalId.toLowerCase() })
+    ).toThrow('byte-exact session-ID binding');
+    expect(() =>
+      assertMigrationBinding({ ...migration, selectedPhysicalId: physicalId.toLowerCase() })
     ).toThrow('exact physical SQLite spelling');
     expect(() => assertMigrationBinding({ ...migration, offScopePayloadReads: 1 })).toThrow(
       'off-scope payload'
@@ -711,17 +714,17 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
 
     const pointer = {
       pointerId: physicalId,
-      globalCarrierId: authoritativePublicId,
-      returnedId: authoritativePublicId,
-      resultCount: 1,
+      globalCarrierId: physicalId.toLowerCase(),
+      returnedId: undefined,
+      resultCount: 0,
     };
-    assertPointerOnlyAssociation(pointer);
-    expect(() => assertPointerOnlyAssociation({ ...pointer, returnedId: physicalId })).toThrow(
-      'sole native global spelling'
-    );
-    expect(() => assertPointerOnlyAssociation({ ...pointer, resultCount: 2 })).toThrow(
-      'sole native global spelling'
-    );
+    assertPointerOnlyCaseIsolation(pointer);
+    expect(() =>
+      assertPointerOnlyCaseIsolation({ ...pointer, returnedId: physicalId, resultCount: 1 })
+    ).toThrow('resolved a global carrier');
+    expect(() =>
+      assertPointerOnlyCaseIsolation({ ...pointer, globalCarrierId: physicalId })
+    ).toThrow('were collapsed');
   });
 
   it('detects active-branch Store-gap, parent-chain, and sidechain mutations for both backbones', () => {

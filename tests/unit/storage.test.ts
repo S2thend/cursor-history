@@ -3143,7 +3143,7 @@ describe('resolveSessionIdentifiers', () => {
     expect(result).toEqual(['uuid-def']);
   });
 
-  it('resolves UUID letter case without normalizing the observed public spelling', async () => {
+  it('requires the exact v0.16 UUID spelling', async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readdirSync).mockReturnValue([
       { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
@@ -3156,9 +3156,11 @@ describe('resolveSessionIdentifiers', () => {
       )
     );
 
-    await expect(resolveSessionIdentifiers(nativeId.toLowerCase(), '/data')).resolves.toEqual([
-      nativeId,
-    ]);
+    await expect(resolveSessionIdentifiers(nativeId, '/data')).resolves.toEqual([nativeId]);
+    await expect(resolveSessionIdentifiers(nativeId.toLowerCase(), '/data')).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      identifier: nativeId.toLowerCase(),
+    });
   });
 
   it('does not case-fold arbitrary non-UUID session identifiers', async () => {

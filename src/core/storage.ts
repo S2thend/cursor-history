@@ -1968,7 +1968,7 @@ function loadGlobalBubbleCounts(
   return counts;
 }
 
-/** Read only native Composer key spellings and group them by case-insensitive UUID identity. */
+/** Read native Composer key spellings and group them by byte-exact v0.16 identity. */
 function loadGlobalComposerIdSpellings(
   db: Database,
   budget = createComposerSqliteBudget(),
@@ -2527,7 +2527,7 @@ interface SessionReadContextPrivateState {
   readonly boundComposerWorkspaceBySession: Map<string, Workspace>;
   /** Exact Composer ID spelling selected inside the bound workspace database. */
   readonly boundComposerWorkspaceIdBySession: Map<string, string>;
-  /** Exact global cursorDiskKV spelling selected for a case-insensitive logical UUID. */
+  /** Exact global cursorDiskKV spelling selected for a byte-exact session ID. */
   readonly boundComposerGlobalIdBySession: Map<string, string>;
   readonly boundStoreOccurrencesBySession: Map<string, readonly StorePhysicalOccurrence[]>;
   readonly emittedDiagnosticKeys: Set<string>;
@@ -4027,9 +4027,9 @@ export async function listSessions(
   const globalFallbackCandidates: WorkspaceGlobalCandidate[] = [];
 
   /**
-   * Route unattributed global-only records through the same exact-spelling replica catalog as
-   * workspace-backed Composer rows. This prevents logical UUID folding from becoming first-wins
-   * when Cursor stored case variants or split metadata and bubble rows across spellings.
+   * Route unattributed global-only records through the same byte-exact replica catalog as
+   * workspace-backed Composer rows. Differently cased IDs remain distinct v0.16 identities, and
+   * metadata or bubbles are never borrowed across those identities.
    */
   const registerGlobalOnlyComposer = (
     db: Database,
@@ -5116,7 +5116,7 @@ export async function listSessions(
     const preferredSource = detectPreferredStackSource(customDataPath);
     for (const ss of storeSessions) {
       const logicalStoreId = logicalSessionIdKey(ss.id);
-      // One logical UUID owns one catalog row. A divergent Composer replica group remains
+      // One byte-exact session ID owns one catalog row. A divergent Composer replica group remains
       // ambiguous even when Store has a usable counterpart; never append a second Store row that
       // would make direct lookup/index addressing depend on which row the caller encounters.
       if (composerAmbiguousIds.has(logicalStoreId)) continue;
@@ -5136,8 +5136,7 @@ export async function listSessions(
       if (composerSelected) {
         const existingSummaries = allSessions.filter((s) => sessionIdsEqual(s.id, ss.id));
         for (const existing of existingSummaries) {
-          // Composer is the compatibility authority for a cross-stack UUID; Store enrichment
-          // must not replace its source-native spelling merely because case differs.
+          // Composer is the compatibility authority for an exactly matching cross-stack ID.
           const storeForMerge = { ...ss, id: existing.id };
           if (!activeWorkspacePath || storeMatchesScope || context.includeCrossWorkspaceSources) {
             applyStoreMergeToSummary(
@@ -6112,8 +6111,8 @@ async function loadMergedSession(
   const composer = await loadComposerSession(summary, index, customDataPath, backupPath, context);
 
   if (composer && store) {
-    // Composer spelling is the public compatibility authority even when Store is the preferred
-    // content backbone. Merge internals require equal IDs, so project only Store's logical ID.
+    // The byte-exact IDs already match. Composer remains the public compatibility authority even
+    // when Store is the preferred content backbone.
     return mergeCrossStackSessions(composer, { ...store, id: composer.id }, preferredSource, index);
   }
   const surviving = composer ?? store;

@@ -1410,7 +1410,7 @@ function inspectStoreSessionIdMetadataOnly(
     const chats = join(storeRoot, 'chats');
     if (existsSync(chats)) {
       const compactSessionId = isNativeCursorUuid(sessionId)
-        ? sessionId.replaceAll('-', '').toLowerCase()
+        ? sessionId.replaceAll('-', '')
         : undefined;
       for (const hash of readdirSync(chats, { withFileTypes: true })) {
         throwIfMigrationAborted(signal);
@@ -1419,7 +1419,7 @@ function inspectStoreSessionIdMetadataOnly(
         if (
           compactSessionId !== undefined &&
           /^[0-9a-f]{32}$/iu.test(hash.name) &&
-          hash.name.toLowerCase() === compactSessionId &&
+          hash.name === compactSessionId &&
           existsSync(join(hashPath, 'store.db'))
         ) {
           return { exists: true, complete: true };
