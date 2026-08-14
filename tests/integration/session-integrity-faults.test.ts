@@ -338,7 +338,7 @@ function packedTopologyFaults(source: string): string[] {
       'packed smoke chat directory no longer derives from the scoped workspace',
     ],
     [
-      'const scopedProjectDirectory = scopedWorkspace.replace',
+      'const scopedProjectDirectory = storeProjectDirectoryName(scopedWorkspace)',
       'packed smoke project directory no longer derives from the scoped workspace',
     ],
     ["backup.manifest.version !== '1.0.0'", 'outer backup manifest version is no longer v1'],
@@ -788,6 +788,15 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
     expect(wrongChatIdentity).not.toBe(source);
     expect(packedTopologyFaults(wrongChatIdentity)).toContain(
       'packed smoke chat directory no longer derives from the scoped workspace'
+    );
+
+    const wrongProjectIdentity = source.replace(
+      'storeProjectDirectoryName(scopedWorkspace)',
+      "storeProjectDirectoryName('/different/workspace')"
+    );
+    expect(wrongProjectIdentity).not.toBe(source);
+    expect(packedTopologyFaults(wrongProjectIdentity)).toContain(
+      'packed smoke project directory no longer derives from the scoped workspace'
     );
 
     const wrongOuterVersion = source.replace(

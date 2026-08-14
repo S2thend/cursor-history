@@ -4,14 +4,12 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  cpSync,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -224,6 +222,107 @@ function assertOwnerPrivateFile(path, label) {
   if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600) {
     fail(`${label} mode is ${(stat.mode & 0o777).toString(8)}; expected 600`);
   }
+}
+
+function storeProjectDirectoryName(workspacePath) {
+  const normalized = workspacePath.replace(/\\/gu, '/');
+  const drive = normalized.match(/^([A-Za-z]):(?:\/|$)/u);
+  const withCanonicalDrive = drive ? `${drive[1].toLowerCase()}${normalized.slice(2)}` : normalized;
+  return withCanonicalDrive.replace(/^\/+|\/+$/gu, '').replace(/[/:]+/gu, '-');
+}
+
+function createPackedSmokeStore(storeRoot) {
+  const scopedWorkspace = '/work/a';
+  const scopedSessionId = '10000000-0000-4000-8000-000000000001';
+  const pathlessSessionId = '20000000-0000-4000-8000-000000000002';
+  const scopedSearchNeedle = 'Inspect synthetic-record.txt';
+  const scopedChatHash = createHash('md5').update(scopedWorkspace).digest('hex');
+  const scopedProjectDirectory = storeProjectDirectoryName(scopedWorkspace);
+  const pathlessProjectDirectory = 'packed-smoke-unscoped';
+
+  const scopedChatDirectory = join(storeRoot, 'chats', scopedChatHash, scopedSessionId);
+  const scopedTranscriptDirectory = join(
+    storeRoot,
+    'projects',
+    scopedProjectDirectory,
+    'agent-transcripts',
+    scopedSessionId
+  );
+  const pathlessTranscriptDirectory = join(
+    storeRoot,
+    'projects',
+    pathlessProjectDirectory,
+    'agent-transcripts',
+    pathlessSessionId
+  );
+  for (const directory of [
+    scopedChatDirectory,
+    scopedTranscriptDirectory,
+    pathlessTranscriptDirectory,
+  ]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  }
+
+  writeFileSync(
+    join(scopedChatDirectory, 'meta.json'),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      createdAtMs: 1_700_000_000_000,
+      hasConversation: true,
+      updatedAtMs: 1_700_000_001_000,
+      cwd: scopedWorkspace,
+    })}\n`,
+    { mode: 0o600 }
+  );
+  writeFileSync(
+    join(scopedTranscriptDirectory, `${scopedSessionId}.jsonl`),
+    `${[
+      {
+        role: 'user',
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: `<user_query>\n${scopedSearchNeedle}\n</user_query>`,
+            },
+          ],
+        },
+      },
+      {
+        role: 'assistant',
+        message: {
+          content: [
+            { type: 'text', text: 'Inspecting the fictional record.' },
+            {
+              type: 'tool_use',
+              name: 'Read',
+              input: { path: '/virtual/synthetic-record.txt' },
+            },
+          ],
+        },
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join('\n')}\n`,
+    { mode: 0o600 }
+  );
+  writeFileSync(
+    join(pathlessTranscriptDirectory, `${pathlessSessionId}.jsonl`),
+    `${JSON.stringify({
+      role: 'user',
+      message: {
+        content: [{ type: 'text', text: 'Summarize this fictional smoke sample.' }],
+      },
+    })}\n`,
+    { mode: 0o600 }
+  );
+
+  return {
+    scopedWorkspace,
+    scopedSessionId,
+    pathlessSessionId,
+    scopedSearchNeedle,
+  };
 }
 
 function assertUniquePersistenceIdentities(sessions, label) {
@@ -486,29 +585,12 @@ try {
   }
 
   const storeRoot = join(workspace, 'synthetic-store');
-  cpSync(join(repositoryRoot, 'tests/fixtures/store-root'), storeRoot, { recursive: true });
-  const scopedWorkspace = '/work/a';
-  const fixtureChatHash = '46d408964d3ec2a21d9a23d01b13d82c';
-  const fixtureProjectDirectory = 'd-1-yuyu-proj-cursor-history';
-  const scopedChatHash = createHash('md5').update(scopedWorkspace).digest('hex');
-  const scopedProjectDirectory = scopedWorkspace.replace(/^\/+|\/+$/gu, '').replace(/[/:]+/gu, '-');
-  renameSync(join(storeRoot, 'chats', fixtureChatHash), join(storeRoot, 'chats', scopedChatHash));
-  renameSync(
-    join(storeRoot, 'projects', fixtureProjectDirectory),
-    join(storeRoot, 'projects', scopedProjectDirectory)
-  );
-  const scopedMetaPath = join(
-    storeRoot,
-    'chats',
-    scopedChatHash,
-    'aaaaaaaa-0000-0000-0000-000000000001',
-    'meta.json'
-  );
-  const scopedMeta = JSON.parse(readFileSync(scopedMetaPath, 'utf8'));
-  scopedMeta.cwd = scopedWorkspace;
-  writeFileSync(scopedMetaPath, `${JSON.stringify(scopedMeta)}\n`, { mode: 0o600 });
-
-  const pathlessId = 'bbbbbbbb-0000-0000-0000-000000000002';
+  const {
+    scopedWorkspace,
+    scopedSessionId,
+    pathlessSessionId: pathlessId,
+    scopedSearchNeedle,
+  } = createPackedSmokeStore(storeRoot);
   const summaryListing = await esm.listSessionSummaries({ dataPath: storeRoot });
   const pathlessCatalogRow = summaryListing.data.find((session) => session.id === pathlessId);
   if (!pathlessCatalogRow) fail('packed summary API omitted the synthetic pathless session');
@@ -544,7 +626,7 @@ try {
       new esm.WorkspaceAmbiguityError('work', ['/one/work', '/two/work']),
     ],
     ['isSessionAmbiguityError', new esm.SessionAmbiguityError(pathlessId, ['one', 'two'])],
-    ['isSessionScopeMismatchError', new esm.SessionScopeMismatchError(pathlessId, '/work/a')],
+    ['isSessionScopeMismatchError', new esm.SessionScopeMismatchError(pathlessId, scopedWorkspace)],
     [
       'isUnsupportedSessionMigrationError',
       new esm.UnsupportedSessionMigrationError(pathlessId, 'store-only'),
@@ -889,16 +971,16 @@ try {
   }
   const documentedList = run(
     process.execPath,
-    [cliPath, '--json', '--data-path', storeRoot, '--workspace', '/work/a', 'list', '--all'],
+    [cliPath, '--json', '--data-path', storeRoot, '--workspace', scopedWorkspace, 'list', '--all'],
     { cwd: workspace, timeout: 30_000 }
   );
   const listedJson = JSON.parse(documentedList.stdout);
-  if (listedJson.sessions?.[0]?.id !== 'aaaaaaaa-0000-0000-0000-000000000001') {
+  if (listedJson.sessions?.[0]?.id !== scopedSessionId) {
     fail('documented workspace-scoped list example did not resolve the synthetic session');
   }
   const documentedShow = run(
     process.execPath,
-    [cliPath, '--json', '--data-path', storeRoot, '--workspace', '/work/a', 'show', '1'],
+    [cliPath, '--json', '--data-path', storeRoot, '--workspace', scopedWorkspace, 'show', '1'],
     { cwd: workspace, timeout: 30_000 }
   );
   if (JSON.parse(documentedShow.stdout).id !== listedJson.sessions[0].id) {
@@ -912,9 +994,9 @@ try {
       '--data-path',
       storeRoot,
       '--workspace',
-      '/work/a',
+      scopedWorkspace,
       'search',
-      'Read foo.txt',
+      scopedSearchNeedle,
     ],
     { cwd: workspace, timeout: 30_000 }
   );

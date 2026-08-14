@@ -51,7 +51,6 @@ const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as V017FatalFixtur
 const missingDataPath = '/fixture/v017/missing-data';
 const missingBackupPath = '/fixture/v017/missing.backup';
 const missingStorePath = '/fixture/v017/missing-store';
-const sourceLimitStoreRoot = resolve('tests/fixtures/store-root');
 const temporaryFixtures: SessionIntegrityFixtureRoot[] = [];
 
 afterEach(() => {
@@ -139,17 +138,27 @@ describe('v0.17 fatal JSON compatibility fixture', () => {
   });
 
   it('maps a fatal payload limit to I/O exit 4 without stdout content', async () => {
+    const temporary = createSessionIntegrityFixtureRoot('cursor-history-cli-source-limit-');
+    temporaryFixtures.push(temporary);
+    const sessionId = '50000000-0000-4000-8000-000000000005';
+    writeStoreTranscript(temporary, 'source-limit-project', sessionId, [
+      {
+        role: 'user',
+        message: { content: [{ type: 'text', text: 'fictional payload above one byte' }] },
+      },
+    ]);
+
     const run = await runBuiltCli(
       [
         '--json',
         '--data-path',
-        missingDataPath,
+        temporary.workspaceStorage,
         '--source-limit',
         'jsonlRecordBytes=1',
         'show',
-        'aaaaaaaa-0000-0000-0000-000000000001',
+        sessionId,
       ],
-      { env: { CURSOR_STORE_ROOT: sourceLimitStoreRoot }, timeoutMs: 20_000 }
+      { env: { CURSOR_STORE_ROOT: temporary.storeRoot }, timeoutMs: 20_000 }
     );
     expect(run).toMatchObject({ status: 4, signal: null, timedOut: false });
     expect(run.stdoutBytes).toHaveLength(0);
