@@ -2830,6 +2830,21 @@ describe('mapBubbleToMessage', () => {
     expect(message.role).toBe('assistant');
     expect(message.metadata?.corrupted).toBe(true);
   });
+
+  it('preserves an unknown numeric bubble type through the v0.16-compatible fallback', () => {
+    const message = mapBubbleToMessage({
+      key: 'bubbleId:c1:b-unknown-type',
+      value: JSON.stringify({
+        type: 99,
+        text: 'Synthetic unknown-type message',
+        bubbleId: 'b-unknown-type',
+      }),
+    });
+
+    expect(message.role).toBe('user');
+    expect(message.content).toBe('Synthetic unknown-type message');
+    expect(message.metadata?.bubbleType).toBe(99);
+  });
 });
 
 describe('extractToolCalls', () => {

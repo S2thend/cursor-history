@@ -17,11 +17,14 @@ Recurring repository CI validates only a generic cursor-history-owned downstream
 complete/degraded/idempotence contract. The exact unchanged-consumer adapter, comparison policy,
 digest, persistence transaction, rollback, and repeat synchronization remain a release-blocking T113
 certification from an owner-authorized external checkout at the recorded upstream revision. T113 has
-two mandatory lanes: the real Composer-only corpus, with Store empty, proves v0.16 import/repeat and
-candidate upgrade/repeat preserve every non-excepted durable old value and every key/binding while
-counting each allowed predicate-guarded scalar correction separately; a separate wholly fictional
-Composer-plus-Store corpus proves complete replacement, late-failure rollback/reopen, retry, and final
-zero-write synchronization without deriving any value from the real corpus.
+two mandatory lanes: a deterministic real Composer-only sample of at most eight structurally rich
+sessions, with Store empty, proves v0.16 import/repeat and candidate upgrade/repeat preserve every
+non-excepted selected durable value and every selected key/binding while counting each allowed
+predicate-guarded scalar correction separately; a separate wholly fictional Composer-plus-Store
+corpus proves complete replacement, late-failure rollback/reopen, retry, and final synchronization
+without deriving any value from the real corpus. Every unchanged repeat has zero session/content
+mutations; the consumer's one `sync_metadata` statement and its logical metadata-value change count
+are instrumented separately for every synchronization.
 
 The same increment also binds destructive migration to an eligible Composer occurrence, centralizes
 private temporary-file handling, selects SQLite drivers by required capability, bounds decoded
@@ -286,22 +289,32 @@ priority or permit publication without it.
   revision as an external-certification reference. T113 checks out that revision outside the
   repository with owner authorization and alone executes its exact adapter, comparison/digest, and
   real SQLite persistence in two separately reported lanes. The real Composer-only lane keeps Store
-  empty and passes the entire authorized corpus through v0.16 import/repeat and candidate
-  upgrade/repeat with exact non-excepted durable old-value and every key/relationship/binding check,
-  plus separate counts for the allowed predicate-guarded scalar corrections. The wholly fictional
-  Composer-plus-Store lane performs complete replacement, a late forced rollback and reopen,
-  successful retry, and repeated zero-write synchronization. It copies or derives no value from the
-  real corpus. Publication remains blocked until both the recurring generic gate and both T113 lanes
-  pass.
+  empty and uses the v0.16 oracle to select at most eight sessions maximizing required observed
+  structural-category coverage. It passes the same selected set through the public differential,
+  v0.16 import/repeat, and candidate upgrade/repeat, with exact non-excepted selected durable-value
+  and every selected key/relationship/binding check, plus separate counts for the allowed
+  predicate-guarded scalar corrections. The wholly fictional Composer-plus-Store lane performs
+  complete replacement, a late forced rollback and reopen, successful retry, and repeated
+  synchronization. Repeats permit zero session/content mutations; every invocation separately counts
+  exactly one `sync_metadata` schema-version statement and its logical metadata-value changes. The
+  fictional lane copies or derives no value from the real corpus. Publication remains blocked until
+  both the recurring generic gate and both T113 lanes pass. T113 writes no real-data value, derived
+  value, membership, count, hash, or result into the repository.
 - Preserve v0.16's Composer discovery order when session `createdAt` values tie, including the
   exact `String.localeCompare()` workspace-path precedence used before the stable timestamp sort.
   Capture that legacy Composer position before replica reconciliation, keep it for merged or
   ambiguous Composer-backed rows, place new-only rows after that legacy tie group, and use
   locale-independent code-point/UUID ordering only among rows that have no v0.16 Composer position.
-- Treat the owner-private v0.16 full-corpus differential as an exhaustive manual certification, not
-  a performance-sensitive recurring test. It may use an independent quadratic all-candidate pass
-  to prove one-to-one session/message/tool associations; sampling, record caps, time budgets, and
-  early-success exits are forbidden.
+- Treat the owner-private v0.16 real-data differential as a bounded structure-coverage
+  certification, not as exhaustive real-corpus evidence. Build an ephemeral structural inventory
+  with the v0.16 oracle and the finite `t113-structure-coverage/v1` registry in
+  `docs/release-verification.md`. Deterministically select by maximum newly covered predicates, then
+  total registry coverage, then earlier v0.16 global ordinal, and cap the selection at eight
+  sessions. Use the same selected set for public-value and unchanged-consumer evidence and compare
+  every selected value, shape, and association. Map every required predicate not represented by the
+  bounded sample to a deterministic fictional regression plus a drift-detecting mutation; a missing
+  mapping blocks T113. Recurring synthetic and mutation tests remain the exhaustive required-predicate
+  gate, including every required predicate not represented by the bounded real sample.
 - Lock representative v0.17 complete Store/merged output separately. Its test promises one
   replacement and convergence, not preservation of unstable Store positional IDs.
 - Lock v0.16 and v0.17 public-search baselines proving the released placeholder `messageIndex`,
@@ -566,7 +579,7 @@ priority or permit publication without it.
 
 | Area | Required evidence |
 |------|-------------------|
-| v0.16 compatibility | Recurring CI: native and missing Composer IDs, exact legacy `localeCompare()` discovery precedence, old tool ordinals, Store insertions at start/middle/end, both preferred sources, resolved active-branch parents/leaf with sidechains excluded, enrichment/tool changes, supported attachment evidence projected into public compatibility fields, ignored standalone attachment/code-block/tool-file fields, collisions, generic complete/degraded/idempotence. External T113 only: exact unchanged adapter/digest/policy; a real Composer-only, empty-Store full-corpus import/repeat and candidate upgrade/repeat with exact non-excepted durable old-value plus every key/relationship/binding check and separate allowed-scalar-correction counts; and a separate wholly fictional real-SQLite replacement/late-rollback/reopen/retry/final-no-op lane that derives no real value |
+| v0.16 compatibility | Recurring CI: native and missing Composer IDs, exact legacy `localeCompare()` discovery precedence, old tool ordinals, Store insertions at start/middle/end, both preferred sources, resolved active-branch parents/leaf with sidechains excluded, enrichment/tool changes, supported attachment evidence projected into public compatibility fields, ignored standalone attachment/code-block/tool-file fields, collisions, generic complete/degraded/idempotence. External T113 only: exact unchanged adapter/digest/policy; a deterministic real Composer-only, empty-Store sample of at most eight sessions maximizing required observed structural-category coverage, with synthetic/mutation mappings for unrepresented categories, import/repeat and candidate upgrade/repeat exact selected-value/key/relationship/binding checks, and separate allowed-scalar-correction/bookkeeping-DML counts; plus a separate wholly fictional real-SQLite replacement/late-rollback/reopen/retry/final-no-content-mutation lane that derives no real value |
 | v0.17 convergence | Locked complete Store/merged baselines converge through one full replacement, produce no duplicate logical content, preserve native Composer IDs, then no-op; degraded transition explicitly excluded |
 | Public search coordinates | Tagged v0.16/v0.17 baselines plus the 0.18.0 correction: complete-array message index, complete-content UTF-16 offset, complete source line/context; non-first/multiline/mixed-case/astral/lowercase-expansion cases; identities and non-search fields unchanged |
 | Public JSON export | Tagged v0.16/v0.17 absence plus additive 0.18.0 zero-based library `index`; single and bulk exports agree without mutating the resolved source object |

@@ -45,18 +45,23 @@ those deleted test-harness revisions.
 The exact no-vibe-history-change guarantee is a separate release-blocking T113 certification. With
 owner authorization, T113 uses an external checkout at the recorded upstream revision and runs that
 project's unchanged adapter, exact comparison policy and digest, and real SQLite persistence path in
-two mandatory lanes. The real-corpus lane keeps Store provably empty, imports every authorized
-Composer-only v0.16 session, repeats with zero writes, applies the candidate, compares every
-non-excepted durable old value and every key/relationship/binding, separately counts only the
-allowed predicate-guarded scalar corrections, and repeats the candidate with zero writes. The
-fictional-transaction lane uses only fixed fictional Composer and Store values with the same
+two mandatory lanes. The real-corpus lane keeps Store provably empty and uses a versioned v0.16
+oracle policy to select at most eight sessions maximizing required observed structural-category
+coverage. Any unrepresented required category maps to a deterministic fictional regression and
+drift-detecting mutation. It imports the same selected v0.16 views used by the public differential, repeats with
+zero session/content mutations, applies the candidate, compares every non-excepted selected durable
+value and every selected key/relationship/binding, separately counts only the allowed
+predicate-guarded scalar corrections, and repeats the candidate with zero session/content
+mutations. Each synchronization's existing `sync_metadata` statement and logical metadata-value
+change count are instrumented and reported separately. The fictional-transaction lane uses only fixed fictional Composer and Store values with the same
 consumer: it performs a complete
 replacement, forces a late transaction failure, reopens the database to prove full old-state
-rollback, retries successfully, and repeats with zero writes. The fictional lane never copies or
+rollback, retries successfully, and proves the same content/bookkeeping write accounting. The fictional lane never copies or
 derives a real ID, path, title, content, timestamp, ordering, or tool value, and its result is never
 presented as a Store transition observed in the real corpus. The revision/license reference may be
-recorded in the repository, but no third-party implementation or downstream database is copied into
-recurring CI. cursor-history owns only the complete, replacement-safe projection and compatibility
+recorded in the repository, but no third-party implementation, downstream database, or
+real-data-derived value, count, membership, hash, or result is copied into recurring CI or a commit.
+cursor-history owns only the complete, replacement-safe projection and compatibility
 signal supplied to that consumer; it does not claim an arbitrary consumer's transactional
 persistence.
 

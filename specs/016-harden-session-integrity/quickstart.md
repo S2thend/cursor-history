@@ -64,14 +64,19 @@ current implementation. The projector-provenance test must:
 Recurring CI MUST NOT copy, vendor, emulate, or execute a third-party adapter, digest, policy,
 SQLite schema/transaction, rollback, or downstream archive. Before release, T113 uses the
 owner-authorized external checkout at the recorded revision to run those exact behaviors in two
-mandatory lanes. The real-corpus lane keeps Store empty, imports every authorized Composer-only
-v0.16 session, repeats with zero writes, applies the candidate, compares every non-excepted durable
-old value and every key/relationship/binding, separately counts only the allowed predicate-guarded
-scalar corrections, and repeats the candidate with zero writes. The separate fictional-transaction
+mandatory lanes. The real-corpus lane keeps Store empty and deterministically selects at most eight
+Composer-only v0.16 sessions maximizing coverage of the required structural categories observed by
+the oracle. The public differential and unchanged-consumer flow use that same selected set, compare every
+selected value/shape/key/relationship/binding, and require zero session/content mutations on both
+unchanged repeats. Each consumer synchronization's existing `sync_metadata` schema-version statement
+and logical metadata-value change count are instrumented and reported separately. The separate fictional-transaction
 lane uses only fixed fictional Composer and Store values to perform complete replacement, force a
-late transaction failure, reopen to prove exact rollback, retry, and repeat with zero writes. It
-MUST NOT derive any value from the real corpus, and its result MUST NOT be described as a real-corpus
-Store transition. The no-consumer-change guarantee is not approved until both lanes pass.
+late transaction failure, reopen to prove exact rollback, retry, and prove the same repeat-write
+accounting. It MUST NOT derive any value from the real corpus, and its result MUST NOT be described
+as a real-corpus Store transition. The no-consumer-change guarantee is not approved until both
+lanes pass.
+Every required category not represented by the bounded real sample must map to a deterministic
+fictional regression and a drift-detecting mutation.
 
 The committed raw-layout SQLite fixture is generated deterministically from wholly synthetic
 values. Its manifest records reproducible generation instructions, logical content, and SHA-256;
@@ -113,11 +118,11 @@ resolves the upgraded complete merge, applies it, then repeats the same input. I
 - equal-time Composer rows retain their v0.16 discovery/numeric order;
 - incoming legacy `source` is `global` for the complete view;
 - cursor-history emits one complete replacement-safe projection and compatibility signal;
-- the next unchanged generic application performs zero writes.
+- the next unchanged generic application performs zero modeled session/content mutations.
 
-T113 separately proves the unchanged external consumer's exact key/digest comparison over the real
-Composer-only corpus and real SQLite replacement/rollback/reopen/retry/repeat-sync behavior over the
-wholly fictional transaction corpus. Repository results must not be described as proving that
+T113 separately proves the unchanged external consumer's exact key/digest comparison over the
+selected real Composer-only sample and real SQLite replacement/rollback/reopen/retry/repeat-sync
+behavior over the wholly fictional transaction corpus. Repository results must not be described as proving that
 external transaction, and the fictional transition must not be described as occurring in the real
 corpus.
 
@@ -135,7 +140,7 @@ Expected:
 - native Composer identities are correct;
 - unstable v0.17 Store positional/cross-format IDs are not asserted as preserved;
 - no logical content is duplicated;
-- the next unchanged sync performs zero writes;
+- the next unchanged sync performs zero session/content mutations;
 - degraded v0.17 fixtures produce the documented pin/retry diagnostic and never overwrite a
   complete stored view.
 
@@ -721,19 +726,24 @@ revision and the packed bytes never change afterward:
    authorized source carriers below before freezing the repository.
 2. If a legitimate source exceeds a default, update every normative/projection artifact, constant,
    test, and document, then restart the affected implementation and preflight work.
-3. Before freezing, run the documented owner-private full-corpus differential between the official
-   v0.16.0 tag and the candidate over the same Composer-only source, including every released
-   library value/shape. Run both pinned unchanged-consumer lanes: the real Composer-only,
-   empty-Store import/repeat/upgrade/repeat compatibility lane and the separately reported wholly
-   fictional complete-replacement/late-rollback/reopen/retry/no-op lane. Real input may reveal a
-   structural class, but no real value, redaction, hash, ordering, or derived artifact may enter a
-   committed fixture or the fictional lane; reproduce the class manually with fixed fictional
-   values, rerun its regression and fixture safety gates, and restart the preflight. Do not sample,
-   cap, time-limit, or stop after an early success; use exhaustive all-candidate association even if
-   that manual pass is quadratic.
-4. Run the preliminary full validation. Any failure or unplanned tracked edit returns to its owning
-   task and restarts at the preflight and private differential. After a clean pass, write the one
-   planned implementation checklist and make no other repository change.
+3. Before freezing, run the documented owner-private structure-coverage differential between the
+   official v0.16.0 tag and the candidate over the same Composer-only source. The v0.16 oracle
+   selects a deterministic set of at most eight sessions maximizing coverage of observed
+   message-ID, message-category, tool, code-block, relationship, timestamp, and workspace-evidence
+   categories. Compare every public value/shape and every association inside that selected set and
+   map every required category not represented by the sample to a deterministic fictional
+   regression plus a mutation that proves drift is detected. Run both pinned unchanged-consumer
+   lanes: the selected real Composer-only, empty-Store import/repeat/upgrade/repeat compatibility
+   lane and the separately reported wholly fictional complete-replacement/late-rollback/reopen/retry
+   lane. Repeats require zero session/content mutations; every invocation separately counts the one
+   existing `sync_metadata` statement and its logical metadata-value changes. Real input may reveal a structural
+   class, but no real value, redaction, hash, ordering, count, membership, result, or derived artifact may enter a committed
+   fixture or the fictional lane; reproduce the class manually with fixed fictional values, rerun
+   its regression and fixture safety gates, and restart the preflight. Recurring deterministic
+   synthetic and mutation tests remain the exhaustive edge-case gate.
+4. Run the preliminary required validation. Any failure or tracked edit returns to its owning task
+   and restarts at the preflight and private differential. T113 writes no repository file; retain its
+   result only in owner-private external storage and verify that the candidate tree remains unchanged.
 5. Freeze that revision and run the unconditional final install/typecheck/lint/format/test/build
    gates. Pack once only after they pass, retain the checksum-addressed tarball, and smoke only those
    bytes.

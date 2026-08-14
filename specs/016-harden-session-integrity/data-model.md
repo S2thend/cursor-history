@@ -703,9 +703,16 @@ Compatibility aliases:
   CI models only its public key/binding and complete/degraded/idempotence contract. The unchanged
   compatibility consumer owns its exact adapter, digest, policy, persistence transaction, and
   rollback; only owner-authorized external T113 at the recorded upstream revision makes exact
-  downstream claims. Its real Composer-only, empty-Store lane claims v0.16 upgrade compatibility;
-  its separate wholly fictional Composer-plus-Store lane claims complete replacement,
-  rollback/reopen/retry, and repeated-sync behavior. Neither claim substitutes for the other.
+  downstream claims. Its real Composer-only, empty-Store lane uses one owner-private
+  `t113-structure-coverage/v1` sample of at most eight sessions for both the public differential and
+  unchanged-consumer flow; sample membership is never a public entity or retained identifier. Every
+  required structural predicate not represented by the sample maps to deterministic synthetic and
+  mutation evidence. Its separate wholly fictional Composer-plus-Store lane claims complete
+  replacement, rollback/reopen/retry, and repeated-sync behavior. Neither claim substitutes for the
+  other. An unchanged repeat has zero session/content mutations and an identical logical snapshot;
+  the consumer's one `sync_metadata` schema-version statement and its logical metadata-value change
+  count per synchronization are separate bookkeeping evidence. Real-data-derived values, counts,
+  memberships, hashes, and results remain external and are never repository entities.
 - For merged sessions, `activeBranchBubbleIds` and `activeBranchMessageIds` contain the same
   resolved selected-branch sequence. Leading, middle, and trailing Store-only active turns appear
   once; Store sidechains do not. Parent and leaf references use those resolved IDs.

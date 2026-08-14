@@ -100,8 +100,10 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
 - **Incremental replacement safety**: A v0.16 Composer-only archive can upgrade to a complete
   Composer-backed merged session without changing the consumer. The first changed sync uses the
   consumer's existing whole-session atomic replacement and the next identical sync performs no
-  writes. Middle insertions, enrichment, relationships, and tools no longer rely on a timestamp
-  watermark.
+  session/content mutations. The consumer still executes one existing `sync_metadata`
+  schema-version upsert statement per synchronization; a fresh target may initialize that metadata
+  row, while later same-version upserts are value-preserving bookkeeping outside the content count.
+  Middle insertions, enrichment, relationships, and tools no longer rely on a timestamp watermark.
 - **v0.17 convergence path**: Complete affected v0.17 Store/merged sessions converge through one
   documented whole-session replacement with no duplicate logical content and then become
   idempotent. Unstable v0.17 Store positional/cross-format synthetic IDs are intentionally not

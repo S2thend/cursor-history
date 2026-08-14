@@ -147,8 +147,11 @@ The confirmed no-consumer-change upgrade path is deliberately narrower: an archi
 v0.16 Composer-only data can become a complete Composer-backed merged view while retaining every
 old session, Composer-message, and existing ordinal-derived tool key byte-for-byte. A changed
 complete view still reports `source: "global"`, so the unchanged consumer performs its existing
-whole-session atomic replacement; a second identical sync performs no writes. Store-only turns may
-be interleaved without renumbering old Composer identities. Do not use a maximum timestamp as the
+whole-session atomic replacement; a second identical sync performs no session/content mutations.
+The unchanged consumer still executes one existing `sync_metadata` schema-version upsert statement
+per synchronization; a fresh target may initialize that metadata row, while later same-version
+upserts are value-preserving bookkeeping outside the session/content mutation count. Store-only turns
+may be interleaved without renumbering old Composer identities. Do not use a maximum timestamp as the
 incremental boundary, and never replace complete archived data with
 `source: "workspace-fallback"`.
 

@@ -149,7 +149,7 @@ Rerun T020, T022, T057, T060, T063, T069, T085, T088, T092, T099, T105, and T110
 preliminary full validation. Any later failure returns to the owning task and restarts the preflight
 through release-candidate sequence.
 
-## Private v0.16 full-corpus differential (T113)
+## Private v0.16 deterministic structure-coverage certification (T113)
 
 Before repository freeze, compare the official `v0.16.0` tag and the candidate against the same
 maintainer-owned Composer-only source in an owner-private directory outside this repository. This is
@@ -176,24 +176,146 @@ checksum-addressed pre-freeze packed candidate, the official v0.16 revision/tree
 digest, the ARR revision and authorized source-blob inventory, the validation-harness manifest, the
 runtime and resolved production-dependency tree, and the exact policy version. Any mismatch aborts
 before source content is opened. The pre-freeze candidate is T113 evidence only; it is not the final
-T115 release tarball, and any repository edit invalidates it and restarts T112–T113.
+T115 release tarball. Before T113 completes, any repository edit invalidates it and restarts
+T112–T113.
 
-The private differential must cover every discovered session, not a sample. Compare every
-pre-existing public library field, optional own-property, ordering rule, null/omission shape, message
-binding, and tool binding separately from allowlisted additive fields and individually documented
-versioned exceptions. T113 then runs two separately reported, mandatory external-consumer lanes from
-the same pinned owner-authorized ARR checkout:
+T113 first performs one single-pass, non-retaining structural inventory of the authorized v0.16
+Composer-only source. The inventory may inspect every session only to compute the versioned
+`t113-structure-coverage/v1` boolean/count predicates; it does not perform a full public-value
+differential or run the downstream consumer for an unselected session. Every key in this finite
+registry is required. “Observed” means that the source-only predicate is true for at least one
+v0.16 logical session; it never means that the candidate emitted a value. The named synthetic test
+group and mutant are required whether the key is covered by the real sample or only synthetically.
 
-1. The **real-corpus lane** keeps Store provably empty and passes every normalized Composer-only
-   session through the unchanged vibe-history adapter and its real sync policy/SQLite persistence
-   path. Import the v0.16 view, repeat it with zero writes, apply the candidate view, compare every
-   non-excepted durable old value and every key/relationship/binding, separately count each allowed
-   predicate-guarded scalar correction, and apply the unchanged candidate again with zero writes. No
-   row may be lost, duplicated, or rebound.
+| Predicate key | Source-only/v0.16-oracle predicate | Synthetic test group | Required mutant |
+|---|---|---|---|
+| `id.native` | Message has its own non-empty string `id` | `v016-versioned-exceptions` | `native-id-rewrite` |
+| `id.absent` | Message has no own `id` property | `v016-versioned-exceptions` | `absent-id-not-materialized` |
+| `id.null` | Message has own `id === null` | `v016-versioned-exceptions` | `null-id-shape-collapse` |
+| `id.empty` | Message has own `id === ""` | `v016-versioned-exceptions` | `empty-id-shape-collapse` |
+| `type.user` | Released classifier returns `user` | `cli-formatters-table` | `user-role-reclassified` |
+| `type.assistant` | Released classifier returns `assistant` | `cli-formatters-table` | `assistant-role-reclassified` |
+| `type.tool` | Released classifier returns `tool` | `cli-formatters-table` | `tool-marker-or-structure-ignored` |
+| `type.thinking` | Released classifier returns `thinking` | `cli-formatters-table` | `thinking-marker-reclassified` |
+| `type.error` | Released classifier returns `error` | `cli-formatters-table` | `error-marker-reclassified` |
+| `type.thinking-with-tool` | One `thinking` message also has a non-empty tool-call array | `cli-formatters-table` | `thinking-tool-hidden` |
+| `type.error-with-tool` | One `error` message also has a non-empty tool-call array | `cli-formatters-table` | `error-tool-hidden` |
+| `source.unknown-bubble-type` | Raw Composer numeric message type is outside `{1, 2}` | `storage-message-mapping` | `unknown-source-type-dropped` |
+| `payload.fenced-code` | Message content contains a fenced block recognized by the v0.16 consumer | `v016-composer-upgrade` | `fenced-code-binding-dropped` |
+| `shape.optional-present` | A released optional message field is present with a non-null value | `v016-versioned-exceptions` | `optional-present-omitted` |
+| `shape.optional-undefined-own` | A released optional message field is own and `undefined` | `v016-versioned-exceptions` | `optional-undefined-omitted` |
+| `shape.optional-omitted` | A released optional message field is absent | `v016-versioned-exceptions` | `optional-omitted-materialized` |
+| `tool.single` | One message has exactly one tool call | `v016-composer-upgrade` | `single-tool-dropped` |
+| `tool.multiple` | One message has at least two ordered tool calls | `v016-composer-upgrade` | `tool-order-collapsed` |
+| `tool.completed` | A tool call has status `completed` | `v016-composer-upgrade` | `completed-status-rewritten` |
+| `tool.cancelled` | A tool call has status `cancelled` | `storage-message-mapping` | `cancelled-status-rewritten` |
+| `tool.error` | A tool call has status `error` | `v016-composer-upgrade` | `tool-error-rewritten` |
+| `relationship.parent` | A message has a parent reference | `store-stack-merge` | `parent-binding-rewritten` |
+| `relationship.sidechain` | Source marks at least one branch/sidechain message | `store-stack-merge` | `sidechain-admitted-active` |
+| `relationship.active-branch` | Source carries active-branch or leaf selection metadata | `store-stack-merge` | `active-branch-member-dropped` |
+| `time.message-created-at` | Message has a valid direct Composer `createdAt` | `v016-versioned-exceptions` | `created-at-source-rewritten` |
+| `time.message-timing` | Message lacks valid `createdAt` and has valid Composer timing | `v016-versioned-exceptions` | `timing-source-rewritten` |
+| `time.inferred-next` | Message lacks direct time and has a later direct message time | `v016-versioned-exceptions` | `next-anchor-ignored` |
+| `time.inferred-previous` | Message lacks direct/later time and has an earlier direct message time | `v016-versioned-exceptions` | `previous-anchor-ignored` |
+| `time.session-fallback` | No message direct anchor exists and stored session creation is valid | `v016-versioned-exceptions` | `session-anchor-ignored` |
+| `time.unknown` | No message direct anchor or deterministic session anchor exists | `v016-versioned-exceptions` | `unknown-uses-read-time` |
+| `time.session-created-stored` | Composer metadata has valid stored creation time | `storage-timestamps` | `stored-creation-rewritten` |
+| `time.session-updated-stored` | Composer metadata has valid stored update time | `storage-timestamps` | `stored-update-rewritten` |
+| `time.session-updated-from-message` | Stored update is absent and a direct message time exists | `storage-timestamps` | `message-update-anchor-ignored` |
+| `time.session-epoch-unknown` | Stored and direct session anchors are all absent | `storage-timestamps` | `unknown-session-uses-read-time` |
+| `scope.global-complete` | Logical session has a complete global Composer carrier | `workspace-index-roundtrip` | `global-carrier-degraded` |
+| `scope.workspace-fallback` | Logical session has a workspace fallback carrier | `workspace-index-roundtrip` | `fallback-carrier-promoted` |
+| `scope.real-path` | Workspace attribution is a real path | `workspace-index-roundtrip` | `real-path-rebound` |
+| `scope.path-placeholder` | Workspace attribution is absent or a directory-ID placeholder | `v016-versioned-exceptions` | `placeholder-fabricated-path` |
+| `occurrence.equivalent` | Two same-role physical occurrences have equal stable v0.16 projections | `session-replica-reconciliation` | `equivalent-replica-duplicated` |
+| `occurrence.divergent` | Two same-role physical occurrences differ in stable v0.16 projections | `session-replica-reconciliation` | `divergent-replica-selected` |
+| `occurrence.uuid-case-variant` | Canonically equal UUID occurrences use different case spellings | `composer-session-id-case-sensitivity` | `case-variant-physical-key-rewritten` |
+
+For this registry, the released classifier is fixed as: `user` role first; otherwise the explicit
+tool, thinking, and error content markers in that order; then a non-empty structured tool-call array;
+otherwise `assistant`. “Released optional message field” means one of `thinking`, `model`,
+`tokenUsage`, `durationMs`, `toolCalls`, or `metadata`. The named synthetic groups map
+to these repository-owned, wholly synthetic tests:
+
+- `v016-versioned-exceptions` →
+  `tests/compatibility/v016-versioned-exceptions.test.ts`;
+- `v016-composer-upgrade` → `tests/compatibility/v016-composer-upgrade.test.ts`;
+- `cli-formatters-table` → `tests/unit/cli-formatters-table.test.ts`;
+- `store-stack-merge` → `tests/unit/store-stack-merge.test.ts`;
+- `storage-message-mapping` → `tests/unit/storage.test.ts`;
+- `storage-timestamps` → `tests/unit/storage.test.ts` and `tests/unit/lib-index.test.ts`;
+- `workspace-index-roundtrip` → `tests/integration/workspace-index-roundtrip.test.ts`;
+- `session-replica-reconciliation` →
+  `tests/integration/session-replica-reconciliation.test.ts`; and
+- `composer-session-id-case-sensitivity` →
+  `tests/integration/composer-session-id-case-sensitivity.test.ts`.
+
+The T113 harness manifest maps each mutant name to a self-test and must prove that enabling it fails
+certification.
+
+Classification uses only raw source facts and the official v0.16 view. For each v0.16 logical
+session, union the predicates of every physical contributor. Let `requiredObserved` be the union over
+the source. Select at most eight logical sessions. Start with an empty selection and, while predicates
+remain uncovered and fewer than eight sessions are selected, choose the unselected session covering the greatest number of currently
+uncovered predicates; break a tie by the greater total number of registry predicates and then by the
+earlier v0.16 global ordinal. IDs, paths, titles, content, timestamps, and hashes must not participate
+in scoring or tie-breaking. Stop when all `requiredObserved` predicates are covered or eight sessions
+have been selected. An empty corpus fails certification. Freeze the owner-private membership before
+the candidate view is opened; never select from candidate output. Every still-uncovered registry
+predicate must have the fictional/mutation mapping described below—the cap never expands
+automatically.
+
+The public v0.16-versus-candidate differential and unchanged-consumer real lane must use exactly the
+same selected set. Within each selected session, compare every session, message, code-block, and tool
+value; every own-property/null/omission shape; all ordering; and every key, relationship, and binding.
+Candidate-only fields are permitted only when they appear in the locked additive-field allowlist,
+and each such field must still satisfy its own type, value, provenance, and canonical-order contract;
+“additive” is not a wildcard that suppresses drift. Every non-additive difference must satisfy
+exactly one predicate in FR-006, FR-024, or FR-036. No record cap or early-success exit is permitted
+inside a selected session. Exact forward/reverse maps, cardinality checks, and duplicate detection
+may replace quadratic all-corpus enumeration.
+Every required structural predicate absent from the selected real sample, whether because of the
+eight-session cap or because it does not occur in the source, must map to a deterministic wholly
+fictional regression and a mutation that proves drift is detected. A missing mapping blocks T113.
+
+Create an owner-private sampled Composer source projection for the real consumer without modifying
+the extracted source. Copy only the selected raw Composer carriers and their required membership
+metadata. Copy per-session records byte-for-byte. When a shared carrier contains several sessions,
+rebuild only its container while preserving each selected JSON subtree recursively, including keys,
+values, own-property shape, and relative order. Prove that every selected stable v0.16 public value
+and own-property shape equals the same session in the unmodified source, and give the public oracle,
+public candidate, consumer oracle, and consumer candidate four isolated copies of one frozen
+blueprint. Projection-local numeric indices, pagination totals, and page positions are contextual
+addresses rather than stable source values: they may differ from the unmodified source, but they must
+be exact between projected oracle and candidate results and round-trip inside each projection. Prove
+that the projection contains zero unselected payload records, and include mutations for an unselected
+carrier leak and an allowed index/page-context renumbering. For source-to-projection equality, the
+only other excluded values are v0.16 read-time-derived timestamp fallbacks whose direct source is
+absent; the projection must preserve the same absence predicate, and the projected
+v0.16-versus-candidate comparison must classify the resulting scalar only under FR-024/FR-036. The
+projection remains private and is deleted in `finally`; it is not a fixture and no derived value
+enters the repository or the fictional lane. T113 then runs two
+separately reported, mandatory external-consumer lanes from the same pinned owner-authorized ARR
+checkout:
+
+1. The **real-corpus lane** keeps Store provably empty and passes the selected Composer-only
+   projection through the unchanged vibe-history adapter and its real sync policy/SQLite persistence
+   path. Import the v0.16 view, repeat it with zero session/content mutations, apply the candidate
+   view, compare every non-excepted selected durable old value and every selected
+   key/relationship/binding, separately count each allowed predicate-guarded scalar correction, and
+   apply the unchanged candidate again with zero session/content mutations. The logical snapshot and
+   sequence must remain unchanged on both repeats. Each consumer synchronization still executes
+   exactly one pre-existing `sync_metadata` schema-version upsert statement; instrument and report
+   that bookkeeping DML separately for initial import, v0.16 repeat, candidate upgrade, and candidate
+   repeat. The initial import may create the metadata row; later same-version invocations are
+   value-preserving.
 2. The **fictional-transaction lane** uses only fixed fictional Composer and Store values with that
-   same unchanged adapter, comparison policy, digest, and real SQLite transaction. Perform one
-   complete replacement, force a late transaction failure, reopen the database to prove exact
-   pre-transaction rollback, retry successfully, and repeat with zero writes. This lane must not
+   same unchanged adapter, comparison policy, digest, and real SQLite transaction. Import a fictional
+   Composer baseline, force its candidate complete-replacement transition to fail late, reopen the
+   database to prove exact pre-transaction rollback, retry the same transition successfully and prove
+   it is complete, then repeat with zero session/content mutations. Report the one `sync_metadata`
+   upsert statement separately for the baseline import, forced failure, retry, and final repeat. This
+   lane must not
    copy, transform, hash into, or otherwise derive any ID, path, title, content, timestamp, ordering,
    or tool value from the real corpus. Its result must never be described as a Store transition
    observed in the real corpus.
@@ -201,18 +323,33 @@ the same pinned owner-authorized ARR checkout:
 Both lanes must pass before T113 passes. Evidence must distinguish the real-corpus compatibility
 result from the fictional transaction result; neither lane substitutes for the other.
 
+For write accounting, a **session/content mutation** is an insert, update, or delete of session,
+message, relationship, code-block, or tool-call state. A **metadata upsert** is the unchanged
+consumer's `sync_metadata` schema-version statement and is never folded into the content count. Count
+one metadata-upsert statement for every synchronization attempt after target `open()` succeeds,
+including a forced-failure attempt, and separately count logical metadata-value changes. The first
+open of a fresh target inserts the schema-version row; subsequent same-version upserts execute one
+statement but change zero logical metadata values. The upsert precedes the content transaction, so a
+forced late failure still executes that one bookkeeping statement. For that failure, report both
+attempted content statements and committed content mutations; after reopening, committed content
+mutations and metadata-value changes must both be zero, and the exact pre-transaction logical content
+snapshot must be restored.
+
 The structural synthetic regressions run before this private pass and cover v0.16
 `String.localeCompare()` equal-time workspace discovery, canonical UUID lookup versus exact
 physical Composer keys, pointer-only membership with one opposite-case global carrier, and leading,
 middle, and trailing Store-only active-branch turns under both preferred backbones. Compact 32-hex
 non-UUID identifiers remain exact. Migration evidence also shows metadata-only off-scope projection
-and complete-batch refusal before any write. The private pass confirms that these fixes introduce no
-unclassified public-value drift; it never derives a committed fixture from real data.
+and complete-batch refusal before any write. Those deterministic regressions plus their mutations are
+the exhaustive edge-case gate. The bounded private sample confirms that the selected structurally
+rich real sessions introduce no unclassified public-value drift; it never derives a committed
+fixture from real data and must never be described as full-corpus real-data certification.
 
-Do not introduce sampling, record caps, time budgets, or early success exits for this certification.
-It is an infrequent manual release gate, so exhaustive validation takes precedence over runtime: use
-an independent all-candidate association pass when needed to prove one-to-one session, message, and
-tool bindings, even when the straightforward validation is quadratic in corpus size.
+The harness may emit fixed, non-sensitive progress events containing only a stage name and aggregate
+selected/processed counts. It must never emit membership, IDs, paths, values, content-derived hashes,
+or raw errors. Removing redundant pre-hydration is permitted, but each unchanged-consumer sync must
+still execute the original provider/aggregator/SQLite call chain without return-value caching or
+provider/target filtering.
 
 Never retain or print raw errors or diffs that can contain IDs, paths, titles, content, timestamps,
 or stable hashes. Raw source, full outputs, comparison intermediates, and the downstream database
@@ -221,13 +358,22 @@ external record may contain only non-private code/artifact bindings, aggregate c
 compatibility categories, and pass/fail assertions. It must not retain the source-archive digest,
 raw-tree manifest, or any content-derived per-session digest.
 
-Real data is discovery evidence only. Apart from the ephemeral owner-private archive/tree integrity
-digests required above—which must be deleted and must not enter aggregate evidence—it must never be
+Real data is discovery and bounded selected-session evidence only. Apart from the ephemeral
+owner-private archive/tree integrity digests required above—which must be deleted and must not
+enter aggregate evidence—it must never be
 copied, transformed, redacted, hashed into, or otherwise used as input to a committed regression
-fixture or the fictional lane. When it reveals a missing structural case, hand-author the analogous
-case with fixed fictional values in the no-input synthetic fixture generator, run deterministic
+fixture or the fictional lane. When the inventory reveals a required structural predicate not
+already mapped to a deterministic regression and mutation, hand-author the analogous case with fixed
+fictional values in the no-input synthetic fixture generator, run deterministic
 regeneration/hash/sensitive-scan/poison checks, and rerun the focused regression. Any resulting
 repository change invalidates the previous preflight/differential and restarts T112–T113.
+
+T113 writes no repository file. Its result remains only in the owner-private external attestation
+described below and is deleted under the maintainer's local secure-data procedure after the release
+decision. No raw or aggregate real-data result, selected membership, derived value, or pass/fail
+status is copied into this repository, a commit, a fixture, or recurring CI. T114 must prove that the
+candidate revision and tracked tree are unchanged after T113; any repository edit invalidates the
+candidate and restarts T112–T113.
 
 ## Exact-tarball maintainer verification (T115)
 
@@ -312,20 +458,52 @@ raw_tree_before_after_identical: [pass/fail and aggregate entry count; do not re
 owner_only_artifacts: [pass/fail]
 platform: [OS/architecture]
 node: [version]
-corpus_counts: [aggregate sessions/messages/code-blocks/tools]
-public_value_shape_differential: [pass/fail and aggregate category counts]
-all_candidate_association: [pass/fail and aggregate association counts]
-real_corpus_initial_import: [pass/fail and aggregate writes]
-real_corpus_v016_repeat_writes: 0
-real_corpus_candidate_upgrade: [pass/fail and aggregate writes]
-real_corpus_old_binding_preservation: [pass/fail and aggregate session/message/code-block/tool counts]
-real_corpus_durable_exception_counts: [aggregate FR-024/FR-036 predicate category counts]
-real_corpus_candidate_repeat_writes: 0
-fictional_transaction_complete_replacement: [pass/fail and aggregate writes]
+source_inventory_counts: [aggregate sessions/messages/code-blocks/tools]
+selection_policy: t113-structure-coverage/v1
+real_sample_count: [1..8]
+structure_registry_predicates: 41
+structure_predicates_observed_in_source: [aggregate count]
+structure_predicates_covered_by_sample: [aggregate count]
+structure_predicates_covered_synthetically: [aggregate count]
+structure_predicates_unmapped: 0
+same_sample_public_and_consumer: [pass/fail]
+sample_projection_selected_values_exact: [pass/fail]
+sample_projection_unselected_payload_records: 0
+public_sample_value_shape_differential: [pass/fail and aggregate category counts]
+public_sample_association: [pass/fail and aggregate association counts]
+real_sample_initial_import: [pass/fail]
+real_sample_initial_import_session_content_mutations: [positive aggregate committed count]
+real_sample_initial_import_sync_metadata_upserts: 1
+real_sample_initial_import_sync_metadata_value_changes: 1
+real_sample_v016_repeat_session_content_mutations: 0
+real_sample_v016_repeat_sync_metadata_upserts: 1
+real_sample_v016_repeat_sync_metadata_value_changes: 0
+real_sample_candidate_upgrade: [pass/fail]
+real_sample_candidate_upgrade_session_content_mutations: [aggregate committed count]
+real_sample_candidate_upgrade_sync_metadata_upserts: 1
+real_sample_candidate_upgrade_sync_metadata_value_changes: 0
+real_sample_old_binding_preservation: [pass/fail and aggregate session/message/code-block/tool counts]
+real_sample_durable_exception_counts: [aggregate FR-024/FR-036 predicate category counts]
+real_sample_candidate_repeat_session_content_mutations: 0
+real_sample_candidate_repeat_sync_metadata_upserts: 1
+real_sample_candidate_repeat_sync_metadata_value_changes: 0
+fictional_transaction_baseline_import: [pass/fail]
+fictional_transaction_baseline_import_session_content_mutations: [positive aggregate committed count]
+fictional_transaction_baseline_import_sync_metadata_upserts: 1
+fictional_transaction_baseline_import_sync_metadata_value_changes: 1
 fictional_transaction_forced_failure: [pass/fail]
+fictional_transaction_forced_failure_attempted_session_content_mutations: [positive aggregate statement count]
+fictional_transaction_forced_failure_committed_session_content_mutations: 0
+fictional_transaction_forced_failure_sync_metadata_upserts: 1
+fictional_transaction_forced_failure_sync_metadata_value_changes: 0
 fictional_transaction_rollback_reopen: [pass/fail with exact pre-transaction state restored]
-fictional_transaction_retry: [pass/fail and aggregate writes]
-fictional_transaction_final_repeat_writes: 0
+fictional_transaction_retry_complete_replacement: [pass/fail]
+fictional_transaction_retry_session_content_mutations: [positive aggregate committed count]
+fictional_transaction_retry_sync_metadata_upserts: 1
+fictional_transaction_retry_sync_metadata_value_changes: 0
+fictional_transaction_final_repeat_session_content_mutations: 0
+fictional_transaction_final_repeat_sync_metadata_upserts: 1
+fictional_transaction_final_repeat_sync_metadata_value_changes: 0
 fictional_transaction_real_values_derived: 0
 documented_drift_categories: [aggregate additive/exception counts]
 private_modes: [aggregate mode results]

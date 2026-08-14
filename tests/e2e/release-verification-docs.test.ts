@@ -7,10 +7,54 @@ const workflowPath = resolve('.github/workflows/npm-publish.yml');
 const packagePath = resolve('package.json');
 
 const OFFICIAL_HANDOFF_HEADING = '## Official release-candidate handoff';
-const T113_HEADING = '## Private v0.16 full-corpus differential (T113)';
+const T113_HEADING = '## Private v0.16 deterministic structure-coverage certification (T113)';
 const T115_HEADING = '## Exact-tarball maintainer verification (T115)';
 const T113_ATTESTATION_HEADING = '### T113 aggregate attestation';
 const T115_ATTESTATION_HEADING = '### T115 aggregate attestation';
+
+const T113_STRUCTURE_PREDICATE_KEYS = [
+  'id.native',
+  'id.absent',
+  'id.null',
+  'id.empty',
+  'type.user',
+  'type.assistant',
+  'type.tool',
+  'type.thinking',
+  'type.error',
+  'type.thinking-with-tool',
+  'type.error-with-tool',
+  'source.unknown-bubble-type',
+  'payload.fenced-code',
+  'shape.optional-present',
+  'shape.optional-undefined-own',
+  'shape.optional-omitted',
+  'tool.single',
+  'tool.multiple',
+  'tool.completed',
+  'tool.cancelled',
+  'tool.error',
+  'relationship.parent',
+  'relationship.sidechain',
+  'relationship.active-branch',
+  'time.message-created-at',
+  'time.message-timing',
+  'time.inferred-next',
+  'time.inferred-previous',
+  'time.session-fallback',
+  'time.unknown',
+  'time.session-created-stored',
+  'time.session-updated-stored',
+  'time.session-updated-from-message',
+  'time.session-epoch-unknown',
+  'scope.global-complete',
+  'scope.workspace-fallback',
+  'scope.real-path',
+  'scope.path-placeholder',
+  'occurrence.equivalent',
+  'occurrence.divergent',
+  'occurrence.uuid-case-variant',
+] as const;
 
 const baseOperations = [
   'list',
@@ -80,6 +124,13 @@ function operationRows(section: string): Map<string, readonly [string[], string[
     rows.set(source, [operationTokens(cells[1]!), operationTokens(cells[2]!)]);
   }
   return rows;
+}
+
+function t113PredicateRows(section: string): string[][] {
+  return section
+    .split(/\r?\n/u)
+    .map((line) => tableCells(line))
+    .filter((cells) => cells.length === 4 && /^`[^`]+`$/u.test(cells[0] ?? ''));
 }
 
 function requireFields(
@@ -258,17 +309,53 @@ function validateReleaseVerificationDocument(
         'real-corpus lane',
         'Store provably empty',
         'fictional-transaction lane',
+        '`t113-structure-coverage/v1`',
+        'at most eight logical sessions',
+        'Every key in this finite registry is required',
+        'the released classifier is fixed as',
+        'The T113 harness manifest maps each mutant name to a self-test',
+        'greatest number of currently uncovered predicates',
+        'greater total number of registry predicates',
+        'earlier v0.16 global ordinal',
+        'must not participate in scoring or tie-breaking',
+        'An empty corpus fails certification',
+        'same selected set',
+        'four isolated copies',
+        'locked additive-field allowlist',
+        '“additive” is not a wildcard that suppresses drift',
+        'Every non-additive difference must satisfy exactly one predicate',
+        'zero session/content mutations',
+        '`sync_metadata` schema-version upsert',
+        'deterministic wholly fictional regression',
+        'mutation that proves drift is detected',
+        'must never be described as full-corpus real-data certification',
+        'T113 writes no repository file',
+        'No raw or aggregate real-data result',
+        'candidate revision and tracked tree are unchanged after T113',
         'must not copy, transform, hash into, or otherwise derive',
         'Both lanes must pass',
         'neither lane substitutes for the other',
-        'non-excepted durable old value',
+        'non-excepted selected durable old value',
         'predicate-guarded scalar correction',
-        'Do not introduce sampling, record caps, time budgets, or early success exits',
-        'quadratic',
       ],
       'T113 private certification',
       errors
     );
+    const predicateRows = t113PredicateRows(t113);
+    const actualPredicateKeys = predicateRows.map((cells) => cells[0]!.slice(1, -1));
+    if (JSON.stringify(actualPredicateKeys) !== JSON.stringify(T113_STRUCTURE_PREDICATE_KEYS)) {
+      errors.push('T113 structure predicate registry does not match the locked v1 key order');
+    }
+    if (T113_STRUCTURE_PREDICATE_KEYS.length !== 41) {
+      errors.push('T113 locked v1 predicate key list must contain exactly 41 keys');
+    }
+    if (predicateRows.some((cells) => cells.slice(1).some((cell) => cell.length === 0))) {
+      errors.push('T113 structure predicate registry contains an incomplete row');
+    }
+    const mutants = predicateRows.map((cells) => cells[3]);
+    if (new Set(mutants).size !== mutants.length) {
+      errors.push('T113 structure predicate registry mutant names must be unique');
+    }
   }
 
   if (t113 && !/no final release-tarball hash/iu.test(documentation)) {
@@ -297,20 +384,52 @@ function validateReleaseVerificationDocument(
         'owner_only_artifacts',
         'platform',
         'node',
-        'corpus_counts',
-        'public_value_shape_differential',
-        'all_candidate_association',
-        'real_corpus_initial_import',
-        'real_corpus_v016_repeat_writes',
-        'real_corpus_candidate_upgrade',
-        'real_corpus_old_binding_preservation',
-        'real_corpus_durable_exception_counts',
-        'real_corpus_candidate_repeat_writes',
-        'fictional_transaction_complete_replacement',
+        'source_inventory_counts',
+        'selection_policy',
+        'real_sample_count',
+        'structure_registry_predicates',
+        'structure_predicates_observed_in_source',
+        'structure_predicates_covered_by_sample',
+        'structure_predicates_covered_synthetically',
+        'structure_predicates_unmapped',
+        'same_sample_public_and_consumer',
+        'sample_projection_selected_values_exact',
+        'sample_projection_unselected_payload_records',
+        'public_sample_value_shape_differential',
+        'public_sample_association',
+        'real_sample_initial_import',
+        'real_sample_initial_import_session_content_mutations',
+        'real_sample_initial_import_sync_metadata_upserts',
+        'real_sample_initial_import_sync_metadata_value_changes',
+        'real_sample_v016_repeat_session_content_mutations',
+        'real_sample_v016_repeat_sync_metadata_upserts',
+        'real_sample_v016_repeat_sync_metadata_value_changes',
+        'real_sample_candidate_upgrade',
+        'real_sample_candidate_upgrade_session_content_mutations',
+        'real_sample_candidate_upgrade_sync_metadata_upserts',
+        'real_sample_candidate_upgrade_sync_metadata_value_changes',
+        'real_sample_old_binding_preservation',
+        'real_sample_durable_exception_counts',
+        'real_sample_candidate_repeat_session_content_mutations',
+        'real_sample_candidate_repeat_sync_metadata_upserts',
+        'real_sample_candidate_repeat_sync_metadata_value_changes',
+        'fictional_transaction_baseline_import',
+        'fictional_transaction_baseline_import_session_content_mutations',
+        'fictional_transaction_baseline_import_sync_metadata_upserts',
+        'fictional_transaction_baseline_import_sync_metadata_value_changes',
         'fictional_transaction_forced_failure',
+        'fictional_transaction_forced_failure_attempted_session_content_mutations',
+        'fictional_transaction_forced_failure_committed_session_content_mutations',
+        'fictional_transaction_forced_failure_sync_metadata_upserts',
+        'fictional_transaction_forced_failure_sync_metadata_value_changes',
         'fictional_transaction_rollback_reopen',
-        'fictional_transaction_retry',
-        'fictional_transaction_final_repeat_writes',
+        'fictional_transaction_retry_complete_replacement',
+        'fictional_transaction_retry_session_content_mutations',
+        'fictional_transaction_retry_sync_metadata_upserts',
+        'fictional_transaction_retry_sync_metadata_value_changes',
+        'fictional_transaction_final_repeat_session_content_mutations',
+        'fictional_transaction_final_repeat_sync_metadata_upserts',
+        'fictional_transaction_final_repeat_sync_metadata_value_changes',
         'fictional_transaction_real_values_derived',
         'documented_drift_categories',
         'private_modes',
@@ -322,19 +441,69 @@ function validateReleaseVerificationDocument(
       errors
     );
     if (fields.get('task') !== 'T113') errors.push('T113 attestation has the wrong task identity');
+    if (fields.get('selection_policy') !== 't113-structure-coverage/v1') {
+      errors.push('T113 attestation has the wrong selection policy');
+    }
+    if (fields.get('real_sample_count') !== '[1..8]') {
+      errors.push('T113 attestation real_sample_count must declare the 1..8 bound');
+    }
+    if (fields.get('structure_registry_predicates') !== '41') {
+      errors.push('T113 attestation structure_registry_predicates must equal 41');
+    }
     for (const zeroField of [
-      'real_corpus_v016_repeat_writes',
-      'real_corpus_candidate_repeat_writes',
-      'fictional_transaction_final_repeat_writes',
+      'real_sample_v016_repeat_session_content_mutations',
+      'real_sample_candidate_repeat_session_content_mutations',
+      'real_sample_v016_repeat_sync_metadata_value_changes',
+      'real_sample_candidate_upgrade_sync_metadata_value_changes',
+      'real_sample_candidate_repeat_sync_metadata_value_changes',
+      'fictional_transaction_forced_failure_committed_session_content_mutations',
+      'fictional_transaction_forced_failure_sync_metadata_value_changes',
+      'fictional_transaction_retry_sync_metadata_value_changes',
+      'fictional_transaction_final_repeat_session_content_mutations',
+      'fictional_transaction_final_repeat_sync_metadata_value_changes',
       'fictional_transaction_real_values_derived',
+      'structure_predicates_unmapped',
+      'sample_projection_unselected_payload_records',
       'temporary_residue_count',
     ]) {
       if (fields.get(zeroField) !== '0') {
         errors.push(`T113 attestation ${zeroField} must equal 0`);
       }
     }
-    for (const forbidden of ['official_artifact', 'candidate_sha256']) {
+    for (const oneField of [
+      'real_sample_v016_repeat_sync_metadata_upserts',
+      'real_sample_initial_import_sync_metadata_upserts',
+      'real_sample_candidate_upgrade_sync_metadata_upserts',
+      'real_sample_candidate_repeat_sync_metadata_upserts',
+      'fictional_transaction_baseline_import_sync_metadata_upserts',
+      'fictional_transaction_forced_failure_sync_metadata_upserts',
+      'fictional_transaction_retry_sync_metadata_upserts',
+      'fictional_transaction_final_repeat_sync_metadata_upserts',
+    ]) {
+      if (fields.get(oneField) !== '1') {
+        errors.push(`T113 attestation ${oneField} must equal 1`);
+      }
+    }
+    for (const forbidden of [
+      'official_artifact',
+      'candidate_sha256',
+      'corpus_counts',
+      'all_candidate_association',
+      'real_corpus_v016_repeat_writes',
+      'real_corpus_candidate_repeat_writes',
+      'fictional_transaction_final_repeat_writes',
+    ]) {
       if (fields.has(forbidden)) errors.push(`T113 attestation must not contain ${forbidden}`);
+    }
+    if (fields.get('real_sample_initial_import_sync_metadata_value_changes') !== '1') {
+      errors.push(
+        'T113 attestation real_sample_initial_import_sync_metadata_value_changes must equal 1'
+      );
+    }
+    if (fields.get('fictional_transaction_baseline_import_sync_metadata_value_changes') !== '1') {
+      errors.push(
+        'T113 attestation fictional_transaction_baseline_import_sync_metadata_value_changes must equal 1'
+      );
     }
   }
 
@@ -479,6 +648,8 @@ describe('private release-verification documentation contract', () => {
   });
 
   it('rejects a T113 contract that merges, weakens, or mislabels its two private lanes', () => {
+    const section = markdownSection(documentation, T113_HEADING);
+    expect(section).toBeDefined();
     for (const [target, expectedError] of [
       ['real-corpus lane', 'T113 private certification is missing real-corpus lane'],
       ['Store provably empty', 'T113 private certification is missing Store provably empty'],
@@ -491,12 +662,49 @@ describe('private release-verification documentation contract', () => {
         'neither lane substitutes for the other',
         'T113 private certification is missing neither lane substitutes for the other',
       ],
+      [
+        '`t113-structure-coverage/v1`',
+        'T113 private certification is missing `t113-structure-coverage/v1`',
+      ],
+      ['same selected set', 'T113 private certification is missing same selected set'],
+      [
+        'zero session/content mutations',
+        'T113 private certification is missing zero session/content mutations',
+      ],
+      [
+        '`sync_metadata` schema-version upsert',
+        'T113 private certification is missing `sync_metadata` schema-version upsert',
+      ],
     ] as const) {
-      const mutated = documentation.replace(target, 'removed contract phrase');
+      const mutatedSection = section!.split(target).join('removed contract phrase');
+      const mutated = documentation.replace(section!, mutatedSection);
       expect(validateReleaseVerificationDocument(mutated, workflow, packageVersion)).toContain(
         expectedError
       );
     }
+  });
+
+  it('rejects drift in the finite T113 structure predicate registry', () => {
+    const removedPredicate = documentation.replace(/^\| `type\.thinking-with-tool` \|.*\n/mu, '');
+    expect(
+      validateReleaseVerificationDocument(removedPredicate, workflow, packageVersion)
+    ).toContain('T113 structure predicate registry does not match the locked v1 key order');
+
+    const wrongRegistryCount = documentation.replace(
+      'structure_registry_predicates: 41',
+      'structure_registry_predicates: 40'
+    );
+    expect(
+      validateReleaseVerificationDocument(wrongRegistryCount, workflow, packageVersion)
+    ).toContain('T113 attestation structure_registry_predicates must equal 41');
+
+    const duplicateMutant = documentation.replace(
+      '`thinking-tool-hidden` |',
+      '`error-tool-hidden` |'
+    );
+    expect(
+      validateReleaseVerificationDocument(duplicateMutant, workflow, packageVersion)
+    ).toContain('T113 structure predicate registry mutant names must be unique');
   });
 
   it('rejects missing interface, source, and addressing operations', () => {
@@ -512,7 +720,7 @@ describe('private release-verification documentation contract', () => {
     }
   });
 
-  it('rejects nonzero off-scope, poison-canary, and residue evidence', () => {
+  it('rejects invalid content-mutation, bookkeeping, off-scope, poison, and residue evidence', () => {
     for (const field of [
       'off_scope_payload_events',
       'poison_canary_hits',
@@ -524,17 +732,68 @@ describe('private release-verification documentation contract', () => {
       );
     }
 
+    const wrongSelectionPolicy = documentation.replace(
+      'selection_policy: t113-structure-coverage/v1',
+      'selection_policy: full-corpus/v0'
+    );
+    expect(
+      validateReleaseVerificationDocument(wrongSelectionPolicy, workflow, packageVersion)
+    ).toContain('T113 attestation has the wrong selection policy');
+
     for (const field of [
-      'real_corpus_v016_repeat_writes',
-      'real_corpus_candidate_repeat_writes',
-      'fictional_transaction_final_repeat_writes',
+      'real_sample_v016_repeat_session_content_mutations',
+      'real_sample_candidate_repeat_session_content_mutations',
+      'real_sample_v016_repeat_sync_metadata_value_changes',
+      'real_sample_candidate_upgrade_sync_metadata_value_changes',
+      'real_sample_candidate_repeat_sync_metadata_value_changes',
+      'fictional_transaction_forced_failure_committed_session_content_mutations',
+      'fictional_transaction_forced_failure_sync_metadata_value_changes',
+      'fictional_transaction_retry_sync_metadata_value_changes',
+      'fictional_transaction_final_repeat_session_content_mutations',
+      'fictional_transaction_final_repeat_sync_metadata_value_changes',
       'fictional_transaction_real_values_derived',
+      'structure_predicates_unmapped',
+      'sample_projection_unselected_payload_records',
     ]) {
       const mutated = documentation.replace(`${field}: 0`, `${field}: 1`);
       expect(validateReleaseVerificationDocument(mutated, workflow, packageVersion)).toContain(
         `T113 attestation ${field} must equal 0`
       );
     }
+
+    for (const field of [
+      'real_sample_initial_import_sync_metadata_upserts',
+      'real_sample_v016_repeat_sync_metadata_upserts',
+      'real_sample_candidate_upgrade_sync_metadata_upserts',
+      'real_sample_candidate_repeat_sync_metadata_upserts',
+      'fictional_transaction_baseline_import_sync_metadata_upserts',
+      'fictional_transaction_forced_failure_sync_metadata_upserts',
+      'fictional_transaction_retry_sync_metadata_upserts',
+      'fictional_transaction_final_repeat_sync_metadata_upserts',
+    ]) {
+      const mutated = documentation.replace(`${field}: 1`, `${field}: 0`);
+      expect(validateReleaseVerificationDocument(mutated, workflow, packageVersion)).toContain(
+        `T113 attestation ${field} must equal 1`
+      );
+    }
+
+    for (const field of [
+      'real_sample_initial_import_sync_metadata_value_changes',
+      'fictional_transaction_baseline_import_sync_metadata_value_changes',
+    ]) {
+      const mutated = documentation.replace(`${field}: 1`, `${field}: 0`);
+      expect(validateReleaseVerificationDocument(mutated, workflow, packageVersion)).toContain(
+        `T113 attestation ${field} must equal 1`
+      );
+    }
+
+    const unboundedSample = documentation.replace(
+      'real_sample_count: [1..8]',
+      'real_sample_count: [1..all]'
+    );
+    expect(
+      validateReleaseVerificationDocument(unboundedSample, workflow, packageVersion)
+    ).toContain('T113 attestation real_sample_count must declare the 1..8 bound');
 
     const t113Residue = documentation.replace(
       'temporary_residue_count: 0',

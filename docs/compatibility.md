@@ -548,10 +548,12 @@ Projects that persist cursor-history library output for incremental backup shoul
 validate the 0.18.0 corrective transition before upgrading.
 
 For a complete affected v0.17 Store/merged fixture, the corrective path is one whole-session
-replacement, no duplicate logical content, and no writes on the next unchanged sync. Unstable v0.17
-Store positional or cross-format synthetic IDs are not preserved. A degraded v0.17 input or
-corrective view must not replace complete data; pin, retry with a complete source, or migrate
-manually. Back up the downstream archive before this one-time convergence.
+replacement, no duplicate logical content, and no session/content mutations on the next unchanged
+sync. Consumer-owned schema-version bookkeeping statements are outside that content-idempotence
+guarantee; the first may initialize metadata and later same-version upserts are value-preserving.
+Unstable v0.17 Store positional or cross-format synthetic IDs are not preserved. A
+degraded v0.17 input or corrective view must not replace complete data; pin, retry with a complete
+source, or migrate manually. Back up the downstream archive before this one-time convergence.
 
 ## Fatal JSON stream migration from v0.17
 

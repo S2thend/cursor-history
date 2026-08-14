@@ -9,31 +9,21 @@ before the exact-revision release gates
 
 ## Status: IN PROGRESS — Previous Freeze Invalidated
 
-- The prior revision's preliminary required suite passed 1,452 of 1,452 executed tests; its single skip matched
-  the checked allowlist. Typecheck, lint, formatting, and both module builds passed.
-- Source Read Limits v1 policy drift and seven preflight tests passed on that prior revision. The authorized
-  Composer-carrier preflight remained within every default and reported no exceeded field.
-- The prior owner-private, no-sampling v0.16 differential covered 498 sessions, 5,832 messages, and
-  666 tool calls. It evaluated 248,004 session identity pairs, 123,753 session-order pairs,
-  68,024,448 message pairs, and 443,556 tool pairs.
-- That exhaustive differential found zero duplicate, missing, ambiguous, reverse-unmatched, or
-  cross-associated session/message/tool identities and zero ordering inversions.
-- Every then-documented non-excepted v0.16 public value and own-property shape matched. The
-  differences were 343 exact missing/null/empty-ID compatibility materializations, 60
-  missing-source message timestamps, 81 missing-source session update values, and two pathless
-  workspace sentinels; every occurrence satisfied its documented predicate and none changed a
-  durable identity or content/relationship/tool binding.
-- The prior one-time owner-authorized external pinned-consumer SQLite transition retained all 7,480 logical persisted
-  rows; both candidate upgrade and repeated sync wrote zero rows and produced an identical logical
-  database snapshot.
-- Raw source, identifiers, paths, content, timestamps, databases, and stable derived hashes
-  remain outside the repository. Recurring tests use only deterministic, input-free synthetic data.
+- Every result from the previous candidate is invalidated by subsequent implementation, test,
+  package, contract, and workflow changes; this file intentionally retains no real-data-derived
+  counts, values, hashes, memberships, or pass/fail evidence.
+- Raw source, identifiers, paths, content, timestamps, databases, derived values, and local
+  attestations remain outside the repository. Recurring tests use only deterministic, input-free
+  synthetic data.
+- The maintainer subsequently replaced the final real-data full-corpus gate with
+  `t113-structure-coverage/v1`: one non-retaining inventory selects at most eight structurally rich
+  sessions for exhaustive-within-sample public and unchanged-consumer checks, while deterministic
+  synthetic regressions and mutations cover every required category not represented by that sample.
 
-Those observations are historical evidence only. Subsequent high-priority fixes changed runtime,
-tests, package metadata, contracts, and release workflow behavior. Every `PASS` token in the tables
-below records that prior run and is **not** current release approval. T116–T147 are now
-implemented in the current tree; the reopened T110–T115 gates must complete from the corrected 0.18.0
-revision before any table can be refrozen.
+Every `PASS` token in the tables below records only the prior synthetic/implementation review and is
+**not** current release approval. T116–T147 are now implemented in the current tree; the reopened
+T110–T115 gates must complete from the corrected 0.18.0 revision without writing their private
+real-data result back to this file.
 
 ## Functional Requirement Traceability
 
@@ -209,8 +199,8 @@ successful carrier fixture is permitted.
 | `workspace` and workspace paths | Real v0.16 spelling retained; additive canonical/matched/source paths | library compatibility and scoped-path tests |
 | Pathless workspace placeholder | Versioned correction to public `"unknown"` / structured `null` | `tests/compatibility/v016-versioned-exceptions.test.ts` |
 | Message timestamp | Direct source values retained; missing-source fallback is deterministic and labeled | timestamp provenance tests and versioned-exception mutations |
-| `metadata.lastModified` | Stored update retained; missing-source read-time value is deterministically corrected | timestamp/session provenance tests and full-corpus source validation |
-| Optional own-property/null/omission shape | v0.16 legacy fields retained except the exact missing/null/empty-ID materialization above; new provenance fields are additive | `tests/compatibility/v016-versioned-exceptions.test.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, exhaustive differential |
+| `metadata.lastModified` | Stored update retained; missing-source read-time value is deterministically corrected | timestamp/session provenance tests, deterministic structural fixtures, and selected-source validation |
+| Optional own-property/null/omission shape | v0.16 legacy fields retained except the exact missing/null/empty-ID materialization above; new provenance fields are additive | `tests/compatibility/v016-versioned-exceptions.test.ts`, `tests/compatibility/v016-fixture-safety.test.ts`, synthetic mutations, and exhaustive-within-sample differential |
 | Set-like provenance arrays | Additive and canonically ordered | public API shape and replica-order tests |
 | Ambiguity/partial diagnostics | Additive typed state; never a silently selected payload | replica reconciliation and CLI schema tests |
 | Fatal CLI JSON stream | Explicit versioned stdout-to-stderr migration; locked fields/exit meaning retained | `tests/e2e/cli-json-schema.test.ts`, changelog warning |
@@ -256,6 +246,5 @@ successful carrier fixture is permitted.
 
 The previous freeze is revoked. T116–T147, including artifact/ledger reconciliation T127–T128 and
 post-audit compatibility reconciliation T141–T147, are implemented in the current tree; T110–T115
-remain reopened. Neither freeze nor publication is approved until every
-unchecked gate above is satisfied from one unchanged 0.18.0 revision and the checklist is
-deliberately refrozen.
+remain reopened. Neither freeze nor publication is approved until every unchecked gate above is
+satisfied against one unchanged 0.18.0 revision and its externally retained candidate binding.
