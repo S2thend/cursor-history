@@ -227,8 +227,8 @@ group and mutant are required whether the key is covered by the real sample or o
 | `scope.workspace-fallback` | Logical session has a workspace fallback carrier | `workspace-index-roundtrip` | `fallback-carrier-promoted` |
 | `scope.real-path` | Workspace attribution is a real path | `workspace-index-roundtrip` | `real-path-rebound` |
 | `scope.path-placeholder` | Workspace attribution is absent or a directory-ID placeholder | `v016-versioned-exceptions` | `placeholder-fabricated-path` |
-| `occurrence.equivalent` | Two same-role physical occurrences have equal stable v0.16 projections | `session-replica-reconciliation` | `equivalent-replica-duplicated` |
-| `occurrence.divergent` | Two same-role physical occurrences differ in stable v0.16 projections | `session-replica-reconciliation` | `divergent-replica-selected` |
+| `occurrence.equivalent` | Two same-role physical occurrences have equal adapter-validated raw-carrier fingerprints | `session-replica-reconciliation` | `equivalent-replica-duplicated` |
+| `occurrence.divergent` | Two same-role physical occurrences have different adapter-validated raw-carrier fingerprints | `session-replica-reconciliation` | `divergent-replica-selected` |
 | `occurrence.uuid-case-variant` | UUID-shaped values with different case remain distinct v0.16 IDs | `composer-session-id-case-sensitivity` | `case-variant-collapsed` |
 
 For this registry, the released classifier is fixed as: `user` role first; otherwise the explicit
@@ -236,6 +236,12 @@ tool, thinking, and error content markers in that order; then a non-empty struct
 otherwise `assistant`. “Released optional message field” means one of `thinking`, `model`,
 `tokenUsage`, `durationMs`, `toolCalls`, or `metadata`. The named synthetic groups map
 to these repository-owned, wholly synthetic tests:
+
+The occurrence predicates are source-structure facts. The private adapter MUST classify competing
+same-role physical carriers before public projection, MUST pass the resulting `unique`,
+`equivalent`, or `divergent` state explicitly to the sampler, and MUST fail closed when that state
+is absent or invalid. The sampler MUST NOT infer replica state from the stable v0.16 public
+projection: distinct raw carriers can legitimately project to the same released public value.
 
 - `v016-versioned-exceptions` →
   `tests/compatibility/v016-versioned-exceptions.test.ts`;
