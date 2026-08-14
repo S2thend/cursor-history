@@ -255,7 +255,7 @@ required `title`, `preview`, `messageCount`, and `resolutionState`, with no `mes
 `count` is the number of scoped logical rows represented by `sessions`, including one row per
 ambiguous UUID; it is not the count of successfully hydrated conversation payloads.
 
-`list --workspaces --json` counts one logical UUID once per membership. A multi-membership session
+`list --workspaces --json` counts one byte-exact logical UUID once per membership. A multi-membership session
 may count once in both A and B, so the sum can exceed the deduplicated global total.
 
 ## `show --json`
@@ -381,11 +381,11 @@ Dry-run and execution share one target preparation contract. A scoped number sel
 by scoped list, then binds an exact eligible Composer occurrence. Execution revalidates the same
 occurrence/fingerprint and refuses any change before the first write.
 
-Canonical UUID syntax is case-insensitive only at the logical selection layer. The prepared target
-retains the Composer-compatible public spelling plus the exact workspace record ID and exact global
-SQLite key; apply reads and mutates only those frozen source spellings. A sole opposite-case global
-carrier is eligible, but multiple case-only global keys produce a typed pre-write refusal.
-Noncanonical identifiers, including compact 32-hex Store directory names, remain byte-sensitive.
+Session-ID selection is byte-exact and case-sensitive, including for canonical UUID syntax. The
+prepared target retains that public spelling plus the exact workspace record ID and exact global
+SQLite key; apply reads and mutates only those frozen values. An opposite-case global carrier is a
+distinct target and cannot satisfy the selector. Compact 32-hex Store directory names and every
+other identifier follow the same byte-sensitive rule.
 
 Scoped preparation may inspect off-scope ID/index/selected-ID/pane-pointer metadata needed for
 membership, but it never loads an off-scope `composer.composerData` value. Only the selected
@@ -404,7 +404,7 @@ behavior for an eligible single-occurrence Composer session remains compatible.
 
 JSON migration results add `sessionId`, normalized source/matched paths, eligibility, and dry-run
 precondition summary, but never a locator. A changed target returns `MIGRATION_TARGET_CHANGED`.
-`sessionId` always uses the bound source-native Composer spelling rather than caller casing.
+`sessionId` always uses the exact bound source-native spelling; caller casing must match it.
 
 ## `backup`
 

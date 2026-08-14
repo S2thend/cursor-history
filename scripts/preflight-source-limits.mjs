@@ -40,22 +40,22 @@ export const POLICY_ARTIFACTS = Object.freeze([
 
 export const POLICY_ARTIFACT_SHA256 = Object.freeze({
   'specs/016-harden-session-integrity/spec.md':
-    'd0bbf129b64e9114413536ebb304e9277bc8cc1d60241ccbbcc187fa526533ff',
+    '28fca33b4531e84981387536670a26bf2be1d59568c62c45a16c7d4a74f5215f',
   'specs/016-harden-session-integrity/research.md':
-    'd07da843c44747104803f113895c21c7392e38ce57366e1dec69d60c1226ecc0',
+    '534c9b4cd14d049c1b8af79d6e7f9ffc5a3c5dedb799ffda8d5221411057740a',
   'specs/016-harden-session-integrity/data-model.md':
-    'ed86d6a462ba3e20dbc4c731c6c5bcd612b91b8a8d6a77a76516c2f3022e3909',
+    'e79d1d6ac09ac69ccbf8c65bfac81d0a4ccea623c09964aa7f71b9f6c635a9c9',
   'specs/016-harden-session-integrity/contracts/internal-resolution.md':
-    '12430f6c9c34edc105b78ed97e3be1b6dbea7f21ad4b785be8c66ff0b14d5c3e',
+    'c1b7c81f398711389ef772132ee9328c1046d38922ab65f35fdbad81cff13eb3',
   'specs/016-harden-session-integrity/contracts/library-api.md':
-    'cc919c3b9b293330b3b93d140a455a9987964f080b13899bee2cd0025c28cc5a',
+    '51e3e6813a5cca274cdc943aa6928c9a84361ba8230c4893b4cc1a77ceb00031',
   'specs/016-harden-session-integrity/contracts/cli-json.md':
-    '2774126a26c92686a05d5303f8337ad0d937d3bf0502c0c6c55e52b50df50533',
+    '73ff69f16a027503fbc137a4837462b75aea8f37aae5c1dd8e18fed381ad2ec3',
   'specs/016-harden-session-integrity/quickstart.md':
-    '6f108b0091822b0888362957b86f0663a2115da48f895da85b6c7a9398bd3d85',
+    '744d42ecf7a0564af6b136e0655c5100c774c803c3a0057517bac03322316b3e',
   'specs/016-harden-session-integrity/tasks.md':
-    'e3b44c3fdea725e2b2a5c59b9c97d62fb764c75276619d2038f2461431dcb34b',
-  'docs/compatibility.md': '0804ad937106d36b8630f0e3d3564699f8b25a9b973497179e420665237d5675',
+    '7f869a3878d4e7f5d2ca107cd4df0444a7e278cf22eb8f7cff74f6eaca70a532',
+  'docs/compatibility.md': 'e495d70d2bc889ffa94ad1de70ddb0c5dd116b294ab2925d3694ae436a347db0',
 });
 
 const POLICY_FIELDS = Object.freeze([

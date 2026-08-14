@@ -115,10 +115,10 @@ the owning tasks are complete and their required test/document evidence passed t
 | FR-081 corrected complete-message public search coordinates | T118, T127–T128, T110, T113–T115 | REVALIDATION REQUIRED |
 | FR-082 integrity-gated and confined restore publication | T127–T130, T136, T110, T114–T115 | REVALIDATION REQUIRED |
 | FR-083 v0.16 locale collation controls equal-time Composer discovery | T141, T147, T110, T113–T115 | REVALIDATION REQUIRED |
-| FR-084 canonical UUID logical selection remains separate from exact physical migration keys | T142, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| FR-084 byte-exact logical selection binds exact physical migration keys | T138, T142, T147, T110, T113–T115 | REVALIDATION REQUIRED |
 | FR-085 scoped migration discovery reads metadata but no off-scope Composer payload | T143, T147, T110, T114–T115 | REVALIDATION REQUIRED |
 | FR-086 complete migration batches prepare before the first write | T143, T147, T110, T114–T115 | REVALIDATION REQUIRED |
-| FR-087 pointer-only workspace membership associates with a sole opposite-case global carrier | T144, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| FR-087 pointer-only membership requires an exact ID and isolates opposite-case carriers | T138, T144, T147, T110, T113–T115 | REVALIDATION REQUIRED |
 | FR-088 leading/middle/trailing Store turns form one resolved active branch | T145, T147, T110, T113–T115 | REVALIDATION REQUIRED |
 | FR-089 exact package smoke uses valid Store topology and the BB manifest version split | T146–T147, T110, T114–T115 | REVALIDATION REQUIRED |
 
@@ -147,9 +147,9 @@ the owning tasks are complete and their required test/document evidence passed t
 | SC-019 post-publication permission failure reports final-path identity honestly | T121, T127–T128, T131, T110, T114–T115 | REVALIDATION REQUIRED |
 | SC-020 corrupt or unsafe restore entries never reach a destination | T127–T130, T136, T110, T114–T115 | REVALIDATION REQUIRED |
 | SC-021 non-ASCII equal-time Composer rows retain v0.16 locale order | T141, T147, T110, T113–T115 | REVALIDATION REQUIRED |
-| SC-022 UUID spelling and exact migration keys round-trip without collateral mutation | T142, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| SC-022 exact UUID spelling and migration keys round-trip without collateral mutation | T138, T142, T147, T110, T113–T115 | REVALIDATION REQUIRED |
 | SC-023 migration performs no off-scope payload read and refuses a mixed batch atomically | T143, T147, T110, T114–T115 | REVALIDATION REQUIRED |
-| SC-024 pointer-only opposite-case global carrier resolves as one scoped session | T144, T147, T110, T113–T115 | REVALIDATION REQUIRED |
+| SC-024 exact pointer carrier resolves while opposite case remains unresolved | T138, T144, T147, T110, T113–T115 | REVALIDATION REQUIRED |
 | SC-025 active Store gaps survive both backbones and unchanged-consumer synchronization | T145, T147, T110, T113–T115 | REVALIDATION REQUIRED |
 | SC-026 exact packed bytes pass topology-valid scope and BB manifest smoke | T146–T147, T110, T114–T115 | REVALIDATION REQUIRED |
 
@@ -187,7 +187,7 @@ successful carrier fixture is permitted.
 | `Session.id` | Preserved native Cursor UUID; locators remain separate | `tests/integration/session-integrity-faults.test.ts`, FR-001–FR-002 |
 | Numeric indices | Existing per-interface bases preserved; additive scope metadata; v0.16 equal-time order restored | `tests/integration/workspace-index-roundtrip.test.ts`, `tests/unit/storage.test.ts` |
 | Equal-time Composer ordering | Preserve v0.16 `String.localeCompare()` workspace discovery before stable timestamp sorting; code-point order remains only for new set-like/new-only values | `tests/integration/session-replica-reconciliation.test.ts`, `tests/unit/storage.test.ts` |
-| Canonical UUID versus physical ID | UUID lookup/grouping is case-insensitive, returned Composer spelling remains source-native, exact workspace/global keys alone authorize migration, and compact 32-hex non-UUID names stay exact | Composer case-sensitivity and scoped-migration integration tests |
+| Session UUID versus physical ID | UUID lookup/grouping is byte-exact and case-sensitive as in v0.16; opposite-case values remain distinct, and exact workspace/global keys alone authorize migration | Public-library/CLI exact-ID tests plus Composer case-sensitivity and scoped-migration integration tests |
 | Native Composer `Message.id` | Preserved byte-for-byte | `tests/compatibility/v016-composer-upgrade.test.ts` |
 | Missing/null/empty-ID Composer message | Versioned own-property materialization of exactly `msg:<v0.16-index>`, the key the unchanged consumer already synthesized; omission, wrong ordinal, and native-ID rewriting fail | `tests/compatibility/v016-versioned-exceptions.test.ts`, `tests/compatibility/v016-fixture-safety.test.ts` |
 | Store-only message identity | New versioned namespace; no public session-ID mutation | `tests/unit/store-stack-merge.test.ts`, identity contracts |

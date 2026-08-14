@@ -62,8 +62,9 @@
 - Constitution v1.2.0 adds Stable Public Contracts and Source Fidelity as an ongoing project
   principle. Specification-quality review found no unresolved product decisions; implementation
   and release remain blocked until the explicitly open T110–T115 validation gates pass.
-- Post-audit validation adds FR-083–FR-089 and SC-021–SC-026 for exact v0.16 locale collation,
-  canonical-UUID versus exact-physical migration identity, metadata-only and complete-batch
-  migration, pointer-only opposite-case global association, leading/middle/trailing Store active
-  turns, topology-valid package smoke, and the settled BB backup version split. These additions are
-  testable, preserve the established scope, and introduce no unresolved clarification.
+- Post-audit validation adds FR-083–FR-089 and SC-021–SC-026 for exact v0.16 locale collation and
+  byte-exact session-ID semantics, exact-physical migration identity, metadata-only and
+  complete-batch migration, exact pointer membership plus opposite-case isolation,
+  leading/middle/trailing Store active turns, topology-valid package smoke, and the settled BB
+  backup version split. These additions are testable, preserve the established scope, and introduce
+  no unresolved clarification.

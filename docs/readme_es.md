@@ -624,10 +624,9 @@ publicado y usa una versión nueva si ya se publicó cualquier byte.
 
 ## Compatibilidad de v0.18
 
-- Los UUID canónicos no distinguen mayúsculas de minúsculas para búsqueda y agrupación, pero el ID
-  devuelto conserva la grafía real de Cursor. Los identificadores no canónicos, incluidos los
-  nombres Store compactos de 32 caracteres hexadecimales, siguen siendo exactos y sensibles a
-  mayúsculas.
+- Todos los ID de sesión, incluidos los UUID canónicos, conservan el comportamiento de v0.16:
+  búsqueda, agrupación y asociación distinguen mayúsculas de minúsculas y comparan byte por byte.
+  Reutilice exactamente la grafía devuelta; una variante de mayúsculas es un ID distinto.
 - La migración con `--workspace` solo inspecciona metadatos fuera del ámbito, fija las claves físicas
   exactas y prepara todo el lote antes de escribir. Un destino ambiguo o no elegible cancela el lote
   sin cambios.

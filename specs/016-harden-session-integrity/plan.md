@@ -373,15 +373,14 @@ priority or permit publication without it.
 
 - Discover only safe metadata and source-instance locators first; do not parse previews, bubbles,
   transcript lines, Store leaves, tools, or attachments during global membership discovery.
-- Group physical instances by native UUID and source role. Reconcile permitted Composer-global
+- Group physical instances by byte-exact native UUID and source role. Reconcile permitted Composer-global
   occurrences first; a usable global is the primary content source and Composer-workspace contributes
   membership only, while workspace content is a partial fallback only when no usable permitted
   global exists. Compare replicas only within the same fidelity tier.
-- Fold canonical UUID spelling only for logical grouping and association. Preserve exact
-  source-native spellings in physical locators and public Composer-compatible presentation. A
-  pointer-only workspace may associate with the sole differently cased global carrier, but
-  arbitrary identifiers—including compact 32-hex Store directory names—remain exact and
-  case-sensitive.
+- Preserve v0.16's byte-exact, case-sensitive session-ID spelling for logical grouping,
+  association, lookup, physical locators, and public presentation. A pointer-only workspace may
+  associate only with an exactly matching global carrier. Canonical UUID syntax, compact 32-hex
+  Store directory names, and arbitrary identifiers all follow the same exact rule.
 - Classify Store DB expectation as `expected`, `not-expected`, or `unknown` from DB presence and
   explicit metadata before hydration. Apply the complete/partial/fatal DB/transcript state machine
   before comparing same-tier Store replicas; never call a transcript complete when an expected or
@@ -426,10 +425,9 @@ priority or permit publication without it.
 - Replace migration's string-ID rediscovery with an internal `BoundMigrationTarget`. Prepare and
   validate the eligible single Composer occurrence, source/destination, fingerprint, and database
   capabilities before the first write; dry-run and apply share the same preparation.
-- Keep the canonical UUID key used for logical selection separate from the exact workspace record
-  ID and exact global SQLite key used for mutation. Opposite-case lookup may select one sole
-  physical carrier, but multiple case-only global keys refuse before writes; noncanonical IDs are
-  never folded.
+- Keep the byte-exact session ID used for logical selection aligned with the exact workspace record
+  ID and exact global SQLite key used for mutation. Opposite-case lookup cannot select a physical
+  carrier, and differently cased global keys remain independent targets rather than aliases.
 - Restrict scoped migration discovery to metadata-only ID/index/selected-ID/pane-pointer projection
   until the scope and exact occurrence are bound. Do not materialize off-scope
   `composer.composerData` values. Reset source-read budgets between catalog projection and selected
@@ -589,9 +587,9 @@ priority or permit publication without it.
 | v0.17 convergence | Locked complete Store/merged baselines converge through one full replacement, produce no duplicate logical content, preserve native Composer IDs, then no-op; degraded transition explicitly excluded |
 | Public search coordinates | Tagged v0.16/v0.17 baselines plus the 0.18.0 correction: complete-array message index, complete-content UTF-16 offset, complete source line/context; non-first/multiline/mixed-case/astral/lowercase-expansion cases; identities and non-search fields unchanged |
 | Public JSON export | Tagged v0.16/v0.17 absence plus additive 0.18.0 zero-based library `index`; single and bulk exports agree without mutating the resolved source object |
-| Workspace/I/O | Conflicting A/B global and scoped order; v0.16 locale collation ties; exact and unique-suffix matches; pointer-only membership with an opposite-case sole global carrier; ambiguity before payload open; low-level adapter events plus poison canaries prove zero off-scope payload reads; opt-in disclosure; live/backup/custom paths |
-| Replicas | Composer global-primary/workspace-fallback arbitration; equivalent and divergent same-tier occurrences; complementary cross-role merge; every Store DB expectation/availability/transcript state; stable set-like array order; unsupported raw attachments force partial fidelity; one logical result/diagnostic per UUID |
-| Migration | Scoped numeric dry-run/apply bind the same exact physical occurrence behind a canonical logical UUID; compact 32-hex non-UUID keys remain exact; discovery reads off-scope metadata but no Composer payload; direct/unfiltered compatibility for eligible Composer targets; equivalent multi-locator/shared-membership, divergent, Store-only, and merged rejection before writes; complete-batch preparation and revalidation before the first mutation |
+| Workspace/I/O | Conflicting A/B global and scoped order; v0.16 locale collation ties; exact and unique-suffix matches; exact pointer-only membership plus opposite-case non-membership; ambiguity before payload open; low-level adapter events plus poison canaries prove zero off-scope payload reads; opt-in disclosure; live/backup/custom paths |
+| Replicas | Composer global-primary/workspace-fallback arbitration; equivalent and divergent same-tier occurrences with byte-exact IDs; case variants remain separate; complementary cross-role merge only for exact IDs; every Store DB expectation/availability/transcript state; stable set-like array order; unsupported raw attachments force partial fidelity; one logical result/diagnostic per exact UUID |
+| Migration | Scoped numeric dry-run/apply bind the same byte-exact logical ID and physical occurrence; compact 32-hex keys remain exact; opposite-case IDs remain distinct; discovery reads off-scope metadata but no Composer payload; direct/unfiltered compatibility for eligible Composer targets; equivalent multi-locator/shared-membership, divergent, Store-only, and exact-ID merged rejection before writes; complete-batch preparation and revalidation before the first mutation |
 | Security | Real POSIX `umask 000` mode checks and owner-only containment; Windows per-user temp/inherited-ACL, uniqueness, cleanup, and typed-failure checks without an unverified cross-user claim; success/failure/close/cleanup injection, concurrent private directories, graceful-signal cleanup, SIGKILL residue containment and next-run stale recovery; v1-validator rejection of live v2 markers before liveness, Linux v1 legacy retention, malformed/foreign v2 retention, same-namespace dead/PID-reused recovery, and real two-PID-namespace same-number non-deletion; final archive no-op/success, identity-bound permission handling, and `BACKUP_PUBLISHED_CLEANUP_FAILED` with verified/unverified residue sets; restore empty/unmanifested/mixed archives, non-force no-clobber races, forced hard-link replacement, identity-bound publication cleanup, concurrent leaf replacement, and complete/incomplete rollback |
 | Defensive parsing | UTF-8 and leading BOM, ignored unknown fields, typed invalid/mixed-encoding outcomes, below/equal/above every Source Read Limits v1 field, invalid/per-operation override behavior, JSONL and SQLite counter resets, ZIP compressed/entry/count/aggregate/ratio rejection, no automatic raise, and bounded cancellation cleanup |
 | SQLite | Importable `node:sqlite` without backup, automatic capable-provider selection, explicit-driver error, capability/snapshot infrastructure fatality before Store transcript fallback, config propagation, no false partial Store result |

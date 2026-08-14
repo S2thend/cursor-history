@@ -229,7 +229,7 @@ group and mutant are required whether the key is covered by the real sample or o
 | `scope.path-placeholder` | Workspace attribution is absent or a directory-ID placeholder | `v016-versioned-exceptions` | `placeholder-fabricated-path` |
 | `occurrence.equivalent` | Two same-role physical occurrences have equal stable v0.16 projections | `session-replica-reconciliation` | `equivalent-replica-duplicated` |
 | `occurrence.divergent` | Two same-role physical occurrences differ in stable v0.16 projections | `session-replica-reconciliation` | `divergent-replica-selected` |
-| `occurrence.uuid-case-variant` | Canonically equal UUID occurrences use different case spellings | `composer-session-id-case-sensitivity` | `case-variant-physical-key-rewritten` |
+| `occurrence.uuid-case-variant` | UUID-shaped values with different case remain distinct v0.16 IDs | `composer-session-id-case-sensitivity` | `case-variant-collapsed` |
 
 For this registry, the released classifier is fixed as: `user` role first; otherwise the explicit
 tool, thinking, and error content markers in that order; then a non-empty structured tool-call array;
@@ -336,14 +336,14 @@ mutations and metadata-value changes must both be zero, and the exact pre-transa
 snapshot must be restored.
 
 The structural synthetic regressions run before this private pass and cover v0.16
-`String.localeCompare()` equal-time workspace discovery, canonical UUID lookup versus exact
-physical Composer keys, pointer-only membership with one opposite-case global carrier, and leading,
-middle, and trailing Store-only active-branch turns under both preferred backbones. Compact 32-hex
-non-UUID identifiers remain exact. Migration evidence also shows metadata-only off-scope projection
-and complete-batch refusal before any write. Those deterministic regressions plus their mutations are
-the exhaustive edge-case gate. The bounded private sample confirms that the selected structurally
-rich real sessions introduce no unclassified public-value drift; it never derives a committed
-fixture from real data and must never be described as full-corpus real-data certification.
+`String.localeCompare()` equal-time workspace discovery, byte-exact UUID lookup versus exact
+physical Composer keys, opposite-case direct lookup and pointer membership remaining unresolved,
+and leading, middle, and trailing Store-only active-branch turns under both preferred backbones.
+Compact 32-hex identifiers remain exact. Migration evidence also shows metadata-only off-scope
+projection and complete-batch refusal before any write. Those deterministic regressions plus their
+mutations are the exhaustive edge-case gate. The bounded private sample confirms that the selected
+structurally rich real sessions introduce no unclassified public-value drift; it never derives a
+committed fixture from real data and must never be described as full-corpus real-data certification.
 
 The harness may emit fixed, non-sensitive progress events containing only a stage name and aggregate
 selected/processed counts. It must never emit membership, IDs, paths, values, content-derived hashes,

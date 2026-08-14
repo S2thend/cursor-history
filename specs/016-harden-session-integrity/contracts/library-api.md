@@ -33,10 +33,10 @@ do not need to opt into `sourceReadLimits` for the confirmed upgrade path. The d
 vibe-history archive is exercised only by owner-authorized external T113, not by the recurring
 repository harness or this source-limit preflight.
 
-Canonical UUID arguments are case-insensitive logical selectors, but returned IDs preserve an
-observed source spelling and Composer wins for Composer-backed sessions. This does not generalize
-to arbitrary strings: compact 32-hex Store directory names and every other noncanonical identifier
-remain case-sensitive and byte-exact.
+All session-ID arguments are byte-exact and case-sensitive, preserving v0.16 behavior even for
+canonical UUID syntax. Returned IDs preserve the observed source spelling. An opposite-case value
+uses the interface's normal not-found behavior and cannot become a grouping or Composer/Store
+association alias.
 
 ## Additive public types
 
@@ -673,11 +673,10 @@ whose mutation affects another membership are rejected. Divergent, Store-only, a
 also throw `UnsupportedSessionMigrationError` or `SessionAmbiguityError` before any write. Move
 retains UUID; copy returns a new UUID.
 
-Canonical UUID matching binds two identities internally: the logical folded key and the exact
-source-native workspace/global record keys. Dry-run and apply return the Composer-compatible public
-spelling but read and mutate only the frozen exact physical keys. A sole opposite-case global
-carrier may be selected; multiple case-only global carriers refuse before writes even if their
-payloads are equivalent. Noncanonical identifiers are never folded.
+Migration binds one byte-exact session ID plus its exact source-native workspace/global record
+keys. Dry-run and apply return that exact public spelling and read or mutate only the frozen keys.
+An opposite-case global carrier is a distinct target and cannot satisfy the selected ID; canonical,
+noncanonical, and compact 32-hex identifiers are never folded.
 
 Scoped preparation may project off-scope IDs, array positions, selected IDs, and pane pointers as
 metadata, but it never materializes an off-scope `composer.composerData` value. Only the selected
@@ -751,11 +750,10 @@ readable, while a legacy multi-workspace archive lacking this inventory throws
 cross-workspace opt-in may open a separate workspace database only for a UUID already admitted by
 the selected workspace inventory.
 
-All public session-ID arguments compare UUID hexadecimal letters case-insensitively. Returned IDs
-retain a deterministic source-native spelling, with Composer spelling preferred for a
-Composer-backed logical session. A differently-cased argument or Store occurrence never rewrites
-that public value. Equivalent case variants reconcile; divergent variants reject resolution with
-the ordinary typed logical-session ambiguity.
+All public session-ID arguments compare byte-for-byte. Returned IDs retain the exact source-native
+spelling. A differently cased argument receives the interface's normal not-found result, and a
+differently cased Store occurrence remains a separate logical session rather than rewriting,
+enriching, or making the Composer session ambiguous.
 
 Rename/link to the requested final path is the publication commit point. If a later mode read,
 identity check, or mode adjustment fails, `createBackup()` rejects with

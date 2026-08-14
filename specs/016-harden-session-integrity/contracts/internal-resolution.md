@@ -17,7 +17,7 @@ Composer-only.
 | Module | Owns | Must not own |
 |--------|------|--------------|
 | `session-identity.ts` | v0.16 Composer projection, Store candidates, canonical hashes, collisions, relationship rewrites | Workspace filtering, file discovery, CLI formatting |
-| `session-catalog.ts` | metadata inventory, UUID grouping, role classification, Store representation selection, replica reconciliation, bound rows | Conversation rendering, public path aliases, filesystem mutation |
+| `session-catalog.ts` | metadata inventory, byte-exact session-ID grouping, role classification, Store representation selection, replica reconciliation, bound rows | Conversation rendering, public path aliases, filesystem mutation |
 | `workspace-scope.ts` | lexical normalization, exact/unique-suffix resolution, match diagnostics | Payload reads, logical ID changes |
 | `storage.ts` | context lifecycle, listing/resolution/search orchestration, lazy hydration | Identity algorithms duplicated inline, destructive migration writes |
 | `private-temp.ts` | exclusive private staging, tracked cleanup, residue error | ZIP/SQLite parsing semantics |
@@ -27,10 +27,10 @@ Composer-only.
 | `zip-stream.ts` | bounded ZIP32/ZIP64 central reads, path/method validation, STORE/DEFLATE entry streams, CRC/limit checks | Session resolution, manifest trust decisions |
 | `backup.ts` | private archive staging/publication, publication commit-point/mode handling, streamed file hashing, manifest producer metadata, archive orchestration | Session/message identity derived from producer metadata; deletion/rollback of a valid post-commit archive |
 
-Logical UUID map keys use an internal ASCII case-folded form. That key is never returned or used as
-a physical SQLite key. Every bound Composer/Store locator retains its exact native spelling;
-physical reads use that exact value. Public spelling is selected from real source values with
-Composer compatibility precedence, and divergent case-only occurrences remain ambiguous.
+Logical session map keys preserve the byte-exact v0.16 ID, including canonical UUID letter case.
+Every bound Composer/Store locator and public result retains that exact source-native spelling;
+physical reads use the same value. Case-only variants remain separate logical IDs and cannot become
+replicas or cross-stack counterparts.
 | `database/registry.ts` | capability profiles and per-operation provider selection | Store completeness policy |
 | `migrate.ts` | bind/prepare/revalidate/apply exact eligible target | Numeric rediscovery after preparation |
 
@@ -118,7 +118,7 @@ attachments.
 
 Hydration asserts that:
 
-1. the logical UUID was already selected in the bound catalog scope;
+1. the byte-exact logical UUID was already selected in the bound catalog scope;
 2. the instance is permitted by the content boundary or explicit related-source opt-in;
 3. the logical row is not divergent/ambiguous;
 4. the context is not disposed.
@@ -226,8 +226,8 @@ export function bindSessionAddress(
 
 Listing rules:
 
-- Exactly one row per canonical native UUID in the bound scope. Canonical UUID syntax groups
-  case-insensitively; noncanonical identifiers remain exact.
+- Exactly one row per byte-exact native UUID in the bound scope. Canonical and noncanonical
+  identifiers follow the same case-sensitive rule.
 - Sort logical rows by descending `createdAt`. For an equal-time tie, preserve the stable v0.16
   discovery order of every Composer-backed UUID, including the original `String.localeCompare()`
   workspace-path precedence and merged/ambiguous Composer rows.
@@ -350,11 +350,10 @@ Canonical hash v1:
 - strings remain exact decoded strings with standard JSON escaping;
 - SHA-256 lowercase full 64 hexadecimal characters.
 
-`logicalSessionIdKey()` folds hexadecimal letter case only when `isNativeCursorUuid()` accepts
-canonical UUID syntax. It does not
-fold arbitrary strings or compact 32-hex Store directory names. Physical Composer workspace IDs,
-global SQLite keys, and Store directory tokens are retained byte-for-byte in their private
-locators; a caller's query spelling never replaces an observed physical key.
+`logicalSessionIdKey()` returns the source ID byte-for-byte. `isNativeCursorUuid()` classifies
+syntax only and never changes equality semantics. Physical Composer workspace IDs, global SQLite
+keys, and Store directory tokens are retained exactly in their private locators; a case-variant
+query cannot replace or select an observed physical key.
 
 Transcript message hash input uses keys `role`, `content`, `toolActivity`, and
 `sourceRelationships`. Synthetic Store-only tool hash input may use call name, normalized structured
@@ -585,8 +584,8 @@ export function applySessionMigration(
 ): Promise<SessionMigrationResult>;
 ```
 
-`PreparedSessionMigration` contains the canonical logical UUID key, Composer-compatible public
-spelling, exact workspace record ID, optional exact global SQLite key, destination preflight,
+`PreparedSessionMigration` contains the byte-exact logical session ID, exact public spelling,
+exact workspace record ID, optional exact global SQLite key, destination preflight,
 capability profile, mode, source fingerprint, and proposed copy UUID. It is never public JSON.
 
 Binding requires exactly one eligible Composer locator and a mutation footprint confined to the
@@ -598,9 +597,8 @@ Scoped binding performs a metadata-only projection of record IDs, array position
 and pane pointers. It may inspect that safe metadata in other workspaces to establish membership,
 but it does not materialize any off-scope `composer.composerData` value. Only the selected workspace
 occurrence is hydrated after binding, and catalog/hydration source-read counters reset separately.
-A pointer-only workspace may bind the sole opposite-case global carrier through the canonical UUID
-key while retaining that carrier's exact key. More than one case-only global physical key refuses
-before payload mutation, even when read-side payload comparison says equivalent.
+A pointer-only workspace may bind a global carrier only when their IDs are byte-for-byte equal. An
+opposite-case carrier remains unrelated and cannot authorize payload reads or mutation.
 
 Both numeric and direct-ID selectors first address the complete scoped logical catalog, including
 ambiguous rows. Ambiguity retains its displayed ordinal; selecting it by number or UUID throws the
@@ -802,9 +800,10 @@ Adapters must satisfy all of the following:
 - unfiltered direct native-ID behavior remains unchanged;
 - scoped numbers and IDs use the immutable scope;
 - summaries are followed by stable UUID/bound address, never a fresh numeric lookup;
-- UUID caller spelling is case-insensitive only for canonical UUID syntax; the returned value and
-  physical mutation keys preserve observed source spelling;
-- noncanonical identifiers, including compact 32-hex Store directory names, remain exact;
+- every session-ID caller spelling is case-sensitive and byte-exact, including canonical UUID
+  syntax and compact 32-hex Store directory names;
+- opposite-case lookup returns the interface's normal not-found result and never selects a
+  physical key;
 - old `source` TypeScript literals remain accepted but are not emitted by new resolution;
 - old `setDriver(): void` remains synchronous;
 - no adapter can construct a public physical locator or silently downgrade a typed error.

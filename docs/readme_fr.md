@@ -625,10 +625,9 @@ publié et utilisez une nouvelle version si des octets ont déjà été publiés
 
 ## Compatibilité de la v0.18
 
-- Les UUID canoniques sont insensibles à la casse pour la recherche et le regroupement, mais l'ID
-  renvoyé conserve l'orthographe réellement observée dans Cursor. Les identifiants non canoniques,
-  notamment les noms Store compacts de 32 caractères hexadécimaux, restent exacts et sensibles à la
-  casse.
+- Tous les ID de session, y compris les UUID canoniques, conservent le comportement de la v0.16 :
+  recherche, regroupement et association sont sensibles à la casse et comparent les octets
+  exactement. Réutilisez l'orthographe renvoyée ; une variante de casse est un ID distinct.
 - Une migration avec `--workspace` ne lit hors périmètre que les métadonnées nécessaires, lie les
   clés physiques exactes et prépare tout le lot avant la première écriture. Une cible ambiguë ou
   inéligible annule le lot sans modification.

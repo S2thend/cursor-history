@@ -304,7 +304,7 @@ Equivalent replicas collapse into one contribution retaining all occurrence prov
 replicas produce one `ambiguous` logical summary and exactly one diagnostic; normal direct-ID,
 index, search, export, and migration paths cannot hydrate, union, or select their contested payload.
 
-**Rationale**: One UUID must remain one logical public session, while complementary data must still
+**Rationale**: One byte-exact UUID must remain one logical public session, while complementary data must still
 enrich it and same-role conflicts must never be guessed. Excluding location/provenance prevents
 identical copies from appearing different.
 
@@ -502,20 +502,20 @@ would complicate recognition of valid legacy residue. Keeping the stable private
 versioning its JSON payload makes both directions conservative: old readers reject v2, while new
 readers can classify v1 without deleting it on Linux.
 
-**Decision**: Treat ASCII case variants of a native Cursor UUID as one logical identity while
-retaining exact physical and public source spelling. Internal grouping, lookup, context caches, and
-Composer/Store association use a folded logical key. SQLite reads and mutations bind one exact
-observed spelling. The public value is selected from actual source IDs, preferring Composer for a
-Composer-backed session; equivalent variants reconcile and divergent variants are typed ambiguity.
+**Decision**: Preserve v0.16's byte-exact, case-sensitive native session-ID semantics. Internal
+grouping, lookup, context caches, Composer/Store association, SQLite reads, and mutations all use
+the exact observed spelling. A case-only variant is a distinct logical ID rather than an alias,
+replica, or cross-stack counterpart, and the public value is never normalized.
 
-**Rationale**: UUID hexadecimal letter case is semantically insignificant, but normalizing the
-public value would rewrite durable v0.16 session keys. Separating the folded logical key from exact
-physical locators and source-native presentation preserves both semantics and compatibility.
+**Rationale**: Consumers may persist returned session IDs as durable keys, and v0.16 compared those
+values exactly. Introducing UUID case folding in v0.18 would therefore change both lookup behavior
+and source association for already persisted values. One exact rule across public and physical
+addressing preserves the released contract and prevents cross-case reads or mutation.
 
-**Alternatives considered**: treating case variants as distinct sessions was rejected because it
-contradicts UUID semantics and makes cross-stack association inconsistent. Always lowercasing was
-rejected because it changes stable returned values. Exact-case queries selecting one divergent
-variant were rejected because caller spelling is not mutation authority.
+**Alternatives considered**: case-insensitive canonical UUID grouping with source-native output was
+rejected because it still changes v0.16 lookup and grouping semantics. Always lowercasing was
+rejected because it rewrites durable public IDs. Treating caller case as a selector over a folded
+group was rejected because it creates a second identity policy and unsafe mutation authority.
 
 Backup creation writes a complete private sibling staging archive and then publishes it. New final
 archives default to `0600`; force-overwrite cannot broaden the existing mode; broader permissions
@@ -932,14 +932,12 @@ New set-like arrays and rows that have no legacy Composer ordinal continue to us
 locale-independent Unicode code-point ordering. The v0.16 promise is evaluated on the same
 supported runtime/locale and source corpus because `localeCompare()` is itself locale-sensitive.
 
-**Decision**: Split session addressing into a canonical UUID logical key and exact source-native
-physical IDs. Canonical UUID syntax is folded case-insensitively for grouping, pointer association,
-and caller lookup, but the public ID comes from an observed source spelling and Composer remains the
-presentation authority. Workspace record IDs and global SQLite keys are retained exactly in the
-bound mutation locator. A sole opposite-case global carrier may satisfy a pointer-only workspace;
-multiple case-only global keys refuse destructive work before writes. Strings that are not
-canonical UUID syntax—including compact 32-hex Store directory identifiers—remain case-sensitive
-and byte-exact.
+**Decision**: Use one byte-exact session-ID rule for logical selection and exact source-native
+physical IDs. Canonical UUID syntax is not folded for grouping, pointer association, caller lookup,
+or Composer/Store matching. Workspace record IDs and global SQLite keys are retained exactly in the
+bound mutation locator. An opposite-case global carrier cannot satisfy a pointer-only workspace,
+and case-only variants remain independent targets. Compact 32-hex Store directory identifiers and
+all other strings follow the same case-sensitive rule.
 
 **Decision**: Treat destructive migration as a two-stage transaction boundary even when its
 storage implementation is not a database transaction. Catalog projection may read only metadata
@@ -964,16 +962,16 @@ preserved checksum-addressed tarball. For the additive backup inventory, retain 
 versioning choice: the enclosing `manifest.version` stays `"1.0.0"`; only
 `composerWorkspaceInventory.schemaVersion` is `1` and independently validated.
 
-**Rationale**: These distinctions preserve released values where callers may persist them while
-still allowing UUID-semantic matching and safe physical mutation. Exact physical locators prevent a
-case-folded logical lookup from deleting the wrong SQLite row. Metadata-only preflight and
+**Rationale**: These distinctions preserve released values where callers may persist them and keep
+logical selection aligned with safe physical mutation. Byte-exact binding prevents an
+opposite-case lookup from reading or deleting the wrong SQLite row. Metadata-only preflight and
 all-or-nothing preparation remove both the off-scope privacy regression and the partially applied
 workspace migration failure. Complete active-branch projection is required because the unchanged
 consumer reconstructs relationships from that legacy array.
 
 **Alternatives considered**: Replace legacy collation with code-point order (changes v0.16 numeric
-positions); lowercase every UUID (rewrites durable public IDs); case-fold compact 32-hex Store names
-(collapses distinct physical names without UUID syntax); hydrate all Composer values during
+positions); lowercase or case-fold UUIDs (rewrites durable public identities and lookup behavior);
+case-fold compact 32-hex Store names (collapses distinct physical names); hydrate all Composer values during
 preflight (violates the scoped payload boundary); mutate eligible members as they are discovered
 (permits partial workspace migration); append Store gaps without rebuilding the active branch
 (causes the unchanged consumer to omit or mis-parent them); raise the outer backup manifest to

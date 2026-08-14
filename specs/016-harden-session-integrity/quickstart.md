@@ -137,7 +137,7 @@ npx vitest run tests/compatibility/v017-convergence.test.ts
 Expected:
 
 - each locked complete v0.17 Store/merged fixture converges through one complete replacement;
-- one native UUID remains one logical session;
+- one byte-exact native UUID remains one logical session, while case variants remain distinct;
 - native Composer identities are correct;
 - unstable v0.17 Store positional/cross-format IDs are not asserted as preserved;
 - no logical content is duplicated;
@@ -313,10 +313,10 @@ node "<repo-root>/dist/cli/index.js" \
 Expected:
 
 - the preview binds A's exact eligible Composer occurrence;
-- canonical UUID lookup is case-insensitive but the preview/public result preserves the observed
-  Composer spelling and apply touches only the exact workspace/global record keys;
-- one sole opposite-case global carrier is eligible, while multiple case-only global keys refuse
-  before writes and compact 32-hex non-UUID identifiers remain distinct;
+- canonical UUID lookup is byte-exact and case-sensitive; the preview/public result preserves that
+  spelling and apply touches only its exact workspace/global record keys;
+- an opposite-case global carrier is a distinct target and cannot satisfy the selector; compact
+  32-hex identifiers follow the same exact rule;
 - off-scope workspaces contribute only record-ID/index/selected-ID/pane-pointer metadata; no
   off-scope `composer.composerData` value is materialized;
 - execution revalidates that occurrence and cannot switch to global index 1/B;
@@ -645,11 +645,10 @@ Structured list/show/search/export fixtures are validated against
 [`contracts/session-output.schema.json`](contracts/session-output.schema.json)
 as part of the e2e suite.
 
-Include one uppercase/lowercase UUID pair in direct-ID, scoped list/show/search/export, merged
-Composer/Store, and migration tests. A single observed spelling must resolve from either query case
-and return the source-native spelling; Composer must remain the presentation authority when Store
-uses another case. Equivalent physical variants collapse to one row. Divergent variants must return
-typed ambiguity and produce zero destructive writes.
+Include one uppercase/lowercase UUID pair in direct-ID, scoped list/show/search/export,
+Composer/Store, and migration tests. Each spelling is a distinct public ID: exact lookup succeeds,
+opposite-case lookup uses normal not-found behavior, cross-case Composer/Store records do not merge,
+and destructive operations affect only the exactly selected spelling.
 
 The package smoke must lock pathless compatibility rather than normalizing both surfaces to the same
 sentinel. For a pathless resolved session:

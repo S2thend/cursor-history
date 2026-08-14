@@ -32,10 +32,10 @@ contract is [docs/compatibility.md](./docs/compatibility.md).
 - **Workspace contract**: Matching is normalized exact-first, followed only by one unambiguous
   complete-component suffix. A workspace is a conversation-payload I/O boundary by default;
   complementary cross-workspace contributors for already selected UUIDs require explicit opt-in.
-- **UUID case semantics**: Session-ID lookup, grouping, and Composer/Store association now treat
-  hexadecimal letter case as insignificant. Returned IDs preserve a real source-native spelling,
-  prefer Composer spelling for Composer-backed sessions, and report divergent case-only physical
-  variants as ambiguity instead of guessing or normalizing a durable public key.
+- **Session-ID case compatibility**: Session-ID lookup, grouping, and Composer/Store association
+  preserve v0.16's byte-exact, case-sensitive behavior, including for canonical UUID syntax.
+  Differently cased values remain distinct IDs; callers must reuse the exact spelling returned by
+  Cursor rather than relying on UUID case folding.
 - **Workspace-scoped backup boundary**: New backups retain the enclosing manifest version `1.0.0`
   and add an optional canonical metadata-only inventory with independently validated
   `schemaVersion: 1`, preserving compatibility with v1 readers that ignore additive fields. It

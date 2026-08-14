@@ -21,12 +21,11 @@ change the enclosing v1 backup envelope.
 
 ## Stable identity and physical instances
 
-`Session.id` is the native Cursor conversation UUID. UUID hexadecimal letter case is ignored for
-lookup, grouping, and Composer/Store matching. The returned ID is never manufactured by lowercasing
-or copied from the caller: it preserves one deterministic spelling actually observed in Cursor
-data. A Composer-backed session prefers its Composer spelling so adding a differently-cased Store
-representation cannot rewrite a v0.16-compatible ID. A workspace path, source kind, list index,
-Store location, backup path, or duplicate occurrence is never appended to it.
+`Session.id` is the native Cursor conversation UUID. It remains a byte-exact, case-sensitive value
+for lookup, grouping, Composer/Store matching, and migration, preserving v0.16 behavior even when
+the value has canonical UUID syntax. Callers must persist and reuse the exact spelling returned by
+Cursor. A workspace path, source kind, list index, Store location, backup path, or duplicate
+occurrence is never appended to it.
 
 A logical session can have several physical source instances: Composer global/workspace records,
 Store databases, Store transcripts, or copies in different workspaces. Physical locators are
@@ -34,11 +33,9 @@ private implementation details. Public ambiguity diagnostics may contain an opaq
 reference, but that reference is scoped to one read and is neither a path nor mutation authority.
 Equivalent replicas reconcile into one logical row. Divergent same-role replicas produce one
 explicit ambiguity; cursor-history never picks or unions them silently.
-Case-only source spellings are physical occurrences of that same logical UUID, not separate public
-sessions. Their payloads must therefore pass the same equivalence check; divergent case variants
-are ambiguous, and an exact-case query does not grant authority to select one.
-Case folding applies only to canonical UUID syntax. Compact 32-hex Store directory names and every
-other noncanonical identifier remain byte-for-byte and case-sensitive.
+Case-only source spellings are separate public session IDs. They are not reconciled as replicas,
+used as cross-source counterparts, or selected by an opposite-case query. Compact 32-hex Store
+directory names and every other noncanonical identifier follow the same byte-exact rule.
 
 ### Message and tool identity version 1
 
@@ -152,9 +149,9 @@ source is disclosed.
 Destructive migration uses a narrower contract than read reconciliation. It may inspect off-scope
 workspace IDs, array positions, selected IDs, and pane-pointer metadata to establish membership, but
 it does not materialize off-scope Composer conversation values. After binding, it hydrates only the
-selected occurrence. The logical UUID key and exact workspace/global SQLite keys remain separate:
-an opposite-case sole carrier may resolve, but apply mutates only the frozen exact keys; multiple
-case-only global carriers refuse before writes. Session and workspace migration prepare every
+selected occurrence. The logical session ID and workspace/global SQLite keys are all
+case-sensitive. An opposite-case carrier cannot satisfy a pointer or selector, and migration
+mutates only keys bound to the exact requested ID. Session and workspace migration prepare every
 requested target before the first write, so one ambiguous, divergent, changed, or ineligible member
 leaves the entire batch unchanged.
 

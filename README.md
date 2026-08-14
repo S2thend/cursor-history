@@ -247,10 +247,10 @@ view as explicitly partial. Legacy backups with one workspace remain scoped-read
 multi-workspace backups without this inventory fail closed with
 `BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED` before database extraction.
 
-Native session UUID lookup is case-insensitive. Returned IDs retain a deterministic spelling that
-was actually stored by Cursor; Composer spelling takes precedence for Composer-backed sessions, so
-a Store case variant cannot rewrite an existing v0.16-compatible public ID. Divergent case-only
-physical variants return an explicit ambiguity instead of being selected by query or scan order.
+Session-ID lookup is byte-exact and case-sensitive, including for canonical UUID syntax, matching
+v0.16 behavior. Persist and reuse the exact `Session.id` spelling returned by Cursor. A differently
+cased value is a distinct ID: it is not an alias for lookup, grouping, Composer/Store association,
+or migration.
 
 Rename/link to the requested backup path is the publication commit point. If a later permission
 read, adjustment, or identity check fails, the command exits nonzero with
@@ -570,7 +570,7 @@ When browsing your chat history, you'll see:
 - **Complete conversations** - All messages exchanged with Cursor AI
 - **Every message rendered** - Each resolved message is shown once in order; consecutive duplicates are not folded, so distinct tool calls, provenance, and token data are never hidden
 - **Timestamps** - Composer sessions retain their historical timestamp recovery and interpolation; Store messages show a time only when Cursor provides a directly mapped turn timestamp
-- **Resolved cross-stack sessions** - When one UUID exists in Composer and Store, compatible
+- **Resolved cross-stack sessions** - When one byte-exact UUID exists in Composer and Store, compatible
   Composer identities are preserved while permitted sources produce one provenance-rich resolved
   view. Workspace scope is applied before payload reads: known off-scope sources remain unopened and
   make the result partial; permitted sources follow the documented backbone/alignment policy rather

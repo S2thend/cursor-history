@@ -102,9 +102,9 @@ type IndexScope = 'global' | 'workspace';
 type WorkspaceMatchKind = 'exact' | 'unique-suffix';
 type ReplicaState = 'single' | 'equivalent' | 'divergent';
 
-// Folded only when the source token satisfies canonical UUID syntax.
+// Byte-exact v0.16 session-ID spelling; canonical UUID syntax is not folded.
 type LogicalSessionKey = string;
-// Exact source-native record/key spelling; never derived from caller casing.
+// Exact source-native record/key spelling; never derived from a case variant.
 type PhysicalSessionId = string;
 
 type TextEncodingState = 'utf8' | 'utf8-bom' | 'invalid-or-mixed';
@@ -204,7 +204,7 @@ Represents one discoverable occurrence before logical reconciliation.
 | Field | Type | Rules |
 |-------|------|-------|
 | `logicalSessionId` | string | Deterministic source-native spelling returned publicly. |
-| `logicalSessionKey` | `LogicalSessionKey` | Canonical UUID key used for case-insensitive logical grouping; a noncanonical identifier remains exact. |
+| `logicalSessionKey` | `LogicalSessionKey` | Byte-exact key used for all logical grouping, including canonical UUID syntax. |
 | `physicalSessionId` | `PhysicalSessionId` | Exact workspace record ID, SQLite key, or Store directory token used by the locator; never case-folded for I/O. |
 | `sourceRole` | `SourceRole` | Composer or resolved Store contribution. |
 | `representation` | `SourceRepresentation` | Describes physical encoding, not fidelity. |
@@ -220,7 +220,7 @@ Represents one discoverable occurrence before logical reconciliation.
 Internal locator variants include Composer global DB/record, Composer workspace DB/record, Store DB,
 Store transcript, and Store metadata. Composer locators preserve both the exact workspace record ID
 and exact global SQLite key when both participate. No formatter or public-library mapper accepts a
-locator type. Compact 32-hex identifiers without canonical UUID separators are not UUID-folded.
+locator type. Canonical UUIDs, compact 32-hex identifiers, and arbitrary IDs are never case-folded.
 
 ## 3. WorkspaceMembership
 
@@ -242,7 +242,7 @@ Rules:
 
 ## 4. ReplicaGroup (internal)
 
-Groups candidates competing for the same logical UUID, source role, representation, and fidelity
+Groups candidates competing for the same byte-exact logical UUID, source role, representation, and fidelity
 tier.
 
 ```ts
@@ -382,9 +382,8 @@ interface LogicalSessionRecord {
 Rules:
 
 - `id` is the sole public logical ID and is always the native UUID.
-- Canonical UUID syntax groups by `logicalSessionKey` case-insensitively, but `id` retains one
-  observed source spelling with Composer precedence. Noncanonical IDs use their exact bytes as the
-  key.
+- `logicalSessionKey` is the exact source-native `id`; differently cased UUID-shaped values remain
+  separate rows and cannot become Composer/Store counterparts.
 - `legacyComposerDiscoveryOrdinal` captures the v0.16 `localeCompare()` workspace-discovery
   position before reconciliation and controls equal-`createdAt` compatibility order.
 - Composer global/workspace groups and Store DB/transcript groups first obey their fixed
@@ -981,10 +980,10 @@ reference cannot be converted to a `BoundMigrationTarget`.
 An ambiguous row never becomes a `BoundMigrationTarget`: its one-based numeric position remains
 occupied, and numeric/UUID selection returns the same typed ambiguity before destination preflight
 or any write.
-Logical UUID matching never substitutes for physical authority: the logical key is derived with
+Logical selection never substitutes for physical authority: the byte-exact key is derived with
 `logicalSessionIdKey(logicalSessionId)`, while apply reads, copies, moves, and deletes only the exact
-`composerLocator.sessionId` and optional `composerLocator.globalSessionId`. More than one case-only
-global key is a pre-write ambiguity even when read reconciliation judged the payloads equivalent.
+`composerLocator.sessionId` and optional `composerLocator.globalSessionId`. An opposite-case global
+key belongs to a distinct target and cannot authorize or block mutation of the selected ID.
 Catalog and selected-hydration source-read counters are separate boundaries. A migration batch is
 the complete prepared array of these targets; no member is applied until the whole array passes.
 
@@ -1258,11 +1257,10 @@ interface DatabaseCapabilityProfile {
 }
 ```
 
-Logical session maps use a private ASCII case-folded UUID key. `Session.id` and every physical
-locator retain an exact spelling observed in source data. Composer spelling wins for a
-Composer-backed row; otherwise selection is deterministic among the preferred source tier.
-Equivalent case variants reconcile, while divergent variants enter the ordinary ambiguous state.
-The caller's letter case is never used as a physical-occurrence selector.
+Logical session maps use the byte-exact v0.16 `Session.id`. Every physical locator retains the same
+exact source-native spelling, and Composer/Store association occurs only when those IDs match
+exactly. Case variants remain distinct logical records regardless of payload equivalence. Caller
+letter case is part of the requested ID, not an alias or physical-occurrence selector.
 
 Selection rules:
 
@@ -1275,7 +1273,8 @@ Selection rules:
 
 ## Aggregate invariants
 
-1. One native UUID produces at most one logical row per listing scope.
+1. One byte-exact native UUID produces at most one logical row per listing scope; case variants are
+   separate IDs.
 2. Every resolved public message has a stable nonempty ID, deterministic timestamp, and provenance.
 3. Preferred source can change rendered values/order but never pair selection, matched Composer ID,
    canonical workspace path, or existing Composer tool positions.
@@ -1302,8 +1301,8 @@ Selection rules:
     typed partial failure with the valid archive preserved.
 16. Legacy equal-time Composer order is derived from the v0.16 `localeCompare()` discovery ordinal;
     new set-like code-point ordering never rewrites that ordinal.
-17. UUID casing may collapse logical identity but never exact physical mutation keys; noncanonical
-    and compact 32-hex identifiers remain byte-sensitive.
+17. UUID casing never collapses logical identity or physical mutation keys; canonical,
+    noncanonical, and compact 32-hex identifiers are all byte-sensitive.
 18. A migration batch performs zero writes until every target is bound, hydrated within scope,
     eligible, and revalidated.
 19. A merged active branch includes every selected leading/middle/trailing Store-only turn once,
