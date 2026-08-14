@@ -1,7 +1,7 @@
 # Implementation Plan: Session Integrity and Compatibility Hardening
 
-**Branch**: `016-harden-session-integrity` | **Date**: 2026-08-13 | **Target release**: `0.18.0` | **Spec**: [spec.md](/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/spec.md)<br>
-**Input**: Feature specification from `/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/spec.md`
+**Branch**: `016-harden-session-integrity` | **Date**: 2026-08-13 | **Target release**: `0.18.0` | **Spec**: [spec.md](spec.md)<br>
+**Input**: Feature specification from `specs/016-harden-session-integrity/spec.md`
 
 ## Summary
 

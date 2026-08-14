@@ -2,7 +2,7 @@
 
 <!-- source-read-limits/v1 policy-sha256: b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108 -->
 
-**Repository**: `/workspaces/patcomm/cursor-history`<br>
+**Repository**: `<repo-root>`<br>
 **Branch**: `016-harden-session-integrity`
 
 This is the post-implementation verification path. A release candidate is not ready unless every
@@ -10,12 +10,13 @@ applicable section passes. Applicability is fixed by the normative specification
 contract projection at
 [`contracts/compatibility-matrix-v1.md`](contracts/compatibility-matrix-v1.md), not discovered from
 the implementation under test. The exact packed artifact must also contain the identical shipped
-projection in `docs/compatibility.md`. The examples use absolute paths and the built CLI.
+projection in `docs/compatibility.md`. The examples use `<repo-root>` as the absolute repository-root
+placeholder and the built CLI.
 
 ## 1. Required local gate
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npm ci
 npm run typecheck
 npm run lint
@@ -35,7 +36,7 @@ Expected:
 ## 2. Locked v0.16 archive upgrade
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/compatibility/v016-projector-provenance.test.ts
 npx vitest run tests/compatibility/v016-consumer-provenance.test.ts
 npx vitest run tests/compatibility/v016-fixture-safety.test.ts
@@ -129,7 +130,7 @@ corpus.
 ## 3. Locked v0.17 convergence
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/compatibility/v017-convergence.test.ts
 ```
 
@@ -158,31 +159,31 @@ The integration fixture must be built under an isolated absolute root such as
 After `npm run build`:
 
 ```bash
-node /workspaces/patcomm/cursor-history/dist/cli/index.js \
+node "<repo-root>/dist/cli/index.js" \
   --json \
   --data-path /tmp/cursor-history-016-workspace-fixture \
   --workspace /fixtures/workspace-a \
   list --all
 
-node /workspaces/patcomm/cursor-history/dist/cli/index.js \
+node "<repo-root>/dist/cli/index.js" \
   --json \
   --data-path /tmp/cursor-history-016-workspace-fixture \
   --workspace /fixtures/workspace-a \
   show 1
 
-node /workspaces/patcomm/cursor-history/dist/cli/index.js \
+node "<repo-root>/dist/cli/index.js" \
   --json \
   --data-path /tmp/cursor-history-016-workspace-fixture \
   --workspace /fixtures/workspace-a \
   search needle-a
 
-node /workspaces/patcomm/cursor-history/dist/cli/index.js \
+node "<repo-root>/dist/cli/index.js" \
   --json \
   --data-path /tmp/cursor-history-016-workspace-fixture \
   --workspace /fixtures/workspace-a \
   search needle-b
 
-node /workspaces/patcomm/cursor-history/dist/cli/index.js \
+node "<repo-root>/dist/cli/index.js" \
   --json \
   --data-path /tmp/cursor-history-016-workspace-fixture \
   --workspace /fixtures/workspace-a \
@@ -216,7 +217,7 @@ also finish before any candidate payload query.
 Run the automated form:
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/e2e/cli-session-integrity.test.ts
 npx vitest run tests/integration/workspace-io-boundary.test.ts
 ```
@@ -224,7 +225,7 @@ npx vitest run tests/integration/workspace-io-boundary.test.ts
 ## 5. Workspace matching and ambiguity
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/unit/workspace-scope.test.ts
 ```
 
@@ -236,7 +237,7 @@ normalized request and explain how to list valid workspaces.
 ## 6. Replica reconciliation
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/integration/session-replica-reconciliation.test.ts
 ```
 
@@ -256,7 +257,7 @@ Expected:
 Run the Store expectation and Composer arbitration matrices explicitly:
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/integration/store-expectation-state.test.ts
 npx vitest run tests/integration/composer-source-arbitration.test.ts
 ```
@@ -295,14 +296,14 @@ Composer arbitration must independently prove:
 ## 7. Scoped destructive migration
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/integration/migrate-session-scope.test.ts
 ```
 
 Then inspect a dry-run against the A/B fixture:
 
 ```bash
-node /workspaces/patcomm/cursor-history/dist/cli/index.js \
+node "<repo-root>/dist/cli/index.js" \
   --json \
   --data-path /tmp/cursor-history-016-workspace-fixture \
   --workspace /fixtures/workspace-a \
@@ -334,7 +335,7 @@ Expected:
 ## 8. Snapshot/archive security
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/unit/backup-publication.test.ts
 npx vitest run tests/integration/backup-snapshot-security.test.ts
 ```
@@ -426,7 +427,7 @@ exclusive creation, cleanup, no collision/path reuse, and typed failures.
 ## 9. SQLite capability boundaries
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/unit/database-capabilities.test.ts
 npx vitest run tests/integration/drivers.test.ts
 ```
@@ -456,7 +457,7 @@ release-date facts for v0.18.0, not an evergreen alias for a different major.
 ## 10. Read-context order and memory
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/integration/read-context-bounds.test.ts
 ```
 
@@ -475,7 +476,7 @@ Expected:
 ## 11. Timestamp and message rendering
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/unit/message-identity.test.ts
 npx vitest run tests/unit/cli-formatters-json.test.ts
 npx vitest run tests/unit/cli-formatters-table.test.ts
@@ -490,7 +491,7 @@ by their real type and render all structured tool calls.
 Run the locked public search-coordinate correction and library export-index regressions:
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/compatibility/v017-fixture-provenance.test.ts
 npx vitest run tests/unit/lib-index.test.ts
 ```
@@ -551,7 +552,7 @@ fingerprint order. Semantic message/branch/tool/code-block arrays retain semanti
 First run the carrier and public-override suites together:
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run \
   tests/integration/defensive-source-parsing.test.ts \
   tests/integration/backup-snapshot-security.test.ts \
@@ -601,7 +602,7 @@ mutation-testing runtime package.
 ## 13. Packed-artifact smoke and publication gate
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/e2e/package-smoke.test.ts
 npm pack --json
 ```
@@ -641,7 +642,7 @@ logical session from the exact packed bytes. A smoke test must not pass by weake
 workspace discovery or by using mutually inconsistent fixture paths.
 
 Structured list/show/search/export fixtures are validated against
-`/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/contracts/session-output.schema.json`
+[`contracts/session-output.schema.json`](contracts/session-output.schema.json)
 as part of the e2e suite.
 
 Include one uppercase/lowercase UUID pair in direct-ID, scoped list/show/search/export, merged
@@ -662,7 +663,7 @@ sentinel. For a pathless resolved session:
 Run built-CLI fatal-output regressions without wholesale command mocks:
 
 ```bash
-cd /workspaces/patcomm/cursor-history
+cd "<repo-root>"
 npx vitest run tests/e2e/cli-fatal-json.test.ts
 ```
 
@@ -689,11 +690,11 @@ migration rather than accidental output drift.
 
 Before release, compare:
 
-- `/workspaces/patcomm/cursor-history/README.md`
-- `/workspaces/patcomm/cursor-history/docs/readme_es.md`
-- `/workspaces/patcomm/cursor-history/docs/readme_fr.md`
-- `/workspaces/patcomm/cursor-history/docs/readme_zh.md`
-- `/workspaces/patcomm/cursor-history/CHANGELOG.md`
+- [`README.md`](../../README.md)
+- [`docs/readme_es.md`](../../docs/readme_es.md)
+- [`docs/readme_fr.md`](../../docs/readme_fr.md)
+- [`docs/readme_zh.md`](../../docs/readme_zh.md)
+- [`CHANGELOG.md`](../../CHANGELOG.md)
 - installed package help and `.d.ts` output
 
 Each surface must explain logical UUID versus physical occurrence, scoped index lifetime, numeric

@@ -5,7 +5,7 @@
 **Branch**: `016-harden-session-integrity`<br>
 **Date**: 2026-08-13<br>
 **Scope**: Resolve the implementation choices required by
-`/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/spec.md`.
+[`spec.md`](spec.md).
 
 All product decisions were settled in the specification. This document freezes the remaining
 technical contracts so design and implementation can proceed without open questions.

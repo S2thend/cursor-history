@@ -25,8 +25,8 @@ describe('store-stack paths', () => {
   it('projects POSIX and Windows cwd values to Cursor project-directory hints', () => {
     expect(storeProjectDirectoryName('/Users/x/proj')).toBe('Users-x-proj');
     expect(storeProjectDirectoryName('D:\\1\\Backend')).toBe('d-1-Backend');
-    expect(storeProjectDirectoryName('/workspaces/patcomm/cursor-history/')).toBe(
-      'workspaces-patcomm-cursor-history'
+    expect(storeProjectDirectoryName('/workspaces/example/cursor-history/')).toBe(
+      'workspaces-example-cursor-history'
     );
   });
 

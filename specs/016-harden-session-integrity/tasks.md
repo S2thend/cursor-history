@@ -2,7 +2,7 @@
 
 <!-- source-read-limits/v1 policy-sha256: b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108 -->
 
-**Input**: Design documents from `/workspaces/patcomm/cursor-history/specs/016-harden-session-integrity/`
+**Input**: Design documents from `specs/016-harden-session-integrity/`
 **Prerequisites**: `plan.md`, `spec.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
 
 **Tests**: Tests are required by FR-066, FR-069, FR-072–FR-089, and SC-018–SC-026. In every story, create the listed failing tests and locked evidence before changing the corresponding production behavior.
