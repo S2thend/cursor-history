@@ -38,6 +38,18 @@ const INFERRED_MESSAGE_SOURCES = new Set([
 ]);
 const NON_STORED_SESSION_UPDATE_SOURCES = new Set(['direct-message', 'epoch-unknown']);
 const V016_PATHLESS_WORKSPACE = /^\(workspace: [^)]+\)$/u;
+const V016_OPTIONAL_MESSAGE_FIELDS = [
+  'thinking',
+  'model',
+  'tokenUsage',
+  'durationMs',
+  'toolCalls',
+  'metadata',
+] as const;
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
 
 function persistentBindings(session: CompatibilitySession): unknown {
   return {
@@ -79,7 +91,12 @@ function expectCompatibleExceptVersionedFallbacks(
   expect(persistentBindings(candidate)).toEqual(persistentBindings(legacy));
 
   candidate.messages.forEach((message, index) => {
-    const legacyId = legacy.messages[index]!.id;
+    const legacyMessage = legacy.messages[index]!;
+    for (const field of V016_OPTIONAL_MESSAGE_FIELDS) {
+      expect(hasOwn(message, field)).toBe(hasOwn(legacyMessage, field));
+    }
+
+    const legacyId = legacyMessage.id;
     if (typeof legacyId === 'string' && legacyId.length > 0) {
       expect(Object.prototype.hasOwnProperty.call(message, 'id')).toBe(true);
       expect(message.id).toBe(legacyId);
@@ -219,6 +236,22 @@ describe('v0.16 explicitly versioned compatibility exceptions', () => {
     const wrongOrdinal = candidateSession(legacy);
     wrongOrdinal.messages[1]!.id = 'msg:2';
     expect(() => expectCompatibleExceptVersionedFallbacks(legacy, wrongOrdinal)).toThrow();
+  });
+
+  it('does not materialize an omitted optional field as own undefined', () => {
+    const legacy = legacySession();
+    const candidate = candidateSession(legacy);
+    const omittedIndex = legacy.messages.findIndex((message) => !hasOwn(message, 'toolCalls'));
+    expect(omittedIndex).toBeGreaterThanOrEqual(0);
+
+    Object.defineProperty(candidate.messages[omittedIndex]!, 'toolCalls', {
+      value: undefined,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+
+    expect(() => expectCompatibleExceptVersionedFallbacks(legacy, candidate)).toThrow();
   });
 
   it('never relabels or removes a nonempty native Composer ID', () => {

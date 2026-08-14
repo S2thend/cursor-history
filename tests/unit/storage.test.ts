@@ -4001,6 +4001,7 @@ describe('getSession (more tool types)', () => {
     const result = await getSession(1, '/data');
     expect(result).not.toBeNull();
     expect(result!.messages[0]!.content).toContain('[Tool:');
+    expect(result!.messages[0]!.toolCalls?.[0]?.status).toBe('cancelled');
   });
 
   it('handles text field with JSON diff', async () => {
