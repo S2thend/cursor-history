@@ -58,7 +58,9 @@ function mutateJob(source: string, jobName: string, target: string, replacement:
 function unsafeReleaseBypasses(source: string): string[] {
   const failures: string[] = [];
   if (
-    /\bnpm\s+(?:test|run\s+(?:typecheck|lint|build))\b[^\n]*(?:\|\||continue-on-error)/.test(source)
+    /\bnpm\s+(?:test|run\s+(?:typecheck|lint|format:check|build))\b[^\n]*(?:\|\||continue-on-error)/.test(
+      source
+    )
   ) {
     failures.push('validation failure is swallowed');
   }
@@ -135,12 +137,13 @@ function unsafeReleaseBypasses(source: string): string[] {
     'npm ci',
     'npm run typecheck',
     'npm run lint',
+    'npm run format:check',
     'npm test',
     'npm run build',
   ]) {
     if (!sourceQualityJob.includes(command)) failures.push(`source quality skips ${command}`);
   }
-  if (/\bnpm\s+(?:ci|test|run\s+(?:typecheck|lint|build))\b/u.test(runtimeJob)) {
+  if (/\bnpm\s+(?:ci|test|run\s+(?:typecheck|lint|format:check|build))\b/u.test(runtimeJob)) {
     failures.push('minimum runtime executes unsupported source tooling');
   }
   for (const flag of [
@@ -365,6 +368,7 @@ describe('npm publication workflow', () => {
       'npm ci',
       'npm run typecheck',
       'npm run lint',
+      'npm run format:check',
       'npm test',
       'npm run build',
     ]) {
@@ -372,7 +376,9 @@ describe('npm publication workflow', () => {
     }
     expect(sourceQuality).toContain("node-version: '24.x'");
     expect(sourceQuality).not.toContain("node-version: '20.0.0'");
-    expect(runtimeCandidate).not.toMatch(/\bnpm\s+(?:ci|test|run\s+(?:typecheck|lint|build))\b/u);
+    expect(runtimeCandidate).not.toMatch(
+      /\bnpm\s+(?:ci|test|run\s+(?:typecheck|lint|format:check|build))\b/u
+    );
     expect(runtimeCandidate).toContain('--runtime-only');
     expect(runtimeCandidate).toContain('--expected-backup-driver=${{ matrix.backup-driver }}');
     expect(runtimeCandidate).toContain(
@@ -430,6 +436,15 @@ describe('npm publication workflow', () => {
 
     const mutated = source.replace('run: npm test', 'run: npm test || echo "skipping failures"');
     expect(unsafeReleaseBypasses(mutated)).toContain('validation failure is swallowed');
+
+    const missingFormatCheck = source.replace(
+      '      - name: Check source formatting\n        run: npm run format:check\n\n',
+      ''
+    );
+    expect(missingFormatCheck).not.toBe(source);
+    expect(unsafeReleaseBypasses(missingFormatCheck)).toContain(
+      'source quality skips npm run format:check'
+    );
   });
 
   it('detects publish dependency, environment, and lifecycle bypass mutations', () => {
