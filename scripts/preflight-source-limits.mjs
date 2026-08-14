@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
+import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync,
   closeSync,
-  existsSync,
+  constants as fsConstants,
+  fchmodSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -13,10 +14,11 @@ import {
   readSync,
   realpathSync,
   readdirSync,
-  statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -25,17 +27,27 @@ export const POLICY_VERSION = 'source-read-limits/v1';
 export const POLICY_FINGERPRINT =
   'b130f4fb03e3ef04f0f01527585ee939df0243e8105a44f6a23fe6d15c9f9108';
 
-export const POLICY_ARTIFACTS = Object.freeze([
-  'specs/016-harden-session-integrity/spec.md',
-  'specs/016-harden-session-integrity/research.md',
-  'specs/016-harden-session-integrity/data-model.md',
-  'specs/016-harden-session-integrity/contracts/internal-resolution.md',
-  'specs/016-harden-session-integrity/contracts/library-api.md',
-  'specs/016-harden-session-integrity/contracts/cli-json.md',
-  'specs/016-harden-session-integrity/quickstart.md',
-  'specs/016-harden-session-integrity/tasks.md',
-  'docs/compatibility.md',
-]);
+export const POLICY_ARTIFACT_SHA256 = Object.freeze({
+  'specs/016-harden-session-integrity/spec.md':
+    'd0bbf129b64e9114413536ebb304e9277bc8cc1d60241ccbbcc187fa526533ff',
+  'specs/016-harden-session-integrity/research.md':
+    'd07da843c44747104803f113895c21c7392e38ce57366e1dec69d60c1226ecc0',
+  'specs/016-harden-session-integrity/data-model.md':
+    'ed86d6a462ba3e20dbc4c731c6c5bcd612b91b8a8d6a77a76516c2f3022e3909',
+  'specs/016-harden-session-integrity/contracts/internal-resolution.md':
+    '12430f6c9c34edc105b78ed97e3be1b6dbea7f21ad4b785be8c66ff0b14d5c3e',
+  'specs/016-harden-session-integrity/contracts/library-api.md':
+    'cc919c3b9b293330b3b93d140a455a9987964f080b13899bee2cd0025c28cc5a',
+  'specs/016-harden-session-integrity/contracts/cli-json.md':
+    '2774126a26c92686a05d5303f8337ad0d937d3bf0502c0c6c55e52b50df50533',
+  'specs/016-harden-session-integrity/quickstart.md':
+    '6f108b0091822b0888362957b86f0663a2115da48f895da85b6c7a9398bd3d85',
+  'specs/016-harden-session-integrity/tasks.md':
+    'e3b44c3fdea725e2b2a5c59b9c97d62fb764c75276619d2038f2461431dcb34b',
+  'docs/compatibility.md': '0804ad937106d36b8630f0e3d3564699f8b25a9b973497179e420665237d5675',
+});
+
+export const POLICY_ARTIFACTS = Object.freeze(Object.keys(POLICY_ARTIFACT_SHA256));
 
 const POLICY_FIELDS = Object.freeze([
   'jsonlRecordBytes',
@@ -79,11 +91,39 @@ function parseNumericLiteral(text) {
 export function readSourcePolicy(repositoryRoot = REPOSITORY_ROOT) {
   const sourcePath = join(repositoryRoot, 'src/core/source-read-limits.ts');
   const source = readFileSync(sourcePath, 'utf8');
-  const policy = { policyVersion: POLICY_VERSION };
+  const defaultObjects = [
+    ...source.matchAll(
+      /\bexport\s+const\s+SOURCE_READ_LIMITS_V1_DEFAULTS\b[^=]*=\s*Object\.freeze\(\{([^{}]*)\}\);/gu
+    ),
+  ];
+  if (defaultObjects.length !== 1) {
+    throw new Error(`Expected one SOURCE_READ_LIMITS_V1_DEFAULTS object in ${sourcePath}`);
+  }
+  const body = defaultObjects[0][1];
+  const propertyNames = [...body.matchAll(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:/gmu)].map(
+    (match) => match[1]
+  );
+  const expectedNames = ['policyVersion', ...POLICY_FIELDS];
+  if (
+    propertyNames.length !== expectedNames.length ||
+    new Set(propertyNames).size !== expectedNames.length ||
+    expectedNames.some((name) => !propertyNames.includes(name))
+  ) {
+    throw new Error(`SOURCE_READ_LIMITS_V1_DEFAULTS does not contain the exact locked fields`);
+  }
+  const versionMatches = [...body.matchAll(/\bpolicyVersion\s*:\s*(['"])([^'"\r\n]+)\1\s*[,\n]/gu)];
+  if (versionMatches.length !== 1) {
+    throw new Error(`Policy field policyVersion is missing or duplicated in ${sourcePath}`);
+  }
+  const policy = { policyVersion: versionMatches[0][2] };
   for (const field of POLICY_FIELDS) {
-    const match = new RegExp(`\\b${field}:\\s*([0-9][0-9_]*)[,\\n]`, 'u').exec(source);
-    if (!match) throw new Error(`Policy field ${field} is missing from ${sourcePath}`);
-    const value = parseNumericLiteral(match[1]);
+    const matches = [
+      ...body.matchAll(new RegExp(`\\b${field}\\s*:\\s*([0-9][0-9_]*)\\s*[,\\n]`, 'gu')),
+    ];
+    if (matches.length !== 1) {
+      throw new Error(`Policy field ${field} is missing or duplicated in ${sourcePath}`);
+    }
+    const value = parseNumericLiteral(matches[0][1]);
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`Policy field ${field} is not a positive safe integer`);
     }
@@ -103,7 +143,12 @@ export function checkPolicyArtifacts(repositoryRoot = REPOSITORY_ROOT) {
   const expectedMarker = `${POLICY_MARKER_PREFIX} ${fingerprint} -->`;
   for (const relativePath of POLICY_ARTIFACTS) {
     const path = join(repositoryRoot, relativePath);
-    const content = readFileSync(path, 'utf8');
+    const bytes = readFileSync(path);
+    const artifactHash = createHash('sha256').update(bytes).digest('hex');
+    if (artifactHash !== POLICY_ARTIFACT_SHA256[relativePath]) {
+      throw new Error(`Source Read Limits policy artifact content drift in ${relativePath}`);
+    }
+    const content = bytes.toString('utf8');
     if (!content.includes(expectedMarker)) {
       throw new Error(`Source Read Limits policy marker drift in ${relativePath}`);
     }
@@ -299,6 +344,15 @@ async function openReadonlyDatabase(path) {
   return new Database(path, { readonly: true, fileMustExist: true });
 }
 
+function lstatIfExists(path) {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 export async function preflightComposerDatabase(path, pageRows) {
   const db = await openReadonlyDatabase(path);
   try {
@@ -355,27 +409,68 @@ export async function preflightComposerDatabase(path, pageRows) {
 
 function collectComposerDatabases(inputPath) {
   const path = resolve(inputPath);
-  if (!existsSync(path)) throw new Error(`Composer input does not exist: ${inputPath}`);
-  if (lstatSync(path).isSymbolicLink()) throw new Error('Composer input must not be a symlink');
-  if (statSync(path).isFile()) {
+  const inputStats = lstatIfExists(path);
+  if (!inputStats) throw new Error(`Composer input does not exist: ${inputPath}`);
+  if (inputStats.isSymbolicLink()) throw new Error('Composer input must not be a symlink');
+  if (inputStats.isFile()) {
     if (extname(path) !== '.vscdb') throw new Error('Composer database must use the .vscdb suffix');
-    return [path];
+    return [realpathSync(path)];
   }
+  if (!inputStats.isDirectory()) throw new Error('Composer input must be a directory or .vscdb');
+
   const candidates = new Set();
-  const directGlobal = join(path, 'globalStorage', 'state.vscdb');
-  const siblingGlobal = join(dirname(path), 'globalStorage', 'state.vscdb');
-  for (const candidate of [directGlobal, siblingGlobal]) {
-    if (existsSync(candidate) && statSync(candidate).isFile())
-      candidates.add(realpathSync(candidate));
+  const workspaceRoot =
+    basename(path) === 'workspaceStorage' ? path : join(path, 'workspaceStorage');
+  const carrierRoot = basename(path) === 'workspaceStorage' ? dirname(path) : path;
+  const canonicalCarrierRoot = realpathSync(carrierRoot);
+  const globalRoot = join(carrierRoot, 'globalStorage');
+
+  function inspectDirectory(directory, label) {
+    const stats = lstatIfExists(directory);
+    if (!stats) return undefined;
+    if (stats.isSymbolicLink()) throw new Error(`${label} must not be a symlink`);
+    if (!stats.isDirectory()) throw new Error(`${label} must be a directory`);
+    const canonical = realpathSync(directory);
+    if (!isInside(canonicalCarrierRoot, canonical)) {
+      throw new Error(`${label} escapes the authorized Composer carrier`);
+    }
+    return canonical;
   }
-  const workspaceRoots = [join(path, 'workspaceStorage'), path];
-  for (const workspaceRoot of workspaceRoots) {
-    if (!existsSync(workspaceRoot) || !statSync(workspaceRoot).isDirectory()) continue;
+
+  function inspectDatabase(candidate, label) {
+    const stats = lstatIfExists(candidate);
+    if (!stats) return;
+    if (stats.isSymbolicLink()) throw new Error(`${label} must not be a symlink`);
+    if (!stats.isFile()) throw new Error(`${label} must be a regular file`);
+    const canonical = realpathSync(candidate);
+    if (!isInside(canonicalCarrierRoot, canonical)) {
+      throw new Error(`${label} escapes the authorized Composer carrier`);
+    }
+    candidates.add(canonical);
+  }
+
+  if (inspectDirectory(globalRoot, 'globalStorage')) {
+    inspectDatabase(join(globalRoot, 'state.vscdb'), 'globalStorage/state.vscdb');
+  }
+  if (inspectDirectory(workspaceRoot, 'workspaceStorage')) {
     for (const entry of readdirSync(workspaceRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-      const candidate = join(workspaceRoot, entry.name, 'state.vscdb');
-      if (existsSync(candidate) && statSync(candidate).isFile())
-        candidates.add(realpathSync(candidate));
+      const instancePath = join(workspaceRoot, entry.name);
+      const instanceStats = lstatSync(instancePath);
+      if (instanceStats.isSymbolicLink()) {
+        throw new Error('workspaceStorage entries must not be symlinks');
+      }
+      if (instanceStats.isFile()) continue;
+      if (!instanceStats.isDirectory()) {
+        throw new Error('workspaceStorage entries must be regular files or directories');
+      }
+      const canonicalInstance = realpathSync(instancePath);
+      if (!isInside(canonicalCarrierRoot, canonicalInstance)) {
+        throw new Error('workspaceStorage entry escapes the authorized Composer carrier');
+      }
+      inspectDatabase(
+        join(instancePath, 'state.vscdb'),
+        `workspaceStorage/${entry.name}/state.vscdb`
+      );
     }
   }
   if (candidates.size === 0)
@@ -398,15 +493,63 @@ function isInside(parent, child) {
 
 function assertPrivateOutput(outputPath, repositoryRoot) {
   const resolvedOutput = resolve(outputPath);
-  if (isInside(realpathSync(repositoryRoot), resolvedOutput)) {
+  const canonicalRepositoryRoot = realpathSync(repositoryRoot);
+  if (
+    isInside(resolve(repositoryRoot), resolvedOutput) ||
+    isInside(canonicalRepositoryRoot, resolvedOutput)
+  ) {
     throw new Error('Preflight evidence must be written outside the repository');
   }
   const parent = dirname(resolvedOutput);
-  if (!existsSync(parent)) mkdirSync(parent, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32' && (statSync(parent).mode & 0o077) !== 0) {
-    throw new Error('Preflight evidence parent must be owner-private (mode 0700)');
+  if (!lstatIfExists(parent)) mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const parentStats = lstatSync(parent);
+  if (parentStats.isSymbolicLink()) {
+    throw new Error('Preflight evidence parent must not be a symlink');
   }
-  return resolvedOutput;
+  if (!parentStats.isDirectory()) {
+    throw new Error('Preflight evidence parent must be a directory');
+  }
+  const canonicalParent = realpathSync(parent);
+  if (isInside(canonicalRepositoryRoot, canonicalParent)) {
+    throw new Error('Preflight evidence must be written outside the repository');
+  }
+  if (process.platform !== 'win32') {
+    const effectiveUid = process.geteuid?.();
+    if (
+      (parentStats.mode & 0o777) !== 0o700 ||
+      (effectiveUid !== undefined && parentStats.uid !== effectiveUid)
+    ) {
+      throw new Error('Preflight evidence parent must be owner-private (owned mode 0700)');
+    }
+  }
+  return join(canonicalParent, basename(resolvedOutput));
+}
+
+function writePrivateEvidence(outputPath, content) {
+  const flags =
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+  let descriptor;
+  let completed = false;
+  try {
+    descriptor = openSync(outputPath, flags, 0o600);
+    if (process.platform !== 'win32') fchmodSync(descriptor, 0o600);
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile()) throw new Error('Preflight evidence output must be a regular file');
+    if (process.platform !== 'win32') {
+      const effectiveUid = process.geteuid?.();
+      if (
+        (stats.mode & 0o777) !== 0o600 ||
+        (effectiveUid !== undefined && stats.uid !== effectiveUid)
+      ) {
+        throw new Error('Preflight evidence output must be owner-private (owned mode 0600)');
+      }
+    }
+    writeFileSync(descriptor, content);
+    completed = true;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (descriptor !== undefined && !completed) unlinkSync(outputPath);
+  }
 }
 
 export async function runPreflight({
@@ -446,7 +589,7 @@ export async function runPreflight({
   if (observations.zipCompressionRatioInfinite) maxima.zipCompressionRatio = null;
   const evidence = {
     schemaVersion: 1,
-    policyVersion: POLICY_VERSION,
+    policyVersion: policy.policyVersion,
     policyFingerprint: fingerprint,
     carrierCounts: {
       composerDatabases: composerDatabases.size,
@@ -458,8 +601,7 @@ export async function runPreflight({
     withinDefaults: exceeded.length === 0,
   };
   const outputPath = assertPrivateOutput(output, repositoryRoot);
-  writeFileSync(outputPath, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-  if (process.platform !== 'win32') chmodSync(outputPath, 0o600);
+  writePrivateEvidence(outputPath, `${JSON.stringify(evidence, null, 2)}\n`);
   return { evidence, outputPath };
 }
 

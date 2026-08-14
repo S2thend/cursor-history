@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   chmodSync,
@@ -17,6 +18,7 @@ import Database from 'better-sqlite3';
 import JSZip from 'jszip';
 
 import {
+  POLICY_ARTIFACT_SHA256,
   POLICY_ARTIFACTS,
   POLICY_FINGERPRINT,
   REPOSITORY_ROOT,
@@ -97,9 +99,17 @@ describe('Source Read Limits v1 policy lock', () => {
     expect(result.fingerprint).toBe(POLICY_FINGERPRINT);
     expect(result.policy).toEqual(readSourcePolicy());
     expect(result.artifacts).toEqual(POLICY_ARTIFACTS);
+    expect(Object.keys(POLICY_ARTIFACT_SHA256)).toEqual(POLICY_ARTIFACTS);
+    for (const [relativePath, expectedHash] of Object.entries(POLICY_ARTIFACT_SHA256)) {
+      expect(
+        createHash('sha256')
+          .update(readFileSync(join(REPOSITORY_ROOT, relativePath)))
+          .digest('hex')
+      ).toBe(expectedHash);
+    }
   });
 
-  it('fails when either an implementation default or one artifact marker drifts', () => {
+  it('fails when an implementation default or implementation policy version drifts', () => {
     const implementationMutation = copyPolicyRepository();
     const sourcePath = join(implementationMutation, 'src/core/source-read-limits.ts');
     writeFileSync(
@@ -111,13 +121,28 @@ describe('Source Read Limits v1 policy lock', () => {
     );
     expect(() => checkPolicyArtifacts(implementationMutation)).toThrow(/implementation=.*locked=/u);
 
+    const versionMutation = copyPolicyRepository();
+    const versionSourcePath = join(versionMutation, 'src/core/source-read-limits.ts');
+    writeFileSync(
+      versionSourcePath,
+      readFileSync(versionSourcePath, 'utf8').replace(
+        "policyVersion: 'source-read-limits/v1'",
+        "policyVersion: 'source-read-limits/v2'"
+      )
+    );
+    expect(readSourcePolicy(versionMutation).policyVersion).toBe('source-read-limits/v2');
+    expect(() => checkPolicyArtifacts(versionMutation)).toThrow(/implementation=.*locked=/u);
+  });
+
+  it('fails when artifact content drifts even if its embedded policy marker remains intact', () => {
     const artifactMutation = copyPolicyRepository();
     const artifactPath = join(artifactMutation, POLICY_ARTIFACTS[0]!);
     writeFileSync(
       artifactPath,
-      readFileSync(artifactPath, 'utf8').replace(POLICY_FINGERPRINT, '0'.repeat(64))
+      `${readFileSync(artifactPath, 'utf8')}\n<!-- non-policy content drift -->\n`
     );
-    expect(() => checkPolicyArtifacts(artifactMutation)).toThrow(/marker drift/u);
+    expect(readFileSync(artifactPath, 'utf8')).toContain(POLICY_FINGERPRINT);
+    expect(() => checkPolicyArtifacts(artifactMutation)).toThrow(/artifact content drift/u);
   });
 });
 
@@ -224,4 +249,98 @@ describe('aggregate evidence boundary', () => {
     ).rejects.toThrow(/outside the repository/u);
     expect(existsSync(join(REPOSITORY_ROOT, '.source-limit-evidence-forbidden.json'))).toBe(false);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects canonical repository escapes and never overwrites an existing evidence file',
+    async () => {
+      const root = privateRoot('cursor-history-preflight-output-security-');
+      const policyRepository = copyPolicyRepository();
+      const databasePath = join(root, 'state.vscdb');
+      createComposerDatabase(databasePath);
+
+      const repositoryLink = join(root, 'repository-link');
+      symlinkSync(policyRepository, repositoryLink, 'dir');
+      const escapedOutput = join(repositoryLink, 'specs', 'evidence.json');
+      await expect(
+        runPreflight({
+          composerRoots: [databasePath],
+          output: escapedOutput,
+          repositoryRoot: policyRepository,
+        })
+      ).rejects.toThrow(/outside the repository/u);
+      expect(existsSync(join(policyRepository, 'specs', 'evidence.json'))).toBe(false);
+
+      const privateTarget = join(root, 'private-target');
+      mkdirSync(privateTarget, { mode: 0o700 });
+      const parentLink = join(root, 'linked-parent');
+      symlinkSync(privateTarget, parentLink, 'dir');
+      await expect(
+        runPreflight({
+          composerRoots: [databasePath],
+          output: join(parentLink, 'evidence.json'),
+        })
+      ).rejects.toThrow(/parent must not be a symlink/u);
+      expect(existsSync(join(privateTarget, 'evidence.json'))).toBe(false);
+
+      const existingOutput = join(root, 'existing-evidence.json');
+      writeFileSync(existingOutput, 'do-not-overwrite', { mode: 0o600 });
+      await expect(
+        runPreflight({ composerRoots: [databasePath], output: existingOutput })
+      ).rejects.toThrow(/EEXIST|file already exists/u);
+      expect(readFileSync(existingOutput, 'utf8')).toBe('do-not-overwrite');
+    }
+  );
+});
+
+describe('authorized Composer carrier discovery', () => {
+  it('accepts documented User roots with only global data and workspaceStorage roots with only workspace data', async () => {
+    const root = privateRoot('cursor-history-preflight-carriers-');
+
+    const globalUserRoot = join(root, 'global-only', 'Cursor', 'User');
+    createComposerDatabase(join(globalUserRoot, 'globalStorage', 'state.vscdb'));
+    const globalResult = await runPreflight({
+      composerRoots: [globalUserRoot],
+      output: join(root, 'global-only-evidence.json'),
+    });
+    expect(globalResult.evidence.carrierCounts.composerDatabases).toBe(1);
+
+    const workspaceRoot = join(root, 'workspace-only', 'User', 'workspaceStorage');
+    createComposerDatabase(join(workspaceRoot, 'fictional-workspace', 'state.vscdb'));
+    const workspaceResult = await runPreflight({
+      composerRoots: [workspaceRoot],
+      output: join(root, 'workspace-only-evidence.json'),
+    });
+    expect(workspaceResult.evidence.carrierCounts.composerDatabases).toBe(1);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects nested global database and workspace-instance symlinks before opening them',
+    async () => {
+      const root = privateRoot('cursor-history-preflight-carrier-symlinks-');
+
+      const globalUserRoot = join(root, 'global-case', 'Cursor', 'User');
+      const outsideGlobal = join(root, 'outside-global.vscdb');
+      createComposerDatabase(outsideGlobal);
+      mkdirSync(join(globalUserRoot, 'globalStorage'), { recursive: true, mode: 0o700 });
+      symlinkSync(outsideGlobal, join(globalUserRoot, 'globalStorage', 'state.vscdb'), 'file');
+      await expect(
+        runPreflight({
+          composerRoots: [globalUserRoot],
+          output: join(root, 'global-symlink-evidence.json'),
+        })
+      ).rejects.toThrow(/globalStorage\/state\.vscdb must not be a symlink/u);
+
+      const workspaceRoot = join(root, 'workspace-case', 'User', 'workspaceStorage');
+      const outsideWorkspace = join(root, 'outside-workspace');
+      createComposerDatabase(join(outsideWorkspace, 'state.vscdb'));
+      mkdirSync(workspaceRoot, { recursive: true, mode: 0o700 });
+      symlinkSync(outsideWorkspace, join(workspaceRoot, 'fictional-workspace'), 'dir');
+      await expect(
+        runPreflight({
+          composerRoots: [workspaceRoot],
+          output: join(root, 'workspace-symlink-evidence.json'),
+        })
+      ).rejects.toThrow(/workspaceStorage entries must not be symlinks/u);
+    }
+  );
 });
