@@ -300,6 +300,12 @@ priority or permit publication without it.
   fictional lane copies or derives no value from the real corpus. Publication remains blocked until
   both the recurring generic gate and both T113 lanes pass. T113 writes no real-data value, derived
   value, membership, count, hash, or result into the repository.
+- Scope T114 sanitation to paths added or modified relative to feature 016's recorded
+  pre-implementation merge base, the exact package inputs, and recurring CI. Per the maintainer's
+  explicit boundary, do not modify or claim to remediate unchanged pre-feature material; do not use
+  it as release evidence or copy it into any feature-added artifact. Preserve the separately
+  approved narrow disposition for the removed feature-branch compatibility harness without
+  broadening it to new feature artifacts.
 - Preserve v0.16's Composer discovery order when session `createdAt` values tie, including the
   exact `String.localeCompare()` workspace-path precedence used before the stable timestamp sort.
   Capture that legacy Composer position before replica reconciliation, keep it for merged or

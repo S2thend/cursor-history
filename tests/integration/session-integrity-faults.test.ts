@@ -16,6 +16,7 @@ import {
   SOURCE_READ_LIMITS_V1_DEFAULTS,
   resolveSourceReadLimits,
 } from '../../src/core/source-read-limits.js';
+import { logicalSessionIdKey, sessionIdsEqual } from '../../src/core/session-id.js';
 import * as storage from '../../src/core/storage.js';
 import { mergeCrossStackSessions } from '../../src/core/store-stack/merge.js';
 import { parseStoreDb } from '../../src/core/store-stack/store-db.js';
@@ -242,6 +243,113 @@ function releaseBypasses(source: string): string[] {
     failures.push('publish runs after a failed dependency');
   }
   return failures;
+}
+
+function assertLegacyCollationOrder(actual: readonly string[], expected: readonly string[]): void {
+  if (
+    actual.length !== expected.length ||
+    actual.some((value, index) => value !== expected[index])
+  ) {
+    throw new Error('Equal-time Composer rows no longer retain v0.16 locale discovery order.');
+  }
+}
+
+interface MigrationBindingEvidence {
+  readonly logicalId: string;
+  readonly authoritativePublicId: string;
+  readonly physicalId: string;
+  readonly selectedPhysicalId: string;
+  readonly targetCount: number;
+  readonly preparedTargetCount: number;
+  readonly offScopePayloadReads: number;
+  readonly writesBeforeAllTargetsPrepared: number;
+}
+
+function assertMigrationBinding(evidence: Readonly<MigrationBindingEvidence>): void {
+  if (
+    logicalSessionIdKey(evidence.logicalId) !==
+      logicalSessionIdKey(evidence.authoritativePublicId) ||
+    !sessionIdsEqual(evidence.authoritativePublicId, evidence.physicalId)
+  ) {
+    throw new Error('Migration logical UUID binding changed.');
+  }
+  if (evidence.selectedPhysicalId !== evidence.physicalId) {
+    throw new Error('Migration no longer retains the exact physical SQLite spelling.');
+  }
+  if (evidence.offScopePayloadReads !== 0) {
+    throw new Error('Migration discovery hydrated an off-scope payload.');
+  }
+  if (
+    evidence.targetCount < 1 ||
+    evidence.preparedTargetCount !== evidence.targetCount ||
+    evidence.writesBeforeAllTargetsPrepared !== 0
+  ) {
+    throw new Error('Migration batch wrote before every logical target was prepared.');
+  }
+}
+
+function assertPointerOnlyAssociation(evidence: {
+  readonly pointerId: string;
+  readonly globalCarrierId: string;
+  readonly returnedId: string;
+  readonly resultCount: number;
+}): void {
+  if (!sessionIdsEqual(evidence.pointerId, evidence.globalCarrierId)) {
+    throw new Error('Pointer and global carrier no longer share one logical UUID.');
+  }
+  if (evidence.resultCount !== 1 || evidence.returnedId !== evidence.globalCarrierId) {
+    throw new Error('Pointer-only membership no longer resolves the sole native global spelling.');
+  }
+}
+
+function assertResolvedStoreGapBranch(session: Readonly<ChatSession>): void {
+  const active = session.activeBranchMessageIds;
+  const legacy = session.activeBranchBubbleIds;
+  if (!active || !legacy || active.join('\0') !== legacy.join('\0')) {
+    throw new Error('Legacy and additive active-branch arrays diverged.');
+  }
+  const byId = new Map(session.messages.map((message) => [message.id, message]));
+  const activeMessages = active.map((id) => byId.get(id));
+  if (activeMessages.some((message) => message === undefined)) {
+    throw new Error('Active branch references an unresolved message.');
+  }
+  const contents = activeMessages.map((message) => message!.content);
+  if (contents.join('\0') !== ['leading', 'A', 'middle', 'B', 'trailing'].join('\0')) {
+    throw new Error('Leading, middle, or trailing Store gap left the resolved active branch.');
+  }
+  activeMessages.forEach((message, index) => {
+    const expectedParent = activeMessages[index - 1]?.id;
+    if (message!.parentMessageId !== expectedParent) {
+      throw new Error('Resolved active-branch parent chain drifted.');
+    }
+  });
+  const sidechainId = session.messages.find(({ content }) => content === 'side')?.id;
+  if (sidechainId && active.includes(sidechainId)) {
+    throw new Error('Store sidechain entered the resolved active branch.');
+  }
+}
+
+function packedTopologyFaults(source: string): string[] {
+  const faults: string[] = [];
+  for (const [fragment, message] of [
+    ["const scopedWorkspace = '/work/a';", 'packed smoke lost its canonical scoped workspace'],
+    [
+      "createHash('md5').update(scopedWorkspace)",
+      'packed smoke chat directory no longer derives from the scoped workspace',
+    ],
+    [
+      'const scopedProjectDirectory = scopedWorkspace.replace',
+      'packed smoke project directory no longer derives from the scoped workspace',
+    ],
+    ["backup.manifest.version !== '1.0.0'", 'outer backup manifest version is no longer v1'],
+    [
+      'backup.manifest.composerWorkspaceInventory.schemaVersion !== 1',
+      'workspace inventory schema version is no longer independently v1',
+    ],
+  ] as const) {
+    if (!source.includes(fragment)) faults.push(message);
+  }
+  return faults;
 }
 
 describe.sequential('session-integrity load-bearing fault aggregate', () => {
@@ -554,6 +662,148 @@ describe.sequential('session-integrity load-bearing fault aggregate', () => {
       SOURCE_READ_LIMITS_V1_DEFAULTS.jsonlRecordBytes + 1
     );
     expect(Object.isFrozen(explicitlyRaised)).toBe(true);
+  });
+
+  it('detects post-audit collation, UUID binding, scoped migration, and pointer mutations', () => {
+    const suffixes = ['Z', 'ä', 'é', 'z', 'Å', 'a', 'Ω'];
+    const codePointCompare = (left: string, right: string): number =>
+      left < right ? -1 : left > right ? 1 : 0;
+    const differingPair = suffixes
+      .flatMap((left) => suffixes.map((right) => [left, right] as const))
+      .find(
+        ([left, right]) =>
+          left !== right &&
+          Math.sign(left.localeCompare(right)) !== Math.sign(codePointCompare(left, right))
+      );
+    expect(differingPair).toBeDefined();
+    const legacyOrder = [...differingPair!].sort((left, right) => left.localeCompare(right));
+    const codePointOrder = [...differingPair!].sort(codePointCompare);
+    assertLegacyCollationOrder(legacyOrder, legacyOrder);
+    expect(() => assertLegacyCollationOrder(codePointOrder, legacyOrder)).toThrow(
+      'locale discovery order'
+    );
+
+    const authoritativePublicId = 'ABABABAB-0000-4000-8000-000000000016';
+    const physicalId = authoritativePublicId.toLowerCase();
+    const migration: MigrationBindingEvidence = {
+      logicalId: physicalId,
+      authoritativePublicId,
+      physicalId,
+      selectedPhysicalId: physicalId,
+      targetCount: 2,
+      preparedTargetCount: 2,
+      offScopePayloadReads: 0,
+      writesBeforeAllTargetsPrepared: 0,
+    };
+    assertMigrationBinding(migration);
+    expect(() =>
+      assertMigrationBinding({ ...migration, selectedPhysicalId: authoritativePublicId })
+    ).toThrow('exact physical SQLite spelling');
+    expect(() => assertMigrationBinding({ ...migration, offScopePayloadReads: 1 })).toThrow(
+      'off-scope payload'
+    );
+    expect(() => assertMigrationBinding({ ...migration, preparedTargetCount: 1 })).toThrow(
+      'before every logical target was prepared'
+    );
+    expect(() =>
+      assertMigrationBinding({ ...migration, writesBeforeAllTargetsPrepared: 1 })
+    ).toThrow('before every logical target was prepared');
+
+    const pointer = {
+      pointerId: physicalId,
+      globalCarrierId: authoritativePublicId,
+      returnedId: authoritativePublicId,
+      resultCount: 1,
+    };
+    assertPointerOnlyAssociation(pointer);
+    expect(() => assertPointerOnlyAssociation({ ...pointer, returnedId: physicalId })).toThrow(
+      'sole native global spelling'
+    );
+    expect(() => assertPointerOnlyAssociation({ ...pointer, resultCount: 2 })).toThrow(
+      'sole native global spelling'
+    );
+  });
+
+  it('detects active-branch Store-gap, parent-chain, and sidechain mutations for both backbones', () => {
+    const composer = {
+      ...coreSession(
+        [
+          coreMessage({ id: 'composer-a', role: 'user', content: 'A' }),
+          coreMessage({ id: 'composer-b', role: 'assistant', content: 'B' }),
+        ],
+        'global'
+      ),
+      activeBranchBubbleIds: ['composer-a', 'composer-b'],
+    };
+    const store = coreSession(
+      [
+        coreMessage({ id: 'store-leading', role: 'user', content: 'leading' }),
+        coreMessage({ id: 'store-a', role: 'user', content: 'A' }),
+        coreMessage({ id: 'store-middle', role: 'assistant', content: 'middle' }),
+        coreMessage({ id: 'store-b', role: 'assistant', content: 'B' }),
+        coreMessage({ id: 'store-trailing', role: 'user', content: 'trailing' }),
+        coreMessage({ id: 'store-side', role: 'assistant', content: 'side', isSidechain: true }),
+      ],
+      'store-complete'
+    );
+
+    for (const backbone of ['composer', 'store'] as const) {
+      const merged = mergeCrossStackSessions(composer, store, backbone, 1);
+      assertResolvedStoreGapBranch(merged);
+
+      const missingMiddle = structuredClone(merged);
+      missingMiddle.activeBranchMessageIds = missingMiddle.activeBranchMessageIds?.filter(
+        (id) => missingMiddle.messages.find((message) => message.id === id)?.content !== 'middle'
+      );
+      missingMiddle.activeBranchBubbleIds = missingMiddle.activeBranchMessageIds;
+      expect(() => assertResolvedStoreGapBranch(missingMiddle)).toThrow('Store gap');
+
+      const wrongParent = structuredClone(merged);
+      const trailing = wrongParent.messages.find(({ content }) => content === 'trailing')!;
+      trailing.parentMessageId = undefined;
+      expect(() => assertResolvedStoreGapBranch(wrongParent)).toThrow('parent chain');
+
+      const admittedSidechain = structuredClone(merged);
+      const sidechainId = admittedSidechain.messages.find(({ content }) => content === 'side')!.id!;
+      admittedSidechain.activeBranchMessageIds = [
+        ...(admittedSidechain.activeBranchMessageIds ?? []),
+        sidechainId,
+      ];
+      admittedSidechain.activeBranchBubbleIds = admittedSidechain.activeBranchMessageIds;
+      expect(() => assertResolvedStoreGapBranch(admittedSidechain)).toThrow(/Store gap|sidechain/u);
+    }
+  });
+
+  it('detects packed Store-topology and backup-envelope version mutations', () => {
+    const source = readFileSync(resolve('scripts/smoke-packed-package.mjs'), 'utf8');
+    expect(packedTopologyFaults(source)).toEqual([]);
+
+    const wrongChatIdentity = source.replace(
+      "createHash('md5').update(scopedWorkspace)",
+      "createHash('md5').update('/different/workspace')"
+    );
+    expect(wrongChatIdentity).not.toBe(source);
+    expect(packedTopologyFaults(wrongChatIdentity)).toContain(
+      'packed smoke chat directory no longer derives from the scoped workspace'
+    );
+
+    const wrongOuterVersion = source.replace(
+      "backup.manifest.version !== '1.0.0'",
+      "backup.manifest.version !== '2.0.0'"
+    );
+    expect(wrongOuterVersion).not.toBe(source);
+    expect(packedTopologyFaults(wrongOuterVersion)).toContain(
+      'outer backup manifest version is no longer v1'
+    );
+
+    const collapsedInventoryVersion = source.replace(
+      'backup.manifest.composerWorkspaceInventory.schemaVersion !== 1',
+      'backup.manifest.composerWorkspaceInventory.schemaVersion !== 2'
+    );
+    expect(collapsedInventoryVersion).not.toBe(source);
+    expect(packedTopologyFaults(collapsedInventoryVersion)).toContain(
+      'workspace inventory schema version is no longer independently v1'
+    );
   });
 
   it('surfaces a deliberate private-temp residue instead of reporting successful cleanup', () => {

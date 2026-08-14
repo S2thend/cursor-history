@@ -744,6 +744,9 @@ revision and the packed bytes never change afterward:
 4. Run the preliminary required validation. Any failure or tracked edit returns to its owning task
    and restarts at the preflight and private differential. T113 writes no repository file; retain its
    result only in owner-private external storage and verify that the candidate tree remains unchanged.
+   For T114, bind the feature's recorded pre-implementation merge base and scan the feature diff,
+   exact package inputs, and recurring CI. Do not modify or claim to remediate unchanged pre-feature
+   material; do not use it as evidence or copy it into a feature-added artifact.
 5. Freeze that revision and run the unconditional final install/typecheck/lint/format/test/build
    gates. Pack once only after they pass, retain the checksum-addressed tarball, and smoke only those
    bytes.

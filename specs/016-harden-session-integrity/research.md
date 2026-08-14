@@ -38,9 +38,12 @@ harness for some of those behaviors, but never contained an upstream vibe-histor
 private Cursor input, or a generated downstream database/archive. T132 removed that harness from
 the current tree. After reviewing the bounded historical exposure, the maintainer explicitly
 accepted the deleted harness revisions remaining in this feature branch's ancestry; release
-sanitation therefore verifies the frozen tree plus the absence of upstream source files, private
-inputs, and generated downstream artifacts, and does not require a history rewrite solely for
-those deleted test-harness revisions.
+sanitation therefore verifies every feature-added or feature-modified path, package input, and
+recurring-CI input plus the absence of upstream source files, private inputs, and generated
+downstream artifacts introduced by this feature. By maintainer decision it neither modifies nor
+claims to sanitize material that predates the feature's recorded merge base and remains unchanged;
+such baseline material is not valid release evidence and cannot be copied into a feature artifact.
+No history rewrite is required solely for the deleted test-harness revisions.
 
 The exact no-vibe-history-change guarantee is a separate release-blocking T113 certification. With
 owner authorization, T113 uses an external checkout at the recorded upstream revision and runs that

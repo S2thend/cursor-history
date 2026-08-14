@@ -375,6 +375,14 @@ status is copied into this repository, a commit, a fixture, or recurring CI. T11
 candidate revision and tracked tree are unchanged after T113; any repository edit invalidates the
 candidate and restarts T112–T113.
 
+T114's repository-sanitation assertion is feature-scoped. Bind the recorded pre-implementation
+merge base and inspect every feature-added or feature-modified path, the exact package inputs, and
+recurring-CI inputs. By maintainer decision, material that predates that merge base and remains
+unchanged is outside this feature's remediation claim: do not modify it, use it as release evidence,
+or copy it into a feature-added artifact. The feature-branch ancestry scan still fails on any newly
+introduced upstream source, raw/private Cursor data, generated downstream database/archive, or
+unapproved feature-branch exception.
+
 ## Exact-tarball maintainer verification (T115)
 
 Create a fresh owner-private runner outside the repository and perform a production install whose

@@ -233,12 +233,15 @@ successful carrier fixture is permitted.
 - [ ] The publish workflow is fail-closed and its manifest-producing runtime matrix, clean-install,
   test, build, pack-once, checksum, smoke, and protected-approval paths are contract tested.
 - [ ] No raw private evidence or external vibe-history checkout is a recurring CI dependency.
-- [ ] T114 confirms that the frozen tree, package inputs, and recurring CI retain no third-party
-  implementation or generated downstream database/archive; confirms that no full upstream source,
-  raw/private Cursor data, or downstream database/archive was tracked; and records the
-  maintainer-approved exception for the already-removed small derived harness in prior
-  feature-branch commits. No history rewrite is required and no additional historical exception is
-  authorized.
+- [ ] T114 binds the recorded pre-implementation merge base and confirms that every feature-added or
+  feature-modified path, exact package input, and recurring-CI input retains no third-party
+  implementation, feature-derived real/private evidence, or generated downstream database/archive;
+  confirms that feature-branch ancestry introduced no full upstream source, raw/private Cursor data,
+  or downstream database/archive; and records the maintainer-approved exception for the
+  already-removed small derived harness in prior feature-branch commits. Unchanged pre-feature
+  material is explicitly outside this feature's sanitation claim, is not modified, is not used as
+  release evidence, and must not be copied into a feature artifact. No history rewrite is required
+  and no additional feature-branch exception is authorized.
 - [ ] T112 and T113 have been rerun from the corrected 0.18.0 revision. T114 must run from the revision containing this checklist;
   T115 must preserve and verify one tarball from that exact revision before protected approval.
 

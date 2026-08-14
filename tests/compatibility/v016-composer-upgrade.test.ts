@@ -137,8 +137,12 @@ function publicSession(session: ChatSession): Session {
   };
 }
 
-/** Exact parent/leaf behavior used by the unchanged vibe-history Cursor adapter. */
-function projectLegacyActiveBranch(session: Session): {
+/**
+ * Generic cursor-history-owned projection used to verify that the legacy branch
+ * array describes one stable parent/leaf chain. This is deliberately not an
+ * emulation or conformance oracle for any third-party consumer.
+ */
+function projectGenericActiveBranch(session: Session): {
   leafMessageId: string | undefined;
   parents: Map<string, string | undefined>;
 } {
@@ -241,7 +245,7 @@ describe('v0.16 Composer compatibility through a generic downstream contract', (
   });
 
   it.each(storeFixture.preferredSourceCases)(
-    'keeps leading, middle, and trailing Store turns connected for the unchanged %s-backbone consumer',
+    'keeps leading, middle, and trailing Store turns connected in the generic %s-backbone projection',
     (preferred) => {
       const merged = mergeCrossStackSessions(composer, store, preferred, 1);
       const incoming = publicSession(merged);
@@ -258,7 +262,7 @@ describe('v0.16 Composer compatibility through a generic downstream contract', (
         expect.arrayContaining([leading.id, middle.id, trailing.id])
       );
 
-      const legacy = projectLegacyActiveBranch(incoming);
+      const legacy = projectGenericActiveBranch(incoming);
       expect(legacy.parents.get(leading.id!)).toBeUndefined();
       expect(legacy.parents.get(middle.id!)).toBeDefined();
       expect(legacy.parents.get(trailing.id!)).toBeDefined();
