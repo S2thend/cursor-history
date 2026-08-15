@@ -104,6 +104,32 @@ describe('v0.16 projector provenance', () => {
     expect(projected.source).toBe('global');
   });
 
+  it('reproduces an empty TEXT payload cell as the same placeholder v0.16 gives NULL', () => {
+    // NULL and an empty TEXT cell are distinct SQLite storage classes that reach the corrupted
+    // placeholder by different routes, so the released v0.16 behaviour for the empty cell is
+    // pinned here alongside the NULL case above rather than inferred from it.
+    const projected = projectV016GlobalSession({
+      id: 'composer-empty-cell',
+      title: 'Locked empty payload cell',
+      createdAt: new Date('2024-01-01T00:00:00.000Z'),
+      lastUpdatedAt: new Date('2024-01-02T00:00:00.000Z'),
+      bubbleRows: [
+        {
+          rowid: 10,
+          key: 'bubbleId:composer-empty-cell:native',
+          value: JSON.stringify({ type: 1, bubbleId: 'native', text: 'kept' }),
+        },
+        { rowid: 20, key: 'bubbleId:composer-empty-cell:empty-cell', value: '' },
+      ],
+      composerDataValue: JSON.stringify({}),
+    });
+
+    expect(projected.messages.map(({ id, content, role }) => ({ id, content, role }))).toEqual([
+      { id: 'native', content: 'kept', role: 'user' },
+      { id: 'empty-cell', content: '[corrupted message]', role: 'assistant' },
+    ]);
+  });
+
   it('reproduces the tagged v0.16 specialized display for supported tool bubbles', () => {
     const projected = projectV016GlobalSession({
       id: 'composer-tools',

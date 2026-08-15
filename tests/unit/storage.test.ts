@@ -2456,6 +2456,42 @@ describe('getSession', () => {
     expect(result?.messageCount).toBe(3);
   });
 
+  it('preserves an empty TEXT global bubble payload as a v0.16-compatible corrupted message', async () => {
+    // A payload cell may legally hold an empty TEXT value rather than NULL. The two reach the
+    // placeholder through different branches — NULL short-circuits, an empty string throws out
+    // of JSON.parse — so the shared outcome has to be pinned separately from the NULL case.
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'ws1', isDirectory: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ folder: '/project' }));
+    const composerData = JSON.stringify({
+      allComposers: [{ composerId: 'c1', name: 'Empty Payload Chat', createdAt: 1000 }],
+    });
+
+    setupGetSessionMocks(composerData, [
+      {
+        key: 'bubbleId:c1:native-user',
+        value: JSON.stringify({ type: 1, text: 'before', bubbleId: 'native-user' }),
+      },
+      { key: 'bubbleId:c1:empty-cell', value: '' },
+      {
+        key: 'bubbleId:c1:native-assistant',
+        value: JSON.stringify({ type: 2, text: 'after', bubbleId: 'native-assistant' }),
+      },
+    ]);
+
+    const result = await getSession(1, '/data');
+
+    expect(result?.messages.map(({ id, role, content }) => ({ id, role, content }))).toEqual([
+      { id: 'native-user', role: 'user', content: 'before' },
+      { id: 'empty-cell', role: 'assistant', content: '[corrupted message]' },
+      { id: 'native-assistant', role: 'assistant', content: 'after' },
+    ]);
+    expect(result?.messages[1]?.metadata?.corrupted).toBe(true);
+    expect(result?.messageCount).toBe(3);
+  });
+
   it('loads global bubbles from the sibling globalStorage for a custom dataPath', async () => {
     const customDataPath = join(parse(process.cwd()).root, 'custom', 'workspaceStorage');
     const expectedGlobalDbPath = join(dirname(customDataPath), 'globalStorage', 'state.vscdb');
