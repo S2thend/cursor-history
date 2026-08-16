@@ -254,7 +254,10 @@ jobs:
         run: npm config delete //registry.npmjs.org/:_authToken
 
       - name: Publish the exact verified tarball without rebuilding
-        run: npm publish "release-candidate/${{ needs.package-candidate.outputs.tarball }}" --provenance --access public
+        # The leading "./" is required: npm-package-arg treats a bare "a/b"
+        # argument as a GitHub owner/repo shorthand, so the path must be an
+        # explicit file spec to publish the preserved tarball.
+        run: npm publish "./release-candidate/${{ needs.package-candidate.outputs.tarball }}" --provenance --access public
         env:
           NODE_AUTH_TOKEN: ''
           NPM_TOKEN: ''
