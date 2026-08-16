@@ -1,0 +1,167 @@
+name: PR Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  source-quality:
+    name: Validate source on supported tooling
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout proposed revision
+        uses: actions/checkout@v4
+
+      - name: Setup supported development toolchain
+        uses: actions/setup-node@v4
+        with:
+          # Same rule as the release workflow: Vite 7 requires Node 20.19+, so
+          # every source-level tool runs on the packaging runtime while the
+          # declared product runtimes are validated through the packed
+          # candidate in the runtime matrix below.
+          node-version: '24.x'
+          cache: npm
+
+      - name: Show toolchain versions
+        run: node -v && npm -v
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run type check
+        run: npm run typecheck
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Check source formatting
+        run: npm run format:check
+
+      - name: Run nonempty verified tests
+        run: npm test
+
+      - name: Build distributable files
+        run: npm run build
+
+  package-candidate:
+    name: Pack one immutable candidate
+    needs: source-quality
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      tarball: ${{ steps.identity.outputs.tarball }}
+      sha256: ${{ steps.identity.outputs.sha256 }}
+
+    steps:
+      - name: Checkout proposed revision
+        uses: actions/checkout@v4
+
+      - name: Setup packaging runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install and build exact revision
+        run: |
+          npm ci
+          npm run build
+
+      - name: Pack candidate once and record identity
+        id: identity
+        shell: bash
+        run: |
+          mkdir -p pr-candidate
+          PACKAGE_VERSION=$(npm pkg get version | tr -d '"')
+          TARBALL=$(npm pack --pack-destination pr-candidate --silent)
+          SHA256=$(sha256sum "pr-candidate/$TARBALL" | cut -d ' ' -f 1)
+          printf '%s  %s\n' "$SHA256" "$TARBALL" > pr-candidate/candidate.sha256
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve checksum-addressed candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-candidate-${{ steps.identity.outputs.sha256 }}
+          path: pr-candidate/
+          if-no-files-found: error
+          retention-days: 3
+
+  runtime-candidate:
+    name: Runtime ${{ matrix.node-version }} (${{ matrix.node-sqlite-backup }})
+    needs: package-candidate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node-version: '20.0.0'
+            backup-driver: better-sqlite3
+            node-sqlite-backup: unavailable
+          - node-version: '22.15.1'
+            backup-driver: better-sqlite3
+            node-sqlite-backup: missing
+          - node-version: '22.16.0'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '23.7.0'
+            backup-driver: better-sqlite3
+            node-sqlite-backup: missing
+          - node-version: '23.8.0'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '24.x'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '25.x'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+          - node-version: '26.x'
+            backup-driver: node:sqlite
+            node-sqlite-backup: supported
+
+    steps:
+      - name: Checkout verification scripts
+        uses: actions/checkout@v4
+
+      - name: Setup product runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Show runtime versions
+        run: node -v && npm -v
+
+      - name: Download checksum-addressed candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-candidate-${{ needs.package-candidate.outputs.sha256 }}
+          path: pr-candidate
+
+      - name: Verify candidate checksum
+        shell: bash
+        working-directory: pr-candidate
+        run: |
+          sha256sum -c candidate.sha256
+          ACTUAL_SHA256=$(sha256sum "${{ needs.package-candidate.outputs.tarball }}" | cut -d ' ' -f 1)
+          test "$ACTUAL_SHA256" = "${{ needs.package-candidate.outputs.sha256 }}"
+
+      - name: Smoke exact candidate and SQLite boundary
+        run: >-
+          node scripts/smoke-packed-package.mjs
+          "pr-candidate/${{ needs.package-candidate.outputs.tarball }}"
+          --runtime-only
+          --expected-backup-driver=${{ matrix.backup-driver }}
+          --expected-node-sqlite-backup=${{ matrix.node-sqlite-backup }}
