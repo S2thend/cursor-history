@@ -6,9 +6,10 @@ import type { Command } from 'commander';
 import pc from 'picocolors';
 import { existsSync } from 'node:fs';
 import { listBackups, getDefaultBackupDir } from '../../core/backup.js';
-import type { BackupInfo } from '../../core/types.js';
-import { handleError, ExitCode } from '../errors.js';
+import type { BackupInfo, SourceReadLimitsOverride } from '../../core/types.js';
+import { CliError, handleError, ExitCode } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 
 interface ListBackupsCommandOptions {
   directory?: string;
@@ -133,24 +134,26 @@ export function registerListBackupsCommand(program: Command): void {
     .description('List available backup files')
     .option('-d, --directory <path>', 'Directory to scan (default: ~/cursor-history-backups)')
     .action(async (options: ListBackupsCommandOptions, command: Command) => {
-      const globalOptions = command.parent?.opts() as { json?: boolean };
+      const globalOptions = command.parent?.opts() as {
+        json?: boolean;
+        sourceLimit?: SourceReadLimitsOverride;
+      };
       const useJson = options.json ?? globalOptions?.json ?? false;
 
       try {
+        const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
         // Resolve directory path
         const directory = options.directory ? expandPath(options.directory) : getDefaultBackupDir();
 
         // T064: Check if directory exists
         if (!existsSync(directory)) {
           if (useJson) {
-            console.log(
-              JSON.stringify({
-                error: 'Directory not found',
-                directory,
-                count: 0,
-                backups: [],
-              })
-            );
+            throw new CliError('Directory not found', ExitCode.USAGE_ERROR, undefined, undefined, {
+              error: 'Directory not found',
+              directory,
+              count: 0,
+              backups: [],
+            });
           } else {
             console.error(pc.yellow('Backup directory not found:'));
             console.error(pc.dim(`  ${contractPath(directory)}`));
@@ -161,7 +164,9 @@ export function registerListBackupsCommand(program: Command): void {
         }
 
         // List backups
-        const backups = await listBackups(directory);
+        const backups = await listBackups(directory, {
+          sourceReadLimits,
+        });
 
         // T063: Handle no backups found
         if (backups.length === 0) {
@@ -190,7 +195,7 @@ export function registerListBackupsCommand(program: Command): void {
           console.log(formatBackupsTable(backups));
         }
       } catch (error) {
-        handleError(error);
+        handleError(error, { json: useJson });
       }
     });
 }

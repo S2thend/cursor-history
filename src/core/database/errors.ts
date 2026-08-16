@@ -4,6 +4,9 @@
  * Custom error types for driver-related failures with actionable messages.
  */
 
+import type { DatabaseCapability, DatabaseOperation } from './types.js';
+export { DatabaseCapabilityError, NoCapableDriverError } from '../errors.js';
+
 /**
  * Error thrown when no SQLite driver is available in the current environment
  */
@@ -19,7 +22,10 @@ export class NoDriverAvailableError extends Error {
 }
 
 /**
- * Error thrown when a specified driver is not available
+ * Error thrown when a specified driver is not available.
+ *
+ * @param driverName - Explicit SQLite driver requested by the caller.
+ * @param availableDrivers - Installed driver names available for selection.
  */
 export class DriverNotAvailableError extends Error {
   constructor(driverName: string, availableDrivers: string[]) {
@@ -41,3 +47,25 @@ export class ReadonlyDatabaseError extends Error {
     this.name = 'ReadonlyDatabaseError';
   }
 }
+
+/** Safe, machine-readable details for an explicitly forced incapable provider. */
+export interface DatabaseCapabilityErrorDetails {
+  readonly driver: string;
+  readonly operation: DatabaseOperation;
+  readonly missingCapabilities: DatabaseCapability[];
+  readonly alternatives: string[];
+  readonly remedy: string;
+}
+
+/**
+ * Error thrown when an explicit operation, process, or environment preference cannot perform the
+ * requested operation. Explicit preferences never fall back silently.
+ */
+/** Safe, machine-readable details when automatic selection has no capable provider. */
+export interface NoCapableDriverErrorDetails {
+  readonly operation: DatabaseOperation;
+  readonly requiredCapabilities: DatabaseCapability[];
+  readonly remedies: string[];
+}
+
+/** Error thrown when automatic selection cannot satisfy the complete operation capability set. */

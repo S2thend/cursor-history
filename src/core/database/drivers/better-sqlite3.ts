@@ -4,11 +4,99 @@
  * Wraps the better-sqlite3 library to conform to the DatabaseDriver interface.
  */
 
-import type { Database, DatabaseDriver, DatabaseOptions, Statement, RunResult } from '../types.js';
+import type {
+  Database,
+  DatabaseCapability,
+  DatabaseCapabilityProfile,
+  DatabaseDriver,
+  DatabaseOptions,
+  Statement,
+  RunResult,
+} from '../types.js';
 import { debugLog } from '../debug.js';
 
 // Lazy-loaded better-sqlite3 module
 let BetterSqlite3: typeof import('better-sqlite3') | null = null;
+let betterSqlite3ProfilePromise: Promise<DatabaseCapabilityProfile> | null = null;
+
+function unavailableProfile(reason: string): DatabaseCapabilityProfile {
+  return {
+    driver: 'better-sqlite3',
+    available: false,
+    capabilities: new Set<DatabaseCapability>(),
+    unavailableReason: reason,
+  };
+}
+
+function probeBetterSqlite3Capabilities(
+  Constructor: typeof import('better-sqlite3')
+): DatabaseCapabilityProfile {
+  let testDb: import('better-sqlite3').Database;
+  try {
+    testDb = new Constructor(':memory:');
+  } catch {
+    return unavailableProfile('better-sqlite3 could not open an in-memory database.');
+  }
+
+  const capabilities = new Set<DatabaseCapability>();
+  let readSupported = false;
+  let writeSupported = false;
+
+  try {
+    const getStatement = testDb.prepare('SELECT 1 AS capability_probe');
+    const allStatement = testDb.prepare('SELECT 1 AS capability_probe');
+    getStatement.get();
+    allStatement.all();
+    readSupported = true;
+  } catch {
+    readSupported = false;
+  }
+
+  if (readSupported) {
+    try {
+      testDb.exec('CREATE TABLE cursor_history_capability_probe (value INTEGER)');
+      testDb.prepare('INSERT INTO cursor_history_capability_probe (value) VALUES (1)').run();
+      writeSupported = true;
+    } catch {
+      writeSupported = false;
+    }
+  }
+
+  const backupSupported = typeof testDb.backup === 'function';
+  try {
+    testDb.close();
+  } catch {
+    return unavailableProfile('better-sqlite3 could not close a probed database safely.');
+  }
+
+  if (!readSupported) {
+    return unavailableProfile('better-sqlite3 statement read APIs are unavailable.');
+  }
+
+  capabilities.add('read');
+  if (writeSupported) capabilities.add('readWrite');
+  if (backupSupported) capabilities.add('onlineBackup');
+  return {
+    driver: 'better-sqlite3',
+    available: true,
+    capabilities,
+  };
+}
+
+async function loadBetterSqlite3Profile(): Promise<DatabaseCapabilityProfile> {
+  if (!betterSqlite3ProfilePromise) {
+    betterSqlite3ProfilePromise = (async () => {
+      try {
+        const module = await import('better-sqlite3');
+        BetterSqlite3 = module.default;
+        return probeBetterSqlite3Capabilities(BetterSqlite3);
+      } catch {
+        return unavailableProfile('better-sqlite3 could not be imported in this runtime.');
+      }
+    })();
+  }
+  return betterSqlite3ProfilePromise;
+}
 
 /**
  * Wrapper for better-sqlite3 Statement
@@ -64,21 +152,17 @@ export const betterSqlite3Driver: DatabaseDriver = {
   name: 'better-sqlite3',
 
   async isAvailable(): Promise<boolean> {
-    try {
-      if (!BetterSqlite3) {
-        // Dynamic import to avoid errors if not installed
-        const module = await import('better-sqlite3');
-        BetterSqlite3 = module.default;
-      }
-      // Actually test the native bindings by creating an in-memory database
-      const testDb = new BetterSqlite3(':memory:');
-      testDb.close();
+    const profile = await loadBetterSqlite3Profile();
+    if (profile.available) {
       debugLog('better-sqlite3 is available');
       return true;
-    } catch {
-      debugLog('better-sqlite3 is not available');
-      return false;
     }
+    debugLog(`better-sqlite3 is not available: ${profile.unavailableReason ?? 'probe failed'}`);
+    return false;
+  },
+
+  getCapabilityProfile(): Promise<DatabaseCapabilityProfile> {
+    return loadBetterSqlite3Profile();
   },
 
   open(path: string, options: DatabaseOptions): Database {

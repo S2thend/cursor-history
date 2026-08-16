@@ -122,7 +122,7 @@ describe('parseTranscriptFile (role-nested Cursor 3.x transcripts)', () => {
         })
       );
 
-      expect(parseTranscriptFile(path)).toEqual({ messages: [], state: 'unsupported' });
+      expect(parseTranscriptFile(path)).toMatchObject({ messages: [], state: 'unsupported' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -12,7 +12,11 @@
 // Re-export types
 export type {
   Database,
+  DatabaseCapability,
+  DatabaseCapabilityProfile,
   DatabaseDriver,
+  DatabaseOperation,
+  DatabaseOperationRequest,
   DatabaseOptions,
   DriverName,
   RunResult,
@@ -21,7 +25,9 @@ export type {
 
 // Re-export errors
 export {
+  DatabaseCapabilityError,
   DriverNotAvailableError,
+  NoCapableDriverError,
   NoDriverAvailableError,
   ReadonlyDatabaseError,
 } from './errors.js';
@@ -30,6 +36,7 @@ export {
 import { registry } from './registry.js';
 import { betterSqlite3Driver } from './drivers/better-sqlite3.js';
 import { nodeSqliteDriver } from './drivers/node-sqlite.js';
+import type { DatabaseOperationRequest, DriverName } from './types.js';
 
 // Register all available drivers
 registry.register(nodeSqliteDriver);
@@ -46,8 +53,8 @@ registry.register(betterSqlite3Driver);
  * @returns Promise resolving to an open Database connection
  * @throws NoDriverAvailableError if no driver is available
  */
-export async function openDatabase(path: string) {
-  return registry.openDatabase(path);
+export async function openDatabase(path: string, request?: DatabaseOperationRequest) {
+  return registry.openDatabase(path, request);
 }
 
 /**
@@ -59,8 +66,8 @@ export async function openDatabase(path: string) {
  * @returns Promise resolving to an open Database connection
  * @throws NoDriverAvailableError if no driver is available
  */
-export async function openDatabaseReadWrite(path: string) {
-  return registry.openDatabaseReadWrite(path);
+export async function openDatabaseReadWrite(path: string, request?: DatabaseOperationRequest) {
+  return registry.openDatabaseReadWrite(path, request);
 }
 
 /**
@@ -90,8 +97,13 @@ export function hasActiveDriver(): boolean {
  * @param name - Driver name ("better-sqlite3" or "node:sqlite")
  * @throws DriverNotAvailableError if the driver is not available
  */
-export async function setDriver(name: 'better-sqlite3' | 'node:sqlite') {
-  return registry.setDriver(name);
+export function setDriver(name: DriverName): void {
+  registry.setDriver(name);
+}
+
+/** Select a capable provider for one explicitly described database operation. */
+export async function selectDatabaseDriver(request: DatabaseOperationRequest) {
+  return registry.selectDatabaseDriver(request);
 }
 
 /**
@@ -132,8 +144,8 @@ export function resetRegistry(): void {
  *
  * @returns Promise that resolves when driver is ready
  */
-export async function ensureDriver(): Promise<void> {
-  await registry.ensureDriver();
+export async function ensureDriver(request?: DatabaseOperationRequest): Promise<void> {
+  await registry.ensureDriver(request);
 }
 
 /**
@@ -146,6 +158,10 @@ export async function ensureDriver(): Promise<void> {
  * @param destPath - Path where backup will be created
  * @returns Promise that resolves when backup is complete
  */
-export async function backupDatabase(sourcePath: string, destPath: string): Promise<void> {
-  return registry.backupDatabase(sourcePath, destPath);
+export async function backupDatabase(
+  sourcePath: string,
+  destPath: string,
+  request?: DatabaseOperationRequest
+): Promise<void> {
+  return registry.backupDatabase(sourcePath, destPath, request);
 }

@@ -22,6 +22,15 @@ import {
   isNestedPathError,
   BackupError,
   isBackupError,
+  BackupPublishedPermissionError,
+  isBackupPublishedPermissionError,
+  BackupPublishedCleanupError,
+  isBackupPublishedCleanupError,
+  BackupWorkspaceScopeMetadataError,
+  isBackupWorkspaceScopeMetadataError,
+  RestoreRollbackError,
+  isRestoreRollbackError,
+  TemporaryArtifactCleanupError,
   NoDataError,
   isNoDataError,
   FileExistsError,
@@ -38,6 +47,11 @@ import {
   isTargetExistsError,
   IntegrityError,
   isIntegrityError,
+  SessionAmbiguityError,
+  WorkspaceAmbiguityError,
+  ReadContextDisposedError,
+  SourceLimitExceededError,
+  isSessionIntegrityError,
 } from '../../src/lib/errors.js';
 
 // =============================================================================
@@ -149,6 +163,106 @@ describe('BackupError', () => {
   });
 });
 
+describe('BackupPublishedPermissionError', () => {
+  it('exposes the completed publication state and requested/actual modes', () => {
+    const err = new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600, undefined, true);
+    expect(err.name).toBe('BackupPublishedPermissionError');
+    expect(err.code).toBe('BACKUP_PUBLISHED_PERMISSION_FAILED');
+    expect(err.details).toMatchObject({
+      published: true,
+      outputPath: '/backup.zip',
+      requestedMode: 0o640,
+      actualMode: 0o600,
+      pathIdentityVerified: true,
+    });
+    expect(err.message).toContain('requested 0o640, actual 0o600');
+    expect(isBackupPublishedPermissionError(err)).toBe(true);
+    expect(isBackupPublishedPermissionError(new Error('other'))).toBe(false);
+  });
+});
+
+describe('BackupPublishedCleanupError', () => {
+  it('exposes the committed publication and owner-private residue paths', () => {
+    const err = new BackupPublishedCleanupError('/backup.zip', true, [
+      '/backups/.private-b',
+      '/backups/.private-a',
+    ]);
+    expect(err.name).toBe('BackupPublishedCleanupError');
+    expect(err.code).toBe('BACKUP_PUBLISHED_CLEANUP_FAILED');
+    expect(err.details).toMatchObject({
+      published: true,
+      outputPath: '/backup.zip',
+      pathIdentityVerified: true,
+      residueCount: 2,
+      residuePaths: ['/backups/.private-a', '/backups/.private-b'],
+      unverifiedResidueCount: 0,
+      unverifiedResiduePaths: [],
+    });
+    expect(isBackupPublishedCleanupError(err)).toBe(true);
+    expect(isBackupPublishedCleanupError(new Error('other'))).toBe(false);
+  });
+});
+
+describe('BackupWorkspaceScopeMetadataError', () => {
+  it('provides a safe actionable compatibility diagnostic', () => {
+    const err = new BackupWorkspaceScopeMetadataError(2);
+    expect(err.code).toBe('BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED');
+    expect(err.details).toMatchObject({ workspaceCount: 2 });
+    expect(err.details.remedy).toContain('0.18.0');
+    expect(isBackupWorkspaceScopeMetadataError(err)).toBe(true);
+    expect(isBackupWorkspaceScopeMetadataError(new Error('other'))).toBe(false);
+  });
+});
+
+describe('RestoreRollbackError', () => {
+  it('exposes archive-relative published residuals and a stable recovery code', () => {
+    const err = new RestoreRollbackError(2, [
+      'workspaceStorage/ws/state.vscdb',
+      'globalStorage/state.vscdb',
+    ]);
+    expect(err.code).toBe('RESTORE_ROLLBACK_INCOMPLETE');
+    expect(err.details).toMatchObject({
+      publishedFileCount: 2,
+      residualFileCount: 2,
+      residualFiles: ['globalStorage/state.vscdb', 'workspaceStorage/ws/state.vscdb'],
+      residueCount: 0,
+      residuePaths: [],
+      unverifiedResidueCount: 0,
+      unverifiedResiduePaths: [],
+    });
+    expect(isRestoreRollbackError(err)).toBe(true);
+    expect(isRestoreRollbackError(new Error('other'))).toBe(false);
+  });
+
+  it('keeps publication and nested workspace-cleanup residues together at top level', () => {
+    const publicationCleanup = new TemporaryArtifactCleanupError(
+      ['/private/publication-stage'],
+      ['/private/publication-unknown']
+    );
+    const workspaceCleanup = new TemporaryArtifactCleanupError(
+      ['/private/workspace', '/private/publication-unknown'],
+      ['/private/workspace-unknown', '/private/publication-stage']
+    );
+    const err = new RestoreRollbackError(1, ['globalStorage/state.vscdb'], publicationCleanup, [
+      workspaceCleanup,
+    ]);
+
+    expect(err.details).toMatchObject({
+      publishedFileCount: 1,
+      residualFiles: ['globalStorage/state.vscdb'],
+      residueCount: 1,
+      residuePaths: ['/private/workspace'],
+      unverifiedResidueCount: 3,
+      unverifiedResiduePaths: [
+        '/private/publication-stage',
+        '/private/publication-unknown',
+        '/private/workspace-unknown',
+      ],
+    });
+    expect(err.cause).toBe(publicationCleanup);
+  });
+});
+
 describe('NoDataError', () => {
   it('has correct properties and extends BackupError', () => {
     const err = new NoDataError('/no-data');
@@ -223,6 +337,40 @@ describe('IntegrityError', () => {
   });
 });
 
+describe('feature-016 public typed errors', () => {
+  it('exports stable codes and safe deterministic details', () => {
+    const workspace = new WorkspaceAmbiguityError('project', [
+      '/work/b/project',
+      '/work/a/project',
+    ]);
+    expect(workspace.code).toBe('WORKSPACE_AMBIGUOUS');
+    expect(workspace.details.candidates).toEqual(['/work/a/project', '/work/b/project']);
+
+    const session = new SessionAmbiguityError('uuid', ['occurrence:z', 'occurrence:a']);
+    expect(session.details.occurrenceRefs).toEqual(['occurrence:a', 'occurrence:z']);
+
+    const unicode = new SessionAmbiguityError('uuid', [
+      'occurrence:\u{1f600}',
+      'occurrence:\ue000',
+    ]);
+    expect(unicode.details.occurrenceRefs).toEqual(['occurrence:\ue000', 'occurrence:\u{1f600}']);
+    expect(isSessionIntegrityError(session)).toBe(true);
+    expect(new ReadContextDisposedError().code).toBe('READ_CONTEXT_DISPOSED');
+  });
+
+  it('preserves fractional ratio observations', () => {
+    const error = new SourceLimitExceededError({
+      sourceKind: 'zip',
+      bound: 'zip-compression-ratio',
+      unit: 'ratio',
+      limit: 200,
+      observedAtLeast: 200.25,
+      outcome: 'fatal',
+    });
+    expect(error.details.observedAtLeast).toBe(200.25);
+  });
+});
+
 // =============================================================================
 // Type guards
 // =============================================================================
@@ -280,6 +428,21 @@ describe('type guards', () => {
       name: 'isNestedPathError',
     },
     { guard: isBackupError, instance: new BackupError('msg'), name: 'isBackupError' },
+    {
+      guard: isBackupPublishedPermissionError,
+      instance: new BackupPublishedPermissionError('/backup.zip', 0o640, 0o600, undefined, true),
+      name: 'isBackupPublishedPermissionError',
+    },
+    {
+      guard: isBackupPublishedCleanupError,
+      instance: new BackupPublishedCleanupError('/backup.zip', true, ['/backups/.private']),
+      name: 'isBackupPublishedCleanupError',
+    },
+    {
+      guard: isRestoreRollbackError,
+      instance: new RestoreRollbackError(1, ['globalStorage/state.vscdb']),
+      name: 'isRestoreRollbackError',
+    },
     { guard: isNoDataError, instance: new NoDataError('p'), name: 'isNoDataError' },
     { guard: isFileExistsError, instance: new FileExistsError('p'), name: 'isFileExistsError' },
     {

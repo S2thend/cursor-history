@@ -51,8 +51,25 @@ describe('validateConfig', () => {
     expect(() => validateConfig({ context: -1 })).toThrow(InvalidConfigError);
   });
 
-  it('rejects workspace: relative path', () => {
-    expect(() => validateConfig({ workspace: 'relative/path' })).toThrow(InvalidConfigError);
+  it('accepts a lexical workspace component suffix without touching the filesystem', () => {
+    expect(() => validateConfig({ workspace: 'relative/path' })).not.toThrow();
+  });
+
+  it.each(['', 'workspace\nname', 'workspace\0name'])(
+    'rejects an invalid workspace selector %j',
+    (workspace) => {
+      expect(() => validateConfig({ workspace })).toThrow(InvalidConfigError);
+    }
+  );
+
+  it('rejects invalid additive workspace/context callbacks', () => {
+    expect(() =>
+      validateConfig({ includeCrossWorkspaceSources: 'yes' as unknown as boolean })
+    ).toThrow(InvalidConfigError);
+    expect(() => validateConfig({ onDiagnostic: 'log' as unknown as () => void })).toThrow(
+      InvalidConfigError
+    );
+    expect(() => validateConfig({ readContext: null as never })).toThrow(InvalidConfigError);
   });
 
   it('rejects workspace: non-string', () => {
@@ -81,6 +98,7 @@ describe('mergeWithDefaults', () => {
     expect(result.offset).toBe(0);
     expect(result.context).toBe(0);
     expect(result.dataPath).toBeUndefined();
+    expect(result.includeCrossWorkspaceSources).toBe(false);
   });
 
   it('merges partial config with defaults', () => {
@@ -90,16 +108,29 @@ describe('mergeWithDefaults', () => {
   });
 
   it('preserves optional fields', () => {
+    const onDiagnostic = () => undefined;
+    const readContext = {
+      resolvedSessionCapacity: 1,
+      disposed: false,
+      releaseSession: () => undefined,
+      dispose: async () => undefined,
+    };
     const result = mergeWithDefaults({
       workspace: '/abs/path',
       dataPath: '/cursor-data',
       backupPath: '/backup',
       sqliteDriver: 'node:sqlite',
+      includeCrossWorkspaceSources: true,
+      onDiagnostic,
+      readContext,
     });
     expect(result.workspace).toBe('/abs/path');
     expect(result.dataPath).toBe('/cursor-data');
     expect(result.backupPath).toBe('/backup');
     expect(result.sqliteDriver).toBe('node:sqlite');
+    expect(result.includeCrossWorkspaceSources).toBe(true);
+    expect(result.onDiagnostic).toBe(onDiagnostic);
+    expect(result.readContext).toBe(readContext);
   });
 
   it('keeps an implicit data path from masking Store preference', () => {

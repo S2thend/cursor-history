@@ -41,20 +41,42 @@
  * Signature keys use JSON tuple stringification (no bespoke separator) so the
  * source file contains no control bytes and matching is unambiguous.
  */
-import type { ChatSession, ChatSessionSummary, Message, ToolCall } from '../types.js';
+import type {
+  ChatSession,
+  ChatSessionSummary,
+  Message,
+  ResolutionReasonCode,
+  SessionResolution,
+  SessionSourceInstance,
+  SourceRole,
+  ToolCall,
+  WorkspaceMembership,
+} from '../types.js';
 import { findEmbeddedToolCallIndex } from '../parser.js';
+import {
+  isValidTimestamp,
+  resolveMessageTimestamps,
+  resolveSessionTimestamps,
+} from '../timestamps.js';
+import {
+  renderInlineAttachmentProjections,
+  splitInlineAttachmentProjections,
+} from './content-evidence.js';
+import {
+  allocateStoreMessageIdentities,
+  allocateToolCallIdentities,
+  matchAlignedToolCalls,
+  MESSAGE_IDENTITY_VERSION,
+  prepareStoreIdentityCandidates,
+  projectV016ComposerMessages,
+  type StoreIdentityCandidate,
+  type StoreIdentityRecord,
+} from '../session-identity.js';
 
 /** Sentinel content produced by the storage layer for a present-but-empty bubble. */
 const EMPTY_PLACEHOLDER = '[empty message]';
 /** Sentinel content produced by the storage layer for an unparseable bubble. */
 const CORRUPTED_PLACEHOLDER = '[corrupted message]';
-
-/**
- * Product threshold above which the O(n*m) LCS DP table is skipped in favor of a
- * linear greedy strong-anchor pass, bounding memory on very long conversations.
- * 250k is roughly a 500x500 alignment; real sessions rarely approach this.
- */
-const LCS_DP_CELL_LIMIT = 250_000;
 
 /** Normalize whitespace for content matching (trim + collapse internal runs). */
 function normalizeText(text: string): string {
@@ -78,6 +100,12 @@ function unwrapUserQuery(text: string): string {
  */
 function matchContent(text: string): string {
   if (text === EMPTY_PLACEHOLDER) return '';
+  const projected = splitInlineAttachmentProjections(text);
+  const base = normalizeText(unwrapUserQuery(projected.baseContent));
+  if (base.length > 0) return base;
+  if (projected.encodedAttachments.length > 0) {
+    return JSON.stringify(['attachments', projected.encodedAttachments]);
+  }
   return normalizeText(unwrapUserQuery(text));
 }
 
@@ -156,44 +184,121 @@ function strongKey(m: Message, index: number, side: 'b' | 'o'): string {
   return JSON.stringify([m.role, matchContent(m.content), tools]);
 }
 
-/**
- * Phase-1 anchor pairs via LCS over strong keys (deterministic, earliest-first
- * backtracking). Returns [] for the oversize case (caller falls back to a
- * linear greedy strong-anchor pass).
- */
-function lcsAnchorPairs(a: string[], b: string[]): Array<[number, number]> {
-  const n = a.length;
-  const m = b.length;
-  if (n === 0 || m === 0) return [];
-  if (n * m > LCS_DP_CELL_LIMIT) return []; // scale guard -- caller falls back
+/** Deterministic work counters used by alignment complexity regression tests. */
+export interface LcsAlignmentWork {
+  cellEvaluations: number;
+  checkpointRows: number;
+  peakRetainedRows: number;
+}
 
-  // dp[i][j] = LCS length of a[i..] vs b[j..]
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i]![j] = a[i] === b[j] ? 1 + dp[i + 1]![j + 1]! : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
-    }
+/** Fill one exact suffix-LCS row from the already-computed row below it. */
+function fillLcsSuffixRow(
+  aKey: string,
+  b: readonly string[],
+  next: Uint32Array,
+  work?: LcsAlignmentWork
+): Uint32Array {
+  const current = new Uint32Array(b.length + 1);
+  for (let bIndex = b.length - 1; bIndex >= 0; bIndex--) {
+    if (work) work.cellEvaluations++;
+    current[bIndex] =
+      aKey === b[bIndex] ? next[bIndex + 1]! + 1 : Math.max(next[bIndex]!, current[bIndex + 1]!);
   }
+  return current;
+}
+
+/**
+ * Phase-1 anchor pairs with the exact legacy DP tie contract.
+ *
+ * The legacy implementation matched an equal current cell immediately and, on
+ * a mismatch with equal remaining LCS lengths, advanced Composer. A plain
+ * Hirschberg split can choose a different duplicate occurrence, so it is not a
+ * safe replacement for identity-bearing alignment.
+ *
+ * Instead, this implementation computes exact suffix rows once while retaining
+ * only square-root-spaced checkpoints. It then reconstructs one checkpoint
+ * block at a time using the same DP cells and the same branch order as the
+ * legacy full matrix. Every cell is evaluated at most twice: once to establish
+ * checkpoints and once while reconstructing its block. Runtime is therefore
+ * O(a.length * b.length), with O(b.length * sqrt(a.length)) retained cells
+ * rather than a quadratic matrix. No input-size threshold changes semantics.
+ *
+ * @internal Exported so deterministic equivalence and work-bound tests exercise
+ * the production implementation directly.
+ */
+export function exactLcsAnchorPairs(
+  a: readonly string[],
+  b: readonly string[],
+  work?: LcsAlignmentWork
+): Array<[number, number]> {
+  if (work) {
+    work.cellEvaluations = 0;
+    work.checkpointRows = 0;
+    work.peakRetainedRows = 0;
+  }
+  if (a.length === 0 || b.length === 0) return [];
+
+  const blockSize = Math.max(1, Math.ceil(Math.sqrt(a.length)));
+  const checkpoints = new Map<number, Uint32Array>();
+  let next: Uint32Array = new Uint32Array(b.length + 1);
+  checkpoints.set(a.length, next);
+
+  for (let aIndex = a.length - 1; aIndex >= 0; aIndex--) {
+    const current = fillLcsSuffixRow(a[aIndex]!, b, next, work);
+    if (aIndex % blockSize === 0) checkpoints.set(aIndex, current);
+    next = current;
+  }
+
+  if (work) {
+    work.checkpointRows = checkpoints.size;
+    work.peakRetainedRows = checkpoints.size + 2;
+  }
+
   const pairs: Array<[number, number]> = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      pairs.push([i, j]);
-      i++;
-      j++;
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
-      i++; // advance backbone on ties (deterministic)
-    } else {
-      j++;
+  let aCursor = 0;
+  let bCursor = 0;
+  while (aCursor < a.length && bCursor < b.length) {
+    const blockStart = aCursor;
+    const blockEnd = Math.min(a.length, Math.floor(blockStart / blockSize + 1) * blockSize);
+    const boundary = checkpoints.get(blockEnd);
+    if (!boundary) {
+      throw new Error(`Missing LCS checkpoint at Composer row ${blockEnd}`);
+    }
+
+    const rows = new Array<Uint32Array>(blockEnd - blockStart + 1);
+    rows[blockEnd - blockStart] = boundary;
+    let blockNext = boundary;
+    for (let aIndex = blockEnd - 1; aIndex >= blockStart; aIndex--) {
+      const current = fillLcsSuffixRow(a[aIndex]!, b, blockNext, work);
+      rows[aIndex - blockStart] = current;
+      blockNext = current;
+    }
+    if (work) {
+      work.peakRetainedRows = Math.max(work.peakRetainedRows, checkpoints.size + rows.length);
+    }
+
+    while (aCursor < blockEnd && bCursor < b.length) {
+      const current = rows[aCursor - blockStart]!;
+      if (current[bCursor] === 0) return pairs;
+      if (a[aCursor] === b[bCursor]) {
+        pairs.push([aCursor, bCursor]);
+        aCursor++;
+        bCursor++;
+        continue;
+      }
+      const skipComposer = rows[aCursor - blockStart + 1]![bCursor]!;
+      const skipStore = current[bCursor + 1]!;
+      if (skipComposer >= skipStore) aCursor++;
+      else bCursor++;
     }
   }
   return pairs;
 }
 
 /**
- * Linear fallback anchor pass for oversize sequences: match equal strong keys
- * in order, O(n+m). Weak messages (side-unique keys) never match across sides.
+ * Linear monotonic anchor helper retained for callers that explicitly need a
+ * best-effort greedy plan. Production merge alignment always uses the exact
+ * checkpointed LCS above. Weak messages never match across sides.
  * The returned pairs are STRICTLY INCREASING on both axes (the b-side cursor
  * only advances forward), so they never cross — `alignAndMerge` relies on this.
  */
@@ -230,9 +335,59 @@ function contentCompatible(a: string, b: string): boolean {
     return ca === 'corrupt' && cb === 'corrupt';
   }
   if (ca === 'real' && cb === 'real') {
+    const aProjected = splitInlineAttachmentProjections(a);
+    const bProjected = splitInlineAttachmentProjections(b);
+    const aBase = normalizeText(unwrapUserQuery(aProjected.baseContent));
+    const bBase = normalizeText(unwrapUserQuery(bProjected.baseContent));
+    if (aBase.length > 0 || bBase.length > 0) {
+      return aBase.length > 0 && aBase === bBase;
+    }
+    if (aProjected.encodedAttachments.length > 0 && bProjected.encodedAttachments.length > 0) {
+      const bAttachments = new Set(bProjected.encodedAttachments);
+      return aProjected.encodedAttachments.some((attachment) => bAttachments.has(attachment));
+    }
     return matchContent(a) === matchContent(b);
   }
   return true; // empty involved (but no corrupt) -> fillable
+}
+
+/**
+ * Merge attachment enrichment only when the pair has a content bridge. The
+ * projection sequence is always Composer then Store, independent of the
+ * rendering backbone, while exact base formatting still follows the preferred
+ * source like other scalar content.
+ */
+function mergeProjectedAttachmentContent(
+  composerContent: string,
+  storeContent: string,
+  preferredSource: 'composer' | 'store'
+): string | null {
+  const composer = splitInlineAttachmentProjections(composerContent);
+  const store = splitInlineAttachmentProjections(storeContent);
+  if (composer.encodedAttachments.length === 0 && store.encodedAttachments.length === 0) {
+    return null;
+  }
+
+  const composerBase = normalizeText(unwrapUserQuery(composer.baseContent));
+  const storeBase = normalizeText(unwrapUserQuery(store.baseContent));
+  const sameNonemptyBase = composerBase.length > 0 && composerBase === storeBase;
+  const sharedAttachment = composer.encodedAttachments.some((attachment) =>
+    store.encodedAttachments.includes(attachment)
+  );
+  const oneSideMissing = contentMissing(composerContent) || contentMissing(storeContent);
+  if (!sameNonemptyBase && !sharedAttachment && !oneSideMissing) return null;
+
+  const preferred = preferredSource === 'composer' ? composer : store;
+  const other = preferredSource === 'composer' ? store : composer;
+  const baseContent =
+    normalizeText(preferred.baseContent).length > 0 ? preferred.baseContent : other.baseContent;
+  const encodedAttachments = [
+    ...composer.encodedAttachments,
+    ...store.encodedAttachments.filter(
+      (attachment) => !composer.encodedAttachments.includes(attachment)
+    ),
+  ];
+  return renderInlineAttachmentProjections(baseContent, encodedAttachments);
 }
 
 /**
@@ -301,33 +456,165 @@ function messagesCompatible(a: Message, b: Message): boolean {
   if (a.role !== b.role) return false;
   const aTools = a.toolCalls ?? [];
   const bTools = b.toolCalls ?? [];
-  const compatibleTools = hasCompatibleToolPair(aTools, bTools) && !toolsConflict(aTools, bTools);
-  if (!compatibleTools) return false;
-  if (contentCompatible(a.content, b.content)) return true;
+  if (toolsConflict(aTools, bTools)) return false;
+  // Real compatible content is an anchor; distinct tool arrays are additive
+  // enrichment. When both contents are blank, however, tools are the only
+  // identity evidence and disjoint calls must remain separate turns.
+  if (contentCompatible(a.content, b.content)) {
+    if (
+      !hasRealContent(a.content) &&
+      !hasRealContent(b.content) &&
+      aTools.length > 0 &&
+      bTools.length > 0 &&
+      !hasCompatibleToolPair(aTools, bTools)
+    ) {
+      return false;
+    }
+    return true;
+  }
   // Composer can render a structured tool call as `[Tool: ...]` while Store
   // keeps the assistant's natural-language text plus the same structured call.
   // The compatible tool signature is the identity bridge in that case.
-  return isSyntheticToolContent(a) || isSyntheticToolContent(b);
+  return (
+    (isSyntheticToolContent(a) || isSyntheticToolContent(b)) &&
+    aTools.length > 0 &&
+    bTools.length > 0 &&
+    hasCompatibleToolPair(aTools, bTools)
+  );
 }
 
 function isPresent(value: string | undefined | null): value is string {
   return value !== undefined && value !== null && value.length > 0;
 }
 
-/** Tag a message that came from only one stack with its origin. Does not mutate input. */
-function tagUnmatched(message: Message, origin: 'composer' | 'store'): Message {
-  return { ...message, source: origin };
+interface AlignmentPair {
+  composerIndex: number;
+  storeIndex: number;
 }
 
-/** Merge fields of two matched (compatible) messages. Backbone wins true conflicts. */
+interface AlignmentPlan {
+  composer: Message[];
+  store: Message[];
+  pairs: AlignmentPair[];
+}
+
+interface RenderedMessage {
+  message: Message;
+  composerIndex?: number;
+  storeIndex?: number;
+}
+
+/** Internal mutation switches used only to prove the load-bearing regressions. */
+export interface MergeFaultInjection {
+  preferredBackbonePairing?: boolean;
+  preferredBackboneToolOrder?: boolean;
+}
+
+/** Attach modern tool identities after the containing message identity is final. */
+function resolveToolIdentities(messageId: string, calls: ToolCall[]): ToolCall[] {
+  return allocateToolCallIdentities(messageId, calls).map(({ call, id, identityOrigin }) => ({
+    ...call,
+    id,
+    identityOrigin,
+  }));
+}
+
+/** Fill non-outcome fields; conflicting outcomes remain wholly preferred-source-owned. */
+function mergeToolCall(preferred: ToolCall, other: ToolCall): ToolCall {
+  const merged: ToolCall = { ...preferred };
+  if (preferred.status === other.status) {
+    if (merged.result === undefined && other.result !== undefined) merged.result = other.result;
+    if (merged.error === undefined && other.error !== undefined) merged.error = other.error;
+  }
+  if (merged.files === undefined && other.files !== undefined) merged.files = [...other.files];
+  if (merged.params === undefined && other.params !== undefined) merged.params = other.params;
+  return merged;
+}
+
+/**
+ * Pair calls once in Composer-to-Store orientation. Composer calls retain their
+ * released array slots, matched Store data enriches those slots, and unmatched
+ * Store calls append in Store-native order. Preferred source controls only
+ * conflicting values inside a paired call.
+ */
+function mergeToolCalls(
+  composer: ToolCall[],
+  store: ToolCall[],
+  preferredSource: 'composer' | 'store',
+  messageId: string,
+  faults?: MergeFaultInjection
+): ToolCall[] | undefined {
+  if (composer.length === 0 && store.length === 0) return undefined;
+
+  const alignment = matchAlignedToolCalls(composer, store);
+  if (faults?.preferredBackboneToolOrder && preferredSource === 'store') {
+    const composerByStore = new Map(
+      alignment.pairs.map(({ composerIndex, storeIndex }) => [storeIndex, composerIndex])
+    );
+    const reordered = store.map((storeCall, storeIndex) => {
+      const composerIndex = composerByStore.get(storeIndex);
+      return composerIndex === undefined
+        ? { ...storeCall }
+        : mergeToolCall(storeCall, composer[composerIndex]!);
+    });
+    for (const composerIndex of alignment.unmatchedComposerIndices) {
+      reordered.push({ ...composer[composerIndex]! });
+    }
+    return resolveToolIdentities(messageId, reordered);
+  }
+  const storeByComposer = new Map(
+    alignment.pairs.map(({ composerIndex, storeIndex }) => [composerIndex, storeIndex])
+  );
+  const merged: ToolCall[] = composer.map((composerCall, composerIndex) => {
+    const storeIndex = storeByComposer.get(composerIndex);
+    if (storeIndex === undefined) return { ...composerCall };
+    const storeCall = store[storeIndex]!;
+    const call =
+      preferredSource === 'composer'
+        ? mergeToolCall(composerCall, storeCall)
+        : mergeToolCall(storeCall, composerCall);
+
+    // A matched call stays in the Composer slot. Preserve the Composer-native
+    // identity when it exists; otherwise a Store-native identity may enrich it.
+    if (isPresent(composerCall.id)) call.id = composerCall.id;
+    else if (isPresent(storeCall.id)) call.id = storeCall.id;
+    else delete call.id;
+    delete call.identityOrigin;
+    return call;
+  });
+  for (const storeIndex of alignment.unmatchedStoreIndices) {
+    merged.push({ ...store[storeIndex]! });
+  }
+  return resolveToolIdentities(messageId, merged);
+}
+
+/** Resolve tool IDs on a message that occurs in only one source. */
+function tagUnmatched(message: Message, origin: 'composer' | 'store'): Message {
+  const tagged: Message = { ...message, source: origin };
+  if (message.toolCalls?.length) {
+    tagged.toolCalls = resolveToolIdentities(message.id!, message.toolCalls);
+  }
+  return tagged;
+}
+
+/** Merge fields of one fixed Composer/Store pair. Preferred source wins conflicts. */
 function mergeMessage(
-  backbone: Message,
-  other: Message,
-  _backboneOrigin: 'composer' | 'store',
-  _otherOrigin: 'composer' | 'store'
+  composer: Message,
+  store: Message,
+  preferredSource: 'composer' | 'store',
+  faults?: MergeFaultInjection
 ): Message {
-  // Start from the backbone message (preferred source wins conflicts).
-  const merged: Message = { ...backbone, source: 'both' };
+  const backbone = preferredSource === 'composer' ? composer : store;
+  const other = preferredSource === 'composer' ? store : composer;
+  const merged: Message = {
+    ...backbone,
+    // Matched Store messages always inherit the frozen Composer identity,
+    // regardless of which representation supplies the rendering backbone.
+    id: composer.id,
+    messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
+    identityOrigin: composer.identityOrigin,
+    source: 'both',
+  };
 
   // Content: if the backbone's content is missing/blank/corrupt but the other
   // side has real content, adopt it (a fidelity gap, not a conflict).
@@ -342,6 +629,12 @@ function mergeMessage(
     // marker even when Composer is the scalar-conflict backbone.
     merged.content = other.content;
   }
+  const projectedAttachmentContent = mergeProjectedAttachmentContent(
+    composer.content,
+    store.content,
+    preferredSource
+  );
+  if (projectedAttachmentContent !== null) merged.content = projectedAttachmentContent;
 
   // Thinking: fill from other when the backbone lacks it.
   if (!isPresent(merged.thinking) && isPresent(other.thinking)) {
@@ -366,19 +659,34 @@ function mergeMessage(
 
   // Tool calls: match by signature and fill missing fields; append unmatched
   // tool calls from either side (additive, no duplication).
-  const mergedTools = mergeToolCalls(backbone.toolCalls ?? [], other.toolCalls ?? []);
+  const mergedTools = mergeToolCalls(
+    composer.toolCalls ?? [],
+    store.toolCalls ?? [],
+    preferredSource,
+    composer.id!,
+    faults
+  );
   if (mergedTools && mergedTools.length > 0) {
     merged.toolCalls = mergedTools;
   } else if (merged.toolCalls !== undefined && (merged.toolCalls?.length ?? 0) === 0) {
     delete merged.toolCalls;
   }
 
-  // Timestamp: keep the backbone's directly-stored time when present; otherwise
-  // adopt the other side's directly-stored time (with its provenance). Never
-  // fabricate.
-  if (merged.timestamp === undefined && other.timestamp !== undefined) {
-    merged.timestamp = other.timestamp;
-    merged.timestampSource = other.timestampSource;
+  // Timestamp selection is permanently Composer-to-Store oriented. Preserve a
+  // legacy Composer value byte-for-byte even when its provenance is unknown;
+  // otherwise enrich from Store. Inferred values are recomputed after the full
+  // semantic order is rendered and therefore cannot become merge anchors.
+  const selectedTimestamp = isValidTimestamp(composer.timestamp)
+    ? composer
+    : isValidTimestamp(store.timestamp)
+      ? store
+      : undefined;
+  if (selectedTimestamp) {
+    merged.timestamp = selectedTimestamp.timestamp;
+    merged.timestampSource = selectedTimestamp.timestampSource;
+  } else {
+    delete merged.timestamp;
+    delete merged.timestampSource;
   }
 
   // Metadata: merge, backbone values take precedence.
@@ -386,163 +694,111 @@ function mergeMessage(
     merged.metadata = { ...other.metadata, ...(merged.metadata ?? {}) };
   }
 
-  // ID: keep backbone id when present, else adopt the other side's.
-  if ((merged.id === null || merged.id === undefined) && other.id) {
-    merged.id = other.id;
-  }
-
   return merged;
 }
 
 /**
- * Merge two tool-call arrays with a GLOBAL two-pass pairing (not per-tool), so a
- * no-params backbone call cannot steal an exact-match partner from another call:
- *
- *  Pass 1 - EXACT: pair every backbone call with an unused other call of the
- *    same name AND equal normalized params (covers both-no-params and
- *    both-same-params). All exact matches are committed before any fill.
- *  Pass 2 - FILL: for backbone calls still unmatched, pair with an unused other
- *    call of the same name where AT LEAST ONE side has no params (fillable).
- *  Remaining: unmatched calls from both sides are appended in order.
- *
- * Differing params are never overwritten (both-present-different never pairs);
- * no call is ever lost or duplicated.
+ * Phase-2 gap pairing in one permanent Composer-to-Store orientation. Each
+ * Composer message chooses the earliest compatible Store message after the
+ * previous pair, so pair selection cannot change with the rendering backbone.
  */
-function mergeToolCalls(backbone: ToolCall[], other: ToolCall[]): ToolCall[] | undefined {
-  if (backbone.length === 0 && other.length === 0) return undefined;
-  if (backbone.length === 0) return other.map((tc) => ({ ...tc }));
-  if (other.length === 0) return backbone.map((tc) => ({ ...tc }));
-
-  const usedOther = new Set<number>();
-  const matched: Array<number | null> = new Array(backbone.length).fill(null);
-
-  // Pass 1: exact (name + equal paramsKey), committed globally first.
-  for (let i = 0; i < backbone.length; i++) {
-    const bt = backbone[i]!;
-    const bp = paramsKey(bt);
-    for (let k = 0; k < other.length; k++) {
-      if (usedOther.has(k)) continue;
-      const ot = other[k]!;
-      if (ot.name !== bt.name) continue;
-      if (paramsKey(ot) === bp) {
-        matched[i] = k;
-        usedOther.add(k);
-        break;
-      }
-    }
-  }
-
-  // Pass 2: fill (same name, one side missing params), only for still-unmatched
-  // backbone calls, against still-unused other calls.
-  for (let i = 0; i < backbone.length; i++) {
-    if (matched[i] != null) continue;
-    const bt = backbone[i]!;
-    const bp = paramsKey(bt);
-    for (let k = 0; k < other.length; k++) {
-      if (usedOther.has(k)) continue;
-      const ot = other[k]!;
-      if (ot.name !== bt.name) continue;
-      const op = paramsKey(ot);
-      if (bp === null || op === null) {
-        matched[i] = k;
-        usedOther.add(k);
-        break;
-      }
-    }
-  }
-
-  // Build result in backbone order; append unmatched other calls in order.
-  const merged: ToolCall[] = [];
-  for (let i = 0; i < backbone.length; i++) {
-    const k = matched[i];
-    if (k != null) merged.push(mergeToolCall(backbone[i]!, other[k]!));
-    else merged.push({ ...backbone[i]! });
-  }
-  for (let k = 0; k < other.length; k++) {
-    if (!usedOther.has(k)) merged.push({ ...other[k]! });
-  }
-  return merged;
-}
-
-/** Fill non-outcome fields; conflicting outcomes remain wholly backbone-owned. */
-function mergeToolCall(backbone: ToolCall, other: ToolCall): ToolCall {
-  const merged: ToolCall = { ...backbone };
-  if (backbone.status === other.status) {
-    if (merged.result === undefined && other.result !== undefined) merged.result = other.result;
-    if (merged.error === undefined && other.error !== undefined) merged.error = other.error;
-  }
-  if (merged.files === undefined && other.files !== undefined) merged.files = [...other.files!];
-  if (merged.params === undefined && other.params !== undefined) merged.params = other.params;
-  return merged;
-}
-
-/**
- * Phase-2 gap matching: pair backbone gap messages with compatible other-side
- * gap messages greedily (earliest compatible match wins, stable). Backbone
- * defines order; unmatched messages from either side are preserved in relative
- * position. Never reorders by timestamp.
- */
-function matchGap(
-  bGap: Message[],
-  oGap: Message[],
-  backboneOrigin: 'composer' | 'store',
-  otherOrigin: 'composer' | 'store'
-): Message[] {
-  const result: Message[] = [];
-  let oCursor = 0;
-  for (const bMsg of bGap) {
+function matchGapPairs(
+  composer: Message[],
+  store: Message[],
+  composerStart: number,
+  composerEnd: number,
+  storeStart: number,
+  storeEnd: number
+): AlignmentPair[] {
+  const pairs: AlignmentPair[] = [];
+  let storeCursor = storeStart;
+  for (let composerIndex = composerStart; composerIndex < composerEnd; composerIndex++) {
     let match = -1;
-    for (let j = oCursor; j < oGap.length; j++) {
-      if (messagesCompatible(bMsg, oGap[j]!)) {
-        match = j;
+    for (let storeIndex = storeCursor; storeIndex < storeEnd; storeIndex++) {
+      if (messagesCompatible(composer[composerIndex]!, store[storeIndex]!)) {
+        match = storeIndex;
         break;
       }
     }
     if (match >= 0) {
-      for (let j = oCursor; j < match; j++) {
-        result.push(tagUnmatched(oGap[j]!, otherOrigin));
-      }
-      result.push(mergeMessage(bMsg, oGap[match]!, backboneOrigin, otherOrigin));
-      oCursor = match + 1;
-    } else {
-      result.push(tagUnmatched(bMsg, backboneOrigin));
+      pairs.push({ composerIndex, storeIndex: match });
+      storeCursor = match + 1;
     }
   }
-  for (let j = oCursor; j < oGap.length; j++) {
-    result.push(tagUnmatched(oGap[j]!, otherOrigin));
-  }
-  return result;
+  return pairs;
 }
 
 /**
- * Align two ordered message sequences (two-phase) and merge them. The backbone
- * (preferred source) defines canonical order.
+ * Compute pair selection exactly once in Composer-to-Store orientation.
+ * Preferred rendering is deliberately absent from this function.
  */
-function alignAndMerge(
-  backbone: Message[],
-  other: Message[],
-  backboneOrigin: 'composer' | 'store',
-  otherOrigin: 'composer' | 'store'
-): Message[] {
-  const bKeys = backbone.map((m, i) => strongKey(m, i, 'b'));
-  const oKeys = other.map((m, i) => strongKey(m, i, 'o'));
-  const anchors =
-    bKeys.length * oKeys.length > LCS_DP_CELL_LIMIT
-      ? greedyAnchorPairs(bKeys, oKeys)
-      : lcsAnchorPairs(bKeys, oKeys);
+function computeAlignment(composer: Message[], store: Message[]): AlignmentPlan {
+  const composerKeys = composer.map((message, index) => strongKey(message, index, 'b'));
+  const storeKeys = store.map((message, index) => strongKey(message, index, 'o'));
+  const anchors = exactLcsAnchorPairs(composerKeys, storeKeys);
 
-  const result: Message[] = [];
-  let bi = 0;
-  let oi = 0;
-  for (const [bIdx, oIdx] of anchors) {
-    result.push(
-      ...matchGap(backbone.slice(bi, bIdx), other.slice(oi, oIdx), backboneOrigin, otherOrigin)
+  const pairs: AlignmentPair[] = [];
+  let composerCursor = 0;
+  let storeCursor = 0;
+  for (const [composerIndex, storeIndex] of anchors) {
+    pairs.push(
+      ...matchGapPairs(composer, store, composerCursor, composerIndex, storeCursor, storeIndex)
     );
-    result.push(mergeMessage(backbone[bIdx]!, other[oIdx]!, backboneOrigin, otherOrigin));
-    bi = bIdx + 1;
-    oi = oIdx + 1;
+    pairs.push({ composerIndex, storeIndex });
+    composerCursor = composerIndex + 1;
+    storeCursor = storeIndex + 1;
   }
-  result.push(...matchGap(backbone.slice(bi), other.slice(oi), backboneOrigin, otherOrigin));
+  pairs.push(
+    ...matchGapPairs(composer, store, composerCursor, composer.length, storeCursor, store.length)
+  );
+  return { composer, store, pairs };
+}
+
+/**
+ * Render one fixed alignment in a source-order-independent semantic order.
+ * Preferred source chooses conflicting values inside matched messages; it must
+ * never move unmatched turns, rewrite the active leaf, or change parent chains.
+ * Composer gaps precede Store gaps at the same alignment boundary to retain the
+ * released Composer projection while appending newly discovered Store turns.
+ */
+function renderAlignment(
+  plan: AlignmentPlan,
+  preferredSource: 'composer' | 'store',
+  faults?: MergeFaultInjection
+): RenderedMessage[] {
+  const result: RenderedMessage[] = [];
+  let composerCursor = 0;
+  let storeCursor = 0;
+
+  const appendUnmatched = (source: 'composer' | 'store', start: number, end: number): void => {
+    const messages = source === 'composer' ? plan.composer : plan.store;
+    for (let index = start; index < end; index++) {
+      result.push({
+        message: tagUnmatched(messages[index]!, source),
+        ...(source === 'composer' ? { composerIndex: index } : { storeIndex: index }),
+      });
+    }
+  };
+
+  for (const pair of plan.pairs) {
+    appendUnmatched('composer', composerCursor, pair.composerIndex);
+    appendUnmatched('store', storeCursor, pair.storeIndex);
+    result.push({
+      message: mergeMessage(
+        plan.composer[pair.composerIndex]!,
+        plan.store[pair.storeIndex]!,
+        preferredSource,
+        faults
+      ),
+      composerIndex: pair.composerIndex,
+      storeIndex: pair.storeIndex,
+    });
+    composerCursor = pair.composerIndex + 1;
+    storeCursor = pair.storeIndex + 1;
+  }
+
+  appendUnmatched('composer', composerCursor, plan.composer.length);
+  appendUnmatched('store', storeCursor, plan.store.length);
   return result;
 }
 
@@ -555,12 +811,463 @@ function pickScalar<T>(preferred: T | null | undefined, other: T | null | undefi
   return null;
 }
 
+const SOURCE_ROLE_ORDER = ['composer', 'store'] as const;
+const SOURCE_REPRESENTATION_ORDER = [
+  'composer-global',
+  'composer-workspace',
+  'store-db',
+  'store-transcript',
+  'store-metadata',
+] as const;
+const SOURCE_INSTANCE_STATE_ORDER = [
+  'contributed',
+  'equivalent-replica',
+  'omitted-by-scope',
+  'failed',
+  'superseded',
+] as const;
+
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0)!);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0)!);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function compareStringArrays(left: readonly string[], right: readonly string[]): number {
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const comparison = compareCodePoints(left[index]!, right[index]!);
+    if (comparison !== 0) return comparison;
+  }
+  return left.length - right.length;
+}
+
+/** Canonicalize safe occurrence provenance without exposing private locators. */
+function mergeSourceInstances(
+  composer: ChatSession | ChatSessionSummary,
+  store: ChatSession | StoreSummaryInput
+): SessionSourceInstance[] | undefined {
+  const instances = [...(composer.sourceInstances ?? []), ...(store.sourceInstances ?? [])].map(
+    (instance) => ({
+      ...instance,
+      workspacePaths: [...instance.workspacePaths].sort(compareCodePoints),
+    })
+  );
+  if (instances.length === 0) return undefined;
+  return instances.sort((left, right) => {
+    const byRole =
+      SOURCE_ROLE_ORDER.indexOf(left.sourceRole) - SOURCE_ROLE_ORDER.indexOf(right.sourceRole);
+    if (byRole !== 0) return byRole;
+    const byRepresentation =
+      SOURCE_REPRESENTATION_ORDER.indexOf(left.representation) -
+      SOURCE_REPRESENTATION_ORDER.indexOf(right.representation);
+    if (byRepresentation !== 0) return byRepresentation;
+    const byPaths = compareStringArrays(left.workspacePaths, right.workspacePaths);
+    if (byPaths !== 0) return byPaths;
+    return (
+      SOURCE_INSTANCE_STATE_ORDER.indexOf(left.state) -
+      SOURCE_INSTANCE_STATE_ORDER.indexOf(right.state)
+    );
+  });
+}
+
+/** Merge public membership metadata by normalized path and declared role order. */
+function mergeWorkspaceMemberships(
+  composer: ChatSession | ChatSessionSummary,
+  store: ChatSession | StoreSummaryInput,
+  sourceInstances: readonly SessionSourceInstance[] | undefined
+): WorkspaceMembership[] | undefined {
+  const memberships = new Map<
+    string,
+    {
+      roles: Set<'composer' | 'store'>;
+      explicitCount: number;
+      instanceCount: number;
+    }
+  >();
+  const add = (membership: WorkspaceMembership): void => {
+    const current = memberships.get(membership.workspacePath) ?? {
+      roles: new Set<'composer' | 'store'>(),
+      explicitCount: 0,
+      instanceCount: 0,
+    };
+    for (const role of membership.sourceRoles) current.roles.add(role);
+    current.explicitCount += membership.contributingInstanceCount;
+    memberships.set(membership.workspacePath, current);
+  };
+  for (const membership of composer.workspaceMemberships ?? []) add(membership);
+  for (const membership of store.workspaceMemberships ?? []) add(membership);
+
+  // Source instances can disclose a path absent from one side's explicit
+  // membership projection. Always union their roles and paths, but an explicit
+  // membership count is authoritative: one physical Store occurrence may have
+  // metadata, DB, and transcript provenance entries, which must not inflate
+  // the occurrence count merely because several representations describe it.
+  for (const instance of sourceInstances ?? []) {
+    for (const workspacePath of instance.workspacePaths) {
+      const current = memberships.get(workspacePath) ?? {
+        roles: new Set<'composer' | 'store'>(),
+        explicitCount: 0,
+        instanceCount: 0,
+      };
+      current.roles.add(instance.sourceRole);
+      current.instanceCount++;
+      memberships.set(workspacePath, current);
+    }
+  }
+  if (memberships.size === 0) return undefined;
+  return [...memberships.entries()]
+    .sort(([left], [right]) => compareCodePoints(left, right))
+    .map(([workspacePath, value]) => ({
+      workspacePath,
+      sourceRoles: [...value.roles].sort(
+        (left, right) => SOURCE_ROLE_ORDER.indexOf(left) - SOURCE_ROLE_ORDER.indexOf(right)
+      ),
+      contributingInstanceCount:
+        value.explicitCount > 0 ? value.explicitCount : value.instanceCount,
+    }));
+}
+
+/** Freeze the exact Composer-only array before Store messages can affect it. */
+function freezeComposerMessages(messages: Message[]): Message[] {
+  return projectV016ComposerMessages(messages).map((projected) => {
+    const message = { ...projected } as Message & { sourceOrdinal?: number };
+    delete message.sourceOrdinal;
+    if (message.toolCalls?.length) {
+      message.toolCalls = allocateToolCallIdentities(
+        message.id!,
+        message.toolCalls,
+        'composer'
+      ).map(({ call, id, identityOrigin }) => ({ ...call, id, identityOrigin }));
+    }
+    return message;
+  });
+}
+
+/** Stable transcript identity evidence excludes outcome/enrichment fields. */
+function transcriptIdentityRecords(messages: Message[]) {
+  return messages.map((message) => {
+    const sourceRelationships: Record<string, unknown> = {};
+    if (message.parentMessageId !== undefined) {
+      sourceRelationships['parentMessageId'] = message.parentMessageId;
+    }
+    if (message.isSidechain !== undefined) {
+      sourceRelationships['isSidechain'] = message.isSidechain;
+    }
+    const toolActivity = (message.toolCalls ?? []).map((call) => {
+      const activity: Record<string, unknown> = { name: call.name };
+      if (call.params !== undefined) activity['params'] = call.params;
+      return activity;
+    });
+    return {
+      representation: 'transcript' as const,
+      role: message.role,
+      content: message.content,
+      toolActivity,
+      ...(Object.keys(sourceRelationships).length > 0 ? { sourceRelationships } : {}),
+    };
+  });
+}
+
+const STORE_MESSAGE_ID_PATTERN =
+  /^store:v1:(db|transcript):([0-9a-f]{64}):([1-9][0-9]*)(?::collision:[1-9][0-9]*)?$/;
+
+/** Preserve source-native DB/transcript candidates allocated before mapping. */
+function storeIdentityCandidates(
+  messages: Message[]
+): Array<StoreIdentityCandidate<StoreIdentityRecord>> {
+  const fallback = prepareStoreIdentityCandidates(transcriptIdentityRecords(messages));
+  return messages.map((message, sourceOrdinal) => {
+    const match =
+      typeof message.id === 'string' &&
+      (message.identityOrigin === 'store-db-v1' || message.identityOrigin === 'store-transcript-v1')
+        ? message.id.match(STORE_MESSAGE_ID_PATTERN)
+        : null;
+    if (!match?.[1] || !match[2] || !match[3]) return fallback[sourceOrdinal]!;
+    const occurrence = Number(match[3]);
+    if (!Number.isSafeInteger(occurrence)) return fallback[sourceOrdinal]!;
+    const representation = match[1] === 'db' ? 'db' : 'transcript';
+    const record: StoreIdentityRecord =
+      representation === 'db'
+        ? { representation: 'db', leafHash: match[2] }
+        : transcriptIdentityRecords([message])[0]!;
+    return {
+      record,
+      representation,
+      sourceOrdinal,
+      baseFingerprint: match[2],
+      occurrence,
+      candidateId: `store:v1:${match[1]}:${match[2]}:${occurrence}`,
+      identityOrigin:
+        representation === 'db' ? ('store-db-v1' as const) : ('store-transcript-v1' as const),
+    };
+  });
+}
+
+/** Allocate Store IDs only after the fixed alignment identifies Composer matches. */
+function resolveMessageIdentities(
+  composerMessages: Message[],
+  storeMessages: Message[],
+  pairs: AlignmentPair[]
+): { composer: Message[]; store: Message[] } {
+  const composer = freezeComposerMessages(composerMessages);
+  const candidates = storeIdentityCandidates(storeMessages);
+  const matchedComposerByStore = new Map(
+    pairs.map(({ composerIndex, storeIndex }) => [storeIndex, composerIndex])
+  );
+  const allocated = allocateStoreMessageIdentities(
+    projectV016ComposerMessages(composerMessages),
+    candidates,
+    matchedComposerByStore
+  );
+  const store = storeMessages.map((message, index) => {
+    const identity = allocated[index]!.identity;
+    return {
+      ...message,
+      id: identity.value,
+      messageIdentityVersion: identity.version,
+      identityOrigin: identity.origin,
+    };
+  });
+  return { composer, store };
+}
+
+function addIdentityMapping(
+  map: Map<string, string>,
+  sourceId: string | null | undefined,
+  resolvedId: string
+): void {
+  if (isPresent(sourceId) && !map.has(sourceId)) map.set(sourceId, resolvedId);
+  if (!map.has(resolvedId)) map.set(resolvedId, resolvedId);
+}
+
+/** Build representation-local source-reference maps without conflating equal raw IDs. */
+function buildSourceIdentityMaps(
+  rawComposer: Message[],
+  rawStore: Message[],
+  resolvedComposer: Message[],
+  resolvedStore: Message[]
+): { composer: Map<string, string>; store: Map<string, string> } {
+  const composer = new Map<string, string>();
+  const store = new Map<string, string>();
+  for (let index = 0; index < resolvedComposer.length; index++) {
+    addIdentityMapping(composer, rawComposer[index]?.id, resolvedComposer[index]!.id!);
+  }
+  for (let index = 0; index < resolvedStore.length; index++) {
+    addIdentityMapping(store, rawStore[index]?.id, resolvedStore[index]!.id!);
+  }
+  return { composer, store };
+}
+
+/** Rewrite explicitly stored parent references through the correct source map. */
+function rewriteRenderedRelationships(
+  rendered: RenderedMessage[],
+  rawComposer: Message[],
+  rawStore: Message[],
+  identityMaps: { composer: Map<string, string>; store: Map<string, string> },
+  preferredSource: 'composer' | 'store'
+): boolean {
+  let hasUnresolvedRelationship = false;
+  for (const entry of rendered) {
+    const composerMessage =
+      entry.composerIndex === undefined ? undefined : rawComposer[entry.composerIndex];
+    const storeMessage = entry.storeIndex === undefined ? undefined : rawStore[entry.storeIndex];
+    const ordered =
+      preferredSource === 'composer'
+        ? ([
+            ['composer', composerMessage],
+            ['store', storeMessage],
+          ] as const)
+        : ([
+            ['store', storeMessage],
+            ['composer', composerMessage],
+          ] as const);
+
+    delete entry.message.parentMessageId;
+    let explicitParentPresent = false;
+    let parentResolved = false;
+    for (const [source, sourceMessage] of ordered) {
+      if (sourceMessage?.parentMessageId === undefined) continue;
+      explicitParentPresent = true;
+      const parentMessageId = identityMaps[source].get(sourceMessage.parentMessageId);
+      if (parentMessageId === undefined) continue;
+      entry.message.parentMessageId = parentMessageId;
+      parentResolved = true;
+      break;
+    }
+    if (explicitParentPresent && !parentResolved) hasUnresolvedRelationship = true;
+
+    delete entry.message.isSidechain;
+    for (const [, sourceMessage] of ordered) {
+      if (sourceMessage?.isSidechain === undefined) continue;
+      entry.message.isSidechain = sourceMessage.isSidechain;
+      break;
+    }
+  }
+  return hasUnresolvedRelationship;
+}
+
 /**
- * Scalar conflict resolution: preferred source wins a true conflict; when the
- * preferred side is missing a value, the other side fills it.
+ * Rewrite the Composer branch over the semantically interleaved merged view.
+ * Composer nodes remain restricted to Cursor's explicit active branch, while
+ * Store-only nodes participate unless their source explicitly marks them as a
+ * sidechain. This applies uniformly to leading, middle, and trailing Store
+ * turns: released downstream adapters reconstruct both parents and the leaf
+ * exclusively from `activeBranchBubbleIds`, so omitting an otherwise admitted
+ * Store turn would persist it as an orphan in a supposedly complete view.
  */
-function pickPreferredDate(preferred: Date, other: Date): Date {
-  return preferred ?? other;
+function rewriteActiveBranch(
+  composer: ChatSession,
+  rendered: RenderedMessage[],
+  composerIdentityMap: Map<string, string>
+): { ids: string[] | undefined; unresolved: boolean } {
+  const sourceBranch = composer.activeBranchBubbleIds ?? composer.activeBranchMessageIds;
+  if (sourceBranch === undefined) return { ids: undefined, unresolved: false };
+  let unresolved = false;
+  const mapped = sourceBranch.flatMap((sourceId) => {
+    const resolved = composerIdentityMap.get(sourceId);
+    if (resolved !== undefined) return [resolved];
+    unresolved = true;
+    return [];
+  });
+  if (unresolved) return { ids: undefined, unresolved: true };
+  let cursor = -1;
+  for (const id of mapped) {
+    const position = rendered.findIndex(
+      (entry, index) =>
+        index > cursor && entry.message.id === id && entry.composerIndex !== undefined
+    );
+    if (position < 0) {
+      unresolved = true;
+      continue;
+    }
+    cursor = position;
+  }
+  if (unresolved) return { ids: undefined, unresolved: true };
+  const activeComposerIds = new Set(mapped);
+  const branch: string[] = [];
+  for (const entry of rendered) {
+    if (entry.composerIndex !== undefined) {
+      if (activeComposerIds.has(entry.message.id!)) branch.push(entry.message.id!);
+      continue;
+    }
+    if (entry.storeIndex !== undefined && entry.message.isSidechain !== true) {
+      branch.push(entry.message.id!);
+    }
+  }
+  return { ids: branch, unresolved: false };
+}
+
+/** Rebuild active parent/leaf semantics after Store gaps alter the branch. */
+function rebuildActiveBranchParents(
+  rendered: RenderedMessage[],
+  activeBranchMessageIds: string[] | undefined
+): void {
+  if (activeBranchMessageIds === undefined) return;
+  let cursor = -1;
+  let previousId: string | undefined;
+  for (const id of activeBranchMessageIds) {
+    const position = rendered.findIndex(
+      (entry, index) => index > cursor && entry.message.id === id
+    );
+    if (position < 0) continue;
+    const message = rendered[position]!.message;
+    if (previousId === undefined) delete message.parentMessageId;
+    else message.parentMessageId = previousId;
+    message.isSidechain = false;
+    previousId = id;
+    cursor = position;
+  }
+}
+
+type FidelityInput = Pick<ChatSession, 'source' | 'resolution' | 'transcriptState'>;
+
+const RESOLUTION_REASON_ORDER = [
+  'workspace-scope-omitted',
+  'source-unavailable',
+  'source-read-failed',
+  'source-partial',
+  'expected-store-db-unavailable',
+  'store-db-expectation-unknown',
+  'store-conversation-unavailable',
+] as const satisfies readonly ResolutionReasonCode[];
+
+function orderedResolutionReasons(reasons: Iterable<ResolutionReasonCode>): ResolutionReasonCode[] {
+  const values = new Set(reasons);
+  return RESOLUTION_REASON_ORDER.filter((reason) => values.has(reason));
+}
+
+function isCompleteContribution(session: FidelityInput, unknownIsComplete: boolean): boolean {
+  if (session.resolution !== undefined) return session.resolution.state === 'complete';
+  switch (session.source) {
+    case 'workspace-fallback':
+    case 'store-partial':
+      return false;
+    case 'transcript':
+      return session.transcriptState === 'parsed';
+    default:
+      // Undefined is retained for source-compatible callers and unit fixtures;
+      // explicit modern adapters must report partial fidelity themselves.
+      return session.source === undefined ? unknownIsComplete : true;
+  }
+}
+
+function mergedResolution(
+  composer: FidelityInput,
+  store: FidelityInput,
+  unknownIsComplete = true,
+  relationshipPartial = false
+) {
+  const complete =
+    isCompleteContribution(composer, unknownIsComplete) &&
+    isCompleteContribution(store, unknownIsComplete) &&
+    !relationshipPartial;
+  const reasonCodes = new Set<ResolutionReasonCode>([
+    ...(composer.resolution?.reasonCodes ?? []),
+    ...(store.resolution?.reasonCodes ?? []),
+  ]);
+  if (relationshipPartial) reasonCodes.add('source-partial');
+  if (!complete && reasonCodes.size === 0) reasonCodes.add('source-partial' as const);
+  const orderedRoles = (roles: Iterable<SourceRole>): SourceRole[] => {
+    const values = new Set(roles);
+    return (['composer', 'store'] as const).filter((role) => values.has(role));
+  };
+  const rolesFrom = (
+    session: FidelityInput,
+    field: keyof Pick<
+      SessionResolution,
+      'expectedSourceRoles' | 'loadedSourceRoles' | 'omittedSourceRoles' | 'failedSourceRoles'
+    >,
+    fallback: SourceRole
+  ): readonly SourceRole[] =>
+    session.resolution?.[field] ?? (field === 'loadedSourceRoles' ? [fallback] : []);
+  return {
+    state: complete ? ('complete' as const) : ('partial' as const),
+    expectedSourceRoles: orderedRoles([
+      'composer',
+      'store',
+      ...rolesFrom(composer, 'expectedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'expectedSourceRoles', 'store'),
+    ]),
+    loadedSourceRoles: orderedRoles([
+      ...rolesFrom(composer, 'loadedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'loadedSourceRoles', 'store'),
+    ]),
+    omittedSourceRoles: orderedRoles([
+      ...rolesFrom(composer, 'omittedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'omittedSourceRoles', 'store'),
+    ]),
+    failedSourceRoles: orderedRoles([
+      ...rolesFrom(composer, 'failedSourceRoles', 'composer'),
+      ...rolesFrom(store, 'failedSourceRoles', 'store'),
+    ]),
+    reasonCodes: orderedResolutionReasons(reasonCodes),
+  };
 }
 
 /**
@@ -573,45 +1280,119 @@ export function mergeCrossStackSessions(
   composer: ChatSession,
   store: ChatSession,
   preferredSource: 'composer' | 'store',
-  index: number
+  index: number,
+  faults?: MergeFaultInjection
 ): ChatSession {
   const backbone = preferredSource === 'composer' ? composer : store;
   const other = preferredSource === 'composer' ? store : composer;
-  const backboneOrigin = preferredSource;
-  const otherOrigin: 'composer' | 'store' = preferredSource === 'composer' ? 'store' : 'composer';
+  const rawPlan =
+    faults?.preferredBackbonePairing && preferredSource === 'store'
+      ? (() => {
+          const reversed = computeAlignment(store.messages, composer.messages);
+          return {
+            composer: composer.messages,
+            store: store.messages,
+            pairs: reversed.pairs.map((pair) => ({
+              composerIndex: pair.storeIndex,
+              storeIndex: pair.composerIndex,
+            })),
+          };
+        })()
+      : computeAlignment(composer.messages, store.messages);
+  const resolved = resolveMessageIdentities(composer.messages, store.messages, rawPlan.pairs);
+  const plan: AlignmentPlan = { ...rawPlan, ...resolved };
+  const rendered = renderAlignment(plan, preferredSource, faults);
+  const identityMaps = buildSourceIdentityMaps(
+    composer.messages,
+    store.messages,
+    resolved.composer,
+    resolved.store
+  );
+  const hasUnresolvedParent = rewriteRenderedRelationships(
+    rendered,
+    composer.messages,
+    store.messages,
+    identityMaps,
+    preferredSource
+  );
+  const activeBranch = rewriteActiveBranch(composer, rendered, identityMaps.composer);
+  const activeBranchMessageIds = activeBranch.ids;
+  rebuildActiveBranchParents(rendered, activeBranchMessageIds);
+  const messages = rendered.map(({ message }) => message);
+  const relationshipPartial = hasUnresolvedParent || activeBranch.unresolved;
+  const resolution = mergedResolution(composer, store, true, relationshipPartial);
 
-  const messages = alignAndMerge(backbone.messages, other.messages, backboneOrigin, otherOrigin);
+  // A merged session is Composer-backed regardless of the rendering backbone.
+  // Resolve clocks from source-native inputs in fixed Composer-then-Store order
+  // so changing preferredSource cannot rewrite incremental-backup watermarks.
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'composer-backed',
+    composerMetadata: {
+      ...(composer.createdAtSource === 'composer-metadata'
+        ? { createdAt: composer.createdAt }
+        : {}),
+      ...(composer.lastUpdatedAtSource === 'composer-metadata'
+        ? { lastUpdatedAt: composer.lastUpdatedAt }
+        : {}),
+    },
+    directMessages: [...composer.messages, ...store.messages],
+  });
+  resolveMessageTimestamps(messages, {
+    timestamp: sessionTimestamps.createdAt,
+    source: sessionTimestamps.createdAtSource,
+  });
 
-  // Scalar metadata: preferred wins conflicts, fill gaps from the other.
+  // Scalar presentation metadata may follow the preferred backbone, but
+  // logical addressing never does: a Composer-backed session keeps its
+  // Composer canonical path and workspace identity across both orientations.
   const title = pickScalar(backbone.title, other.title);
-  const workspacePath = backbone.workspacePath ?? other.workspacePath ?? composer.workspacePath;
-  const createdAt = pickPreferredDate(backbone.createdAt, other.createdAt);
-  // lastUpdatedAt: preferred source wins (e.g. WSL -> Store's value), not the
-  // later of the two.
-  const lastUpdatedAt = pickPreferredDate(backbone.lastUpdatedAt, other.lastUpdatedAt);
+  const canonicalWorkspacePath =
+    composer.canonicalWorkspacePath ?? composer.workspacePath ?? store.canonicalWorkspacePath;
+  const workspacePath = canonicalWorkspacePath ?? store.workspacePath;
+  const matchedWorkspacePath = composer.matchedWorkspacePath ?? store.matchedWorkspacePath;
+  const sourceInstances = mergeSourceInstances(composer, store);
+  const workspaceMemberships = mergeWorkspaceMemberships(composer, store, sourceInstances);
 
   // Source-specific structured data is additive: keep whichever side provides it
   // (Composer typically provides usage + activeBranchBubbleIds; Store may extend).
   const usage = backbone.usage ?? other.usage;
-  const activeBranchBubbleIds = backbone.activeBranchBubbleIds ?? other.activeBranchBubbleIds;
-
   const session: ChatSession = {
     id: composer.id,
     index,
     title,
-    createdAt,
-    lastUpdatedAt,
+    ...sessionTimestamps,
     messageCount: messages.length,
     messages,
-    workspaceId: backbone.workspaceId,
+    workspaceId: composer.workspaceId,
     workspacePath,
-    source: 'merged',
+    // `source` remains the v0.16 replacement-safety signal. Actual provenance
+    // is additive so unchanged incremental consumers can replace complete data.
+    source: resolution.state === 'complete' ? 'global' : 'workspace-fallback',
+    resolvedSource: 'merged',
     sources: ['composer', 'store'],
     preferredSource,
+    resolution: {
+      ...resolution,
+      expectedSourceRoles: [...resolution.expectedSourceRoles],
+      loadedSourceRoles: [...resolution.loadedSourceRoles],
+      omittedSourceRoles: [...resolution.omittedSourceRoles],
+      failedSourceRoles: [...resolution.failedSourceRoles],
+    },
+    messageIdentityVersion: MESSAGE_IDENTITY_VERSION,
     transcriptState: store.transcriptState,
+    ...(canonicalWorkspacePath ? { canonicalWorkspacePath } : {}),
+    ...(matchedWorkspacePath ? { matchedWorkspacePath } : {}),
+    ...((composer.workspaceMatchKind ?? store.workspaceMatchKind)
+      ? { workspaceMatchKind: composer.workspaceMatchKind ?? store.workspaceMatchKind }
+      : {}),
+    ...(workspaceMemberships ? { workspaceMemberships } : {}),
+    ...(sourceInstances ? { sourceInstances } : {}),
   };
   if (usage) session.usage = usage;
-  if (activeBranchBubbleIds) session.activeBranchBubbleIds = activeBranchBubbleIds;
+  if (activeBranchMessageIds !== undefined) {
+    session.activeBranchMessageIds = activeBranchMessageIds;
+    session.activeBranchBubbleIds = [...activeBranchMessageIds];
+  }
   return session;
 }
 
@@ -623,19 +1404,30 @@ export interface StoreSummaryInput {
   id: string;
   title: string | null;
   createdAt: Date;
+  createdAtSource?: ChatSessionSummary['createdAtSource'];
   /** Store session-level update time (`updatedAtMs` or `createdAt`). */
   lastUpdatedAt: Date;
+  lastUpdatedAtSource?: ChatSessionSummary['lastUpdatedAtSource'];
+  /** Source-native Store messages used only for direct-time extrema. */
+  directMessages?: readonly Message[];
   workspacePath?: string;
   messageCount: number;
+  source?: ChatSession['source'];
+  resolution?: ChatSession['resolution'];
   transcriptState: ChatSessionSummary['transcriptState'];
+  canonicalWorkspacePath?: string;
+  matchedWorkspacePath?: string;
+  workspaceMatchKind?: ChatSessionSummary['workspaceMatchKind'];
+  workspaceMemberships?: ChatSessionSummary['workspaceMemberships'];
+  sourceInstances?: ChatSessionSummary['sourceInstances'];
 }
 
 /**
  * Merge Store-side summary fields into an existing (Composer) summary in place.
- * Marks the summary as merged and records the contributing stacks + preferred
- * source. Used by `listSessions` so a session visible in both stacks appears
- * once with merged scalar metadata; the real message merge happens in
- * `getSession` via `mergeCrossStackSessions`.
+ * Legacy `source` reports conservative replacement safety while
+ * `resolvedSource` records merged provenance. Used by `listSessions` so a
+ * session visible in both stacks appears once with merged scalar metadata; the
+ * real message merge happens in `getSession` via `mergeCrossStackSessions`.
  */
 export function applyStoreMergeToSummary(
   existing: ChatSessionSummary,
@@ -647,22 +1439,76 @@ export function applyStoreMergeToSummary(
   const otherTitle = preferStore ? existing.title : store.title;
   existing.title = pickScalar(prefTitle, otherTitle);
 
-  const prefPath = preferStore ? store.workspacePath : existing.workspacePath;
-  const otherPath = preferStore ? existing.workspacePath : store.workspacePath;
-  existing.workspacePath = prefPath ?? otherPath ?? existing.workspacePath;
+  const canonicalWorkspacePath =
+    existing.canonicalWorkspacePath ?? existing.workspacePath ?? store.canonicalWorkspacePath;
+  existing.workspacePath = canonicalWorkspacePath ?? store.workspacePath ?? existing.workspacePath;
+  if (canonicalWorkspacePath) existing.canonicalWorkspacePath = canonicalWorkspacePath;
+  existing.matchedWorkspacePath ??= store.matchedWorkspacePath;
+  existing.workspaceMatchKind ??= store.workspaceMatchKind;
+  const sourceInstances = mergeSourceInstances(existing, store);
+  if (sourceInstances) existing.sourceInstances = sourceInstances;
+  const workspaceMemberships = mergeWorkspaceMemberships(existing, store, sourceInstances);
+  if (workspaceMemberships) existing.workspaceMemberships = workspaceMemberships;
 
-  // createdAt: preferred source wins.
-  existing.createdAt = preferStore ? store.createdAt : existing.createdAt;
-
-  // lastUpdatedAt: preferred source wins. Store keeps its own update time
-  // (`updatedAtMs` or `createdAt`) instead of reusing another source's value.
-  existing.lastUpdatedAt = preferStore ? store.lastUpdatedAt : existing.lastUpdatedAt;
+  const composerDirectExtrema: Message[] = [];
+  if (existing.createdAtSource === 'direct-message') {
+    composerDirectExtrema.push({
+      id: null,
+      role: 'user',
+      content: '',
+      codeBlocks: [],
+      timestamp: existing.createdAt,
+      timestampSource: 'composer-timing',
+    });
+  }
+  if (
+    existing.lastUpdatedAtSource === 'direct-message' &&
+    existing.lastUpdatedAt.getTime() !== existing.createdAt.getTime()
+  ) {
+    composerDirectExtrema.push({
+      id: null,
+      role: 'user',
+      content: '',
+      codeBlocks: [],
+      timestamp: existing.lastUpdatedAt,
+      timestampSource: 'composer-timing',
+    });
+  }
+  const sessionTimestamps = resolveSessionTimestamps({
+    view: 'composer-backed',
+    composerMetadata: {
+      ...(existing.createdAtSource === 'composer-metadata'
+        ? { createdAt: existing.createdAt }
+        : {}),
+      ...(existing.lastUpdatedAtSource === 'composer-metadata'
+        ? { lastUpdatedAt: existing.lastUpdatedAt }
+        : {}),
+    },
+    directMessages: [...composerDirectExtrema, ...(store.directMessages ?? [])],
+  });
+  existing.createdAt = sessionTimestamps.createdAt;
+  existing.createdAtSource = sessionTimestamps.createdAtSource;
+  existing.lastUpdatedAt = sessionTimestamps.lastUpdatedAt;
+  existing.lastUpdatedAtSource = sessionTimestamps.lastUpdatedAtSource;
 
   // messageCount: approximate (preferred source's count); recomputed on get.
   existing.messageCount = preferStore ? store.messageCount : existing.messageCount;
 
-  existing.source = 'merged';
+  // Listings that predate fidelity metadata must not claim replacement safety;
+  // full hydration will later promote a genuinely complete resolved session.
+  const resolution = mergedResolution(existing, store, false);
+  existing.source = resolution.state === 'complete' ? 'global' : 'workspace-fallback';
+  existing.resolvedSource = 'merged';
   existing.sources = ['composer', 'store'];
   existing.preferredSource = preferredSource;
+  existing.resolutionState = resolution.state;
+  existing.resolution = {
+    ...resolution,
+    expectedSourceRoles: [...resolution.expectedSourceRoles],
+    loadedSourceRoles: [...resolution.loadedSourceRoles],
+    omittedSourceRoles: [...resolution.omittedSourceRoles],
+    failedSourceRoles: [...resolution.failedSourceRoles],
+  };
+  existing.messageIdentityVersion = MESSAGE_IDENTITY_VERSION;
   existing.transcriptState = store.transcriptState;
 }

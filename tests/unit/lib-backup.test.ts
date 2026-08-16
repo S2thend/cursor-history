@@ -59,6 +59,8 @@ describe('createBackup', () => {
     const config = {
       outputPath: '/custom/path/backup.zip',
       force: true,
+      sharedPermissions: true,
+      sourceReadLimits: { zipEntryCount: 10 },
     };
     const mockResult = {
       success: true,
@@ -117,6 +119,7 @@ describe('restoreBackup', () => {
     const config = {
       backupPath: '/path/to/backup.zip',
       force: true,
+      sourceReadLimits: { zipEntryCount: 10 },
     };
     const mockResult = {
       success: true,
@@ -200,7 +203,7 @@ describe('validateBackup', () => {
 
     const result = await validateBackup(backupPath);
 
-    expect(mockCoreValidateBackup).toHaveBeenCalledWith(backupPath);
+    expect(mockCoreValidateBackup).toHaveBeenCalledWith(backupPath, undefined);
     expect(result).toEqual(mockValidation);
   });
 
@@ -249,6 +252,24 @@ describe('validateBackup', () => {
     expect(result.errors).toHaveLength(2);
     expect(result.corruptedFiles).toHaveLength(2);
   });
+
+  it('passes source limits and cancellation through validation unchanged', async () => {
+    const controller = new AbortController();
+    const options = {
+      sourceReadLimits: { zipEntryCount: 5 },
+      signal: controller.signal,
+    };
+    mockCoreValidateBackup.mockResolvedValue({
+      status: 'valid',
+      validFiles: [],
+      corruptedFiles: [],
+      missingFiles: [],
+      errors: [],
+    });
+
+    await validateBackup('/path/to/backup.zip', options);
+    expect(mockCoreValidateBackup).toHaveBeenCalledWith('/path/to/backup.zip', options);
+  });
 });
 
 // =============================================================================
@@ -278,7 +299,7 @@ describe('listBackups', () => {
 
     const result = await listBackups();
 
-    expect(mockCoreListBackups).toHaveBeenCalledWith(undefined);
+    expect(mockCoreListBackups).toHaveBeenCalledWith(undefined, undefined);
     expect(result).toEqual(mockBackups);
   });
 
@@ -296,7 +317,7 @@ describe('listBackups', () => {
 
     const result = await listBackups(directory);
 
-    expect(mockCoreListBackups).toHaveBeenCalledWith(directory);
+    expect(mockCoreListBackups).toHaveBeenCalledWith(directory, undefined);
     expect(result).toEqual(mockBackups);
   });
 
@@ -340,6 +361,18 @@ describe('listBackups', () => {
     expect(result).toHaveLength(2);
     expect(result[0]!.manifest).toBeDefined();
     expect(result[1]!.manifest).toBeUndefined();
+  });
+
+  it('passes source limits and cancellation through listing unchanged', async () => {
+    const controller = new AbortController();
+    const options = {
+      sourceReadLimits: { zipCompressedBytes: 1024 },
+      signal: controller.signal,
+    };
+    mockCoreListBackups.mockResolvedValue([]);
+
+    await listBackups('/backups', options);
+    expect(mockCoreListBackups).toHaveBeenCalledWith('/backups', options);
   });
 });
 

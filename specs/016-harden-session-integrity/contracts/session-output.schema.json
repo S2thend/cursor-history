@@ -1,0 +1,735 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cursor-history:schema:session-integrity:v1",
+  "title": "cursor-history session integrity structured output",
+  "oneOf": [
+    { "$ref": "#/$defs/ListOutput" },
+    { "$ref": "#/$defs/SessionOutput" },
+    { "$ref": "#/$defs/SearchOutput" },
+    { "$ref": "#/$defs/ExportResultOutput" },
+    { "$ref": "#/$defs/FatalError" }
+  ],
+  "$defs": {
+    "GlobalIndexAddress": {
+      "type": "object",
+      "required": ["index", "indexScope"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1 },
+        "indexScope": { "const": "global" }
+      },
+      "not": { "required": ["indexWorkspacePath"] }
+    },
+    "WorkspaceIndexAddress": {
+      "type": "object",
+      "required": ["index", "indexScope", "indexWorkspacePath"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1 },
+        "indexScope": { "const": "workspace" },
+        "indexWorkspacePath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "IndexAddress": {
+      "oneOf": [
+        { "$ref": "#/$defs/GlobalIndexAddress" },
+        { "$ref": "#/$defs/WorkspaceIndexAddress" }
+      ]
+    },
+    "SourceRole": {
+      "enum": ["composer", "store"]
+    },
+    "SourceRepresentation": {
+      "enum": [
+        "composer-global",
+        "composer-workspace",
+        "store-db",
+        "store-transcript",
+        "store-metadata"
+      ]
+    },
+    "ResolutionReasonCode": {
+      "enum": [
+        "workspace-scope-omitted",
+        "source-unavailable",
+        "source-read-failed",
+        "source-partial",
+        "expected-store-db-unavailable",
+        "store-db-expectation-unknown",
+        "store-conversation-unavailable"
+      ]
+    },
+    "SessionTimestampSource": {
+      "enum": [
+        "composer-metadata",
+        "store-db-metadata",
+        "store-meta",
+        "direct-message",
+        "epoch-unknown"
+      ]
+    },
+    "Resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "expectedSourceRoles",
+        "loadedSourceRoles",
+        "omittedSourceRoles",
+        "failedSourceRoles",
+        "reasonCodes"
+      ],
+      "properties": {
+        "state": { "enum": ["complete", "partial"] },
+        "expectedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "loadedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "omittedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "failedSourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "reasonCodes": {
+          "type": "array",
+          "description": "Deduplicated in ResolutionReasonCode declaration order.",
+          "items": { "$ref": "#/$defs/ResolutionReasonCode" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "WorkspaceMembership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspacePath", "sourceRoles", "contributingInstanceCount"],
+      "properties": {
+        "workspacePath": { "type": "string", "minLength": 1 },
+        "sourceRoles": {
+          "type": "array",
+          "description": "Deduplicated in SourceRole declaration order.",
+          "items": { "$ref": "#/$defs/SourceRole" },
+          "uniqueItems": true
+        },
+        "contributingInstanceCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "SourceInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRole", "representation", "workspacePaths", "state"],
+      "properties": {
+        "sourceRole": { "$ref": "#/$defs/SourceRole" },
+        "representation": { "$ref": "#/$defs/SourceRepresentation" },
+        "workspacePaths": {
+          "type": "array",
+          "description": "Deduplicated normalized paths in code-point order; empty when pathless.",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "state": {
+          "enum": [
+            "contributed",
+            "equivalent-replica",
+            "omitted-by-scope",
+            "failed",
+            "superseded"
+          ]
+        }
+      }
+    },
+    "ResolvedSessionMetadata": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "source",
+            "resolvedSource",
+            "sources",
+            "resolution",
+            "createdAt",
+            "createdAtSource",
+            "lastUpdatedAt",
+            "lastUpdatedAtSource",
+            "workspacePath",
+            "workspaceMemberships",
+            "sourceInstances",
+            "messageIdentityVersion"
+          ],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "source": { "enum": ["global", "workspace-fallback"] },
+            "resolvedSource": {
+              "enum": ["composer", "store-db", "store-transcript", "store-metadata", "merged"]
+            },
+            "sources": {
+              "type": "array",
+              "description": "Deduplicated in SourceRole declaration order.",
+              "items": { "$ref": "#/$defs/SourceRole" },
+              "uniqueItems": true,
+              "minItems": 1
+            },
+            "preferredSource": { "$ref": "#/$defs/SourceRole" },
+            "resolution": { "$ref": "#/$defs/Resolution" },
+            "createdAt": { "type": "string", "format": "date-time" },
+            "createdAtSource": { "$ref": "#/$defs/SessionTimestampSource" },
+            "lastUpdatedAt": { "type": "string", "format": "date-time" },
+            "lastUpdatedAtSource": { "$ref": "#/$defs/SessionTimestampSource" },
+            "workspacePath": {
+              "type": ["string", "null"],
+              "description": "Canonical compatibility path, or null when pathless."
+            },
+            "canonicalWorkspacePath": { "type": "string", "minLength": 1 },
+            "matchedWorkspacePath": { "type": "string", "minLength": 1 },
+            "workspaceMatchKind": { "enum": ["exact", "unique-suffix"] },
+            "workspaceMemberships": {
+              "type": "array",
+              "description": "Deduplicated by normalized path and sorted by path code-point order.",
+              "items": { "$ref": "#/$defs/WorkspaceMembership" }
+            },
+            "sourceInstances": {
+              "type": "array",
+              "description": "Sorted by role, representation, lexicographic workspacePaths, then state declaration order.",
+              "items": { "$ref": "#/$defs/SourceInstance" }
+            },
+            "messageIdentityVersion": { "const": 1 }
+          }
+        }
+      ]
+    },
+    "ToolCall": {
+      "type": "object",
+      "required": ["id", "identityOrigin", "name", "status"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "identityOrigin": { "enum": ["source-native", "tool-v1"] },
+        "name": { "type": "string" },
+        "status": { "enum": ["completed", "cancelled", "error"] }
+      },
+      "additionalProperties": true
+    },
+    "Message": {
+      "type": "object",
+      "required": [
+        "id",
+        "messageIdentityVersion",
+        "identityOrigin",
+        "role",
+        "content",
+        "timestamp",
+        "timestampSource"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "messageIdentityVersion": { "const": 1 },
+        "identityOrigin": {
+          "enum": [
+            "composer-native",
+            "composer-v0.16-index",
+            "store-db-v1",
+            "store-transcript-v1"
+          ]
+        },
+        "role": { "enum": ["user", "assistant"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "timestampSource": {
+          "enum": [
+            "composer-created-at",
+            "composer-timing",
+            "store-turn-timing",
+            "inferred-previous",
+            "inferred-next",
+            "session-fallback",
+            "unknown"
+          ]
+        },
+        "parentMessageId": { "type": "string", "minLength": 1 },
+        "isSidechain": { "type": "boolean" },
+        "toolCalls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ToolCall" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ResolvedSummary": {
+      "allOf": [
+        { "$ref": "#/$defs/ResolvedSessionMetadata" },
+        {
+          "type": "object",
+          "required": ["title", "preview", "messageCount", "resolutionState"],
+          "properties": {
+            "title": { "type": ["string", "null"] },
+            "preview": { "type": "string" },
+            "messageCount": { "type": "integer", "minimum": 0 },
+            "resolutionState": { "enum": ["complete", "partial"] }
+          },
+          "not": { "required": ["messages"] },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "AmbiguousSummary": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "resolutionState",
+            "sourceRoles",
+            "occurrenceCount",
+            "diagnosticOccurrenceRefs"
+          ],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "resolutionState": { "const": "ambiguous" },
+            "sourceRoles": {
+              "type": "array",
+              "description": "Deduplicated in SourceRole declaration order.",
+              "items": { "$ref": "#/$defs/SourceRole" },
+              "uniqueItems": true,
+              "minItems": 1
+            },
+            "occurrenceCount": { "type": "integer", "minimum": 2 },
+            "diagnosticOccurrenceRefs": {
+              "type": "array",
+              "description": "Sorted by stable payload fingerprint with opaque reference as tie-breaker.",
+              "items": { "type": "string", "minLength": 1 },
+              "minItems": 2,
+              "uniqueItems": true
+            }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["messages"] },
+              { "required": ["preview"] }
+            ]
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sourceRole": { "$ref": "#/$defs/SourceRole" },
+        "occurrenceCount": { "type": "integer", "minimum": 1 },
+        "occurrenceRefs": {
+          "type": "array",
+          "description": "Sorted by stable payload fingerprint with opaque reference as tie-breaker.",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "policyVersion": { "const": "source-read-limits/v1" },
+        "sourceKind": { "enum": ["jsonl", "sqlite"] },
+        "bound": {
+          "enum": [
+            "jsonl-record-bytes",
+            "jsonl-source-bytes",
+            "jsonl-record-count",
+            "sqlite-page-rows",
+            "sqlite-page-bytes",
+            "sqlite-value-bytes",
+            "sqlite-row-count",
+            "sqlite-decoded-bytes"
+          ]
+        },
+        "limit": { "type": "integer", "minimum": 1 },
+        "observedAtLeast": { "type": "integer", "minimum": 1 },
+        "unit": { "enum": ["bytes", "records", "rows", "ratio"] },
+        "outcome": { "const": "partial" },
+        "retryableWithOverride": { "const": true },
+        "remedy": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "code": { "const": "SOURCE_ENCODING_INVALID" } },
+            "required": ["code"]
+          },
+          "then": {
+            "required": ["sourceKind", "outcome", "remedy"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "code": { "const": "SOURCE_LIMIT_EXCEEDED" } },
+            "required": ["code"]
+          },
+          "then": {
+            "required": [
+              "policyVersion",
+              "sourceKind",
+              "bound",
+              "limit",
+              "observedAtLeast",
+              "unit",
+              "outcome",
+              "retryableWithOverride",
+              "remedy"
+            ],
+            "oneOf": [
+              {
+                "properties": {
+                  "sourceKind": { "const": "jsonl" },
+                  "bound": { "enum": ["jsonl-record-bytes", "jsonl-source-bytes"] },
+                  "unit": { "const": "bytes" }
+                }
+              },
+              {
+                "properties": {
+                  "sourceKind": { "const": "jsonl" },
+                  "bound": { "const": "jsonl-record-count" },
+                  "unit": { "const": "records" }
+                }
+              },
+              {
+                "properties": {
+                  "sourceKind": { "const": "sqlite" },
+                  "bound": { "enum": ["sqlite-page-rows", "sqlite-row-count"] },
+                  "unit": { "const": "rows" }
+                }
+              },
+              {
+                "properties": {
+                  "sourceKind": { "const": "sqlite" },
+                  "bound": {
+                    "enum": [
+                      "sqlite-page-bytes",
+                      "sqlite-value-bytes",
+                      "sqlite-decoded-bytes"
+                    ]
+                  },
+                  "unit": { "const": "bytes" }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "ListOutput": {
+      "type": "object",
+      "description": "count and sessions represent scoped logical rows, including ambiguous UUID rows.",
+      "required": ["count", "sessions"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "indexScope": { "enum": ["global", "workspace"] },
+        "indexWorkspacePath": { "type": "string", "minLength": 1 },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/ResolvedSummary" },
+              { "$ref": "#/$defs/AmbiguousSummary" }
+            ]
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "SessionOutput": {
+      "allOf": [
+        { "$ref": "#/$defs/ResolvedSessionMetadata" },
+        {
+          "type": "object",
+          "required": ["messages"],
+          "properties": {
+            "messages": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/Message" }
+            },
+            "activeBranchBubbleIds": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "activeBranchMessageIds": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "SearchResult": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": ["sessionId", "matchCount", "snippets"],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "workspacePath": { "type": ["string", "null"] },
+            "matchedWorkspacePath": { "type": "string", "minLength": 1 },
+            "matchCount": { "type": "integer", "minimum": 1 },
+            "snippets": { "type": "array" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "SearchOutput": {
+      "type": "object",
+      "required": ["query", "count", "totalMatches", "results"],
+      "properties": {
+        "query": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 },
+        "totalMatches": { "type": "integer", "minimum": 0 },
+        "indexScope": { "enum": ["global", "workspace"] },
+        "indexWorkspacePath": { "type": "string", "minLength": 1 },
+        "results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SearchResult" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ExportedFile": {
+      "allOf": [
+        { "$ref": "#/$defs/IndexAddress" },
+        {
+          "type": "object",
+          "required": ["sessionId", "path"],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "ExportResultOutput": {
+      "type": "object",
+      "required": ["count", "files"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ExportedFile" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Diagnostic" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "FatalSourceEncodingDetails": {
+      "type": "object",
+      "required": ["sourceKind", "outcome", "remedy"],
+      "properties": {
+        "sourceKind": { "enum": ["jsonl", "sqlite"] },
+        "outcome": { "const": "fatal" },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sourceRole": { "$ref": "#/$defs/SourceRole" },
+        "remedy": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "FatalSourceLimitDetails": {
+      "type": "object",
+      "required": [
+        "policyVersion",
+        "sourceKind",
+        "bound",
+        "limit",
+        "observedAtLeast",
+        "unit",
+        "outcome",
+        "retryableWithOverride",
+        "remedy"
+      ],
+      "properties": {
+        "policyVersion": { "const": "source-read-limits/v1" },
+        "sourceKind": { "enum": ["jsonl", "sqlite", "zip"] },
+        "bound": {
+          "enum": [
+            "jsonl-record-bytes",
+            "jsonl-source-bytes",
+            "jsonl-record-count",
+            "sqlite-page-rows",
+            "sqlite-page-bytes",
+            "sqlite-value-bytes",
+            "sqlite-row-count",
+            "sqlite-decoded-bytes",
+            "zip-compressed-bytes",
+            "zip-entry-count",
+            "zip-entry-bytes",
+            "zip-aggregate-bytes",
+            "zip-compression-ratio"
+          ]
+        },
+        "limit": { "type": "integer", "minimum": 1 },
+        "observedAtLeast": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "enum": ["bytes", "records", "rows", "ratio"] },
+        "outcome": { "const": "fatal" },
+        "retryableWithOverride": { "const": true },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sourceRole": { "$ref": "#/$defs/SourceRole" },
+        "remedy": { "type": "string", "minLength": 1 }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "sourceKind": { "const": "jsonl" },
+            "bound": { "enum": ["jsonl-record-bytes", "jsonl-source-bytes"] },
+            "unit": { "const": "bytes" },
+            "observedAtLeast": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "properties": {
+            "sourceKind": { "const": "jsonl" },
+            "bound": { "const": "jsonl-record-count" },
+            "unit": { "const": "records" },
+            "observedAtLeast": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "properties": {
+            "sourceKind": { "const": "sqlite" },
+            "bound": { "enum": ["sqlite-page-rows", "sqlite-row-count"] },
+            "unit": { "const": "rows" },
+            "observedAtLeast": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "properties": {
+            "sourceKind": { "const": "sqlite" },
+            "bound": {
+              "enum": [
+                "sqlite-page-bytes",
+                "sqlite-value-bytes",
+                "sqlite-decoded-bytes"
+              ]
+            },
+            "unit": { "const": "bytes" },
+            "observedAtLeast": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "properties": {
+            "sourceKind": { "const": "zip" },
+            "bound": {
+              "enum": [
+                "zip-compressed-bytes",
+                "zip-entry-bytes",
+                "zip-aggregate-bytes"
+              ]
+            },
+            "unit": { "const": "bytes" },
+            "observedAtLeast": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "properties": {
+            "sourceKind": { "const": "zip" },
+            "bound": { "const": "zip-entry-count" },
+            "unit": { "const": "records" },
+            "observedAtLeast": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "properties": {
+            "sourceKind": { "const": "zip" },
+            "bound": { "const": "zip-compression-ratio" },
+            "unit": { "const": "ratio" },
+            "observedAtLeast": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "FatalSourceLimitConfigurationDetails": {
+      "type": "object",
+      "required": ["invalidField", "receivedType", "violatedConstraint", "remedy"],
+      "properties": {
+        "invalidField": { "type": "string", "minLength": 1 },
+        "invalidValue": { "type": ["string", "number"] },
+        "receivedType": { "type": "string", "minLength": 1 },
+        "violatedConstraint": { "type": "string", "minLength": 1 },
+        "remedy": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "FatalError": {
+      "type": "object",
+      "description": "Schema for fatal JSON written to stderr. For a locked failure fixture, every pre-existing field name/type/value and exit category remains stable; documented additive fields are allowed, so whole-object byte equality is not required. v0.17 stdout consumers receive a versioned migration warning.",
+      "required": ["error", "code"],
+      "properties": {
+        "error": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "details": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "code": { "const": "SOURCE_ENCODING_INVALID" } },
+            "required": ["code"]
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": { "$ref": "#/$defs/FatalSourceEncodingDetails" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "code": { "const": "SOURCE_LIMIT_EXCEEDED" } },
+            "required": ["code"]
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": { "$ref": "#/$defs/FatalSourceLimitDetails" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "code": { "const": "SOURCE_LIMIT_CONFIGURATION_INVALID" } },
+            "required": ["code"]
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": { "$ref": "#/$defs/FatalSourceLimitConfigurationDetails" }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

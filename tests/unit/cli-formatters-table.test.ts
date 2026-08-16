@@ -5,6 +5,7 @@ import {
   formatSessionDetail,
   formatSearchResultsTable,
   formatExportSuccess,
+  formatOperationDiagnostics,
   formatNoHistory,
   formatCursorNotFound,
   filterMessages,
@@ -16,6 +17,7 @@ import type {
   ChatSession,
   SearchResult,
   MessageType,
+  SessionDiagnostic,
 } from '../../src/core/types.js';
 
 const now = new Date('2024-01-15T10:00:00Z');
@@ -68,6 +70,29 @@ describe('formatSessionsTable', () => {
     expect(result).toContain('No chat sessions found');
   });
 
+  it('renders an ambiguous logical row without contested content', () => {
+    const result = stripAnsi(
+      formatSessionsTable([
+        {
+          id: 'session-ambiguous',
+          index: 2,
+          indexScope: 'workspace',
+          indexWorkspacePath: '/workspaces/a',
+          resolutionState: 'ambiguous',
+          sourceRoles: ['composer'],
+          occurrenceCount: 2,
+          diagnosticOccurrenceRefs: ['occurrence:v1:a', 'occurrence:v1:b'],
+        },
+      ])
+    );
+
+    expect(result).toContain('2');
+    expect(result).toContain('ambiguous');
+    expect(result).toContain('Divergent replicas (2)');
+    expect(result).toContain('/workspaces/a');
+    expect(result).not.toContain('occurrence:v1:');
+  });
+
   it('formats sessions table with rows', () => {
     const result = formatSessionsTable([makeSummary()]);
     expect(result).toContain('1');
@@ -94,6 +119,28 @@ describe('formatSessionsTable', () => {
     );
     expect(result).toContain('⚠ partial');
     expect(result).toContain('⚠ metadata');
+  });
+
+  it('renders partial resolution and omitted source details independently of source label', () => {
+    const result = stripAnsi(
+      formatSessionsTable([
+        makeSummary({
+          source: 'merged',
+          resolutionState: 'partial',
+          resolution: {
+            state: 'partial',
+            expectedSourceRoles: ['composer', 'store'],
+            loadedSourceRoles: ['composer'],
+            omittedSourceRoles: ['store'],
+            failedSourceRoles: [],
+            reasonCodes: ['workspace-scope-omitted'],
+          },
+        }),
+      ])
+    );
+    expect(result).toContain('⚠ partial');
+    expect(result).toContain('#1 omitted source: store');
+    expect(result).toContain('workspace-scope-omitted');
   });
 });
 
@@ -269,7 +316,7 @@ describe('formatSessionDetail', () => {
     expect(result).not.toContain('×2');
   });
 
-  it('matches a mixed assistant/tool message in both filter categories', () => {
+  it('assigns a mixed assistant/tool message to its one actual category', () => {
     const mixed = {
       id: 'm1',
       role: 'assistant' as const,
@@ -278,7 +325,7 @@ describe('formatSessionDetail', () => {
       toolCalls: [{ name: 'Read', status: 'completed' as const, params: { file: '/a' } }],
     };
 
-    expect(filterMessages([mixed], ['assistant'])).toEqual([mixed]);
+    expect(filterMessages([mixed], ['assistant'])).toEqual([]);
     expect(filterMessages([mixed], ['tool'])).toEqual([mixed]);
   });
 
@@ -297,7 +344,7 @@ describe('formatSessionDetail', () => {
     ];
 
     expect(filterMessages(marked, ['assistant'])).toEqual([]);
-    expect(filterMessages(marked, ['tool'])).toEqual(marked);
+    expect(filterMessages(marked, ['tool'])).toEqual([]);
     expect(filterMessages(marked, ['thinking'])).toEqual([marked[0]]);
     expect(filterMessages(marked, ['error'])).toEqual([marked[1]]);
   });
@@ -335,12 +382,48 @@ describe('formatSessionDetail', () => {
     expect(normal).toContain('🔧 Read');
     expect(normal).toContain('🔧 Write');
 
-    const toolOnly = filterMessages(s.messages, ['tool']);
+    expect(filterMessages(s.messages, ['tool'])).toEqual([]);
+    const actualCategories = filterMessages(s.messages, ['thinking', 'error']);
     const full = stripAnsi(
-      formatSessionDetail({ ...s, messages: toolOnly }, undefined, { fullTool: true })
+      formatSessionDetail({ ...s, messages: actualCategories }, undefined, { fullTool: true })
     );
     expect(full).toContain('params: {"file":"/a"}');
     expect(full).toContain('error: disk full');
+  });
+
+  it('marks inferred and unknown human timestamps approximate but leaves direct time exact', () => {
+    const s = makeSession({
+      messages: [
+        {
+          id: 'direct',
+          role: 'user',
+          content: 'direct',
+          timestamp: now,
+          timestampSource: 'composer-timing',
+          codeBlocks: [],
+        },
+        {
+          id: 'inferred',
+          role: 'assistant',
+          content: 'inferred',
+          timestamp: later,
+          timestampSource: 'inferred-next',
+          codeBlocks: [],
+        },
+        {
+          id: 'unknown',
+          role: 'assistant',
+          content: 'unknown',
+          timestamp: later,
+          timestampSource: 'unknown',
+          codeBlocks: [],
+        },
+      ],
+    });
+
+    const result = stripAnsi(formatSessionDetail(s));
+    expect(result).toMatch(/You: (?!≈)/);
+    expect(result.match(/≈/g) ?? []).toHaveLength(2);
   });
 
   it('shows filter info when messageFilter is active', () => {
@@ -502,6 +585,27 @@ describe('formatSessionDetail', () => {
     expect(result).toContain('workspace fallback');
   });
 
+  it('shows omitted sources and reasons for a partial merged detail view', () => {
+    const result = stripAnsi(
+      formatSessionDetail(
+        makeSession({
+          source: 'merged',
+          resolution: {
+            state: 'partial',
+            expectedSourceRoles: ['composer', 'store'],
+            loadedSourceRoles: ['composer'],
+            omittedSourceRoles: ['store'],
+            failedSourceRoles: [],
+            reasonCodes: ['workspace-scope-omitted'],
+          },
+        })
+      )
+    );
+    expect(result).toContain('Partial data - unavailable sources: store');
+    expect(result).toContain('workspace-scope-omitted');
+    expect(result).not.toContain('fields and messages combined');
+  });
+
   it.each(['store', 'store-complete'] as const)(
     'shows missing metadata warning for %s sessions',
     (source) => {
@@ -545,11 +649,46 @@ describe('formatExportSuccess', () => {
   });
 });
 
+describe('formatOperationDiagnostics', () => {
+  it('renders each safe diagnostic once with the session, count, and recovery action', () => {
+    const diagnostics: SessionDiagnostic[] = [
+      {
+        code: 'SESSION_AMBIGUOUS',
+        message: 'Divergent physical occurrences were skipped.',
+        sessionId: 'session-ambiguous',
+        occurrenceCount: 2,
+        occurrenceRefs: ['occurrence:v1:a', 'occurrence:v1:b'],
+        remedy: 'Resolve or remove the divergent replicas, then retry.',
+      },
+    ];
+
+    const result = stripAnsi(formatOperationDiagnostics(diagnostics));
+
+    expect(result).toContain('1 session diagnostic');
+    expect(result).toContain('session-ambiguous');
+    expect(result).toContain('Physical occurrences: 2');
+    expect(result).toContain('Next step:');
+    expect(result).toContain('Resolve or remove the divergent replicas');
+    expect(result).not.toContain('occurrence:v1:a');
+  });
+
+  it('returns an empty string when the operation has no diagnostics', () => {
+    expect(formatOperationDiagnostics([])).toBe('');
+  });
+});
+
 describe('formatNoHistory', () => {
   it('returns guidance text', () => {
     const result = formatNoHistory();
     expect(result).toContain('No chat history');
     expect(result).toContain('Cursor');
+  });
+
+  it('gives actionable workspace-scoped empty-result guidance', () => {
+    const result = formatNoHistory('my-project');
+    expect(result).toContain('No chat sessions matched workspace: my-project');
+    expect(result).toContain('list --workspaces');
+    expect(result).toContain('complete path');
   });
 });
 

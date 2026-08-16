@@ -1,0 +1,655 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import BetterSqlite3 from 'better-sqlite3';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseCapabilityError } from '../../src/core/database/errors.js';
+import * as database from '../../src/core/database/index.js';
+import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
+import {
+  buildSessionCatalog,
+  reconcileReplicaGroup,
+  type PhysicalSessionInstance,
+  type ReplicaConsumedPayload,
+} from '../../src/core/session-catalog.js';
+import { writeStoreDbAtPath, writeStoreMeta } from '../helpers/session-integrity-fixtures.js';
+
+type DbShape =
+  'complete' | 'partial' | 'empty' | 'source-corrupt' | 'invalid-encoding' | 'invalid-after-prefix';
+
+const roots: string[] = [];
+const spies: Array<{ mockRestore(): void }> = [];
+const hash = (value: Buffer) => createHash('sha256').update(value).digest('hex');
+const frame = (leafHash: string) =>
+  Buffer.concat([Buffer.from([0x0a, 0x20]), Buffer.from(leafHash, 'hex')]);
+
+function root(): string {
+  const value = mkdtempSync(join(tmpdir(), 'ch-store-expectation-'));
+  roots.push(value);
+  return value;
+}
+
+function chatDir(base: string, id: string, hasConversation?: boolean): string {
+  const dir = join(base, 'chats', 'hash', id);
+  mkdirSync(dir, { recursive: true });
+  const meta: Record<string, unknown> = { cwd: `/work/${id}`, createdAtMs: 1783000000000 };
+  if (hasConversation !== undefined) meta['hasConversation'] = hasConversation;
+  writeFileSync(join(dir, 'meta.json'), JSON.stringify(meta));
+  return dir;
+}
+
+function transcript(
+  base: string,
+  id: string,
+  state: 'complete' | 'partial' | 'empty' | 'invalid-encoding' | 'invalid-after-prefix'
+): void {
+  const dir = join(base, 'projects', 'fixture', 'agent-transcripts');
+  mkdirSync(dir, { recursive: true });
+  const valid = JSON.stringify({
+    role: 'user',
+    message: { content: [{ type: 'text', text: `transcript:${id}` }] },
+  });
+  const content =
+    state === 'complete'
+      ? `${valid}\n`
+      : state === 'partial'
+        ? `${valid}\n{"role":`
+        : state === 'invalid-encoding'
+          ? Buffer.concat([Buffer.from('{"role":"user","message":"'), Buffer.from([0xff])])
+          : state === 'invalid-after-prefix'
+            ? Buffer.concat([
+                Buffer.from(`${valid}\n{"role":"user","message":"`),
+                Buffer.from([0xff]),
+              ])
+            : '';
+  writeFileSync(join(dir, `${id}.jsonl`), content);
+}
+
+function transcriptCandidate(base: string, project: string, id: string, content: string): string {
+  const dir = join(base, 'projects', project, 'agent-transcripts');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${id}.jsonl`);
+  writeFileSync(
+    path,
+    `${JSON.stringify({
+      role: 'user',
+      message: { content: [{ type: 'text', text: content }] },
+    })}\n`,
+    { encoding: 'utf8', mode: 0o600 }
+  );
+  return path;
+}
+
+function storeDbCandidate(
+  base: string,
+  lane: string,
+  id: string,
+  content: string,
+  cwd = `/work/${id}`
+): string {
+  const dir = join(base, 'chats', lane, id);
+  writeStoreMeta(dir, {
+    cwd,
+    title: `Store ${id}`,
+    hasConversation: true,
+    createdAtMs: 1_783_000_000_000,
+    updatedAtMs: 1_783_000_001_000,
+  });
+  return writeStoreDbAtPath(join(dir, 'store.db'), id, [{ role: 'user', content }], `Store ${id}`);
+}
+
+function shapedStoreDbCandidate(base: string, lane: string, id: string, shape: DbShape): void {
+  const dir = join(base, 'chats', lane, id);
+  writeStoreMeta(dir, {
+    cwd: `/work/${id}`,
+    title: `Store ${id}`,
+    hasConversation: true,
+    createdAtMs: 1_783_000_000_000,
+  });
+  storeDb(dir, shape);
+}
+
+function shapedTranscriptCandidate(
+  base: string,
+  project: string,
+  id: string,
+  state: 'complete' | 'invalid-encoding'
+): void {
+  const dir = join(base, 'projects', project, 'agent-transcripts');
+  mkdirSync(dir, { recursive: true });
+  const valid = JSON.stringify({
+    role: 'user',
+    message: { content: [{ type: 'text', text: `transcript:${id}` }] },
+  });
+  const content =
+    state === 'complete'
+      ? `${valid}\n`
+      : Buffer.concat([Buffer.from('{"role":"user","message":"'), Buffer.from([0xff])]);
+  writeFileSync(join(dir, `${id}.jsonl`), content);
+}
+
+function storeDb(dir: string, shape: DbShape): void {
+  const db = new BetterSqlite3(join(dir, 'store.db'));
+  if (shape === 'source-corrupt') {
+    db.exec('CREATE TABLE unrelated (value TEXT)');
+    db.close();
+    return;
+  }
+  db.exec('CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)');
+  db.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+  let rootHash: string | undefined;
+  if (shape !== 'empty') {
+    const firstLeaf =
+      shape === 'invalid-encoding'
+        ? Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d])
+        : Buffer.from(JSON.stringify({ role: 'user', content: `db:${shape}` }));
+    const firstHash = hash(firstLeaf);
+    db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(firstHash, firstLeaf);
+    const leafFrames = [frame(firstHash)];
+    if (shape === 'invalid-after-prefix') {
+      const invalidLeaf = Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]);
+      const invalidHash = hash(invalidLeaf);
+      db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(invalidHash, invalidLeaf);
+      leafFrames.push(frame(invalidHash));
+    }
+    const rootData =
+      shape === 'partial'
+        ? Buffer.concat([frame(firstHash), frame(hash(Buffer.from('missing')))])
+        : Buffer.concat(leafFrames);
+    rootHash = hash(rootData);
+    db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(rootHash, rootData);
+  }
+  db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(
+    '0',
+    Buffer.from(JSON.stringify({ name: shape, latestRootBlobId: rootHash })).toString('hex')
+  );
+  db.close();
+}
+
+function byId<T extends { id: string }>(values: T[], id: string): T {
+  const value = values.find((candidate) => candidate.id === id);
+  expect(value, `missing ${id}`).toBeDefined();
+  return value!;
+}
+
+afterEach(() => {
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+describe('StoreDbExpectation and representation selection', () => {
+  it('covers the complete expected/not-expected/unknown selection matrix with real sources', async () => {
+    const base = root();
+
+    const completeDb = 'expected-complete-db';
+    storeDb(chatDir(base, completeDb, true), 'complete');
+    transcript(base, completeDb, 'complete');
+
+    const partialDb = 'expected-partial-db';
+    storeDb(chatDir(base, partialDb, true), 'partial');
+    transcript(base, partialDb, 'complete');
+
+    const expectedCompleteTranscript = 'expected-missing-db-complete-transcript';
+    chatDir(base, expectedCompleteTranscript, true);
+    transcript(base, expectedCompleteTranscript, 'complete');
+
+    const expectedPartialTranscript = 'expected-empty-db-partial-transcript';
+    storeDb(chatDir(base, expectedPartialTranscript, true), 'empty');
+    transcript(base, expectedPartialTranscript, 'partial');
+
+    const notExpectedComplete = 'not-expected-complete-transcript';
+    chatDir(base, notExpectedComplete, false);
+    transcript(base, notExpectedComplete, 'complete');
+
+    const notExpectedPartial = 'not-expected-partial-transcript';
+    chatDir(base, notExpectedPartial, false);
+    transcript(base, notExpectedPartial, 'partial');
+
+    const transcriptOnly = 'canonical-transcript-only';
+    transcript(base, transcriptOnly, 'complete');
+
+    const unknownTranscript = 'unknown-complete-transcript';
+    chatDir(base, unknownTranscript);
+    transcript(base, unknownTranscript, 'complete');
+
+    const expectedMetadata = 'expected-no-conversation';
+    chatDir(base, expectedMetadata, true);
+
+    const unknownMetadata = 'unknown-no-conversation';
+    chatDir(base, unknownMetadata);
+
+    const notExpectedEvidence = 'not-expected-empty-transcript';
+    chatDir(base, notExpectedEvidence, false);
+    transcript(base, notExpectedEvidence, 'empty');
+
+    const explicitNoConversation = 'explicit-no-conversation';
+    chatDir(base, explicitNoConversation, false);
+
+    const corruptDbFallback = 'expected-corrupt-db-transcript';
+    storeDb(chatDir(base, corruptDbFallback, true), 'source-corrupt');
+    transcript(base, corruptDbFallback, 'complete');
+
+    const sessions = await discoverStoreSessions(base);
+
+    expect(byId(sessions, completeDb)).toMatchObject({
+      storeDbExpectation: 'expected',
+      source: 'global',
+      resolvedSource: 'store-db',
+      resolution: { state: 'complete', reasonCodes: [] },
+    });
+    expect(byId(sessions, completeDb).messages[0]?.content).toBe('db:complete');
+
+    expect(byId(sessions, partialDb)).toMatchObject({
+      storeDbExpectation: 'expected',
+      source: 'workspace-fallback',
+      resolvedSource: 'store-db',
+      resolution: { state: 'partial', reasonCodes: ['source-partial'] },
+    });
+    expect(byId(sessions, partialDb).messages[0]?.content).toBe('db:partial');
+
+    for (const id of [expectedCompleteTranscript, corruptDbFallback]) {
+      expect(byId(sessions, id)).toMatchObject({
+        storeDbExpectation: 'expected',
+        source: 'workspace-fallback',
+        resolvedSource: 'store-transcript',
+        resolution: { state: 'partial', reasonCodes: ['expected-store-db-unavailable'] },
+      });
+    }
+    expect(byId(sessions, expectedPartialTranscript).resolution?.reasonCodes).toEqual([
+      'source-partial',
+      'expected-store-db-unavailable',
+    ]);
+
+    expect(byId(sessions, notExpectedComplete)).toMatchObject({
+      storeDbExpectation: 'not-expected',
+      source: 'global',
+      resolvedSource: 'store-transcript',
+      resolution: { state: 'complete', reasonCodes: [] },
+    });
+    expect(byId(sessions, transcriptOnly).storeDbExpectation).toBe('not-expected');
+    expect(byId(sessions, transcriptOnly).source).toBe('global');
+    expect(byId(sessions, notExpectedPartial).resolution?.reasonCodes).toEqual(['source-partial']);
+
+    expect(byId(sessions, unknownTranscript)).toMatchObject({
+      storeDbExpectation: 'unknown',
+      source: 'workspace-fallback',
+      resolvedSource: 'store-transcript',
+      resolution: { state: 'partial', reasonCodes: ['store-db-expectation-unknown'] },
+    });
+
+    for (const id of [expectedMetadata, unknownMetadata, notExpectedEvidence]) {
+      expect(byId(sessions, id)).toMatchObject({
+        source: 'workspace-fallback',
+        resolvedSource: 'store-metadata',
+        resolution: { state: 'partial', reasonCodes: ['store-conversation-unavailable'] },
+      });
+    }
+    expect(sessions.some((session) => session.id === explicitNoConversation)).toBe(false);
+  });
+
+  it('lets positive expected evidence win conflicting false/unsupported metadata', async () => {
+    const base = root();
+    const id = 'positive-wins';
+    const first = chatDir(base, id, false);
+    writeFileSync(
+      join(first, 'meta.json'),
+      JSON.stringify({ hasConversation: false, createdAtMs: 1783000000000 })
+    );
+    const second = join(base, 'acp-sessions', id);
+    mkdirSync(second, { recursive: true });
+    writeFileSync(join(second, 'meta.json'), JSON.stringify({ hasConversation: true }));
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session.storeDbExpectation).toBe('expected');
+    expect(session.resolvedSource).toBe('store-metadata');
+  });
+
+  it('propagates capability/snapshot infrastructure failures without transcript fallback', async () => {
+    const base = root();
+    const id = 'fatal-infrastructure';
+    storeDb(chatDir(base, id, true), 'complete');
+    transcript(base, id, 'complete');
+    const spy = vi
+      .spyOn(database, 'backupDatabase')
+      .mockRejectedValueOnce(
+        new DatabaseCapabilityError('node:sqlite', 'store-snapshot', ['onlineBackup'])
+      );
+    spies.push(spy);
+
+    await expect(discoverStoreSessions(base)).rejects.toMatchObject({
+      code: 'DATABASE_CAPABILITY_MISSING',
+    });
+  });
+
+  it('promotes typed source failures when no safe alternate contributor exists', async () => {
+    const transcriptRoot = root();
+    transcript(transcriptRoot, 'bad-transcript', 'invalid-encoding');
+    await expect(discoverStoreSessions(transcriptRoot)).rejects.toMatchObject({
+      code: 'SOURCE_ENCODING_INVALID',
+      details: { sourceKind: 'jsonl', outcome: 'fatal' },
+    });
+
+    const dbRoot = root();
+    storeDb(chatDir(dbRoot, 'bad-db', true), 'invalid-encoding');
+    await expect(discoverStoreSessions(dbRoot)).rejects.toMatchObject({
+      code: 'SOURCE_ENCODING_INVALID',
+      details: { sourceKind: 'sqlite', outcome: 'fatal' },
+    });
+
+    const limitedRoot = root();
+    transcript(limitedRoot, 'bounded-transcript', 'complete');
+    await expect(
+      discoverStoreSessions(limitedRoot, {
+        sourceReadLimits: { jsonlRecordBytes: 8, jsonlSourceBytes: 128 * 1024 },
+      })
+    ).rejects.toMatchObject({
+      code: 'SOURCE_LIMIT_EXCEEDED',
+      details: { sourceKind: 'jsonl', bound: 'jsonl-record-bytes', outcome: 'fatal' },
+    });
+  });
+
+  it('retains partial diagnostics only when a real alternate contributor remains', async () => {
+    const dbFailureRoot = root();
+    const dbFailureId = 'db-failure-with-transcript';
+    storeDb(chatDir(dbFailureRoot, dbFailureId, true), 'invalid-encoding');
+    transcript(dbFailureRoot, dbFailureId, 'complete');
+    const dbDiagnostics: unknown[] = [];
+    const transcriptFallback = byId(
+      await discoverStoreSessions(dbFailureRoot, {
+        onDiagnostic: (diagnostic) => dbDiagnostics.push(diagnostic),
+      }),
+      dbFailureId
+    );
+    expect(transcriptFallback).toMatchObject({
+      resolvedSource: 'store-transcript',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed', 'expected-store-db-unavailable'],
+      },
+      diagnostics: [
+        expect.objectContaining({
+          code: 'SOURCE_ENCODING_INVALID',
+          sourceKind: 'sqlite',
+          outcome: 'partial',
+        }),
+      ],
+    });
+    expect(dbDiagnostics).toEqual(transcriptFallback.diagnostics);
+
+    const transcriptFailureRoot = root();
+    const transcriptFailureId = 'transcript-failure-with-db';
+    storeDb(chatDir(transcriptFailureRoot, transcriptFailureId, true), 'complete');
+    transcript(transcriptFailureRoot, transcriptFailureId, 'invalid-encoding');
+    const dbFallback = byId(
+      await discoverStoreSessions(transcriptFailureRoot),
+      transcriptFailureId
+    );
+    expect(dbFallback).toMatchObject({
+      resolvedSource: 'store-db',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+      diagnostics: [
+        expect.objectContaining({
+          code: 'SOURCE_ENCODING_INVALID',
+          sourceKind: 'jsonl',
+          outcome: 'partial',
+        }),
+      ],
+    });
+  });
+
+  it('does not let two truncated representations validate each other as safe', async () => {
+    const base = root();
+    const id = 'both-sources-fail-after-prefix';
+    storeDb(chatDir(base, id, true), 'invalid-after-prefix');
+    transcript(base, id, 'invalid-after-prefix');
+
+    await expect(discoverStoreSessions(base)).rejects.toMatchObject({
+      code: 'SOURCE_ENCODING_INVALID',
+      details: { outcome: 'fatal' },
+    });
+  });
+
+  it('propagates non-ENOENT transcript read failures instead of publishing metadata', async () => {
+    const base = root();
+    const id = 'transcript-read-failure';
+    chatDir(base, id, true);
+    const nested = join(base, 'projects', 'fixture', 'agent-transcripts', id, `${id}.jsonl`);
+    mkdirSync(nested, { recursive: true });
+
+    await expect(discoverStoreSessions(base)).rejects.toMatchObject({ code: 'EISDIR' });
+  });
+});
+
+describe('same-tier Store replica groups', () => {
+  const basePayload: ReplicaConsumedPayload = {
+    messages: [{ id: 'store-message', role: 'user', content: 'same-tier-content' }],
+  };
+
+  function instance(
+    key: string,
+    representation: 'store-db' | 'store-transcript',
+    payload: ReplicaConsumedPayload,
+    sourceOrder: number
+  ): PhysicalSessionInstance<string> {
+    return {
+      instanceKey: key,
+      logicalSessionId: 'ffffffff-0000-0000-0000-000000000070',
+      sourceRole: 'store',
+      representation,
+      fidelityTier: 'complete',
+      locator: `/private/${key}`,
+      workspacePaths: ['/work/same-tier'],
+      sourceOrder,
+      loadConsumedPayload: async () => payload,
+    };
+  }
+
+  it.each(['store-db', 'store-transcript'] as const)(
+    'reconciles equivalent %s candidates independently of discovery permutation',
+    async (representation) => {
+      const candidates = [
+        instance('candidate-z', representation, basePayload, 9),
+        instance(
+          'candidate-a',
+          representation,
+          {
+            ...basePayload,
+            messages: [
+              {
+                ...basePayload.messages[0]!,
+                timestampSource: 'epoch-unknown',
+                files: ['/ignored/standalone-evidence'],
+              },
+            ],
+          },
+          1
+        ),
+      ];
+      const forwardGroup = buildSessionCatalog(candidates)[0]!.replicaGroups[0]!;
+      const reverseGroup = buildSessionCatalog([...candidates].reverse())[0]!.replicaGroups[0]!;
+      const forward = await reconcileReplicaGroup(forwardGroup);
+      const reverse = await reconcileReplicaGroup(reverseGroup);
+
+      expect(forward.state).toBe('equivalent');
+      expect(reverse.state).toBe('equivalent');
+      if (forward.state !== 'equivalent' || reverse.state !== 'equivalent') {
+        throw new Error('Expected equivalent same-tier Store candidates');
+      }
+      expect(forward.selected.instanceKey).toBe('candidate-a');
+      expect(reverse.selected.instanceKey).toBe('candidate-a');
+      expect(reverse.sourceInstances).toEqual(forward.sourceInstances);
+    }
+  );
+
+  it.each([
+    [
+      'message identity',
+      { messages: [{ id: 'other', role: 'user', content: 'same-tier-content' }] },
+    ],
+    [
+      'role',
+      { messages: [{ id: 'store-message', role: 'assistant', content: 'same-tier-content' }] },
+    ],
+    ['content', { messages: [{ id: 'store-message', role: 'user', content: 'changed' }] }],
+    [
+      'stored timestamp',
+      {
+        messages: [
+          {
+            id: 'store-message',
+            role: 'user',
+            content: 'same-tier-content',
+            directTimestamp: 1_783_000_000_000,
+          },
+        ],
+      },
+    ],
+  ] satisfies Array<[string, ReplicaConsumedPayload]>)(
+    'classifies a changed consumed %s as divergent in both Store tiers',
+    async (_field, changed) => {
+      for (const representation of ['store-db', 'store-transcript'] as const) {
+        const group = buildSessionCatalog([
+          instance('left', representation, basePayload, 1),
+          instance('right', representation, changed, 2),
+        ])[0]!.replicaGroups[0]!;
+        await expect(
+          reconcileReplicaGroup(group, { diagnosticContextId: 'store-matrix' })
+        ).resolves.toMatchObject({ state: 'divergent' });
+      }
+    }
+  );
+
+  it('retains both equivalent DB occurrences while returning one Store contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000071';
+    storeDbCandidate(base, 'candidate-z', id, 'equivalent-db-content');
+    storeDbCandidate(base, 'candidate-a', id, 'equivalent-db-content');
+
+    const matches = (await discoverStoreSessions(base)).filter((session) => session.id === id);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]).toMatchObject({
+      resolvedSource: 'store-db',
+      messages: [expect.objectContaining({ content: 'equivalent-db-content' })],
+      sourceInstances: [
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-db', state: 'equivalent-replica' }),
+      ],
+    });
+  });
+
+  it('retains both equivalent transcript occurrences when no DB is expected', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000072';
+    transcriptCandidate(base, 'candidate-z', id, 'equivalent-transcript-content');
+    transcriptCandidate(base, 'candidate-a', id, 'equivalent-transcript-content');
+
+    const matches = (await discoverStoreSessions(base)).filter((session) => session.id === id);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]).toMatchObject({
+      storeDbExpectation: 'not-expected',
+      resolvedSource: 'store-transcript',
+      messages: [expect.objectContaining({ content: 'equivalent-transcript-content' })],
+      sourceInstances: [
+        expect.objectContaining({ representation: 'store-transcript', state: 'contributed' }),
+        expect.objectContaining({
+          representation: 'store-transcript',
+          state: 'equivalent-replica',
+        }),
+      ],
+    });
+  });
+
+  it('retains a failed DB replica beside a complete same-tier contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000074';
+    storeDbCandidate(base, 'complete-db', id, 'complete-db-content');
+    shapedStoreDbCandidate(base, 'failed-db', id, 'invalid-encoding');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      resolvedSource: 'store-db',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+      messages: [expect.objectContaining({ content: 'complete-db-content' })],
+      diagnostics: [expect.objectContaining({ code: 'SOURCE_ENCODING_INVALID' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-db', state: 'failed' }),
+      ]),
+    });
+  });
+
+  it('does not hide a source-corrupt DB replica behind a complete same-tier contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000076';
+    storeDbCandidate(base, 'complete-db', id, 'complete-db-content');
+    shapedStoreDbCandidate(base, 'corrupt-db', id, 'source-corrupt');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      resolvedSource: 'store-db',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+      messages: [expect.objectContaining({ content: 'complete-db-content' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-db', state: 'failed' }),
+      ]),
+    });
+  });
+
+  it('retains a failed transcript replica beside a complete same-tier contribution', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000075';
+    shapedTranscriptCandidate(base, 'complete-transcript', id, 'complete');
+    shapedTranscriptCandidate(base, 'failed-transcript', id, 'invalid-encoding');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      storeDbExpectation: 'not-expected',
+      resolvedSource: 'store-transcript',
+      resolution: {
+        state: 'partial',
+        failedSourceRoles: ['store'],
+        reasonCodes: ['source-read-failed'],
+      },
+      diagnostics: [expect.objectContaining({ code: 'SOURCE_ENCODING_INVALID' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-transcript', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-transcript', state: 'failed' }),
+      ]),
+    });
+  });
+
+  it('does not compare divergent transcript fallbacks against a usable DB tier', async () => {
+    const base = root();
+    const id = 'ffffffff-0000-0000-0000-000000000073';
+    storeDbCandidate(base, 'db-primary', id, 'selected-db-content');
+    transcriptCandidate(base, 'transcript-a', id, 'divergent-transcript-a');
+    transcriptCandidate(base, 'transcript-z', id, 'divergent-transcript-z');
+
+    const session = byId(await discoverStoreSessions(base), id);
+    expect(session).toMatchObject({
+      resolvedSource: 'store-db',
+      resolution: { state: 'complete' },
+      messages: [expect.objectContaining({ content: 'selected-db-content' })],
+      sourceInstances: expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-db', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-transcript', state: 'superseded' }),
+      ]),
+    });
+    expect(session.messages.map(({ content }) => content)).not.toContain('divergent-transcript-a');
+    expect(session.messages.map(({ content }) => content)).not.toContain('divergent-transcript-z');
+  });
+});

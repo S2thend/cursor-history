@@ -1,12 +1,17 @@
 <!--
   SYNC IMPACT REPORT
   ==================
-  Version change: 1.0.0 → 1.1.0
+  Version change: 1.1.0 → 1.2.0
+
+  Added Sections:
+  - Core Principle VI: Stable Public Contracts and Source Fidelity
 
   Modified Sections:
-  - Technical Standards: Python → TypeScript/Node.js
+  - Development Workflow: compatibility review added to the required review checklist
 
-  Rationale: JavaScript chosen for future GUI extensibility (Electron/Tauri)
+  Rationale: Public return values are persisted by incremental consumers. Native identities,
+  deterministic synthetic identities, completeness signals, and provenance therefore require
+  explicit backward-compatibility treatment rather than being considered presentation details.
 
   Templates Requiring Updates:
   - .specify/templates/plan-template.md ✅ (generic, no updates needed)
@@ -85,6 +90,31 @@ The parser MUST handle malformed, incomplete, or unexpected input gracefully.
 **Rationale**: Cursor chat history files may vary across versions or be partially corrupted.
 Robust parsing ensures the tool remains useful in real-world conditions.
 
+### VI. Stable Public Contracts and Source Fidelity
+
+Public return values that consumers can persist, compare, address, deduplicate, or use for
+incremental synchronization MUST be treated as compatibility contracts once released.
+
+- Native source identifiers MUST be preserved byte-for-byte whenever they are available
+- Synthetic identifiers MUST be deterministic, versioned, and assigned before transformations
+  such as merging or filtering can change presentation order
+- Logical identity MUST remain separate from physical location, workspace membership, source
+  provenance, and ephemeral presentation indices
+- Existing public values MUST NOT silently change meaning; additive fields are preferred, and any
+  unavoidable change requires a documented compatibility transition and migration guidance
+- Resolved data MUST retain the highest available source fidelity: incomplete data MUST be marked
+  as incomplete, inferred values MUST be identified as inferred, and content MUST NOT be
+  attributed to the wrong logical identity or source path
+- A change to a stable public contract MUST be tested against fixtures from every affected
+  supported release, including round-trip and idempotent incremental-upgrade scenarios
+- An intentional breaking change requires an appropriate version change, release warning, and a
+  practical migration or pinning path before publication
+
+**Rationale**: Library users build durable archives and database keys from cursor-history output.
+Identity drift, silent semantic changes, or fidelity loss can corrupt those archives even when the
+CLI still appears to work. Preserving the source's original identity and clearly separating derived
+metadata keeps upgrades safe for both existing and new consumers.
+
 ## Technical Standards
 
 - **Language**: TypeScript 5.0+ (strict mode enabled)
@@ -100,7 +130,8 @@ Robust parsing ensures the tool remains useful in real-world conditions.
 
 1. **Spec before code**: Write or update spec.md before implementing a feature
 2. **Small PRs**: Each PR addresses one concern; avoid bundling unrelated changes
-3. **Review checklist**: Verify simplicity, CLI conventions, and documentation
+3. **Review checklist**: Verify simplicity, CLI conventions, documentation, public-contract
+   compatibility, and source fidelity
 4. **Manual testing**: Run the tool on real Cursor chat exports before merging
 5. **Release notes**: Update CHANGELOG for every user-facing change
 
@@ -120,4 +151,4 @@ This constitution supersedes conflicting guidance elsewhere in the repository.
 - All PRs MUST verify adherence to Core Principles
 - Complexity beyond simplest solution MUST be justified in PR description
 
-**Version**: 1.1.0 | **Ratified**: 2025-12-18 | **Last Amended**: 2025-12-18
+**Version**: 1.2.0 | **Ratified**: 2025-12-18 | **Last Amended**: 2026-08-05

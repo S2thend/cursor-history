@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "taggedRelease": "v0.17.0",
+  "fixtureKind": "complete-composer-backed-merged-session",
+  "session": {
+    "id": "00000000-0017-4017-8017-000000000017",
+    "workspace": "/fixture/v017/merged-project",
+    "timestamp": "2024-01-17T00:00:00.000Z",
+    "source": "merged",
+    "sources": ["composer", "store"],
+    "preferredSource": "composer",
+    "transcriptState": "parsed",
+    "messageCount": 5,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Synthetic v0.17 Store-only opening turn.",
+        "timestamp": "2024-01-16T23:59:59.000Z",
+        "source": "store"
+      },
+      {
+        "id": "native-composer-user-017",
+        "role": "user",
+        "content": "Synthetic v0.17 merged question.",
+        "timestamp": "2024-01-17T00:00:01.000Z",
+        "source": "both"
+      },
+      {
+        "role": "assistant",
+        "content": "Synthetic v0.17 Store-only middle turn.",
+        "timestamp": "2024-01-17T00:00:01.500Z",
+        "source": "store"
+      },
+      {
+        "id": "native-composer-assistant-017",
+        "role": "assistant",
+        "content": "Synthetic v0.17 merged answer.",
+        "timestamp": "2024-01-17T00:00:02.000Z",
+        "source": "both",
+        "toolCalls": [
+          {
+            "name": "synthetic_read",
+            "status": "completed",
+            "params": { "path": "/fixture/v017/merged-project/input.txt" },
+            "result": "synthetic merged result"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "Synthetic v0.17 Store-only closing turn.",
+        "timestamp": "2024-01-17T00:00:03.000Z",
+        "source": "store"
+      }
+    ],
+    "activeBranchBubbleIds": ["native-composer-user-017", "native-composer-assistant-017"],
+    "metadata": { "lastModified": "2024-01-17T00:00:03.000Z" }
+  },
+  "expectedCorrectiveTransition": {
+    "incomingLegacySource": "global",
+    "resolvedSource": "merged",
+    "replacementCount": 1,
+    "nextUnchangedWriteCount": 0,
+    "duplicateLogicalContentCount": 0,
+    "preservedIds": ["native-composer-user-017", "native-composer-assistant-017"],
+    "nonContractualValues": ["v0.17 Store positional IDs", "cross-format Store IDs"]
+  }
+}

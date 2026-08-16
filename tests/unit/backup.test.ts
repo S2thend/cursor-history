@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import packageJson from '../../package.json';
 
 // Mock node:fs
 vi.mock('node:fs', async () => {
@@ -15,15 +16,19 @@ vi.mock('node:fs', async () => {
     statSync: vi.fn(),
     unlinkSync: vi.fn(),
     rmdirSync: vi.fn(),
-  };
-});
-
-vi.mock('node:fs/promises', async () => {
-  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
-  return {
-    ...actual,
-    readFile: vi.fn(),
-    writeFile: vi.fn(),
+    chmodSync: vi.fn(),
+    closeSync: vi.fn(),
+    copyFileSync: vi.fn(),
+    fchmodSync: vi.fn(),
+    fstatSync: vi.fn(() => ({ isFile: () => true })),
+    fsyncSync: vi.fn(),
+    linkSync: vi.fn(),
+    lstatSync: vi.fn(),
+    openSync: vi.fn(() => 42),
+    readSync: vi.fn(() => 0),
+    realpathSync: vi.fn((path: Parameters<typeof actual.realpathSync>[0]) => String(path)),
+    renameSync: vi.fn(),
+    writeSync: vi.fn(),
   };
 });
 
@@ -41,46 +46,111 @@ vi.mock('../../src/core/database/registry.js', () => ({
 vi.mock('../../src/core/database/index.js', () => ({
   backupDatabase: vi.fn().mockResolvedValue(undefined),
   ensureDriver: vi.fn().mockResolvedValue(undefined),
+  openDatabase: vi.fn(),
 }));
 
-// Mock jszip - vi.hoisted ensures variables are available in hoisted vi.mock
-const { mockZipFile, mockZipGenerateAsync, mockZipLoadAsync } = vi.hoisted(() => ({
-  mockZipFile: vi.fn(),
-  mockZipGenerateAsync: vi.fn(),
-  mockZipLoadAsync: vi.fn(),
+const {
+  createPrivateTempWorkspaceMock,
+  disposePrivateTempWorkspaceMock,
+  openBoundedZipArchiveMock,
+  prepareZipFileInputsMock,
+  writeBoundedZipArchiveMock,
+} = vi.hoisted(() => ({
+  createPrivateTempWorkspaceMock: vi.fn(),
+  disposePrivateTempWorkspaceMock: vi.fn(),
+  openBoundedZipArchiveMock: vi.fn(),
+  prepareZipFileInputsMock: vi.fn(),
+  writeBoundedZipArchiveMock: vi.fn(),
 }));
 
-vi.mock('jszip', () => {
-  function MockJSZip() {
-    return {
-      file: mockZipFile,
-      generateAsync: mockZipGenerateAsync,
-    };
+vi.mock('../../src/core/private-temp.js', () => ({
+  createPrivateTempWorkspace: createPrivateTempWorkspaceMock,
+}));
+
+vi.mock('../../src/core/backup-publication.js', () => ({
+  enforcePublishedArchiveMode: vi.fn(),
+}));
+
+vi.mock('../../src/core/zip-stream.js', () => {
+  class MockZipArchiveFormatError extends Error {
+    override readonly name = 'ZipArchiveFormatError';
   }
-  MockJSZip.loadAsync = mockZipLoadAsync;
-  return { default: MockJSZip };
+  return {
+    BoundedZipArchive: class {},
+    ZipArchiveFormatError: MockZipArchiveFormatError,
+    openBoundedZipArchive: openBoundedZipArchiveMock,
+    prepareZipFileInputs: prepareZipFileInputsMock,
+    writeBoundedZipArchive: writeBoundedZipArchiveMock,
+  };
 });
 
-import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import {
   getDefaultBackupDir,
   computeChecksum,
   generateBackupFilename,
   scanDatabaseFiles,
   createManifest,
+  serializeBackupManifest,
   checkDiskSpace,
   readBackupManifest,
+  readBackupEntryBuffer,
   listBackups,
   validateBackup,
   createBackup,
   restoreBackup,
-  openBackupDatabase,
 } from '../../src/core/backup.js';
+import { ZipArchiveFormatError } from '../../src/core/zip-stream.js';
+import { RestoreRollbackError, TemporaryArtifactCleanupError } from '../../src/core/errors.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  createPrivateTempWorkspaceMock.mockReturnValue({
+    path: '/private-workspace',
+    marker: {},
+    state: 'open',
+    createFile: vi.fn((name: string) => `/private-workspace/${name}`),
+    register: vi.fn(),
+    dispose: disposePrivateTempWorkspaceMock,
+  });
+  prepareZipFileInputsMock.mockImplementation(
+    async (inputs: Array<{ name: string; sourcePath: string }>) =>
+      inputs.map((input, index) => ({
+        ...input,
+        size: index + 1,
+        crc32: index + 1,
+        checksum: `sha256:${String(index + 1).padStart(64, '0')}`,
+      }))
+  );
+  writeBoundedZipArchiveMock.mockResolvedValue({ archiveSize: 1, entryCount: 1 });
+  const missing = Object.assign(new Error('missing archive'), { code: 'ENOENT' });
+  openBoundedZipArchiveMock.mockRejectedValue(missing);
 });
+
+function mockArchive(entries: Readonly<Record<string, Buffer>>) {
+  return {
+    entries: Object.entries(entries).map(([name, data]) => ({
+      name,
+      isDirectory: false,
+      uncompressedSize: data.length,
+    })),
+    getEntry: vi.fn((name: string) => {
+      const data = entries[name];
+      return data ? { name, isDirectory: false, uncompressedSize: data.length } : undefined;
+    }),
+    readEntryBuffer: vi.fn(async (name: string) => entries[name]),
+    checksumEntry: vi.fn(async (name: string) => ({
+      entry: { name, isDirectory: false, uncompressedSize: entries[name]!.length },
+      checksum: computeChecksum(entries[name]!),
+    })),
+    extractEntryToFile: vi.fn(),
+    extractEntryToFileWithChecksum: vi.fn(async (name: string) => ({
+      entry: { name, isDirectory: false, uncompressedSize: entries[name]!.length },
+      checksum: computeChecksum(entries[name]!),
+    })),
+    close: vi.fn(),
+  };
+}
 
 // =============================================================================
 // getDefaultBackupDir
@@ -180,6 +250,62 @@ describe('createManifest', () => {
     expect(manifest.sourcePlatform).toBe(expectedPlatform);
     expect(manifest.files).toEqual(files);
     expect(manifest.stats).toEqual(stats);
+    expect(manifest.producer).toBe(packageJson.version);
+    expect(manifest.cursorHistoryVersion).toBe(packageJson.version);
+  });
+
+  it('keeps the v1 envelope while independently versioning additive workspace inventory', () => {
+    const manifest = createManifest(
+      [],
+      { totalSize: 0, sessionCount: 0, workspaceCount: 1 },
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'workspace-a',
+            workspacePath: '/project/a',
+            sessionIds: [],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      }
+    );
+
+    expect(manifest.version).toBe('1.0.0');
+    expect(manifest.composerWorkspaceInventory?.schemaVersion).toBe(1);
+  });
+
+  it('accepts exactly the reader metadata ceiling and rejects the first byte above it', () => {
+    const base = createManifest(
+      [],
+      { totalSize: 0, sessionCount: 0, workspaceCount: 0 },
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '',
+            sessionIds: [],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      }
+    );
+    const ceiling = 16 * 1024 * 1024;
+    const baseBytes = serializeBackupManifest(base).byteLength;
+    const exactPath = '/'.padEnd(ceiling - baseBytes, 'x');
+    const withPath = (workspacePath: string) => ({
+      ...base,
+      composerWorkspaceInventory: {
+        schemaVersion: 1 as const,
+        workspaces: [{ ...base.composerWorkspaceInventory!.workspaces[0]!, workspacePath }],
+      },
+    });
+
+    expect(serializeBackupManifest(withPath(exactPath))).toHaveLength(ceiling);
+    expect(() => serializeBackupManifest(withPath(`${exactPath}x`))).toThrow('metadata limit');
   });
 });
 
@@ -212,36 +338,343 @@ describe('readBackupManifest', () => {
   it('returns manifest from valid backup', async () => {
     const manifest = { version: '1.0.0', files: [] };
     const manifestBuffer = Buffer.from(JSON.stringify(manifest));
-
-    vi.mocked(readFile).mockResolvedValue(Buffer.from('zipdata'));
-    mockZipLoadAsync.mockResolvedValue({
-      file: vi.fn((name: string) => {
-        if (name === 'manifest.json') {
-          return { async: vi.fn().mockResolvedValue(manifestBuffer) };
-        }
-        return null;
-      }),
-    });
+    const archive = mockArchive({ 'manifest.json': manifestBuffer });
+    openBoundedZipArchiveMock.mockResolvedValue(archive);
 
     const result = await readBackupManifest('/backup.zip');
     expect(result).not.toBeNull();
     expect(result!.version).toBe('1.0.0');
+    expect(result!.producer).toBeUndefined();
+    expect(archive.readEntryBuffer).toHaveBeenCalledWith('manifest.json', 16 * 1024 * 1024);
   });
 
   it('returns null when manifest missing', async () => {
-    vi.mocked(readFile).mockResolvedValue(Buffer.from('zipdata'));
-    mockZipLoadAsync.mockResolvedValue({
-      file: vi.fn(() => null),
-    });
+    openBoundedZipArchiveMock.mockResolvedValue(mockArchive({}));
 
     const result = await readBackupManifest('/backup.zip');
     expect(result).toBeNull();
   });
 
   it('returns null on error', async () => {
-    vi.mocked(readFile).mockRejectedValue(new Error('file not found'));
     const result = await readBackupManifest('/nonexistent.zip');
     expect(result).toBeNull();
+  });
+
+  it('propagates backup I/O failures other than an absent archive', async () => {
+    const failure = Object.assign(new Error('synthetic archive I/O failure'), { code: 'EIO' });
+    openBoundedZipArchiveMock.mockRejectedValueOnce(failure);
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toBe(failure);
+  });
+
+  it('propagates malformed archive and manifest integrity failures', async () => {
+    const failure = new ZipArchiveFormatError('synthetic manifest CRC failure');
+    openBoundedZipArchiveMock.mockRejectedValueOnce(failure);
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toBe(failure);
+  });
+
+  it('rejects a manifest whose files inventory is not an array', async () => {
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': Buffer.from(JSON.stringify({ version: '1.0.0', files: 'not-an-array' })),
+      })
+    );
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toBeInstanceOf(ZipArchiveFormatError);
+  });
+
+  it.each([
+    ['settings.json', 'global-db'],
+    ['workspaceStorage/ws/state.vscdb', 'workspace-json'],
+    ['globalStorage/state.vscdb', 'manifest'],
+  ] as const)('rejects unsupported manifest path/type mapping %s as %s', async (path, type) => {
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': Buffer.from(
+          JSON.stringify({
+            version: '1.0.0',
+            files: [{ path, size: 1, checksum: `sha256:${'0'.repeat(64)}`, type }],
+          })
+        ),
+      })
+    );
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toThrow(
+      'unsupported path/type combination'
+    );
+  });
+
+  it('rejects duplicate manifest destinations before archive entry reads', async () => {
+    const file = {
+      path: 'globalStorage/state.vscdb',
+      size: 1,
+      checksum: `sha256:${'0'.repeat(64)}`,
+      type: 'global-db',
+    };
+    const archive = mockArchive({
+      'manifest.json': Buffer.from(
+        JSON.stringify({ version: '1.0.0', files: [file, { ...file }] })
+      ),
+    });
+    openBoundedZipArchiveMock.mockResolvedValueOnce(archive);
+
+    await expect(readBackupManifest('/backup.zip')).rejects.toThrow(
+      'duplicate restore destination'
+    );
+    expect(archive.checksumEntry).not.toHaveBeenCalled();
+  });
+
+  it('accepts a canonically ordered complete Composer workspace inventory', async () => {
+    const workspaceFile = {
+      path: 'workspaceStorage/ws/state.vscdb',
+      size: 1,
+      checksum: `sha256:${'0'.repeat(64)}`,
+      type: 'workspace-db',
+    };
+    const archive = mockArchive({
+      'manifest.json': Buffer.from(
+        JSON.stringify({
+          version: '1.0.0',
+          files: [workspaceFile],
+          composerWorkspaceInventory: {
+            schemaVersion: 1,
+            workspaces: [
+              {
+                workspaceId: 'ws',
+                workspacePath: '/projects/a',
+                sessionIds: ['a-session', 'b-session'],
+                globalCounterpartSessionIds: [],
+                linkedGlobalSessionIds: [],
+              },
+            ],
+          },
+        })
+      ),
+    });
+    openBoundedZipArchiveMock.mockResolvedValueOnce(archive);
+
+    await expect(readBackupManifest('/backup.zip')).resolves.toMatchObject({
+      composerWorkspaceInventory: {
+        schemaVersion: 1,
+        workspaces: [{ workspaceId: 'ws', sessionIds: ['a-session', 'b-session'] }],
+      },
+    });
+  });
+
+  it.each([
+    [
+      'incomplete coverage',
+      { schemaVersion: 1, workspaces: [] },
+      'does not cover every workspace database',
+    ],
+    [
+      'unordered session IDs',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: ['b-session', 'a-session'],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      },
+      'session IDs are not canonically ordered and unique',
+    ],
+    [
+      'global counterpart IDs outside the materialized set',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: ['materialized-session'],
+            globalCounterpartSessionIds: ['global-only-session'],
+            linkedGlobalSessionIds: [],
+          },
+        ],
+      },
+      'has a global counterpart without a materialized workspace session',
+    ],
+    [
+      'linked global IDs without a global database',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: [],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: ['global-session'],
+          },
+        ],
+      },
+      'declares global sessions without a global database entry',
+    ],
+    [
+      'overlapping materialized and linked global IDs',
+      {
+        schemaVersion: 1,
+        workspaces: [
+          {
+            workspaceId: 'ws',
+            workspacePath: '/projects/a',
+            sessionIds: ['same-session'],
+            globalCounterpartSessionIds: [],
+            linkedGlobalSessionIds: ['same-session'],
+          },
+        ],
+      },
+      'overlaps materialized and linked global session IDs',
+    ],
+  ] as const)(
+    'rejects a Composer workspace inventory with %s',
+    async (_label, inventory, error) => {
+      openBoundedZipArchiveMock.mockResolvedValueOnce(
+        mockArchive({
+          'manifest.json': Buffer.from(
+            JSON.stringify({
+              version: '1.0.0',
+              files: [
+                {
+                  path: 'workspaceStorage/ws/state.vscdb',
+                  size: 1,
+                  checksum: `sha256:${'0'.repeat(64)}`,
+                  type: 'workspace-db',
+                },
+              ],
+              composerWorkspaceInventory: inventory,
+            })
+          ),
+        })
+      );
+
+      await expect(readBackupManifest('/backup.zip')).rejects.toThrow(error);
+    }
+  );
+
+  it('propagates immutable source-read options to the bounded ZIP open', async () => {
+    const controller = new AbortController();
+    const archive = mockArchive({});
+    openBoundedZipArchiveMock.mockResolvedValue(archive);
+    const options = {
+      sourceReadLimits: { zipEntryCount: 7 },
+      signal: controller.signal,
+    };
+
+    await readBackupManifest('/backup.zip', options);
+    expect(openBoundedZipArchiveMock).toHaveBeenCalledWith(
+      '/backup.zip',
+      expect.objectContaining({
+        signal: controller.signal,
+        sourceReadLimits: expect.objectContaining({ zipEntryCount: 7 }),
+      })
+    );
+    expect(Object.isFrozen(openBoundedZipArchiveMock.mock.calls[0]![1]!.sourceReadLimits)).toBe(
+      true
+    );
+    expect(archive.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe('readBackupEntryBuffer', () => {
+  it('reads metadata through the bounded archive and returns null for a missing entry', async () => {
+    const workspaceJson = Buffer.from('{"x":1}');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        version: '1.0.0',
+        files: [
+          {
+            path: 'workspaceStorage/ws/workspace.json',
+            size: workspaceJson.length,
+            checksum: computeChecksum(workspaceJson),
+            type: 'workspace-json',
+          },
+        ],
+      })
+    );
+    const archive = mockArchive({
+      'manifest.json': manifest,
+      'workspaceStorage/ws/workspace.json': workspaceJson,
+    });
+    openBoundedZipArchiveMock.mockResolvedValueOnce(archive);
+    await expect(
+      readBackupEntryBuffer('/backup.zip', 'workspaceStorage/ws/workspace.json', {
+        sourceReadLimits: { zipEntryCount: 7 },
+      })
+    ).resolves.toEqual(Buffer.from('{"x":1}'));
+    expect(archive.readEntryBuffer).toHaveBeenCalledWith(
+      'workspaceStorage/ws/workspace.json',
+      16 * 1024 * 1024
+    );
+    expect(archive.close).toHaveBeenCalledOnce();
+
+    const missing = mockArchive({
+      'manifest.json': Buffer.from(JSON.stringify({ version: '1.0.0', files: [] })),
+    });
+    openBoundedZipArchiveMock.mockResolvedValueOnce(missing);
+    await expect(readBackupEntryBuffer('/backup.zip', 'missing.json')).resolves.toBeNull();
+    expect(missing.close).toHaveBeenCalledOnce();
+  });
+
+  it('rejects selected metadata whose bytes do not match the manifest', async () => {
+    const declared = Buffer.from('{"folder":"/safe"}');
+    const corrupted = Buffer.from('{"folder":"/evil"}');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        version: '1.0.0',
+        files: [
+          {
+            path: 'workspaceStorage/ws/workspace.json',
+            size: corrupted.length,
+            checksum: computeChecksum(declared),
+            type: 'workspace-json',
+          },
+        ],
+      })
+    );
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': manifest,
+        'workspaceStorage/ws/workspace.json': corrupted,
+      })
+    );
+
+    await expect(
+      readBackupEntryBuffer('/backup.zip', 'workspaceStorage/ws/workspace.json')
+    ).rejects.toThrow('checksum does not match');
+  });
+
+  it('accepts a legacy uppercase checksum during lazy metadata validation', async () => {
+    const workspaceJson = Buffer.from('{"folder":"/safe"}');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        version: '1.0.0',
+        files: [
+          {
+            path: 'workspaceStorage/ws/workspace.json',
+            size: workspaceJson.length,
+            checksum: computeChecksum(workspaceJson).toUpperCase(),
+            type: 'workspace-json',
+          },
+        ],
+      })
+    );
+    openBoundedZipArchiveMock.mockResolvedValueOnce(
+      mockArchive({
+        'manifest.json': manifest,
+        'workspaceStorage/ws/workspace.json': workspaceJson,
+      })
+    );
+
+    await expect(
+      readBackupEntryBuffer('/backup.zip', 'workspaceStorage/ws/workspace.json')
+    ).resolves.toEqual(workspaceJson);
   });
 });
 
@@ -257,9 +690,7 @@ describe('validateBackup', () => {
   });
 
   it('returns invalid when zip is corrupt', async () => {
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readFile).mockResolvedValue(Buffer.from('not a zip'));
-    mockZipLoadAsync.mockRejectedValue(new Error('Bad zip'));
+    openBoundedZipArchiveMock.mockRejectedValue(new Error('Bad zip'));
 
     const result = await validateBackup('/bad.zip');
     expect(result.status).toBe('invalid');
@@ -267,11 +698,7 @@ describe('validateBackup', () => {
   });
 
   it('returns invalid when manifest is missing', async () => {
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readFile).mockResolvedValue(Buffer.from('zipdata'));
-    mockZipLoadAsync.mockResolvedValue({
-      file: vi.fn(() => null),
-    });
+    openBoundedZipArchiveMock.mockResolvedValue(mockArchive({}));
 
     const result = await validateBackup('/no-manifest.zip');
     expect(result.status).toBe('invalid');
@@ -283,26 +710,26 @@ describe('validateBackup', () => {
     const checksum = computeChecksum(fileContent);
     const manifest = {
       version: '1.0.0',
-      files: [{ path: 'test.db', size: fileContent.length, checksum, type: 'global-db' }],
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: fileContent.length,
+          checksum,
+          type: 'global-db',
+        },
+      ],
     };
 
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readFile).mockResolvedValue(Buffer.from('zipdata'));
-    mockZipLoadAsync.mockResolvedValue({
-      file: vi.fn((name: string) => {
-        if (name === 'manifest.json') {
-          return { async: vi.fn().mockResolvedValue(Buffer.from(JSON.stringify(manifest))) };
-        }
-        if (name === 'test.db') {
-          return { async: vi.fn().mockResolvedValue(fileContent) };
-        }
-        return null;
-      }),
-    });
+    openBoundedZipArchiveMock.mockResolvedValue(
+      mockArchive({
+        'manifest.json': Buffer.from(JSON.stringify(manifest)),
+        'globalStorage/state.vscdb': fileContent,
+      })
+    );
 
     const result = await validateBackup('/valid.zip');
     expect(result.status).toBe('valid');
-    expect(result.validFiles).toContain('test.db');
+    expect(result.validFiles).toContain('globalStorage/state.vscdb');
   });
 });
 
@@ -326,8 +753,6 @@ describe('listBackups', () => {
       size: 5000,
       mtime: new Date('2024-01-15'),
     } as ReturnType<typeof statSync>);
-    vi.mocked(readFile).mockRejectedValue(new Error('mock'));
-
     const result = await listBackups('/backups');
     expect(result).toHaveLength(1);
     expect(result[0]!.filename).toBe('backup1.zip');
@@ -384,7 +809,7 @@ describe('createBackup', () => {
       if (path.endsWith('.zip')) return false; // output doesn't exist yet
       return true; // everything else exists
     });
-    vi.mocked(readdirSync).mockImplementation((_p, _opts) => {
+    vi.mocked(readdirSync).mockImplementation(() => {
       return [
         { name: 'ws1', isDirectory: () => true, isFile: () => false } as unknown as ReturnType<
           typeof readdirSync
@@ -392,15 +817,75 @@ describe('createBackup', () => {
       ];
     });
     vi.mocked(statSync).mockReturnValue({ size: 1024 } as ReturnType<typeof statSync>);
-    vi.mocked(readFileSync).mockReturnValue(Buffer.from('database-content'));
+    vi.mocked(lstatSync).mockReturnValue({
+      dev: 1n,
+      ino: 2n,
+      isFile: () => true,
+    } as unknown as ReturnType<typeof lstatSync>);
 
-    const { writeFile: mockWriteFile } = await import('node:fs/promises');
-    vi.mocked(mockWriteFile).mockResolvedValue(undefined);
-    mockZipGenerateAsync.mockResolvedValue(Buffer.from('zipdata'));
-
-    const result = await createBackup({ outputPath: '/backups/test.zip' });
+    const sourceReadLimits = { zipEntryCount: 10 };
+    const result = await createBackup({
+      outputPath: '/backups/test.zip',
+      sourceReadLimits,
+      sharedPermissions: true,
+    });
     expect(result.success).toBe(true);
     expect(result.manifest.files.length).toBeGreaterThan(0);
+    expect(result.manifest.producer).toBe(packageJson.version);
+    expect(prepareZipFileInputsMock).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        sourceReadLimits: expect.objectContaining(sourceReadLimits),
+      })
+    );
+    const preparedPolicy = prepareZipFileInputsMock.mock.calls[0]![1]!.sourceReadLimits;
+    expect(Object.isFrozen(preparedPolicy)).toBe(true);
+    expect(writeBoundedZipArchiveMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\.cursor-history-backup-/u),
+      expect.arrayContaining([expect.objectContaining({ name: 'manifest.json' })]),
+      expect.objectContaining({ sourceReadLimits: preparedPolicy })
+    );
+  });
+
+  it('copies and freezes one effective source policy before progress callbacks can mutate input', async () => {
+    vi.mocked(mkdirSync).mockImplementation(() => undefined as unknown as string);
+    vi.mocked(existsSync).mockImplementation((path) => !String(path).endsWith('.zip'));
+    vi.mocked(readdirSync).mockReturnValue([]);
+    vi.mocked(statSync).mockReturnValue({ size: 1 } as ReturnType<typeof statSync>);
+    vi.mocked(lstatSync).mockReturnValue({
+      dev: 1n,
+      ino: 2n,
+      isFile: () => true,
+    } as unknown as ReturnType<typeof lstatSync>);
+    const sourceReadLimits = { zipEntryCount: 10 };
+
+    const result = await createBackup({
+      outputPath: '/backups/frozen.zip',
+      sourceReadLimits,
+      onProgress: () => {
+        sourceReadLimits.zipEntryCount = 1;
+      },
+    });
+
+    expect(result.success).toBe(true);
+    const preparePolicy = prepareZipFileInputsMock.mock.calls[0]![1]!.sourceReadLimits;
+    const writePolicy = writeBoundedZipArchiveMock.mock.calls[0]![2]!.sourceReadLimits;
+    expect(preparePolicy).toBe(writePolicy);
+    expect(Object.isFrozen(preparePolicy)).toBe(true);
+    expect(preparePolicy?.zipEntryCount).toBe(10);
+    expect(sourceReadLimits.zipEntryCount).toBe(1);
+  });
+
+  it('rejects invalid source limits before filesystem discovery or archive output', async () => {
+    await expect(
+      createBackup({
+        outputPath: '/backups/test.zip',
+        sourceReadLimits: { zipEntryBytes: 2, zipAggregateBytes: 1 },
+      })
+    ).rejects.toMatchObject({ code: 'SOURCE_LIMIT_CONFIGURATION_INVALID' });
+    expect(existsSync).not.toHaveBeenCalled();
+    expect(prepareZipFileInputsMock).not.toHaveBeenCalled();
+    expect(writeBoundedZipArchiveMock).not.toHaveBeenCalled();
   });
 });
 
@@ -408,6 +893,24 @@ describe('createBackup', () => {
 // restoreBackup
 // =============================================================================
 describe('restoreBackup', () => {
+  it('has no pathname observation-then-mutation rollback window after publication', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const source = fs.readFileSync(resolve('src/core/backup.ts'), 'utf8');
+    const start = source.indexOf(
+      '// Portable Node filesystem APIs cannot atomically prove that a pathname'
+    );
+    const end = source.indexOf('if (shouldPropagateBoundedReadError(error))', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+
+    const failurePath = source.slice(start, end);
+    expect(failurePath).toContain('new RestoreRollbackError');
+    expect(failurePath).toContain('restoredFiles.map');
+    expect(failurePath).not.toMatch(
+      /\b(?:lstatSync|renameSync|unlinkSync|publishRestoreFile)\s*\(/u
+    );
+  });
+
   it('returns failure for invalid backup', async () => {
     vi.mocked(existsSync).mockReturnValue(false); // backup file doesn't exist
 
@@ -431,22 +934,214 @@ describe('restoreBackup', () => {
       ],
     };
 
-    vi.mocked(existsSync).mockReturnValue(true); // both backup and target exist
-    vi.mocked(readFile).mockResolvedValue(Buffer.from('zipdata'));
-    mockZipLoadAsync.mockResolvedValue({
-      file: vi.fn((name: string) => {
-        if (name === 'manifest.json') {
-          return { async: vi.fn().mockResolvedValue(Buffer.from(JSON.stringify(manifest))) };
-        }
-        if (name === 'globalStorage/state.vscdb') {
-          return { async: vi.fn().mockResolvedValue(fileContent) };
-        }
-        return null;
-      }),
+    vi.mocked(existsSync).mockReturnValue(true); // backup and target exist
+    vi.mocked(mkdirSync).mockImplementation(() => undefined as unknown as string);
+    vi.mocked(lstatSync).mockImplementation((path) => {
+      const value = String(path);
+      if (
+        value === '/' ||
+        value === '/target' ||
+        value === '/target/User' ||
+        value === '/target/User/globalStorage'
+      ) {
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => true,
+          isFile: () => false,
+        } as ReturnType<typeof lstatSync>;
+      }
+      if (value.endsWith('/globalStorage/state.vscdb')) {
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => false,
+          isFile: () => true,
+        } as ReturnType<typeof lstatSync>;
+      }
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
     });
+    openBoundedZipArchiveMock.mockResolvedValue(
+      mockArchive({
+        'manifest.json': Buffer.from(JSON.stringify(manifest)),
+        'globalStorage/state.vscdb': fileContent,
+      })
+    );
 
-    const result = await restoreBackup({ backupPath: '/backup.zip', force: false });
+    const sourceReadLimits = { zipEntryCount: 8 };
+    const result = await restoreBackup({
+      backupPath: '/backup.zip',
+      targetPath: '/target/User/workspaceStorage',
+      force: false,
+      sourceReadLimits,
+    });
     expect(result.success).toBe(false);
     expect(result.error).toContain('already has Cursor data');
+    expect(openBoundedZipArchiveMock).toHaveBeenCalledWith(
+      '/backup.zip',
+      expect.objectContaining({
+        sourceReadLimits: expect.objectContaining(sourceReadLimits),
+      })
+    );
+  });
+
+  it('freezes the restore policy before a validating callback mutates the caller override', async () => {
+    const fileContent = Buffer.from('database content');
+    const manifest = {
+      version: '1.0.0',
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: fileContent.length,
+          checksum: computeChecksum(fileContent),
+          type: 'global-db',
+        },
+      ],
+    };
+    vi.mocked(existsSync).mockReturnValue(false);
+    vi.mocked(lstatSync).mockImplementation(() => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    openBoundedZipArchiveMock.mockResolvedValue(
+      mockArchive({
+        'manifest.json': Buffer.from(JSON.stringify(manifest)),
+        'globalStorage/state.vscdb': fileContent,
+      })
+    );
+    const sourceReadLimits = { zipEntryCount: 8 };
+
+    const result = await restoreBackup({
+      backupPath: '/backup.zip',
+      targetPath: '/target/User/workspaceStorage',
+      sourceReadLimits,
+      onProgress: () => {
+        sourceReadLimits.zipEntryCount = 1;
+      },
+    });
+
+    expect(result.success).toBe(true);
+    const policy = openBoundedZipArchiveMock.mock.calls[0]![1]!.sourceReadLimits;
+    expect(Object.isFrozen(policy)).toBe(true);
+    expect(policy?.zipEntryCount).toBe(8);
+    expect(sourceReadLimits.zipEntryCount).toBe(1);
+  });
+
+  it('does not let private-workspace cleanup mask published restore residuals', async () => {
+    const fileContent = Buffer.from('database content');
+    const manifest = {
+      version: '1.0.0',
+      files: [
+        {
+          path: 'globalStorage/state.vscdb',
+          size: fileContent.length,
+          checksum: computeChecksum(fileContent),
+          type: 'global-db',
+        },
+      ],
+    };
+    vi.mocked(existsSync).mockReturnValue(false);
+    vi.mocked(lstatSync).mockImplementation(() => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    openBoundedZipArchiveMock.mockResolvedValue(
+      mockArchive({
+        'manifest.json': Buffer.from(JSON.stringify(manifest)),
+        'globalStorage/state.vscdb': fileContent,
+      })
+    );
+    disposePrivateTempWorkspaceMock.mockImplementationOnce(() => {
+      throw new TemporaryArtifactCleanupError(
+        ['/private-workspace/verified-residue'],
+        ['/private-workspace/unverified-residue']
+      );
+    });
+
+    let caught: unknown;
+    try {
+      await restoreBackup({
+        backupPath: '/backup.zip',
+        targetPath: '/target/User/workspaceStorage',
+        onProgress: (progress) => {
+          if (progress.phase === 'finalizing') throw new Error('failure after publication');
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(RestoreRollbackError);
+    expect(caught).toMatchObject({
+      code: 'RESTORE_ROLLBACK_INCOMPLETE',
+      details: {
+        publishedFileCount: 1,
+        residualFiles: ['globalStorage/state.vscdb'],
+        residuePaths: ['/private-workspace/verified-residue'],
+        unverifiedResiduePaths: ['/private-workspace/unverified-residue'],
+      },
+      cause: expect.objectContaining({ message: 'failure after publication' }),
+    });
+  });
+
+  it('does not let outer cleanup mask an earlier cleanup failure before publication', async () => {
+    const initialCleanup = new TemporaryArtifactCleanupError(
+      ['/private-workspace/shared', '/private-workspace/initial'],
+      ['/private-workspace/initial-unknown']
+    );
+    const outerCleanup = new TemporaryArtifactCleanupError(
+      ['/private-workspace/outer', '/private-workspace/initial-unknown'],
+      ['/private-workspace/shared']
+    );
+    openBoundedZipArchiveMock.mockRejectedValueOnce(initialCleanup);
+    disposePrivateTempWorkspaceMock.mockImplementationOnce(() => {
+      throw outerCleanup;
+    });
+
+    let caught: unknown;
+    try {
+      await restoreBackup({ backupPath: '/backup.zip' });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TemporaryArtifactCleanupError);
+    expect(caught).toMatchObject({
+      code: 'TEMPORARY_ARTIFACT_CLEANUP_FAILED',
+      details: {
+        residuePaths: ['/private-workspace/initial', '/private-workspace/outer'],
+        unverifiedResiduePaths: ['/private-workspace/initial-unknown', '/private-workspace/shared'],
+      },
+      cause: initialCleanup,
+    });
+  });
+});
+
+describe('listBackups immutable policy', () => {
+  it('reuses one frozen effective policy when caller input mutates between archive awaits', async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readdirSync).mockReturnValue([
+      { name: 'one.zip', isFile: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+      { name: 'two.zip', isFile: () => true } as unknown as ReturnType<typeof readdirSync>[0],
+    ]);
+    vi.mocked(statSync).mockReturnValue({
+      size: 1,
+      mtime: new Date('2024-01-01'),
+    } as ReturnType<typeof statSync>);
+    const sourceReadLimits = { zipEntryCount: 8 };
+    const policies: unknown[] = [];
+    openBoundedZipArchiveMock.mockImplementation(async () => {
+      const policy = openBoundedZipArchiveMock.mock.calls.at(-1)![1]!.sourceReadLimits;
+      policies.push(policy);
+      sourceReadLimits.zipEntryCount = 1;
+      return mockArchive({
+        'manifest.json': Buffer.from(
+          JSON.stringify({ files: [], stats: { sessionCount: 0, workspaceCount: 0, totalSize: 0 } })
+        ),
+      });
+    });
+
+    expect(await listBackups('/backups', { sourceReadLimits })).toHaveLength(2);
+    expect(policies).toHaveLength(2);
+    expect(policies[0]).toBe(policies[1]);
+    expect(Object.isFrozen(policies[0])).toBe(true);
+    expect((policies[0] as { zipEntryCount: number }).zipEntryCount).toBe(8);
+    expect(sourceReadLimits.zipEntryCount).toBe(1);
   });
 });

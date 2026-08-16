@@ -20,6 +20,7 @@ import type {
   RestoreResult,
   BackupValidation,
   BackupInfo,
+  SourceReadOptions,
 } from './types.js';
 
 /**
@@ -27,6 +28,12 @@ import type {
  *
  * @param config - Optional backup configuration
  * @returns Promise resolving to backup result
+ * @throws {BackupError} If source discovery, output validation, or archive creation fails.
+ * @throws {SessionIntegrityError} If a driver, source limit, cancellation, cleanup, or final archive
+ * permission contract fails. `BACKUP_PUBLISHED_PERMISSION_FAILED` and
+ * `BACKUP_PUBLISHED_CLEANUP_FAILED` both mean publication crossed its commit point; trust and
+ * inspect `details.outputPath` only when `details.pathIdentityVerified` is true, delete only paths
+ * in verified `details.residuePaths`, and never retry blindly.
  *
  * @example
  * ```typescript
@@ -55,6 +62,11 @@ export async function createBackup(config?: BackupConfig): Promise<BackupResult>
  *
  * @param config - Restore configuration (backupPath required)
  * @returns Promise resolving to restore result
+ * @throws {RestoreError} If the archive is missing, invalid, unsafe, or cannot be restored.
+ * @throws {SessionIntegrityError} If a source limit, cancellation, cleanup, or publication contract
+ * fails. After any post-publication failure, `RESTORE_ROLLBACK_INCOMPLETE` lists every
+ * archive-relative entry intentionally left untouched for recovery from a known-good backup;
+ * portable Node path APIs cannot perform safe automatic multi-file rollback.
  *
  * @example
  * ```typescript
@@ -74,7 +86,10 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
  * Validate a backup file's integrity without restoring.
  *
  * @param backupPath - Path to backup zip file
+ * @param options - Optional immutable source limits and cancellation signal
  * @returns Promise resolving to validation result with status and details
+ * @throws {RestoreError} If the archive cannot be opened or safely inspected.
+ * @throws {SessionIntegrityError} If a source limit, cancellation, or cleanup contract fails.
  *
  * @example
  * ```typescript
@@ -86,15 +101,20 @@ export async function restoreBackup(config: RestoreConfig): Promise<RestoreResul
  * }
  * ```
  */
-export async function validateBackup(backupPath: string): Promise<BackupValidation> {
-  return coreValidateBackup(backupPath);
+export async function validateBackup(
+  backupPath: string,
+  options?: SourceReadOptions
+): Promise<BackupValidation> {
+  return coreValidateBackup(backupPath, options);
 }
 
 /**
  * List available backup files in a directory.
  *
  * @param directory - Directory to scan (default: ~/cursor-history-backups)
+ * @param options - Optional immutable source limits and cancellation signal
  * @returns Promise resolving to array of backup info objects
+ * @throws {RestoreError} If the requested backup directory cannot be inspected safely.
  *
  * @example
  * ```typescript
@@ -106,8 +126,11 @@ export async function validateBackup(backupPath: string): Promise<BackupValidati
  * }
  * ```
  */
-export async function listBackups(directory?: string): Promise<BackupInfo[]> {
-  return coreListBackups(directory);
+export async function listBackups(
+  directory?: string,
+  options?: SourceReadOptions
+): Promise<BackupInfo[]> {
+  return coreListBackups(directory, options);
 }
 
 /**

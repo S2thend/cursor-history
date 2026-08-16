@@ -1,6 +1,6 @@
 {
   "name": "cursor-history",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "The ultimate CLI tool and library to browse, search, export, migrate, and backup your Cursor AI chat history",
   "type": "module",
   "main": "dist/lib/index.js",
@@ -16,16 +16,24 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/clean-build.mjs && npm run build:esm && npm run build:cjs",
+    "build:esm": "node scripts/generate-package-version.mjs --check && tsc",
+    "build:cjs": "node scripts/generate-package-version.mjs --check && tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "test": "vitest run",
+    "pretest": "npm run build",
+    "test": "vitest run --reporter=json --outputFile=.vitest-results.tmp && npm run test:verify",
+    "test:verify": "node scripts/verify-test-results.mjs .vitest-results.tmp",
+    "test:compatibility": "vitest run tests/compatibility --reporter=json --outputFile=.vitest-compatibility-results.tmp && node scripts/verify-test-results.mjs .vitest-compatibility-results.tmp",
+    "test:e2e": "vitest run tests/e2e --reporter=json --outputFile=.vitest-e2e-results.tmp && node scripts/verify-test-results.mjs .vitest-e2e-results.tmp",
+    "test:package-smoke": "vitest run tests/e2e/package-smoke.test.ts --reporter=json --outputFile=.vitest-package-results.tmp && node scripts/verify-test-results.mjs .vitest-package-results.tmp",
+    "test:release-gates": "vitest run tests/unit/verify-test-results.test.ts tests/e2e/publish-workflow.test.ts --reporter=json --outputFile=.vitest-release-results.tmp && node scripts/verify-test-results.mjs .vitest-release-results.tmp",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "node scripts/generate-package-version.mjs --check && tsc --noEmit"
   },
   "keywords": [
     "cursor",
@@ -65,16 +73,23 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs/compatibility.md",
+    "docs/release-verification.md",
+    "docs/logo.png",
+    "docs/readme_es.md",
+    "docs/readme_fr.md",
+    "docs/readme_zh.md"
   ],
   "publishConfig": {
     "access": "public"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": "20.x || 22.x || 23.x || 24.x || 25.x || 26.x"
   },
   "dependencies": {
-    "better-sqlite3": "^12.5.0",
+    "better-sqlite3": ">=12.10.0 <13",
     "commander": "^14.0.2",
     "jszip": "^3.10.1",
     "picocolors": "^1.1.1"

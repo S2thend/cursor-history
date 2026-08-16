@@ -5,10 +5,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Command } from 'commander';
-import { SessionNotFoundError } from '../../src/lib/errors.js';
+import {
+  BackupPublishedPermissionError,
+  BackupPublishedCleanupError,
+  RestoreRollbackError,
+  TemporaryArtifactCleanupError,
+  SessionAmbiguityError,
+  SessionNotFoundError,
+} from '../../src/lib/errors.js';
 
 // --- Mock functions ---
 const mockListSessions = vi.fn();
+const mockListSessionSummaries = vi.fn((...args: unknown[]) => mockListSessions(...args));
 const mockGetSession = vi.fn();
 const mockSearchSessions = vi.fn();
 const mockListWorkspaces = vi.fn();
@@ -22,34 +30,48 @@ const mockFormatWorkspacesTable = vi.fn(() => 'workspaces table');
 const mockFormatWorkspacesJson = vi.fn(() => '{"workspaces":[]}');
 const mockFormatSearchResultsTable = vi.fn(() => 'search results');
 const mockFormatSearchResultsJson = vi.fn(() => '{"results":[]}');
+const mockFormatOperationDiagnostics = vi.fn(() => '');
+const mockFormatExportSuccess = vi.fn(() => 'Export done');
+const mockFormatExportResultJson = vi.fn(() => '{"exported":[]}');
 const mockFormatNoHistory = vi.fn(() => 'No history found');
 const mockFormatCursorNotFound = vi.fn(() => 'Cursor not found');
 const mockFilterMessages = vi.fn((messages: unknown[]) => messages);
 const mockValidateMessageTypes = vi.fn(() => []);
 const mockExistsSync = vi.fn(() => true);
+const mockExpandPath = vi.fn((path: string) => path);
+const mockReleaseSession = vi.fn();
+const mockDisposeReadContext = vi.fn(async () => undefined);
+const mockReadContext = {
+  workspaceScope: null,
+  includeCrossWorkspaceSources: false,
+  resolvedSessionCapacity: 0,
+  storeSessions: null,
+  summaries: null,
+  resolvedSessions: new Map(),
+  releaseSession: (...args: unknown[]) => mockReleaseSession(...args),
+  dispose: (...args: unknown[]) => mockDisposeReadContext(...args),
+};
+const mockCreateSessionReadContext = vi.fn(() => mockReadContext);
 
 vi.mock('../../src/core/storage.js', () => ({
   listSessions: (...args: unknown[]) => mockListSessions(...args),
+  listSessionSummaries: (...args: unknown[]) => mockListSessionSummaries(...args),
   getSession: (...args: unknown[]) => mockGetSession(...args),
   searchSessions: (...args: unknown[]) => mockSearchSessions(...args),
   listWorkspaces: (...args: unknown[]) => mockListWorkspaces(...args),
   findWorkspaces: (...args: unknown[]) => mockFindWorkspaces(...args),
-  createSessionReadContext: vi.fn(() => ({
-    workspaceScope: undefined,
-    storeSessions: null,
-    summaries: null,
-    resolvedSessions: new Map(),
-  })),
+  createSessionReadContext: (...args: unknown[]) => mockCreateSessionReadContext(...args),
 }));
 
 const mockListBackups = vi.fn();
 const mockGetDefaultBackupDir = vi.fn(() => '/home/user/cursor-history-backups');
 const mockCreateBackup = vi.fn();
+const mockRestoreBackup = vi.fn();
 
 vi.mock('../../src/core/backup.js', () => ({
   validateBackup: (...args: unknown[]) => mockValidateBackup(...args),
   createBackup: (...args: unknown[]) => mockCreateBackup(...args),
-  restoreBackup: vi.fn(),
+  restoreBackup: (...args: unknown[]) => mockRestoreBackup(...args),
   listBackups: (...args: unknown[]) => mockListBackups(...args),
   getDefaultBackupDir: () => mockGetDefaultBackupDir(),
 }));
@@ -68,16 +90,17 @@ vi.mock('../../src/cli/formatters/index.js', () => ({
   formatWorkspacesJson: (...args: unknown[]) => mockFormatWorkspacesJson(...args),
   formatSearchResultsTable: (...args: unknown[]) => mockFormatSearchResultsTable(...args),
   formatSearchResultsJson: (...args: unknown[]) => mockFormatSearchResultsJson(...args),
+  formatOperationDiagnostics: (...args: unknown[]) => mockFormatOperationDiagnostics(...args),
   formatNoHistory: (...args: unknown[]) => mockFormatNoHistory(...args),
   formatCursorNotFound: (...args: unknown[]) => mockFormatCursorNotFound(...args),
-  formatExportSuccess: vi.fn(() => 'Export done'),
-  formatExportResultJson: vi.fn(() => '{"exported":[]}'),
+  formatExportSuccess: (...args: unknown[]) => mockFormatExportSuccess(...args),
+  formatExportResultJson: (...args: unknown[]) => mockFormatExportResultJson(...args),
   filterMessages: (...args: unknown[]) => mockFilterMessages(...args),
   validateMessageTypes: (...args: unknown[]) => mockValidateMessageTypes(...args),
 }));
 
 vi.mock('../../src/lib/platform.js', () => ({
-  expandPath: (p: string) => p,
+  expandPath: (p: string) => mockExpandPath(p),
   contractPath: (p: string) => p,
   getCursorDataPath: () => '/mock/cursor/data',
   getStoreStackRoot: () => '/mock/cursor/store',
@@ -95,8 +118,10 @@ vi.mock('node:fs', async () => {
 
 // Mock migrate module
 const mockMigrateWorkspace = vi.fn();
+const mockMigrateSessions = vi.fn();
 vi.mock('../../src/core/migrate.js', () => ({
   migrateWorkspace: (...args: unknown[]) => mockMigrateWorkspace(...args),
+  migrateSessions: (...args: unknown[]) => mockMigrateSessions(...args),
 }));
 
 // Mock lib/errors type guards
@@ -113,9 +138,11 @@ import { registerSearchCommand } from '../../src/cli/commands/search.js';
 import { registerExportCommand } from '../../src/cli/commands/export.js';
 import { registerListBackupsCommand } from '../../src/cli/commands/list-backups.js';
 import { registerMigrateCommand } from '../../src/cli/commands/migrate.js';
+import { registerMigrateSessionCommand } from '../../src/cli/commands/migrate-session.js';
 import { registerBackupCommand } from '../../src/cli/commands/backup.js';
+import { registerRestoreCommand } from '../../src/cli/commands/restore.js';
 import { writeFileSync } from 'node:fs';
-import { createBackup } from '../../src/core/backup.js';
+import { parseSourceLimitOption } from '../../src/cli/source-limit-option.js';
 
 let consoleSpy: ReturnType<typeof vi.spyOn>;
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
@@ -123,6 +150,11 @@ let exitSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockExpandPath.mockImplementation((path: string) => path);
+  mockListSessionSummaries.mockImplementation((...args: unknown[]) => mockListSessions(...args));
+  mockFormatOperationDiagnostics.mockReturnValue('');
+  mockFormatExportSuccess.mockReturnValue('Export done');
+  mockFormatExportResultJson.mockReturnValue('{"exported":[]}');
   consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
@@ -136,12 +168,15 @@ function createProgram() {
   program.option('--json', 'Output in JSON format');
   program.option('--data-path <path>', 'Custom path');
   program.option('-w, --workspace <path>', 'Filter by workspace');
+  program.option('--include-cross-workspace-sources');
+  program.option('--source-limit <field=value>', 'Source limit', parseSourceLimitOption);
   return program;
 }
 
 // --- Sample data factories ---
 function makeSessions(count = 2) {
   return Array.from({ length: count }, (_, i) => ({
+    id: `session-${i + 1}`,
     index: i + 1,
     title: `Session ${i + 1}`,
     createdAt: new Date('2025-01-01'),
@@ -152,6 +187,7 @@ function makeSessions(count = 2) {
 
 function makeSession(index = 1) {
   return {
+    id: `session-${index}`,
     index,
     title: 'Test Session',
     createdAt: new Date('2025-01-01'),
@@ -186,10 +222,11 @@ describe('list command', () => {
     registerListCommand(program);
     await program.parseAsync(['node', 'test', 'list']);
 
-    expect(mockListSessions).toHaveBeenCalledWith(
+    expect(mockListSessionSummaries).toHaveBeenCalledWith(
       { limit: 20, all: false, workspacePath: undefined },
       undefined,
-      undefined
+      undefined,
+      mockReadContext
     );
     expect(mockFormatSessionsTable).toHaveBeenCalledWith(sessions, false);
     expect(consoleSpy).toHaveBeenCalledWith('sessions table');
@@ -206,6 +243,55 @@ describe('list command', () => {
     expect(consoleSpy).toHaveBeenCalledWith('{"sessions":[]}');
   });
 
+  it('passes workspace index scope into the top-level JSON list envelope', async () => {
+    const sessions = makeSessions(1);
+    mockListSessions.mockResolvedValue(sessions);
+
+    const program = createProgram();
+    registerListCommand(program);
+    await program.parseAsync(['node', 'test', '--json', '--workspace', '/workspace/a', 'list']);
+
+    expect(mockFormatSessionsJson).toHaveBeenCalledWith(sessions, {
+      indexScope: 'workspace',
+      indexWorkspacePath: '/workspace/a',
+      diagnostics: [],
+    });
+  });
+
+  it('keeps one ambiguous logical row and emits one machine-readable list diagnostic', async () => {
+    const ambiguous = {
+      id: 'session-ambiguous',
+      index: 2,
+      indexScope: 'workspace' as const,
+      indexWorkspacePath: '/workspace/a',
+      resolutionState: 'ambiguous' as const,
+      sourceRoles: ['composer'] as const,
+      occurrenceCount: 2,
+      diagnosticOccurrenceRefs: ['occurrence:v1:a', 'occurrence:v1:b'],
+    };
+    mockListSessionSummaries.mockResolvedValue([ambiguous]);
+
+    const program = createProgram();
+    registerListCommand(program);
+    await program.parseAsync(['node', 'test', '--json', '--workspace', '/workspace/a', 'list']);
+
+    expect(mockFormatSessionsJson).toHaveBeenCalledWith([ambiguous], {
+      indexScope: 'workspace',
+      indexWorkspacePath: '/workspace/a',
+      diagnostics: [
+        {
+          code: 'SESSION_AMBIGUOUS',
+          message: 'Session session-ambiguous has divergent physical occurrences.',
+          sessionId: 'session-ambiguous',
+          occurrenceCount: 2,
+          occurrenceRefs: ['occurrence:v1:a', 'occurrence:v1:b'],
+          remedy: 'Resolve or remove the divergent replicas, then retry the operation.',
+        },
+      ],
+    });
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+  });
+
   it('lists sessions with --all flag (limit = 0)', async () => {
     mockListSessions.mockResolvedValue(makeSessions());
 
@@ -213,10 +299,11 @@ describe('list command', () => {
     registerListCommand(program);
     await program.parseAsync(['node', 'test', 'list', '--all']);
 
-    expect(mockListSessions).toHaveBeenCalledWith(
+    expect(mockListSessionSummaries).toHaveBeenCalledWith(
       expect.objectContaining({ limit: 0, all: true }),
       undefined,
-      undefined
+      undefined,
+      mockReadContext
     );
   });
 
@@ -227,10 +314,11 @@ describe('list command', () => {
     registerListCommand(program);
     await program.parseAsync(['node', 'test', 'list', '-n', '5']);
 
-    expect(mockListSessions).toHaveBeenCalledWith(
+    expect(mockListSessionSummaries).toHaveBeenCalledWith(
       expect.objectContaining({ limit: 5 }),
       undefined,
-      undefined
+      undefined,
+      mockReadContext
     );
   });
 
@@ -252,7 +340,11 @@ describe('list command', () => {
     registerListCommand(program);
     await program.parseAsync(['node', 'test', '--json', 'list']);
 
-    expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify({ count: 0, sessions: [] }));
+    expect(mockFormatSessionsJson).toHaveBeenCalledWith([], {
+      indexScope: 'global',
+      diagnostics: [],
+    });
+    expect(consoleSpy).toHaveBeenCalledWith('{"sessions":[]}');
   });
 
   it('lists workspaces with --workspaces flag', async () => {
@@ -266,6 +358,20 @@ describe('list command', () => {
     expect(mockListWorkspaces).toHaveBeenCalled();
     expect(mockFormatWorkspacesTable).toHaveBeenCalledWith(workspaces);
     expect(consoleSpy).toHaveBeenCalledWith('workspaces table');
+  });
+
+  it('rejects combining scoped session addressing with unscoped workspace discovery', async () => {
+    const program = createProgram();
+    registerListCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'test', '--workspace', '/ws1', 'list', '--workspaces'])
+    ).rejects.toThrow('process.exit');
+    expect(exitSpy).toHaveBeenCalledWith(2);
+    expect(mockListWorkspaces).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('unscoped discovery command')
+    );
   });
 
   it('lists workspaces with --json flag', async () => {
@@ -330,10 +436,11 @@ describe('list command', () => {
     registerListCommand(program);
     await program.parseAsync(['node', 'test', '-w', '/my/workspace', 'list']);
 
-    expect(mockListSessions).toHaveBeenCalledWith(
+    expect(mockListSessionSummaries).toHaveBeenCalledWith(
       expect.objectContaining({ workspacePath: '/my/workspace' }),
       undefined,
-      undefined
+      undefined,
+      mockReadContext
     );
   });
 });
@@ -356,7 +463,28 @@ describe('show command', () => {
       expect.any(Object)
     );
     const context = mockListSessions.mock.calls[0]![3];
+    expect(mockGetSession).toHaveBeenCalledWith('session-1', undefined, undefined, context, 1);
+    expect(mockFindWorkspaces).not.toHaveBeenCalled();
+  });
+
+  it('reuses an ambiguous scoped index through the bound logical catalog', async () => {
+    mockListSessions.mockResolvedValue([]);
+    mockGetSession.mockRejectedValue(
+      new SessionAmbiguityError('ambiguous-session', ['occurrence:v1:b', 'occurrence:v1:a'])
+    );
+
+    const program = createProgram();
+    registerShowCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'test', '--workspace', '/workspace/a', 'show', '1'])
+    ).rejects.toThrow('process.exit');
+
+    const context = mockListSessions.mock.calls[0]![3];
     expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, context);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('divergent source replicas')
+    );
   });
 
   it('passes composer ID string to getSession when argument is not all digits', async () => {
@@ -371,15 +499,22 @@ describe('show command', () => {
     expect(mockFormatSessionDetail).toHaveBeenCalledWith(session, '/ws', expect.any(Object));
   });
 
-  it('keeps direct ID lookup global when a workspace filter is present', async () => {
+  it('resolves a direct ID only through the active workspace listing', async () => {
+    mockListSessions.mockResolvedValue(makeSessions());
     mockGetSession.mockResolvedValue(makeSession());
     const program = createProgram();
     registerShowCommand(program);
 
-    await program.parseAsync(['node', 'test', '--workspace', '/workspace/a', 'show', 'session-b']);
+    await program.parseAsync(['node', 'test', '--workspace', '/workspace/a', 'show', 'session-2']);
 
-    expect(mockListSessions).not.toHaveBeenCalled();
-    expect(mockGetSession).toHaveBeenCalledWith('session-b', undefined, undefined);
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
+    const context = mockListSessions.mock.calls[0]![3];
+    expect(mockGetSession).toHaveBeenCalledWith('session-2', undefined, undefined, context, 2);
   });
 
   it('shows session detail by index', async () => {
@@ -564,9 +699,20 @@ describe('search command', () => {
       'hello',
       { limit: 10, contextChars: 50, workspacePath: undefined },
       undefined,
-      undefined
+      undefined,
+      mockReadContext
     );
+    expect(mockCreateSessionReadContext).toHaveBeenCalledWith({
+      dataPath: undefined,
+      backupPath: undefined,
+      workspacePath: undefined,
+      resolvedSessionCapacity: 0,
+      sourceReadLimits: undefined,
+      onDiagnostic: expect.any(Function),
+    });
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
     expect(mockFormatSearchResultsTable).toHaveBeenCalledWith(results, 'hello');
+    expect(mockFormatOperationDiagnostics).toHaveBeenCalledWith([]);
     expect(consoleSpy).toHaveBeenCalledWith('search results');
   });
 
@@ -577,7 +723,10 @@ describe('search command', () => {
     registerSearchCommand(program);
     await program.parseAsync(['node', 'test', '--json', 'search', 'hello']);
 
-    expect(mockFormatSearchResultsJson).toHaveBeenCalledWith(expect.any(Array), 'hello');
+    expect(mockFormatSearchResultsJson).toHaveBeenCalledWith(expect.any(Array), 'hello', {
+      diagnostics: [],
+      indexScope: 'global',
+    });
     expect(consoleSpy).toHaveBeenCalledWith('{"results":[]}');
   });
 
@@ -592,7 +741,8 @@ describe('search command', () => {
       'hello',
       expect.objectContaining({ limit: 5, contextChars: 100 }),
       undefined,
-      undefined
+      undefined,
+      mockReadContext
     );
   });
 
@@ -609,6 +759,10 @@ describe('search command', () => {
     // handleError prints the NoSearchResultsError message
     expect(consoleErrorSpy).toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalledWith(3);
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+    expect(mockDisposeReadContext.mock.invocationCallOrder[0]).toBeLessThan(
+      exitSpy.mock.invocationCallOrder[0]!
+    );
   });
 
   it('handles no results in JSON mode with structured output', async () => {
@@ -618,9 +772,65 @@ describe('search command', () => {
     registerSearchCommand(program);
     await program.parseAsync(['node', 'test', '--json', 'search', 'nonexistent']);
 
-    expect(consoleSpy).toHaveBeenCalledWith(
-      JSON.stringify({ query: 'nonexistent', count: 0, totalMatches: 0, results: [] })
-    );
+    expect(mockFormatSearchResultsJson).toHaveBeenCalledWith([], 'nonexistent', {
+      diagnostics: [],
+      indexScope: 'global',
+    });
+    expect(consoleSpy).toHaveBeenCalledWith('{"results":[]}');
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+  });
+
+  it('deduplicates ambiguity diagnostics in an empty JSON search result', async () => {
+    const diagnostic = {
+      code: 'SESSION_AMBIGUOUS' as const,
+      message: 'Session duplicate has divergent physical occurrences.',
+      sessionId: 'session-duplicate',
+      occurrenceCount: 2,
+      occurrenceRefs: ['occurrence:v1:a', 'occurrence:v1:b'],
+      remedy: 'Resolve the replicas and retry.',
+    };
+    mockSearchSessions.mockImplementation(async () => {
+      const contextOptions = mockCreateSessionReadContext.mock.calls.at(-1)![0] as {
+        onDiagnostic(diagnostic: typeof diagnostic): void;
+      };
+      contextOptions.onDiagnostic(diagnostic);
+      contextOptions.onDiagnostic(diagnostic);
+      return [];
+    });
+
+    const program = createProgram();
+    registerSearchCommand(program);
+    await program.parseAsync(['node', 'test', '--json', 'search', 'needle']);
+
+    expect(mockFormatSearchResultsJson).toHaveBeenCalledWith([], 'needle', {
+      diagnostics: [diagnostic],
+      indexScope: 'global',
+    });
+  });
+
+  it('prints an actionable ambiguity diagnostic instead of a not-found fatal', async () => {
+    const diagnostic = {
+      code: 'SESSION_AMBIGUOUS' as const,
+      message: 'A divergent session was skipped.',
+      sessionId: 'session-duplicate',
+      remedy: 'Resolve the replicas and retry.',
+    };
+    mockFormatOperationDiagnostics.mockReturnValue('actionable diagnostic');
+    mockSearchSessions.mockImplementation(async () => {
+      const contextOptions = mockCreateSessionReadContext.mock.calls.at(-1)![0] as {
+        onDiagnostic(diagnostic: typeof diagnostic): void;
+      };
+      contextOptions.onDiagnostic(diagnostic);
+      return [];
+    });
+
+    const program = createProgram();
+    registerSearchCommand(program);
+    await program.parseAsync(['node', 'test', 'search', 'needle']);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(mockFormatOperationDiagnostics).toHaveBeenCalledWith([diagnostic]);
+    expect(consoleSpy).toHaveBeenCalledWith('search results\n\nactionable diagnostic');
   });
 
   it('passes workspace filter from global option', async () => {
@@ -634,7 +844,8 @@ describe('search command', () => {
       'hello',
       expect.objectContaining({ workspacePath: '/my/ws' }),
       undefined,
-      undefined
+      undefined,
+      mockReadContext
     );
   });
 
@@ -649,7 +860,41 @@ describe('search command', () => {
       'hello',
       expect.any(Object),
       '/custom',
-      undefined
+      undefined,
+      mockReadContext
+    );
+  });
+
+  it('binds Source Read Limits into the capacity-zero search context', async () => {
+    const sourceReadLimits = { sqliteRowCount: 6_000_000 };
+    mockSearchSessions.mockResolvedValue(makeSearchResults());
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerSearchCommand(program);
+
+    await program.parseAsync(['node', 'test', 'search', 'hello']);
+
+    expect(mockCreateSessionReadContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolvedSessionCapacity: 0,
+        sourceReadLimits,
+      })
+    );
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+  });
+
+  it('disposes the owned search context before handling storage failures', async () => {
+    mockSearchSessions.mockRejectedValue(new Error('synthetic search failure'));
+    const program = createProgram();
+    registerSearchCommand(program);
+
+    await expect(program.parseAsync(['node', 'test', 'search', 'hello'])).rejects.toThrow(
+      'process.exit'
+    );
+
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+    expect(mockDisposeReadContext.mock.invocationCallOrder[0]).toBeLessThan(
+      exitSpy.mock.invocationCallOrder[0]!
     );
   });
 });
@@ -683,10 +928,11 @@ describe('export command', () => {
       expect.any(Object)
     );
     const context = mockListSessions.mock.calls[0]![3];
-    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, context);
+    expect(mockGetSession).toHaveBeenCalledWith('session-1', undefined, undefined, context, 1);
   });
 
-  it('keeps direct export by ID global when a workspace filter is present', async () => {
+  it('resolves a direct export ID only through the active workspace listing', async () => {
+    mockListSessions.mockResolvedValue(makeSessions());
     mockGetSession.mockResolvedValue(makeSession());
     mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
     mockExistsSync.mockReturnValue(false);
@@ -699,13 +945,19 @@ describe('export command', () => {
       '--workspace',
       '/workspace/a',
       'export',
-      'session-b',
+      'session-2',
       '-o',
       '/tmp/out.md',
     ]);
 
-    expect(mockListSessions).not.toHaveBeenCalled();
-    expect(mockGetSession).toHaveBeenCalledWith('session-b', undefined, undefined);
+    expect(mockListSessions).toHaveBeenCalledWith(
+      { limit: 0, all: true, workspacePath: '/workspace/a' },
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
+    const context = mockListSessions.mock.calls[0]![3];
+    expect(mockGetSession).toHaveBeenCalledWith('session-2', undefined, undefined, context, 2);
   });
 
   it('exports single session to markdown', async () => {
@@ -853,13 +1105,176 @@ describe('export command', () => {
     // Use --force to avoid FileExistsError on generated filenames
     await program.parseAsync(['node', 'test', 'export', '--all', '--force', '-o', '/tmp/exports']);
 
-    expect(mockListSessions).toHaveBeenCalledWith(
+    expect(mockListSessionSummaries).toHaveBeenCalledWith(
       { limit: 0, all: true, workspacePath: undefined },
       undefined,
       undefined,
       expect.objectContaining({ storeSessions: null, summaries: null })
     );
+    expect(mockCreateSessionReadContext).toHaveBeenCalledWith({
+      dataPath: undefined,
+      backupPath: undefined,
+      workspacePath: undefined,
+      resolvedSessionCapacity: 0,
+      sourceReadLimits: undefined,
+      onDiagnostic: expect.any(Function),
+    });
+    expect(mockReleaseSession).toHaveBeenNthCalledWith(1, 'session-1');
+    expect(mockReleaseSession).toHaveBeenNthCalledWith(2, 'session-2');
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledTimes(2);
+  });
+
+  it('exports all sessions as JSON with bound limits and releases each payload', async () => {
+    const sourceReadLimits = { sqliteRowCount: 6_000_000 };
+    mockListSessions.mockResolvedValue([makeSessions(1)[0]]);
+    mockGetSession.mockResolvedValue(makeSession(1));
+    mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
+    mockExistsSync.mockReturnValue(true);
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerExportCommand(program);
+
+    await program.parseAsync([
+      'node',
+      'test',
+      'export',
+      '--all',
+      '--force',
+      '--format',
+      'json',
+      '--output',
+      '/tmp/exports',
+    ]);
+
+    expect(mockCreateSessionReadContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolvedSessionCapacity: 0,
+        sourceReadLimits,
+      })
+    );
+    expect(mockReleaseSession).toHaveBeenCalledWith('session-1');
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+    expect(vi.mocked(writeFileSync)).toHaveBeenCalledWith(
+      expect.stringMatching(/\.json$/),
+      '{}',
+      'utf-8'
+    );
+  });
+
+  it('exports resolved rows and reports each ambiguous logical group once in JSON', async () => {
+    const resolved = makeSessions(1)[0]!;
+    const ambiguous = {
+      id: 'session-ambiguous',
+      index: 2,
+      indexScope: 'global' as const,
+      resolutionState: 'ambiguous' as const,
+      sourceRoles: ['composer'] as const,
+      occurrenceCount: 2,
+      diagnosticOccurrenceRefs: ['occurrence:v1:a', 'occurrence:v1:b'],
+    };
+    mockListSessionSummaries.mockResolvedValue([resolved, ambiguous]);
+    mockGetSession.mockResolvedValue(makeSession(1));
+    mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
+    mockExistsSync.mockReturnValue(true);
+
+    const program = createProgram();
+    registerExportCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--json',
+      'export',
+      '--all',
+      '--force',
+      '--output',
+      '/tmp/exports',
+    ]);
+
+    expect(mockGetSession).toHaveBeenCalledOnce();
+    expect(mockGetSession).toHaveBeenCalledWith(
+      resolved.id,
+      undefined,
+      undefined,
+      mockReadContext,
+      resolved.index
+    );
+    expect(mockFormatExportResultJson).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          index: 1,
+          indexScope: 'global',
+          sessionId: 'session-1',
+        }),
+      ],
+      {
+        diagnostics: [
+          {
+            code: 'SESSION_AMBIGUOUS',
+            message: 'Session session-ambiguous has divergent physical occurrences.',
+            sessionId: 'session-ambiguous',
+            occurrenceCount: 2,
+            occurrenceRefs: ['occurrence:v1:a', 'occurrence:v1:b'],
+            remedy: 'Resolve or remove the divergent replicas, then retry the operation.',
+          },
+        ],
+      }
+    );
+    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce();
+  });
+
+  it('skips a session that becomes ambiguous after listing and reports it once', async () => {
+    const resolved = makeSessions(1)[0]!;
+    mockListSessionSummaries.mockResolvedValue([resolved]);
+    mockGetSession.mockRejectedValue(
+      new SessionAmbiguityError(resolved.id, ['occurrence:v1:late-a', 'occurrence:v1:late-b'])
+    );
+    mockFindWorkspaces.mockResolvedValue([]);
+    mockExistsSync.mockReturnValue(true);
+
+    const program = createProgram();
+    registerExportCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--json',
+      'export',
+      '--all',
+      '--force',
+      '--output',
+      '/tmp/exports',
+    ]);
+
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
+    expect(mockReleaseSession).toHaveBeenCalledWith(resolved.id);
+    expect(mockFormatExportResultJson).toHaveBeenCalledWith([], {
+      diagnostics: [
+        expect.objectContaining({
+          code: 'SESSION_AMBIGUOUS',
+          sessionId: resolved.id,
+          occurrenceCount: 2,
+        }),
+      ],
+    });
+  });
+
+  it('releases the active export payload and disposes before handling failures', async () => {
+    mockListSessions.mockResolvedValue([makeSessions(1)[0]]);
+    mockGetSession.mockRejectedValue(new Error('synthetic export failure'));
+    mockFindWorkspaces.mockResolvedValue([]);
+    mockExistsSync.mockReturnValue(true);
+    const program = createProgram();
+    registerExportCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'test', 'export', '--all', '--force'])
+    ).rejects.toThrow('process.exit');
+
+    expect(mockReleaseSession).toHaveBeenCalledWith('session-1');
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+    expect(mockDisposeReadContext.mock.invocationCallOrder[0]).toBeLessThan(
+      exitSpy.mock.invocationCallOrder[0]!
+    );
   });
 
   it('limits --all exports to the global workspace filter', async () => {
@@ -882,12 +1297,13 @@ describe('export command', () => {
       '/tmp/exports',
     ]);
 
-    expect(mockListSessions).toHaveBeenCalledWith(
+    expect(mockListSessionSummaries).toHaveBeenCalledWith(
       { limit: 0, all: true, workspacePath: '/workspace/a' },
       undefined,
       undefined,
       expect.any(Object)
     );
+    expect(mockFindWorkspaces).not.toHaveBeenCalled();
   });
 
   it('exports all sessions exits when no sessions', async () => {
@@ -988,6 +1404,9 @@ describe('list-backups command', () => {
 
   it('exits with JSON when directory does not exist and --json', async () => {
     mockExistsSync.mockReturnValue(false);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
 
     const program = createProgram();
     registerListBackupsCommand(program);
@@ -996,7 +1415,8 @@ describe('list-backups command', () => {
       'process.exit'
     );
 
-    const output = consoleSpy.mock.calls[0]![0] as string;
+    expect(consoleSpy).not.toHaveBeenCalled();
+    const output = String(stderr.mock.calls[0]![0]);
     const parsed = JSON.parse(output);
     expect(parsed.error).toBe('Directory not found');
   });
@@ -1034,7 +1454,24 @@ describe('list-backups command', () => {
     registerListBackupsCommand(program);
     await program.parseAsync(['node', 'test', 'list-backups', '-d', '/custom/backups']);
 
-    expect(mockListBackups).toHaveBeenCalledWith('/custom/backups');
+    expect(mockListBackups).toHaveBeenCalledWith('/custom/backups', {
+      sourceReadLimits: undefined,
+    });
+  });
+
+  it('forwards the immutable source-limit override to archive inspection', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockListBackups.mockResolvedValue([]);
+    const sourceReadLimits = Object.freeze({ zipEntryCount: 17 });
+
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerListBackupsCommand(program);
+    await program.parseAsync(['node', 'test', 'list-backups']);
+
+    expect(mockListBackups).toHaveBeenCalledWith('/home/user/cursor-history-backups', {
+      sourceReadLimits,
+    });
   });
 
   it('displays backup with error status', async () => {
@@ -1221,6 +1658,9 @@ describe('migrate command', () => {
 
   it('outputs JSON error on thrown error with --json', async () => {
     mockMigrateWorkspace.mockRejectedValue(new Error('DB locked'));
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
 
     const program = createProgram();
     registerMigrateCommand(program);
@@ -1229,7 +1669,8 @@ describe('migrate command', () => {
       program.parseAsync(['node', 'test', '--json', 'migrate', '/source', '/dest'])
     ).rejects.toThrow('process.exit');
 
-    const output = consoleSpy.mock.calls[0]![0] as string;
+    expect(consoleSpy).not.toHaveBeenCalled();
+    const output = String(stderr.mock.calls[0]![0]);
     const parsed = JSON.parse(output);
     expect(parsed.error).toBeDefined();
   });
@@ -1257,15 +1698,220 @@ describe('migrate command', () => {
       })
     );
   });
+
+  it('expands a literal home-relative custom data path before migration resolution', async () => {
+    mockExpandPath.mockImplementation((path: string) =>
+      path === '~/Cursor/User/workspaceStorage' ? '/home/test/Cursor/User/workspaceStorage' : path
+    );
+    mockMigrateWorkspace.mockResolvedValue({
+      success: true,
+      source: '/source',
+      destination: '/dest',
+      mode: 'move',
+      totalSessions: 0,
+      successCount: 0,
+      failureCount: 0,
+      results: [],
+      dryRun: true,
+    });
+
+    const program = createProgram();
+    registerMigrateCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--data-path',
+      '~/Cursor/User/workspaceStorage',
+      'migrate',
+      '/source',
+      '/dest',
+      '--dry-run',
+    ]);
+
+    expect(mockMigrateWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ dataPath: '/home/test/Cursor/User/workspaceStorage' })
+    );
+  });
+});
+
+// ==================== MIGRATE-SESSION COMMAND ====================
+
+describe('migrate-session command', () => {
+  function successfulResult(sessionId: string, dryRun: boolean) {
+    return {
+      success: true,
+      sessionId,
+      sourceWorkspace: '/workspace/a',
+      destinationWorkspace: '/workspace/destination',
+      mode: 'move' as const,
+      dryRun,
+      pathsWillBeUpdated: true,
+    };
+  }
+
+  it('propagates the parent workspace while resolving both numeric and direct-ID selectors', async () => {
+    mockMigrateSessions.mockImplementation(
+      async (options: { selectors: string[]; dryRun: boolean }) =>
+        options.selectors.map((id) => successfulResult(id, options.dryRun))
+    );
+
+    for (const selector of ['1', 'session-a']) {
+      const program = createProgram();
+      registerMigrateSessionCommand(program);
+      await program.parseAsync([
+        'node',
+        'test',
+        '--workspace',
+        '/workspace/a',
+        'migrate-session',
+        selector,
+        '/workspace/destination',
+        '--dry-run',
+      ]);
+    }
+
+    expect(mockMigrateSessions).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        selectors: ['1'],
+        workspacePath: '/workspace/a',
+        dryRun: true,
+      })
+    );
+    expect(mockMigrateSessions).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        selectors: ['session-a'],
+        workspacePath: '/workspace/a',
+        dryRun: true,
+      })
+    );
+  });
+
+  it('uses the identical scoped target for dry-run and apply', async () => {
+    mockMigrateSessions.mockImplementation(
+      async (options: { selectors: string[]; dryRun: boolean }) =>
+        options.selectors.map((id) => successfulResult(id, options.dryRun))
+    );
+
+    const dryRunProgram = createProgram();
+    registerMigrateSessionCommand(dryRunProgram);
+    await dryRunProgram.parseAsync([
+      'node',
+      'test',
+      '--workspace',
+      '/workspace/a',
+      'migrate-session',
+      '1',
+      '/workspace/destination',
+      '--dry-run',
+    ]);
+
+    const applyProgram = createProgram();
+    registerMigrateSessionCommand(applyProgram);
+    await applyProgram.parseAsync([
+      'node',
+      'test',
+      '--workspace',
+      '/workspace/a',
+      'migrate-session',
+      '1',
+      '/workspace/destination',
+    ]);
+
+    const dryRunOptions = mockMigrateSessions.mock.calls[0]?.[0] as {
+      selectors: string[];
+      workspacePath: string;
+      dryRun: boolean;
+    };
+    const applyOptions = mockMigrateSessions.mock.calls[1]?.[0] as {
+      selectors: string[];
+      workspacePath: string;
+      dryRun: boolean;
+    };
+    expect(dryRunOptions).toMatchObject({
+      selectors: ['1'],
+      workspacePath: '/workspace/a',
+      dryRun: true,
+    });
+    expect(applyOptions).toMatchObject({
+      selectors: ['1'],
+      workspacePath: '/workspace/a',
+      dryRun: false,
+    });
+    expect(applyOptions.selectors).toEqual(dryRunOptions.selectors);
+    expect(applyOptions.workspacePath).toBe(dryRunOptions.workspacePath);
+  });
+
+  it('expands a literal home-relative custom data path before binding selectors', async () => {
+    mockExpandPath.mockImplementation((path: string) =>
+      path === '~/Cursor/User/workspaceStorage' ? '/home/test/Cursor/User/workspaceStorage' : path
+    );
+    mockMigrateSessions.mockResolvedValue([successfulResult('1', true)]);
+
+    const program = createProgram();
+    registerMigrateSessionCommand(program);
+    await program.parseAsync([
+      'node',
+      'test',
+      '--data-path',
+      '~/Cursor/User/workspaceStorage',
+      'migrate-session',
+      '1',
+      '/workspace/destination',
+      '--dry-run',
+    ]);
+
+    expect(mockMigrateSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ dataPath: '/home/test/Cursor/User/workspaceStorage' })
+    );
+  });
+
+  it('prints an ordinary migration failure result before exiting with partial-failure status', async () => {
+    mockMigrateSessions.mockResolvedValue([
+      {
+        success: false,
+        sessionId: 'session-a',
+        sourceWorkspace: '/workspace/a',
+        destinationWorkspace: '/workspace/destination',
+        mode: 'move',
+        error: 'synthetic destination write failure',
+        dryRun: false,
+      },
+    ]);
+
+    const program = createProgram();
+    registerMigrateSessionCommand(program);
+    await expect(
+      program.parseAsync([
+        'node',
+        'test',
+        '--workspace',
+        '/workspace/a',
+        'migrate-session',
+        'session-a',
+        '/workspace/destination',
+      ])
+    ).rejects.toThrow('process.exit');
+
+    expect(mockMigrateSessions).toHaveBeenCalledOnce();
+    expect(
+      consoleSpy.mock.calls.some(([value]) => String(value).includes('Failed to migrate'))
+    ).toBe(true);
+    expect(
+      consoleSpy.mock.calls.some(([value]) =>
+        String(value).includes('synthetic destination write failure')
+      )
+    ).toBe(true);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
 });
 
 // ==================== BACKUP COMMAND ====================
 
 describe('backup command', () => {
-  let stdoutSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
-    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   });
 
   it('creates backup with default options', async () => {
@@ -1331,6 +1977,31 @@ describe('backup command', () => {
     expect(mockCreateBackup).toHaveBeenCalledWith(
       expect.objectContaining({
         force: true,
+      })
+    );
+  });
+
+  it('forwards explicit shared permissions and the immutable source-limit override', async () => {
+    mockCreateBackup.mockResolvedValue({
+      success: true,
+      backupPath: '/backups/test.zip',
+      durationMs: 500,
+      manifest: {
+        stats: { sessionCount: 10, workspaceCount: 3, totalSize: 5000 },
+        files: [],
+      },
+    });
+    const sourceReadLimits = Object.freeze({ zipEntryBytes: 1024 });
+
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerBackupCommand(program);
+    await program.parseAsync(['node', 'test', 'backup', '--shared']);
+
+    expect(mockCreateBackup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sharedPermissions: true,
+        sourceReadLimits,
       })
     );
   });
@@ -1434,4 +2105,299 @@ describe('backup command', () => {
 
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
+
+  it('reports a safely published archive permission failure and exits with I/O status', async () => {
+    mockCreateBackup.mockRejectedValue(
+      new BackupPublishedPermissionError('/backups/published.zip', 0o640, 0o600, undefined, true)
+    );
+
+    const program = createProgram();
+    registerBackupCommand(program);
+
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+    const output = consoleErrorSpy.mock.calls.map(([value]) => String(value)).join('\n');
+    expect(output).toContain('Backup archive was published at /backups/published.zip');
+    expect(output).toContain('requested 0o640, actual 0o600');
+    expect(output).toContain('Do not retry with --force');
+  });
+
+  it('reports committed archive cleanup residue without suggesting a blind retry', async () => {
+    mockCreateBackup.mockRejectedValue(
+      new BackupPublishedCleanupError('/backups/published.zip', true, [
+        '/backups/.cursor-history-backup-private.tmp',
+      ])
+    );
+
+    const program = createProgram();
+    registerBackupCommand(program);
+
+    await expect(program.parseAsync(['node', 'test', 'backup'])).rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+    const output = consoleErrorSpy.mock.calls.map(([value]) => String(value)).join('\n');
+    expect(output).toContain('Backup archive was published at /backups/published.zip');
+    expect(output).toContain('Private residue paths:');
+    expect(output).toContain('/backups/.cursor-history-backup-private.tmp');
+    expect(output).toContain('Do not retry with --force');
+  });
+});
+
+// ==================== RESTORE COMMAND ====================
+
+describe('restore command source-read options', () => {
+  it('uses one source-limit override for validation and restore', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockValidateBackup.mockResolvedValue({
+      status: 'valid',
+      validFiles: [],
+      corruptedFiles: [],
+      missingFiles: [],
+      errors: [],
+      manifest: { files: [] },
+    });
+    mockRestoreBackup.mockResolvedValue({
+      success: true,
+      targetPath: '/target',
+      filesRestored: 0,
+      warnings: [],
+      durationMs: 1,
+    });
+    const sourceReadLimits = Object.freeze({ zipEntryCount: 17 });
+
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', sourceReadLimits);
+    registerRestoreCommand(program);
+    await program.parseAsync(['node', 'test', '--json', 'restore', '/backups/test.zip']);
+
+    expect(mockValidateBackup).toHaveBeenCalledWith('/backups/test.zip', {
+      sourceReadLimits,
+    });
+    expect(mockRestoreBackup).toHaveBeenCalledWith(expect.objectContaining({ sourceReadLimits }));
+  });
+
+  it('prints safe rollback residual paths for a human-readable fatal restore', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockValidateBackup.mockResolvedValue({
+      status: 'valid',
+      validFiles: ['globalStorage/state.vscdb'],
+      corruptedFiles: [],
+      missingFiles: [],
+      errors: [],
+      manifest: { files: [{ path: 'globalStorage/state.vscdb' }] },
+    });
+    mockRestoreBackup.mockRejectedValue(
+      new RestoreRollbackError(
+        1,
+        ['globalStorage/state.vscdb'],
+        new TemporaryArtifactCleanupError(
+          ['/private/verified-restore-stage'],
+          ['/private/unverified-restore-stage']
+        )
+      )
+    );
+
+    const program = createProgram();
+    registerRestoreCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'test', 'restore', '/backups/test.zip'])
+    ).rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+    const output = consoleErrorSpy.mock.calls.map(([value]) => String(value)).join('\n');
+    expect(output).toContain('Restore residual files:');
+    expect(output).toContain('globalStorage/state.vscdb');
+    expect(output).toContain('Private residue paths:');
+    expect(output).toContain('/private/verified-restore-stage');
+    expect(output).toContain('Unverified residue paths (do not delete blindly):');
+    expect(output).toContain('/private/unverified-restore-stage');
+    expect(output).toContain('known-good backup');
+  });
+});
+
+describe('workspace-scoped backup validation boundary', () => {
+  const cases = [
+    {
+      name: 'list',
+      register: registerListCommand,
+      args: ['list', '--all'],
+      setup: () => mockListSessions.mockResolvedValue(makeSessions(1)),
+    },
+    {
+      name: 'show',
+      register: registerShowCommand,
+      args: ['show', '1'],
+      setup: () => {
+        mockListSessions.mockResolvedValue(makeSessions(1));
+        mockGetSession.mockResolvedValue(makeSession(1));
+      },
+    },
+    {
+      name: 'search',
+      register: registerSearchCommand,
+      args: ['search', 'needle'],
+      setup: () => mockSearchSessions.mockResolvedValue(makeSearchResults()),
+    },
+    {
+      name: 'export',
+      register: registerExportCommand,
+      args: ['export', '1', '--force', '--output', '/tmp/scoped-backup-export.json'],
+      setup: () => {
+        mockListSessions.mockResolvedValue(makeSessions(1));
+        mockGetSession.mockResolvedValue(makeSession(1));
+        mockFindWorkspaces.mockResolvedValue([{ id: 'ws1', path: '/ws' }]);
+        mockExistsSync.mockReturnValue(false);
+      },
+    },
+  ] as const;
+
+  it.each(cases)(
+    '$name bypasses archive-wide validation under a workspace scope',
+    async (entry) => {
+      mockValidateBackup.mockRejectedValue(
+        new Error('archive-wide validation must not run for a scoped backup read')
+      );
+      entry.setup();
+      const program = createProgram();
+      entry.register(program);
+
+      await program.parseAsync([
+        'node',
+        'test',
+        '--workspace',
+        '/workspace/a',
+        ...entry.args,
+        '--backup',
+        '/backups/scoped.zip',
+      ]);
+
+      expect(mockValidateBackup).not.toHaveBeenCalled();
+    }
+  );
+});
+
+describe('global Source Read Limits command contract', () => {
+  const repeatedLimits = Object.freeze({
+    sqliteRowCount: 6_000_000,
+    jsonlRecordCount: 3_000_000,
+  });
+
+  it('propagates repeated different fields through list before session reads', async () => {
+    mockListSessions.mockResolvedValue(makeSessions(1));
+    const program = createProgram();
+    registerListCommand(program);
+
+    await program.parseAsync([
+      'node',
+      'test',
+      '--source-limit',
+      'sqliteRowCount=6000000',
+      '--source-limit',
+      'jsonlRecordCount=3000000',
+      'list',
+    ]);
+
+    expect(mockListSessionSummaries).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceReadLimits: repeatedLimits }),
+      undefined,
+      undefined,
+      mockReadContext
+    );
+    const forwarded = mockListSessionSummaries.mock.calls[0]![0].sourceReadLimits;
+    expect(Object.isFrozen(forwarded)).toBe(true);
+  });
+
+  it('binds the same immutable map into show lookup contexts', async () => {
+    mockGetSession.mockResolvedValue(makeSession());
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', repeatedLimits);
+    registerShowCommand(program);
+
+    await program.parseAsync(['node', 'test', 'show', '1']);
+
+    expect(mockCreateSessionReadContext).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceReadLimits: repeatedLimits })
+    );
+    expect(mockGetSession).toHaveBeenCalledWith(1, undefined, undefined, mockReadContext);
+    expect(mockDisposeReadContext).toHaveBeenCalledOnce();
+  });
+
+  it('propagates the immutable map through workspace migration', async () => {
+    mockMigrateWorkspace.mockResolvedValue({
+      success: true,
+      source: '/source',
+      destination: '/destination',
+      mode: 'move',
+      totalSessions: 0,
+      successCount: 0,
+      failureCount: 0,
+      results: [],
+      dryRun: false,
+    });
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', repeatedLimits);
+    registerMigrateCommand(program);
+
+    await program.parseAsync(['node', 'test', 'migrate', '/source', '/destination']);
+
+    expect(mockMigrateWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceReadLimits: repeatedLimits })
+    );
+  });
+
+  it('propagates the immutable map through scoped session migration', async () => {
+    mockMigrateSessions.mockResolvedValue([]);
+    const program = createProgram();
+    program.setOptionValue('sourceLimit', repeatedLimits);
+    registerMigrateSessionCommand(program);
+
+    await program.parseAsync(['node', 'test', 'migrate-session', '1', '/destination']);
+
+    expect(mockMigrateSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceReadLimits: repeatedLimits })
+    );
+  });
+
+  const commandCases = [
+    ['list', registerListCommand, ['list']],
+    ['show', registerShowCommand, ['show', '1']],
+    ['search', registerSearchCommand, ['search', 'needle']],
+    ['export', registerExportCommand, ['export', '1', '--force', '-o', '/tmp/out.md']],
+    ['migrate', registerMigrateCommand, ['migrate', '/source', '/destination']],
+    ['migrate-session', registerMigrateSessionCommand, ['migrate-session', '1', '/destination']],
+    ['backup', registerBackupCommand, ['backup']],
+    ['restore', registerRestoreCommand, ['restore', '/tmp/backup.zip']],
+    ['list-backups', registerListBackupsCommand, ['list-backups']],
+  ] as const;
+
+  it.each(commandCases)(
+    'rejects an invalid cross-field policy before %s payload I/O',
+    async (_name, register, args) => {
+      const program = createProgram();
+      program.setOptionValue('sourceLimit', {
+        zipEntryBytes: 2_147_483_648,
+        zipAggregateBytes: 1_073_741_824,
+      });
+      register(program);
+
+      await expect(program.parseAsync(['node', 'test', ...args])).rejects.toThrow('process.exit');
+
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      for (const payloadReader of [
+        mockListSessions,
+        mockGetSession,
+        mockSearchSessions,
+        mockMigrateWorkspace,
+        mockMigrateSessions,
+        mockCreateBackup,
+        mockValidateBackup,
+        mockRestoreBackup,
+        mockListBackups,
+      ]) {
+        expect(payloadReader).not.toHaveBeenCalled();
+      }
+    }
+  );
 });

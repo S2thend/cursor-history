@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "fixtureKind": "v0.16-composer-to-complete-merged-input",
+  "logicalSessionId": "00000000-0016-4016-8016-000000000016",
+  "composerProjection": "tagged-output.json#/globalSession",
+  "preferredSourceCases": [
+    "composer",
+    "store"
+  ],
+  "storeRepresentation": "transcript",
+  "sourceNativeOrder": [
+    {
+      "label": "store-only-start",
+      "placement": "start",
+      "role": "user",
+      "content": "Synthetic Store-only turn before Composer history.",
+      "directTimestamp": "2024-01-15T23:59:59.000Z",
+      "parentLabel": null
+    },
+    {
+      "label": "matched-native-user",
+      "placement": "matched",
+      "matchesComposerId": "native-user-016",
+      "role": "user",
+      "content": "Synthetic question alpha.",
+      "enrichment": {
+        "source": "both"
+      }
+    },
+    {
+      "label": "store-only-middle",
+      "placement": "middle",
+      "role": "assistant",
+      "content": "Synthetic Store-only middle turn.",
+      "directTimestamp": "2024-01-16T00:00:02.500Z",
+      "parentLabel": "matched-native-user"
+    },
+    {
+      "label": "matched-tool-read",
+      "placement": "matched",
+      "matchesComposerId": "native-tool-read-016",
+      "role": "assistant",
+      "content": "[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed",
+      "appendToolCalls": [
+        {
+          "name": "synthetic_store_enrichment",
+          "status": "completed",
+          "params": {
+            "fixture": true
+          },
+          "result": "synthetic enrichment result"
+        }
+      ]
+    },
+    {
+      "label": "store-collision",
+      "placement": "after-middle",
+      "role": "assistant",
+      "content": "Synthetic Store collision payload.",
+      "toolActivity": [],
+      "sourceRelationships": []
+    }
+  ],
+  "collision": {
+    "frozenComposerMessageId": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
+    "storeCandidateId": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
+    "expectedAllocatedStoreId": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1:collision:1"
+  },
+  "relationships": {
+    "expectedLeafLabel": "store-collision",
+    "rewriteParents": true,
+    "retainComposerBranch": true
+  }
+}

@@ -6,7 +6,7 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { resolve, normalize, isAbsolute } from 'node:path';
+import { resolve, normalize } from 'node:path';
 import type { LibraryConfig, SqliteDriverName } from './types.js';
 import { InvalidConfigError, DatabaseNotFoundError } from './errors.js';
 import { getCursorDataPath } from '../lib/platform.js';
@@ -25,11 +25,16 @@ const VALID_SQLITE_DRIVERS: SqliteDriverName[] = ['better-sqlite3', 'node:sqlite
 export interface ResolvedConfig {
   dataPath?: string;
   workspace?: string;
+  includeCrossWorkspaceSources: boolean;
   limit: number;
   offset: number;
   context: number;
   backupPath?: string;
   sqliteDriver?: SqliteDriverName;
+  onDiagnostic?: LibraryConfig['onDiagnostic'];
+  sourceReadLimits?: LibraryConfig['sourceReadLimits'];
+  readContext?: LibraryConfig['readContext'];
+  signal?: AbortSignal;
 }
 
 /**
@@ -74,11 +79,16 @@ export function validateConfig(config?: LibraryConfig): void {
 
   // Validate workspace path
   if (config.workspace !== undefined) {
-    if (typeof config.workspace !== 'string') {
-      throw new InvalidConfigError('workspace', config.workspace, 'must be a string');
-    }
-    if (!isAbsolute(config.workspace)) {
-      throw new InvalidConfigError('workspace', config.workspace, 'must be an absolute path');
+    if (
+      typeof config.workspace !== 'string' ||
+      config.workspace.length === 0 ||
+      /[\r\n\0]/.test(config.workspace)
+    ) {
+      throw new InvalidConfigError(
+        'workspace',
+        config.workspace,
+        'must be a non-empty single-line historical path or component suffix'
+      );
     }
   }
 
@@ -97,6 +107,32 @@ export function validateConfig(config?: LibraryConfig): void {
       );
     }
   }
+
+  if (
+    config.includeCrossWorkspaceSources !== undefined &&
+    typeof config.includeCrossWorkspaceSources !== 'boolean'
+  ) {
+    throw new InvalidConfigError(
+      'includeCrossWorkspaceSources',
+      config.includeCrossWorkspaceSources,
+      'must be a boolean'
+    );
+  }
+
+  if (config.onDiagnostic !== undefined && typeof config.onDiagnostic !== 'function') {
+    throw new InvalidConfigError('onDiagnostic', config.onDiagnostic, 'must be a function');
+  }
+
+  if (
+    config.readContext !== undefined &&
+    (typeof config.readContext !== 'object' || config.readContext === null)
+  ) {
+    throw new InvalidConfigError(
+      'readContext',
+      config.readContext,
+      'must be a context created by createSessionReadContext()'
+    );
+  }
 }
 
 /**
@@ -108,11 +144,16 @@ export function mergeWithDefaults(config?: LibraryConfig): ResolvedConfig {
   return {
     dataPath: config?.dataPath,
     workspace: config?.workspace,
+    includeCrossWorkspaceSources: config?.includeCrossWorkspaceSources ?? false,
     limit: config?.limit ?? Number.MAX_SAFE_INTEGER,
     offset: config?.offset ?? 0,
     context: config?.context ?? 0,
     backupPath: config?.backupPath,
     sqliteDriver: config?.sqliteDriver,
+    onDiagnostic: config?.onDiagnostic,
+    sourceReadLimits: config?.sourceReadLimits,
+    readContext: config?.readContext,
+    signal: config?.signal,
   };
 }
 

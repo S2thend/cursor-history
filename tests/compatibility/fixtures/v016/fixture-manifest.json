@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "fixtureSchema": "cursor-history-v016-synthetic/v1",
+  "generator": {
+    "path": "tests/compatibility/support/generate-v016-fixtures.ts",
+    "invocation": "node --no-warnings --experimental-strip-types tests/compatibility/support/generate-v016-fixtures.ts <private-output-directory>",
+    "deterministic": true,
+    "forbiddenInputs": [
+      "live Cursor roots",
+      "user backup archives",
+      "environment-derived identity or content",
+      "adjacent vibe-history checkout",
+      "network resources",
+      "wall clock or randomness"
+    ],
+    "logicalInputs": {
+      "sessionId": "00000000-0016-4016-8016-000000000016",
+      "workspacePath": "/fixture/v016/project",
+      "hostname": "fixture-host",
+      "createdAt": "2024-01-16T00:00:00.000Z",
+      "updatedAt": "2024-01-16T00:01:00.000Z",
+      "sqliteHeaderVersion": 3051001,
+      "bubbleRowids": [10, 15, 20, 25, 30, 40, 50],
+      "allowedPayloadStrings": [
+        "Synthetic question alpha.",
+        "Composer owns the synthetic collision identity.",
+        "Synthetic answer beta.\n```ts\nconst fixtureValue = 16;\n```",
+        "[corrupted message]",
+        "[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed",
+        "[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed",
+        "Synthetic empty-ID compatibility turn.",
+        "Synthetic workspace-native message.",
+        "Synthetic workspace missing-ID answer.",
+        "Synthetic workspace empty-ID answer.",
+        "Synthetic Store-only turn before Composer history.",
+        "Synthetic Store-only middle turn.",
+        "Synthetic Store collision payload.",
+        "synthetic read result",
+        "synthetic search result",
+        "synthetic enrichment result"
+      ]
+    }
+  },
+  "provenance": {
+    "cursorHistory": {
+      "tag": "v0.16.0",
+      "commit": "e8a7abf8cea3419a9dda911e174a05f82a9b260e",
+      "projectorManifest": "tests/compatibility/fixtures/v016/projector-manifest.json",
+      "sourceFormat": {
+        "composerGlobalTable": "cursorDiskKV",
+        "composerGlobalKeys": ["composerData:<session-id>", "bubbleId:<session-id>:<bubble-id>"],
+        "bubbleOrder": "rowid ASC",
+        "nullBubblePayload": "preserved as a row-key-ID [corrupted message] entry",
+        "workspaceFallbackContainer": "tabs[].messages[]"
+      }
+    },
+    "externalConsumerCertification": {
+      "manifest": "tests/compatibility/fixtures/v016/vibe-history-consumer-manifest.json",
+      "recurringCiIncludesThirdPartyImplementation": false
+    }
+  },
+  "syntheticIdentities": {
+    "allowedCursorShapedIds": ["00000000-0016-4016-8016-000000000016"],
+    "collisionId": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1"
+  },
+  "logicalInventory": {
+    "composerGlobal": {
+      "table": "cursorDiskKV",
+      "sessionId": "00000000-0016-4016-8016-000000000016",
+      "rowids": [10, 15, 20, 25, 30, 40, 50, 100],
+      "keys": [
+        "bubbleId:00000000-0016-4016-8016-000000000016:native-user-016",
+        "bubbleId:00000000-0016-4016-8016-000000000016:synthetic-collision-row",
+        "bubbleId:00000000-0016-4016-8016-000000000016:fallback-assistant-016",
+        "bubbleId:00000000-0016-4016-8016-000000000016:synthetic-null-payload-016",
+        "bubbleId:00000000-0016-4016-8016-000000000016:native-tool-read-016",
+        "bubbleId:00000000-0016-4016-8016-000000000016:native-tool-search-016",
+        "bubbleId:00000000-0016-4016-8016-000000000016:empty-id-row-016",
+        "composerData:00000000-0016-4016-8016-000000000016"
+      ],
+      "bubbleIds": [
+        "native-user-016",
+        "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
+        null,
+        null,
+        "native-tool-read-016",
+        "native-tool-search-016",
+        ""
+      ]
+    },
+    "workspaceFallback": {
+      "sessionIds": ["00000000-0016-4016-8016-000000000016"],
+      "messageIds": ["workspace-native-016", null, ""]
+    },
+    "taggedProjection": {
+      "globalMessageIds": [
+        "native-user-016",
+        "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
+        "fallback-assistant-016",
+        "synthetic-null-payload-016",
+        "native-tool-read-016",
+        "native-tool-search-016",
+        ""
+      ],
+      "workspaceMessageIds": ["workspace-native-016", null, ""],
+      "sources": ["global", "workspace-fallback"]
+    },
+    "storeUpgrade": {
+      "labels": [
+        "store-only-start",
+        "matched-native-user",
+        "store-only-middle",
+        "matched-tool-read",
+        "store-collision"
+      ],
+      "collisionCandidateId": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1",
+      "collisionAllocatedId": "store:v1:transcript:70b01b53440d21e54871cbf4e978a2f9a7b50954d233c0cd9fa748a35c2beb3e:1:collision:1"
+    },
+    "payloadStrings": [
+      "Composer owns the synthetic collision identity.",
+      "Synthetic Store collision payload.",
+      "Synthetic Store-only middle turn.",
+      "Synthetic Store-only turn before Composer history.",
+      "Synthetic answer beta.\n```ts\nconst fixtureValue = 16;\n```",
+      "Synthetic empty-ID compatibility turn.",
+      "Synthetic question alpha.",
+      "Synthetic workspace empty-ID answer.",
+      "Synthetic workspace missing-ID answer.",
+      "Synthetic workspace-native message.",
+      "[Tool: Read File]\nFile: /fixture/v016/project/synthetic.ts\nStatus: ✓ completed",
+      "[Tool: Search]\nPattern: synthetic-token\nPath: /fixture/v016/project\nStatus: ✓ completed",
+      "[corrupted message]",
+      "synthetic enrichment result",
+      "synthetic read result",
+      "synthetic search result"
+    ]
+  },
+  "artifacts": {
+    "composer-global-state.vscdb": {
+      "sha256": "8532715354510bfed8e0ce7e48ca37855cf65788412ba29ad1a5ae8084ea125d",
+      "bytes": 12288
+    },
+    "workspace-fallback.json": {
+      "sha256": "9f50b7562ee3671d26b3c2697b768217821a104db09c9a0bdd817a0cc774b39e",
+      "bytes": 805
+    },
+    "tagged-output.json": {
+      "sha256": "077a31b92bdd988d3226a877591bce9ae7caa46e618fb8260230f59d030aceba",
+      "bytes": 4662
+    },
+    "merged-store-source.json": {
+      "sha256": "5760ccb99854273351d55f54de691a989685996f8b4a03b250e0b7184cd62526",
+      "bytes": 2342
+    }
+  },
+  "safety": {
+    "syntheticOnly": true,
+    "allowedPathPrefixes": ["/fixture/v016/"],
+    "requiredScans": [
+      "byte-sensitive-patterns",
+      "declared-Cursor-shaped-identities",
+      "declared-logical-payload-content",
+      "committed-vs-regenerated-hashes"
+    ]
+  }
+}

@@ -7,8 +7,28 @@
 [![npm version](https://img.shields.io/npm/v/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![npm downloads](https://img.shields.io/npm/dm/cursor-history.svg)](https://www.npmjs.com/package/cursor-history)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2C%2022--26-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
+
+> **Contrato de compatibilidad:** el documento canónico en inglés
+> [Compatibility and Data-Integrity Contract](./compatibility.md) define la identidad estable, el
+> alcance y base de los índices, el límite de E/S por espacio de trabajo, la fidelidad/procedencia,
+> los tiempos inferidos, los límites de lectura, los permisos de respaldo y los ejemplos
+> verificados de CLI/biblioteca. En caso de diferencia, ese contrato es la fuente de verdad.
+>
+> Los consumidores incrementales de la biblioteca deben fijar v0.16 hasta poder validar v0.18.0
+> antes de actualizar desde v0.17. El camino sin cambios en el consumidor está garantizado
+> para archivos v0.16 que solo contienen Composer; no garantiza conservar IDs sintéticos Store
+> inestables de v0.17.
+>
+> v0.18.0 corrige directamente las coordenadas públicas de búsqueda de v0.16/v0.17 y añade el
+> índice cero-basado a la exportación JSON como metadato nuevo. El contrato canónico también define
+> el punto de publicación y los errores tipados de permisos o limpieza posteriores a una copia de
+> seguridad ya publicada; las rutas de residuo no verificadas nunca deben borrarse a ciegas.
+> La restauración omite entradas corruptas y rechaza rutas, destinos duplicados o enlaces inseguros
+> antes de escribir; `--force` no desactiva estas comprobaciones de integridad y confinamiento. Tras
+> publicar cualquier archivo, un fallo no intenta una reversión automática: conserva todas las
+> hojas y devuelve `RESTORE_ROLLBACK_INCOMPLETE`; detenga Cursor y recupere desde una copia fiable.
 
 **La herramienta de código abierto definitiva para navegar, buscar, exportar y respaldar tu historial de chat de Cursor AI.**
 
@@ -16,9 +36,9 @@ Una herramienta CLI de estilo POSIX que hace una cosa bien: acceder a tu histori
 
 ```bash
 # Compatible con pipes: combina con otras herramientas
-cursor-history list --json | jq '.[] | select(.messageCount > 10)'
+cursor-history list --json | jq '.sessions[] | select(.messageCount > 10)'
 cursor-history export 1 | grep -i "api" | head -20
-cursor-history search "bug" --json | jq -r '.[].sessionId' | xargs -I {} cursor-history export {}
+cursor-history search "bug" --json | jq -r '.results[].sessionId' | xargs -I {} cursor-history export {}
 ```
 
 Nunca pierdas una conversación otra vez. Ya sea que necesites encontrar ese fragmento de código perfecto de la semana pasada, migrar tu historial a una nueva máquina, o crear respaldos confiables de todas tus sesiones de desarrollo asistido por IA — cursor-history te tiene cubierto. Gratis, de código abierto, y construido por la comunidad para la comunidad.
@@ -32,7 +52,7 @@ Nunca pierdas una conversación otra vez. Ya sea que necesites encontrar ese fra
   - **Visualización completa de diff** para ediciones de archivos con resaltado de sintaxis
   - **Llamadas de herramientas detalladas** mostrando todos los parámetros (rutas de archivos, patrones de búsqueda, comandos, etc.)
   - Razonamiento y pensamiento de la IA
-  - Marcas de tiempo de mensajes (precisas para todas las sesiones, incluyendo antes de septiembre 2025)
+  - Marcas de tiempo con procedencia explícita (almacenada o inferida)
 - **Búsqueda** - Encontrar conversaciones por palabra clave con coincidencias resaltadas
 - **Exportar** - Guardar sesiones como archivos Markdown o JSON
 - **Migrar** - Mover o copiar sesiones entre espacios de trabajo (ej. al renombrar proyectos)
@@ -70,24 +90,28 @@ cursor-history list
 
 ## Requisitos
 
-- Node.js 20+ (Node.js 22.5+ recomendado para soporte SQLite integrado)
+- Node.js 20.x o 22.x–26.x (Node 21 no es compatible; se recomienda Node.js 22.5+ para SQLite integrado)
 - Cursor IDE (con historial de chat existente)
 
 ## Configuración del controlador SQLite
 
 cursor-history soporta dos controladores SQLite para máxima compatibilidad:
 
-| Controlador | Descripción | Versión Node.js |
-|-------------|-------------|-----------------|
-| `node:sqlite` | Módulo SQLite integrado de Node.js (sin bindings nativos) | 22.5+ |
-| `better-sqlite3` | Bindings nativos vía better-sqlite3 | 20+ |
+| Controlador | Descripción | Límite de capacidad de Node.js |
+|-------------|-------------|--------------------------------|
+| `node:sqlite` | Módulo integrado; solo se elige si incluye todas las API requeridas | Lectura desde 22.5; respaldo en línea desde 22.16.0 y 23.8.0 |
+| `better-sqlite3` | Binding nativo y alternativa automática cuando es capaz | Versiones principales 20 y 22–26 |
 
 ### Selección automática de controlador
 
-Por defecto, cursor-history selecciona automáticamente el mejor controlador disponible:
+cursor-history selecciona por operación y comprueba capacidades reales, no solo si el módulo se
+puede importar:
 
-1. **node:sqlite** (preferido) - Funciona en Node.js 22.5+ sin compilación nativa
-2. **better-sqlite3** (respaldo) - Funciona en versiones anteriores de Node.js
+1. prefiere **node:sqlite** cuando dispone de todas las API requeridas;
+2. de lo contrario usa un **better-sqlite3** instalado y capaz.
+
+Un controlador forzado nunca usa otro como respaldo: si no tiene una capacidad requerida, la
+operación falla con un error tipado y una solución accionable.
 
 ### Selección manual de controlador
 
@@ -97,7 +121,7 @@ Puedes forzar un controlador específico usando la variable de entorno:
 # Forzar better-sqlite3
 CURSOR_HISTORY_SQLITE_DRIVER=better-sqlite3 cursor-history list
 
-# Forzar node:sqlite (requiere Node.js 22.5+)
+# Forzar node:sqlite (debe incluir todas las API requeridas por la operación)
 CURSOR_HISTORY_SQLITE_DRIVER=node:sqlite cursor-history list
 ```
 
@@ -292,7 +316,7 @@ Al navegar tu historial de chat, verás:
 - **Conversaciones completas** - Todos los mensajes intercambiados con Cursor AI
 - **Cada mensaje se renderiza** - Cada mensaje resuelto se muestra una vez en orden; los duplicados consecutivos no se pliegan, por lo que las llamadas a herramientas, la procedencia y los datos de tokens distintos nunca se ocultan
 - **Marcas de tiempo** - La hora almacenada directamente de un mensaje cuando está disponible (formato HH:MM:SS); los mensajes sin hora directa no muestran marca de tiempo en lugar de usar un respaldo fabricado
-- **Sesiones combinadas entre pilas** - Cuando la misma sesión existe tanto en la pila Composer (vscdb) como en Store (~/.cursor), ambas representaciones se combinan campo a campo (ninguna se descarta), con la fuente principal elegida por plataforma (WSL prefiere Store; Windows/macOS/Linux nativo prefieren Composer)
+- **Sesiones resueltas entre pilas** - Cuando el mismo UUID existe en Composer y Store, cursor-history conserva las identidades Composer compatibles y resuelve una vista con procedencia explícita. El alcance del espacio de trabajo se aplica antes de leer contenido: una fuente conocida fuera del límite no se abre y hace que la vista sea parcial; las fuentes permitidas siguen la política canónica de backbone y enriquecimiento, no una unión ciega campo a campo.
 - **Acciones de herramientas IA** - Vista detallada de lo que hizo Cursor AI:
   - **Ediciones/escrituras de archivos** - Visualización completa de diff con resaltado de sintaxis mostrando exactamente qué cambió
   - **Lecturas de archivos** - Rutas de archivos y previsualizaciones de contenido (usa `--fullread` para contenido completo)
@@ -338,7 +362,7 @@ import {
 } from 'cursor-history';
 
 // Listar todas las sesiones con paginación
-const result = listSessions({ limit: 10 });
+const result = await listSessions({ limit: 10 });
 console.log(`Encontradas ${result.pagination.total} sesiones`);
 
 for (const session of result.data) {
@@ -346,17 +370,18 @@ for (const session of result.data) {
 }
 
 // Obtener una sesión específica (índice basado en cero)
-const session = getSession(0);
+const session = await getSession(0);
 console.log(session.messages);
 
 // Buscar en todas las sesiones
-const results = searchSessions('authentication', { context: 2 });
+const results = await searchSessions('authentication', { context: 2 });
 for (const match of results) {
-  console.log(match.match);
+  // Índice en el array completo, desplazamiento UTF-16 y línea de origen completa.
+  console.log(match.messageIndex, match.offset, match.match);
 }
 
 // Exportar a Markdown
-const markdown = exportSessionToMarkdown(0);
+const markdown = await exportSessionToMarkdown(0);
 ```
 
 ### API de migración
@@ -365,24 +390,26 @@ const markdown = exportSessionToMarkdown(0);
 import { migrateSession, migrateWorkspace } from 'cursor-history';
 
 // Mover una sesión a otro espacio de trabajo
-const results = migrateSession({
+const moveResults = await migrateSession({
   sessions: 3,  // índice o ID
   destination: '/ruta/a/nuevo/proyecto'
 });
+console.log(moveResults);
 
 // Copiar múltiples sesiones (mantiene originales)
-const results = migrateSession({
+const copyResults = await migrateSession({
   sessions: [1, 3, 5],
   destination: '/ruta/a/proyecto',
   mode: 'copy'
 });
+console.log(copyResults);
 
 // Migrar todas las sesiones entre espacios de trabajo
-const result = migrateWorkspace({
+const workspaceResult = await migrateWorkspace({
   source: '/proyecto/antiguo',
   destination: '/proyecto/nuevo'
 });
-console.log(`Migradas ${result.successCount} sesiones`);
+console.log(`Migradas ${workspaceResult.successCount} sesiones`);
 ```
 
 ### API de respaldo
@@ -393,7 +420,8 @@ import {
   restoreBackup,
   validateBackup,
   listBackups,
-  getDefaultBackupDir
+  getDefaultBackupDir,
+  listSessions
 } from 'cursor-history';
 
 // Crear un respaldo
@@ -408,7 +436,7 @@ console.log(`Respaldo creado: ${result.backupPath}`);
 console.log(`Sesiones: ${result.manifest.stats.sessionCount}`);
 
 // Validar un respaldo
-const validation = validateBackup('~/backup.zip');
+const validation = await validateBackup('~/backup.zip');
 if (validation.status === 'valid') {
   console.log('El respaldo es válido');
 } else if (validation.status === 'warnings') {
@@ -416,20 +444,21 @@ if (validation.status === 'valid') {
 }
 
 // Restaurar desde respaldo
-const restoreResult = restoreBackup({
+const restoreResult = await restoreBackup({
   backupPath: '~/backup.zip',
   force: true
 });
 console.log(`Restaurados ${restoreResult.filesRestored} archivos`);
+// Revisa restoreResult.warnings: las entradas corruptas se omiten y nunca se restauran.
 
 // Listar respaldos disponibles
-const backups = listBackups();  // Escanea ~/cursor-history-backups/
+const backups = await listBackups();  // Escanea ~/cursor-history-backups/
 for (const backup of backups) {
   console.log(`${backup.filename}: ${backup.manifest?.stats.sessionCount} sesiones`);
 }
 
 // Leer sesiones de respaldo sin restaurar
-const sessions = listSessions({ backupPath: '~/backup.zip' });
+const sessions = await listSessions({ backupPath: '~/backup.zip' });
 ```
 
 ### Funciones disponibles
@@ -457,6 +486,8 @@ const sessions = listSessions({ backupPath: '~/backup.zip' });
 ### Opciones de configuración
 
 ```typescript
+import type { MessageType } from 'cursor-history';
+
 interface LibraryConfig {
   dataPath?: string;       // Ruta personalizada de datos de Cursor
   workspace?: string;      // Filtrar por ruta de espacio de trabajo
@@ -474,20 +505,22 @@ interface LibraryConfig {
 ```typescript
 import {
   listSessions,
-  getSession,
   createBackup,
+  restoreBackup,
   isDatabaseLockedError,
   isDatabaseNotFoundError,
   isSessionNotFoundError,
   isWorkspaceNotFoundError,
-  isInvalidFilterError,
   isBackupError,
+  isBackupPublishedPermissionError,
+  isRestoreRollbackError,
   isRestoreError,
-  isInvalidBackupError
+  isInvalidBackupError,
+  validateMessageTypes
 } from 'cursor-history';
 
 try {
-  const result = listSessions();
+  const result = await listSessions();
 } catch (err) {
   if (isDatabaseLockedError(err)) {
     console.error('Base de datos bloqueada - cierra Cursor y reintenta');
@@ -500,19 +533,28 @@ try {
   }
 }
 
-// Manejo de errores de filtro
 try {
-  const session = getSession(0, { messageFilter: ['invalid'] });
+  await createBackup({ outputPath: '/private/backups/cursor.zip' });
 } catch (err) {
-  if (isInvalidFilterError(err)) {
-    console.error('Tipos de filtro inválidos:', err.invalidTypes);
-    console.error('Tipos válidos:', err.validTypes);
+  if (isBackupPublishedPermissionError(err)) {
+    if (err.details.pathIdentityVerified) {
+      console.error('El respaldo publicado verificado necesita corregir permisos:', err.details.outputPath);
+    } else {
+      // Se cruzó el punto de confirmación, pero esta ruta no es fiable. No cambies sus permisos aquí.
+      console.error('La ruta del respaldo publicado requiere recuperación de identidad:', err.details.outputPath);
+    }
   }
+}
+
+// Validar valores de filtro sin tipo antes de pasarlos a una operación de lectura
+const invalidTypes = validateMessageTypes(['invalid']);
+if (invalidTypes.length > 0) {
+  console.error('Tipos de filtro inválidos:', invalidTypes);
 }
 
 // Errores específicos de respaldo
 try {
-  const result = await createBackup();
+  await createBackup();
 } catch (err) {
   if (isBackupError(err)) {
     console.error('Respaldo fallido:', err.message);
@@ -520,6 +562,15 @@ try {
     console.error('Archivo de respaldo inválido');
   } else if (isRestoreError(err)) {
     console.error('Restauración fallida:', err.message);
+  }
+}
+
+try {
+  await restoreBackup({ backupPath: '/private/backups/cursor.zip', force: true });
+} catch (err) {
+  if (isRestoreRollbackError(err)) {
+    // Estas son rutas relativas al manifiesto, nunca localizadores físicos privados.
+    console.error('Se requiere recuperación manual para:', err.details.residualFiles);
   }
 }
 ```
@@ -540,31 +591,53 @@ npm test              # Ejecutar todas las pruebas
 npm run test:watch    # Modo observación
 ```
 
-### Publicar en NPM
+### Publicar en npm
 
-Este proyecto usa GitHub Actions para publicación automática en NPM. Para publicar una nueva versión:
+Las versiones usan la publicación de confianza de npm mediante GitHub Actions. No se utiliza ningún
+secreto de repositorio `NPM_TOKEN`. Antes de la primera publicación:
 
-1. Actualizar versión en `package.json`:
-   ```bash
-   npm version patch  # Para correcciones de bugs (0.1.0 -> 0.1.1)
-   npm version minor  # Para nuevas características (0.1.0 -> 0.2.0)
-   npm version major  # Para cambios importantes (0.1.0 -> 1.0.0)
-   ```
+1. Configura el publicador de confianza del paquete npm para este repositorio exacto, introduce
+   `npm-publish.yml` como nombre del flujo (el archivo está en
+   `.github/workflows/npm-publish.yml`), establece el entorno `npm-release-verification` y permite
+   la acción `npm publish`.
+2. Crea el entorno de GitHub `npm-release-verification`, exige revisores mantenedores designados y
+   evita omitir la revisión según la política de protección del repositorio.
 
-2. Empujar la etiqueta de versión para disparar publicación automática:
-   ```bash
-   git push origin main --tags
-   ```
+Para cada versión:
 
-3. El flujo de trabajo de GitHub automáticamente:
-   - Ejecutará verificaciones de tipos, linting y pruebas
-   - Compilará el proyecto
-   - Publicará en NPM con procedencia
+1. Actualiza y valida todos los metadatos versionados y las notas de la versión, completa las puertas
+   documentadas y congela una revisión limpia.
+2. Confirma que la etiqueta no exista y empuja solo esa etiqueta (por ejemplo,
+   `git push origin v0.18.0`). No empujes ni muevas una etiqueta antes de congelar la revisión.
+3. El flujo valida el código y todos los entornos compatibles, empaqueta una sola vez y vincula el
+   candidato a la revisión y a su SHA-256. Cuando esas puertas pasan, el trabajo real `publish` se
+   detiene en el entorno protegido `npm-release-verification` antes de solicitar su token OIDC.
+4. Descarga ese candidato identificado por suma y completa las verificaciones privadas del artefacto
+   exacto descritas en [release-verification.md](release-verification.md). Aprueba el entorno solo
+   cuando todas pasen.
+5. La aprobación publica exactamente esos bytes conservados con procedencia npm, sin recompilar ni
+   volver a empaquetar.
 
-**Configuración inicial**: Agrega tu token de acceso NPM como secreto de GitHub llamado `NPM_TOKEN`:
-1. Crea un token de acceso NPM en https://www.npmjs.com/settings/YOUR_USERNAME/tokens
-2. Ve a configuración de tu repositorio GitHub → Secrets and variables → Actions
-3. Agrega un nuevo secreto de repositorio llamado `NPM_TOKEN` con tu token NPM
+Cualquier fallo de código, runtime, artefacto o verificación privada bloquea la publicación. Nunca
+fuerces silenciosamente el movimiento de una etiqueta: corrige explícitamente un candidato aún no
+publicado y usa una versión nueva si ya se publicó cualquier byte.
+
+## Compatibilidad de v0.18
+
+- Todos los ID de sesión, incluidos los UUID canónicos, conservan el comportamiento de v0.16:
+  búsqueda, agrupación y asociación distinguen mayúsculas de minúsculas y comparan byte por byte.
+  Reutilice exactamente la grafía devuelta; una variante de mayúsculas es un ID distinto.
+- La migración con `--workspace` solo inspecciona metadatos fuera del ámbito, fija las claves físicas
+  exactas y prepara todo el lote antes de escribir. Un destino ambiguo o no elegible cancela el lote
+  sin cambios.
+- Al combinar Composer y Store, los mensajes Store de la rama activa al principio, en medio y al
+  final aparecen una sola vez; las ramas laterales quedan excluidas y los ID antiguos de Composer no
+  cambian.
+- Los índices de Composer con la misma fecha conservan el orden de descubrimiento de v0.16 mediante
+  `String.localeCompare()` en el mismo entorno compatible.
+- El manifiesto de copia de seguridad conserva `manifest.version: "1.0.0"`; el inventario opcional
+  usa su propio `schemaVersion: 1`. Consulte [compatibility.md](compatibility.md) para el contrato
+  normativo.
 
 ## Contribuir
 

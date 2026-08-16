@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   parseChatData,
   extractCodeBlocks,
@@ -8,6 +8,7 @@ import {
   exportToJson,
 } from '../../src/core/parser.js';
 import type { ChatSession, Message } from '../../src/core/types.js';
+import { resolveMessageTimestamps, resolveSessionTimestamps } from '../../src/core/timestamps.js';
 
 function msg(
   role: 'user' | 'assistant',
@@ -246,6 +247,190 @@ describe('parseChatData', () => {
     const result = parseChatData(JSON.stringify(data));
     expect(result[0]!.lastUpdatedAt.getTime()).toBe(1705310000000);
   });
+
+  it('resolves Composer session and message provenance without consulting the wall clock', () => {
+    const NativeDate = Date;
+    class PoisonDate extends NativeDate {
+      constructor(value?: string | number) {
+        if (arguments.length === 0) {
+          throw new Error('zero-argument Date constructor is forbidden');
+        }
+        super(value as string | number);
+      }
+
+      static override now(): number {
+        throw new Error('Date.now is forbidden');
+      }
+    }
+
+    vi.stubGlobal('Date', PoisonDate);
+    try {
+      const parsed = parseChatData(
+        JSON.stringify({
+          allComposers: [{ composerId: 'clock-free', name: 'Clock free' }],
+        })
+      );
+      expect(parsed[0]).toMatchObject({
+        createdAtSource: 'epoch-unknown',
+        lastUpdatedAtSource: 'epoch-unknown',
+      });
+      expect(parsed[0]!.createdAt.toISOString()).toBe('1970-01-01T00:00:00.000Z');
+      expect(parsed[0]!.messages[0]).toMatchObject({
+        timestampSource: 'unknown',
+      });
+      expect(parsed[0]!.messages[0]!.timestamp!.toISOString()).toBe('1970-01-01T00:00:00.000Z');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('deterministic timestamp projection', () => {
+  const directEarly = new Date('2024-01-15T10:00:00.000Z');
+  const directLate = new Date('2024-01-15T11:00:00.000Z');
+
+  it('uses only direct values as next/previous anchors and preserves legacy unknown values', () => {
+    const legacyUnknown = new Date('1999-12-31T23:59:59.123Z');
+    const messages = [
+      {},
+      { timestamp: legacyUnknown },
+      {},
+      { timestamp: directEarly, timestampSource: 'composer-timing' as const },
+      {},
+      { timestamp: directLate, timestampSource: 'store-turn-timing' as const },
+      {},
+      {},
+    ];
+
+    resolveMessageTimestamps(messages);
+
+    expect(messages.map((message) => message.timestampSource)).toEqual([
+      'inferred-next',
+      'unknown',
+      'inferred-next',
+      'composer-timing',
+      'inferred-next',
+      'store-turn-timing',
+      'inferred-previous',
+      'inferred-previous',
+    ]);
+    expect(messages[0]!.timestamp!.getTime()).toBe(directEarly.getTime());
+    expect(messages[1]!.timestamp).toBe(legacyUnknown);
+    expect(messages[1]!.timestamp!.toISOString()).toBe('1999-12-31T23:59:59.123Z');
+    expect(messages[7]!.timestamp!.getTime()).toBe(directLate.getTime());
+
+    const firstProjection = messages.map((message) => [
+      message.timestamp!.toISOString(),
+      message.timestampSource,
+    ]);
+    resolveMessageTimestamps(messages);
+    expect(
+      messages.map((message) => [message.timestamp!.toISOString(), message.timestampSource])
+    ).toEqual(firstProjection);
+  });
+
+  it('uses a valid deterministic session anchor, but never an epoch-unknown anchor', () => {
+    const sessionTime = new Date('2024-02-03T04:05:06.789Z');
+    const fromSession = [{}, {}];
+    resolveMessageTimestamps(fromSession, {
+      timestamp: sessionTime,
+      source: 'composer-metadata',
+    });
+    expect(fromSession).toEqual([
+      { timestamp: sessionTime, timestampSource: 'session-fallback' },
+      { timestamp: sessionTime, timestampSource: 'session-fallback' },
+    ]);
+    expect(fromSession[0]!.timestamp).not.toBe(sessionTime);
+
+    const fromUnknownEpoch = [{}];
+    resolveMessageTimestamps(fromUnknownEpoch, {
+      timestamp: new Date(0),
+      source: 'epoch-unknown',
+    });
+    expect(fromUnknownEpoch[0]!.timestamp!.toISOString()).toBe('1970-01-01T00:00:00.000Z');
+    expect(fromUnknownEpoch[0]!.timestampSource).toBe('unknown');
+  });
+
+  it('applies exact session-source precedence independently for creation and update', () => {
+    const directMessages = [
+      { timestamp: directLate, timestampSource: 'store-turn-timing' as const },
+      { timestamp: directEarly, timestampSource: 'composer-timing' as const },
+    ];
+    const composer = resolveSessionTimestamps({
+      view: 'composer-backed',
+      composerMetadata: {
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        lastUpdatedAt: new Date('2024-02-01T00:00:00Z'),
+      },
+      storeDbMetadata: {
+        createdAt: new Date('2023-01-01T00:00:00Z'),
+        lastUpdatedAt: new Date('2025-01-01T00:00:00Z'),
+      },
+      directMessages,
+    });
+    expect(composer).toMatchObject({
+      createdAtSource: 'composer-metadata',
+      lastUpdatedAtSource: 'composer-metadata',
+    });
+    expect(composer.createdAt.toISOString()).toBe('2024-01-01T00:00:00.000Z');
+    expect(composer.lastUpdatedAt.toISOString()).toBe('2024-02-01T00:00:00.000Z');
+
+    const store = resolveSessionTimestamps({
+      view: 'store-only',
+      storeDbMetadata: { createdAt: new Date(Number.NaN) },
+      storeMetadata: {
+        createdAt: new Date('2024-01-02T00:00:00Z'),
+        lastUpdatedAt: new Date('2024-02-02T00:00:00Z'),
+      },
+      directMessages,
+    });
+    expect(store).toMatchObject({
+      createdAtSource: 'store-meta',
+      lastUpdatedAtSource: 'store-meta',
+    });
+
+    const direct = resolveSessionTimestamps({
+      view: 'source-unknown',
+      directMessages,
+    });
+    expect(direct.createdAt.toISOString()).toBe(directEarly.toISOString());
+    expect(direct.lastUpdatedAt.toISOString()).toBe(directLate.toISOString());
+    expect(direct.createdAtSource).toBe('direct-message');
+    expect(direct.lastUpdatedAtSource).toBe('direct-message');
+
+    const epoch = resolveSessionTimestamps({ view: 'source-unknown', directMessages: [] });
+    expect(epoch).toMatchObject({
+      createdAtSource: 'epoch-unknown',
+      lastUpdatedAtSource: 'epoch-unknown',
+    });
+    expect(epoch.createdAt.toISOString()).toBe('1970-01-01T00:00:00.000Z');
+  });
+
+  it('is invariant to preferred backbone, scope labels, discovery order, and repeated reads', () => {
+    const sourceNative = [
+      { timestamp: directEarly, timestampSource: 'composer-timing' as const },
+      { timestamp: directLate, timestampSource: 'store-turn-timing' as const },
+    ];
+    const projections = [sourceNative, [...sourceNative].reverse(), sourceNative].map((messages) =>
+      resolveSessionTimestamps({ view: 'source-unknown', directMessages: messages })
+    );
+
+    expect(
+      projections.map((projection) => ({
+        createdAt: projection.createdAt.toISOString(),
+        createdAtSource: projection.createdAtSource,
+        lastUpdatedAt: projection.lastUpdatedAt.toISOString(),
+        lastUpdatedAtSource: projection.lastUpdatedAtSource,
+      }))
+    ).toEqual(
+      Array(3).fill({
+        createdAt: directEarly.toISOString(),
+        createdAtSource: 'direct-message',
+        lastUpdatedAt: directLate.toISOString(),
+        lastUpdatedAtSource: 'direct-message',
+      })
+    );
+  });
 });
 
 // =============================================================================
@@ -371,6 +556,44 @@ describe('getSearchSnippets', () => {
     const result = getSearchSnippets([msg('user', 'find me here')], 'find');
     expect(result[0]!.matchPositions.length).toBeGreaterThan(0);
   });
+
+  it('retains the source message index and full-message offsets beside snippet offsets', () => {
+    const content = `${'prefix '.repeat(20)}MixedCase Needle${' suffix'.repeat(20)}`;
+    const result = getSearchSnippets(
+      [msg('user', 'not this message'), msg('assistant', content)],
+      'mixedcase needle',
+      8
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      messageIndex: 1,
+      contentMatchPositions: [
+        [content.indexOf('MixedCase Needle'), content.indexOf('MixedCase Needle') + 16],
+      ],
+    });
+    expect(result[0]!.matchPositions[0]![0]).toBeLessThan(result[0]!.contentMatchPositions![0]![0]);
+  });
+
+  it('maps case-folded matches back to original UTF-16 message offsets', () => {
+    const content = '😀 İstanbul\nMixed CASE';
+    const result = getSearchSnippets([msg('assistant', content)], 'case');
+
+    expect(result[0]!.contentMatchPositions).toEqual([
+      [content.indexOf('CASE'), content.indexOf('CASE') + 'CASE'.length],
+    ]);
+    expect(content.slice(...result[0]!.contentMatchPositions![0]!)).toBe('CASE');
+
+    const expanded = getSearchSnippets([msg('assistant', content)], 'i');
+    expect(expanded[0]!.contentMatchPositions).toContainEqual([
+      content.indexOf('İ'),
+      content.indexOf('İ') + 1,
+    ]);
+  });
+
+  it('returns no snippets for an empty query', () => {
+    expect(getSearchSnippets([msg('user', 'content')], '')).toEqual([]);
+  });
 });
 
 // =============================================================================
@@ -411,6 +634,12 @@ describe('exportToMarkdown', () => {
     expect(md).toContain('**Messages**: 2');
   });
 
+  it('does not render an internal workspace label as a Markdown path', () => {
+    const md = exportToMarkdown(session({ workspacePath: '(unknown workspace)' }));
+    expect(md).not.toContain('**Workspace**:');
+    expect(md).not.toContain('(unknown workspace)');
+  });
+
   it('renders message IDs only when available', () => {
     const md = exportToMarkdown(
       session({
@@ -449,6 +678,41 @@ describe('exportToJson', () => {
   it('includes workspacePath when provided', () => {
     const parsed = JSON.parse(exportToJson(session(), '/my/workspace'));
     expect(parsed.workspacePath).toBe('/my/workspace');
+  });
+
+  it('nulls or omits internal labels across exported workspace metadata', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          workspacePath: '(unknown workspace)',
+          canonicalWorkspacePath: '(global)',
+          matchedWorkspacePath: '(workspace: legacy-id)',
+          indexWorkspacePath: '(workspace: legacy-id)',
+          workspaceMemberships: [
+            {
+              workspacePath: '(workspace: legacy-id)',
+              sourceRoles: ['composer'],
+              contributingInstanceCount: 1,
+            },
+          ],
+          sourceInstances: [
+            {
+              sourceRole: 'composer',
+              representation: 'composer-workspace',
+              workspacePaths: ['(unknown workspace)'],
+              state: 'contributed',
+            },
+          ],
+        })
+      )
+    );
+
+    expect(parsed.workspacePath).toBeNull();
+    expect(parsed).not.toHaveProperty('canonicalWorkspacePath');
+    expect(parsed).not.toHaveProperty('matchedWorkspacePath');
+    expect(parsed).not.toHaveProperty('indexWorkspacePath');
+    expect(parsed.workspaceMemberships).toEqual([]);
+    expect(parsed.sourceInstances[0].workspacePaths).toEqual([]);
   });
 
   it('messages include expected fields', () => {
@@ -513,14 +777,99 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
         })
       )
     );
-    expect(parsed.source).toBe('merged');
+    expect(parsed.source).toBe('workspace-fallback');
+    expect(parsed.resolvedSource).toBe('merged');
     expect(parsed.sources).toEqual(['composer', 'store']);
     expect(parsed.preferredSource).toBe('store');
+  });
+
+  it('serializes additive resolution and stable identity metadata', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          source: 'global',
+          resolvedSource: 'merged',
+          sources: ['composer', 'store'],
+          messageIdentityVersion: 1,
+          resolution: {
+            state: 'complete',
+            expectedSourceRoles: ['composer', 'store'],
+            loadedSourceRoles: ['composer', 'store'],
+            omittedSourceRoles: [],
+            failedSourceRoles: [],
+            reasonCodes: [],
+          },
+          activeBranchMessageIds: ['msg:0'],
+          messages: [
+            msg('assistant', 'done', {
+              id: 'msg:0',
+              messageIdentityVersion: 1,
+              identityOrigin: 'composer-v0.16-index',
+              parentMessageId: 'native-parent',
+              isSidechain: false,
+              toolCalls: [
+                {
+                  id: 'tool:v1:synthetic',
+                  identityOrigin: 'tool-v1',
+                  name: 'Read',
+                  status: 'completed',
+                },
+              ],
+            }),
+          ],
+        })
+      )
+    );
+
+    expect(parsed).toMatchObject({
+      source: 'global',
+      resolvedSource: 'merged',
+      messageIdentityVersion: 1,
+      activeBranchMessageIds: ['msg:0'],
+      resolution: { state: 'complete' },
+    });
+    expect(parsed.messages[0]).toMatchObject({
+      id: 'msg:0',
+      messageIdentityVersion: 1,
+      identityOrigin: 'composer-v0.16-index',
+      parentMessageId: 'native-parent',
+      isSidechain: false,
+    });
+    expect(parsed.messages[0].toolCalls[0]).toMatchObject({
+      id: 'tool:v1:synthetic',
+      identityOrigin: 'tool-v1',
+    });
   });
 
   it('preserves Store transcript state in JSON', () => {
     const parsed = JSON.parse(exportToJson(session({ transcriptState: 'partial' })));
     expect(parsed.transcriptState).toBe('partial');
+  });
+
+  it('serializes total message timestamp pairs and session provenance', () => {
+    const parsed = JSON.parse(
+      exportToJson(
+        session({
+          createdAtSource: 'composer-metadata',
+          lastUpdatedAtSource: 'direct-message',
+          messages: [
+            msg('user', 'direct', { timestampSource: 'composer-timing' }),
+            msg('assistant', 'missing', { timestamp: undefined, timestampSource: undefined }),
+          ],
+        })
+      )
+    );
+
+    expect(parsed.createdAtSource).toBe('composer-metadata');
+    expect(parsed.lastUpdatedAtSource).toBe('direct-message');
+    expect(parsed.messages[0]).toMatchObject({
+      timestamp: '2024-01-15T10:00:00.000Z',
+      timestampSource: 'composer-timing',
+    });
+    expect(parsed.messages[1]).toMatchObject({
+      timestamp: '1970-01-01T00:00:00.000Z',
+      timestampSource: 'unknown',
+    });
   });
 
   it('serializes every ToolCall field including error and files', () => {
@@ -531,6 +880,8 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
             msg('assistant', '', {
               toolCalls: [
                 {
+                  id: 'native-tool',
+                  identityOrigin: 'source-native',
                   name: 'Write',
                   status: 'error',
                   params: { file: '/a' },
@@ -547,6 +898,8 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
     expect(tc).toMatchObject({ name: 'Write', status: 'error', params: { file: '/a' } });
     expect(tc.error).toBe('disk full');
     expect(tc.files).toEqual(['/a']);
+    expect(tc.id).toBe('native-tool');
+    expect(tc.identityOrigin).toBe('source-native');
   });
 
   it('preserves defined empty tool fields', () => {
@@ -574,6 +927,23 @@ describe('exportToJson — resolved-session fallback and provenance', () => {
 });
 
 describe('exportToMarkdown — source line and no duplicate tool', () => {
+  it('marks inferred and unknown message times approximate while direct times stay exact', () => {
+    const md = exportToMarkdown(
+      session({
+        messages: [
+          msg('user', 'direct', { timestampSource: 'composer-created-at' }),
+          msg('assistant', 'inferred', { timestampSource: 'inferred-next' }),
+          msg('assistant', 'legacy', { timestampSource: 'unknown' }),
+        ],
+      })
+    );
+
+    expect(md).toContain('**Time**: 2024-01-15T10:00:00.000Z');
+    expect(md).toContain('**Time**: ≈ 2024-01-15T10:00:00.000Z');
+    expect(md).toContain('**Time Source**: inferred-next');
+    expect(md).toContain('**Time Source**: unknown');
+  });
+
   it('includes the session update timestamp without changing the original date line', () => {
     const md = exportToMarkdown(session());
     expect(md).toContain('**Date**: 2024-01-15');
@@ -583,6 +953,38 @@ describe('exportToMarkdown — source line and no duplicate tool', () => {
   it('includes a readable source line for a single-source Store session', () => {
     const md = exportToMarkdown(session({ source: 'store-complete' }));
     expect(md).toContain('**Source**: Store stack (store.db — complete)');
+  });
+
+  it('derives Store provenance from resolvedSource when source is a compatibility value', () => {
+    const md = exportToMarkdown(
+      session({
+        source: 'global',
+        resolvedSource: 'store-db',
+        resolutionState: 'complete',
+      })
+    );
+    expect(md).toContain('**Source**: Store stack (store.db — complete)');
+  });
+
+  it('visibly discloses partial resolution and machine-readable reason codes', () => {
+    const md = exportToMarkdown(
+      session({
+        source: 'workspace-fallback',
+        resolvedSource: 'store-transcript',
+        resolutionState: 'partial',
+        resolution: {
+          state: 'partial',
+          expectedSourceRoles: ['composer', 'store'],
+          loadedSourceRoles: ['store'],
+          omittedSourceRoles: [],
+          failedSourceRoles: ['composer'],
+          reasonCodes: ['source-unavailable'],
+        },
+      })
+    );
+    expect(md).toContain('**Source**: Store stack (transcript — partial)');
+    expect(md).toContain('**Warning — partial session**');
+    expect(md).toContain('Reason codes: source-unavailable.');
   });
 
   it('includes a merged source line', () => {

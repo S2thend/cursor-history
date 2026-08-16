@@ -13,6 +13,206 @@ export type MessageRole = 'user' | 'assistant';
  */
 export type SessionStackSource = 'composer' | 'store';
 
+/** Logical source role participating in a resolved Cursor session. */
+export type SourceRole = 'composer' | 'store';
+
+/** Physical representation used by one source contribution. */
+export type SourceRepresentation =
+  'composer-global' | 'composer-workspace' | 'store-db' | 'store-transcript' | 'store-metadata';
+
+/** Actual representation selected for a resolved logical session. */
+export type ResolvedSource =
+  'composer' | 'store-db' | 'store-transcript' | 'store-metadata' | 'merged';
+
+/** Whether a resolved view is replacement-safe or degraded. */
+export type ResolutionState = 'complete' | 'partial';
+
+/** Why a source contribution did not produce a complete view. */
+export type ResolutionReasonCode =
+  | 'workspace-scope-omitted'
+  | 'source-unavailable'
+  | 'source-read-failed'
+  | 'source-partial'
+  | 'expected-store-db-unavailable'
+  | 'store-db-expectation-unknown'
+  | 'store-conversation-unavailable';
+
+/** Scope of a reusable presentation index. */
+export type IndexScope = 'global' | 'workspace';
+
+/** How a workspace filter matched a historical workspace path. */
+export type WorkspaceMatchKind = 'exact' | 'unique-suffix';
+
+/** Stable identity origin for a resolved message. */
+export type MessageIdentityOrigin =
+  'composer-native' | 'composer-v0.16-index' | 'store-db-v1' | 'store-transcript-v1';
+
+/** Stable identity origin for a resolved tool call. */
+export type ToolIdentityOrigin = 'source-native' | 'tool-v1';
+
+/** Deterministic provenance for resolved session timestamps. */
+export type SessionTimestampSource =
+  'composer-metadata' | 'store-db-metadata' | 'store-meta' | 'direct-message' | 'epoch-unknown';
+
+/** Membership of one logical UUID in a historical workspace. */
+export interface WorkspaceMembership {
+  workspacePath: string;
+  sourceRoles: SourceRole[];
+  contributingInstanceCount: number;
+}
+
+/** Safe public provenance for a physical source occurrence. */
+export interface SessionSourceInstance {
+  sourceRole: SourceRole;
+  representation: SourceRepresentation;
+  workspacePaths: string[];
+  state: 'contributed' | 'equivalent-replica' | 'omitted-by-scope' | 'failed' | 'superseded';
+}
+
+/**
+ * Completeness and contributor state of a resolved logical session.
+ *
+ * Role arrays describe physical contributors, so one role may appear in both `loadedSourceRoles`
+ * and `omittedSourceRoles`/`failedSourceRoles` when some representations or occurrences loaded and
+ * others did not. `sourceInstances` is the authoritative representation-level detail.
+ */
+export interface SessionResolution {
+  state: ResolutionState;
+  expectedSourceRoles: SourceRole[];
+  loadedSourceRoles: SourceRole[];
+  omittedSourceRoles: SourceRole[];
+  failedSourceRoles: SourceRole[];
+  reasonCodes: ResolutionReasonCode[];
+}
+
+/** General safe diagnostic codes emitted by session resolution. */
+export type GeneralSessionDiagnosticCode =
+  | 'WORKSPACE_AMBIGUOUS'
+  | 'SESSION_AMBIGUOUS'
+  | 'SESSION_SCOPE_MISMATCH'
+  | 'UNSUPPORTED_SESSION_MIGRATION'
+  | 'DATABASE_CAPABILITY_MISSING'
+  | 'TEMPORARY_ARTIFACT_CLEANUP_FAILED';
+
+/** A diagnostic that never exposes content or a physical locator. */
+export interface GeneralSessionDiagnostic {
+  code: GeneralSessionDiagnosticCode;
+  message: string;
+  sessionId?: string;
+  sourceRole?: SourceRole;
+  occurrenceCount?: number;
+  occurrenceRefs?: string[];
+  remedy?: string;
+}
+
+/** Inclusive source-reading bounds, versioned as one immutable policy. */
+export interface SourceReadLimitsV1 {
+  readonly policyVersion: 'source-read-limits/v1';
+  readonly jsonlRecordBytes: number;
+  readonly jsonlSourceBytes: number;
+  readonly jsonlRecordCount: number;
+  readonly sqlitePageRows: number;
+  readonly sqlitePageBytes: number;
+  readonly sqliteValueBytes: number;
+  readonly sqliteRowCount: number;
+  readonly sqliteDecodedBytes: number;
+  readonly zipCompressedBytes: number;
+  readonly zipEntryCount: number;
+  readonly zipEntryBytes: number;
+  readonly zipAggregateBytes: number;
+  readonly zipCompressionRatio: number;
+}
+
+/** Per-operation overrides; policyVersion is deliberately not caller-settable. */
+export type SourceReadLimitsOverride = Partial<Omit<SourceReadLimitsV1, 'policyVersion'>>;
+
+/** Per-operation options shared by bounded source-reading APIs. */
+export interface SourceReadOptions {
+  /** Immutable partial override of Source Read Limits v1 defaults. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel parsing/materialization while retaining cleanup guarantees. */
+  signal?: AbortSignal;
+}
+
+/** Source Read Limits v1 bounds applied to one transcript JSONL carrier. */
+export type JsonlSourceBoundKind =
+  'jsonl-record-bytes' | 'jsonl-source-bytes' | 'jsonl-record-count';
+/** Source Read Limits v1 bounds applied to one SQLite session or catalog scan. */
+export type SqliteSourceBoundKind =
+  | 'sqlite-page-rows'
+  | 'sqlite-page-bytes'
+  | 'sqlite-value-bytes'
+  | 'sqlite-row-count'
+  | 'sqlite-decoded-bytes';
+/** Source Read Limits v1 bounds applied while reading one backup ZIP archive. */
+export type ZipSourceBoundKind =
+  | 'zip-compressed-bytes'
+  | 'zip-entry-count'
+  | 'zip-entry-bytes'
+  | 'zip-aggregate-bytes'
+  | 'zip-compression-ratio';
+/** Every stable Source Read Limits v1 bound name accepted by diagnostics and overrides. */
+export type SourceBoundKind = JsonlSourceBoundKind | SqliteSourceBoundKind | ZipSourceBoundKind;
+
+/** Exact JSONL carrier/bound/unit correlations used by structured diagnostics. */
+export type JsonlSourceLimitDimension =
+  | {
+      sourceKind: 'jsonl';
+      bound: 'jsonl-record-bytes' | 'jsonl-source-bytes';
+      unit: 'bytes';
+    }
+  | { sourceKind: 'jsonl'; bound: 'jsonl-record-count'; unit: 'records' };
+/** Exact SQLite carrier/bound/unit correlations used by structured diagnostics. */
+export type SqliteSourceLimitDimension =
+  | {
+      sourceKind: 'sqlite';
+      bound: 'sqlite-page-rows' | 'sqlite-row-count';
+      unit: 'rows';
+    }
+  | {
+      sourceKind: 'sqlite';
+      bound: 'sqlite-page-bytes' | 'sqlite-value-bytes' | 'sqlite-decoded-bytes';
+      unit: 'bytes';
+    };
+/** Exact ZIP carrier/bound/unit correlations used by fatal structured errors. */
+export type ZipSourceLimitDimension =
+  | {
+      sourceKind: 'zip';
+      bound: 'zip-compressed-bytes' | 'zip-entry-bytes' | 'zip-aggregate-bytes';
+      unit: 'bytes';
+    }
+  | { sourceKind: 'zip'; bound: 'zip-entry-count'; unit: 'records' }
+  | { sourceKind: 'zip'; bound: 'zip-compression-ratio'; unit: 'ratio' };
+
+/** Safe partial-result diagnostic for nondeterministic Store-source text encoding. */
+export interface SourceEncodingDiagnostic {
+  code: 'SOURCE_ENCODING_INVALID';
+  message: string;
+  sessionId?: string;
+  sourceRole?: SourceRole;
+  sourceKind: 'jsonl' | 'sqlite';
+  outcome: 'partial';
+  remedy: string;
+}
+
+/** Safe partial-result diagnostic for a bounded Store source that exceeded policy. */
+export type SourceLimitExceededDiagnostic = {
+  code: 'SOURCE_LIMIT_EXCEEDED';
+  message: string;
+  sessionId?: string;
+  sourceRole?: SourceRole;
+  policyVersion: 'source-read-limits/v1';
+  limit: number;
+  observedAtLeast: number;
+  outcome: 'partial';
+  retryableWithOverride: true;
+  remedy: string;
+} & (JsonlSourceLimitDimension | SqliteSourceLimitDimension);
+
+/** Public content-free diagnostic attached to a logical summary, session, or bulk result. */
+export type SessionDiagnostic =
+  GeneralSessionDiagnostic | SourceEncodingDiagnostic | SourceLimitExceededDiagnostic;
+
 /** Parse state of the Store transcript associated with a resolved session. */
 export type TranscriptState =
   'missing' | 'parsed' | 'partial' | 'empty' | 'error-only' | 'unsupported' | 'unreadable';
@@ -32,7 +232,13 @@ export type MessageSource = 'composer' | 'store' | 'both';
  * untimed unless Cursor stored a turn timestamp.
  */
 export type MessageTimestampSource =
-  'composer-created-at' | 'composer-timing' | 'store-turn-timing';
+  | 'composer-created-at'
+  | 'composer-timing'
+  | 'store-turn-timing'
+  | 'inferred-previous'
+  | 'inferred-next'
+  | 'session-fallback'
+  | 'unknown';
 
 /**
  * Valid message type filter values for filtering displayed messages
@@ -105,19 +311,47 @@ export interface ChatSession {
     | 'store-complete'
     | 'store-partial'
     | 'merged';
+  /** Actual selected source representation; `source` remains the fidelity signal. */
+  resolvedSource?: ResolvedSource;
   /**
-   * Cross-stack provenance. Present only when `source === 'merged'`: lists the
-   * stacks that contributed and which stack supplies the canonical order /
+   * Cross-stack provenance. Present when `resolvedSource === 'merged'`: lists
+   * the stacks that contributed and which stack supplies canonical rendering /
    * wins true scalar conflicts. Additive — absent for single-source sessions.
    */
   sources?: SessionStackSource[];
   preferredSource?: SessionStackSource;
+  /** Replacement-safety and contributor diagnostics. */
+  resolution?: SessionResolution;
+  /** Convenience mirror of `resolution.state` for structured consumers. */
+  resolutionState?: ResolutionState;
+  /** Scope of this one-based core/CLI presentation index. */
+  indexScope?: IndexScope;
+  /** Full matched path when `indexScope` is `workspace`. */
+  indexWorkspacePath?: string;
+  /** Stable canonical workspace path, independent of active filtering. */
+  canonicalWorkspacePath?: string;
+  /** Full normalized workspace path selected by the active filter. */
+  matchedWorkspacePath?: string;
+  /** Whether the active workspace matched exactly or by unique suffix. */
+  workspaceMatchKind?: WorkspaceMatchKind;
+  /** Deterministically ordered historical workspace memberships. */
+  workspaceMemberships?: WorkspaceMembership[];
+  /** Safe source provenance without physical locators. */
+  sourceInstances?: SessionSourceInstance[];
+  /** Version of the resolved message identity contract. */
+  messageIdentityVersion?: 1;
+  /** Provenance of the existing createdAt field. */
+  createdAtSource?: SessionTimestampSource;
+  /** Provenance of the existing lastUpdatedAt field. */
+  lastUpdatedAtSource?: SessionTimestampSource;
   /** Store transcript state, retained even when store.db supplies the messages. */
   transcriptState?: TranscriptState;
   /** Session-level token usage summary (optional, when available) */
   usage?: SessionUsage;
   /** Ordered bubble IDs of the current active conversation branch */
   activeBranchBubbleIds?: string[];
+  /** Active branch rewritten through resolved stable message identities. */
+  activeBranchMessageIds?: string[];
 }
 
 /**
@@ -125,6 +359,10 @@ export interface ChatSession {
  */
 export interface Message {
   id: string | null;
+  /** Version of the stable resolved identity contract. */
+  messageIdentityVersion?: 1;
+  /** Source of the resolved identity. */
+  identityOrigin?: MessageIdentityOrigin;
   role: MessageRole;
   content: string;
   /**
@@ -135,6 +373,10 @@ export interface Message {
   timestamp?: Date;
   /** Provenance of `timestamp` when it is directly stored (not inferred). */
   timestampSource?: MessageTimestampSource;
+  /** Stable parent reference rewritten after merge. */
+  parentMessageId?: string;
+  /** Whether this message belongs to a sidechain. */
+  isSidechain?: boolean;
   codeBlocks: CodeBlock[];
   /**
    * Which stack supplied this resolved message ('composer' | 'store'), or
@@ -173,6 +415,10 @@ export interface CodeBlock {
  * A tool/function call executed by the assistant
  */
 export interface ToolCall {
+  /** Stable modern tool identity; legacy consumers may retain array ordinals. */
+  id?: string;
+  /** Source of the stable tool identity. */
+  identityOrigin?: ToolIdentityOrigin;
   /** Tool/function name (e.g., 'read_file', 'write', 'grep') */
   name: string;
   /** Tool execution status */
@@ -209,12 +455,42 @@ export interface ChatSessionSummary {
     | 'store-complete'
     | 'store-partial'
     | 'merged';
-  /** Cross-stack provenance (present only when `source === 'merged'`). */
+  resolvedSource?: ResolvedSource;
+  /** Cross-stack provenance (present when `resolvedSource === 'merged'`). */
   sources?: SessionStackSource[];
   preferredSource?: SessionStackSource;
   /** Store transcript state when the Store stack contributes to this session. */
   transcriptState?: TranscriptState;
+  indexScope?: IndexScope;
+  indexWorkspacePath?: string;
+  resolutionState?: ResolutionState;
+  resolution?: SessionResolution;
+  createdAtSource?: SessionTimestampSource;
+  lastUpdatedAtSource?: SessionTimestampSource;
+  canonicalWorkspacePath?: string;
+  matchedWorkspacePath?: string;
+  workspaceMatchKind?: WorkspaceMatchKind;
+  workspaceMemberships?: WorkspaceMembership[];
+  sourceInstances?: SessionSourceInstance[];
+  messageIdentityVersion?: 1;
 }
+
+/** Message-free summary for a divergent logical UUID. */
+export interface AmbiguousSessionSummary {
+  id: string;
+  index: number;
+  indexScope: IndexScope;
+  indexWorkspacePath?: string;
+  resolutionState: 'ambiguous';
+  sourceRoles: SourceRole[];
+  occurrenceCount: number;
+  diagnosticOccurrenceRefs: string[];
+  canonicalWorkspacePath?: string;
+  matchedWorkspacePath?: string;
+}
+
+/** One logical catalog row exposed by summary-only listing APIs. */
+export type LogicalSessionSummary = ChatSessionSummary | AmbiguousSessionSummary;
 
 /**
  * Search result with match snippets
@@ -222,7 +498,12 @@ export interface ChatSessionSummary {
 export interface SearchResult {
   sessionId: string;
   index: number;
+  /** Backward-compatible workspace address; canonical for scoped results. */
   workspacePath: string;
+  /** Stable canonical workspace selected for this logical session. */
+  canonicalWorkspacePath?: string;
+  /** Workspace membership that satisfied the active filter, when scoped. */
+  matchedWorkspacePath?: string;
   createdAt: Date;
   matchCount: number;
   snippets: SearchSnippet[];
@@ -234,7 +515,12 @@ export interface SearchResult {
 export interface SearchSnippet {
   messageRole: MessageRole;
   text: string;
+  /** Positions relative to `text`, retained for CLI highlighting. */
   matchPositions: [number, number][];
+  /** Zero-based index in the full session message array. */
+  messageIndex?: number;
+  /** Absolute positions in the complete source message content. */
+  contentMatchPositions?: [number, number][];
 }
 
 /**
@@ -244,6 +530,9 @@ export interface ListOptions {
   limit: number;
   all: boolean;
   workspacePath?: string;
+  includeCrossWorkspaceSources?: boolean;
+  sourceReadLimits?: SourceReadLimitsOverride;
+  signal?: AbortSignal;
 }
 
 /**
@@ -253,6 +542,9 @@ export interface SearchOptions {
   limit: number;
   contextChars: number;
   workspacePath?: string;
+  includeCrossWorkspaceSources?: boolean;
+  sourceReadLimits?: SourceReadLimitsOverride;
+  signal?: AbortSignal;
 }
 
 /**
@@ -277,8 +569,12 @@ export type MigrationMode = 'move' | 'copy';
  * Options for migrating one or more sessions
  */
 export interface MigrateSessionOptions {
-  /** Session ID(s) to migrate (resolved from index or UUID) */
-  sessionIds: string[];
+  /** Legacy pre-resolved session ID(s). New callers should pass selectors. */
+  sessionIds?: string[];
+  /** Numeric/direct-ID selectors bound once inside the active migration scope. */
+  selectors?: Array<string | number>;
+  /** Workspace scope used for both numeric and direct-ID migration selectors. */
+  workspacePath?: string;
   /** Destination workspace path */
   destination: string;
   /** Migration mode: 'move' (default) or 'copy' */
@@ -291,6 +587,10 @@ export interface MigrateSessionOptions {
   dataPath?: string;
   /** If true, log detailed path transformation info to stderr */
   debug?: boolean;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel before mutation or between bounded stages. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -311,6 +611,10 @@ export interface MigrateWorkspaceOptions {
   dataPath?: string;
   /** If true, log detailed path transformation info to stderr */
   debug?: boolean;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel before mutation or between bounded stages. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -333,9 +637,24 @@ export interface SessionMigrationResult {
   error?: string;
   /** Whether this was a dry run */
   dryRun: boolean;
+  /** Safe eligibility projection; physical locators are never exposed. */
+  eligibility?: MigrationEligibilityResult;
+  /** Opaque fingerprint shared by preview/apply for the bound occurrence. */
+  targetFingerprint?: string;
+  /** Stable typed error code for batch-result failures. */
+  errorCode?: string;
   /** Indicates file paths in session data will be updated (dry run preview) */
   pathsWillBeUpdated?: boolean;
 }
+
+/** Public-safe migration eligibility values. */
+export type MigrationEligibilityResult =
+  | 'eligible-composer'
+  | 'multiple-composer-occurrences'
+  | 'shared-membership'
+  | 'ambiguous'
+  | 'store-only'
+  | 'merged';
 
 /**
  * Aggregate result of workspace migration
@@ -369,18 +688,56 @@ export interface WorkspaceMigrationResult {
  * Metadata stored in the manifest.json file within the backup zip
  */
 export interface BackupManifest {
-  /** Manifest schema version for backward compatibility */
+  /**
+   * Enclosing backup-manifest version. Additive optional metadata keeps the v1 envelope at
+   * `1.0.0`; independently evolving members carry their own schema version.
+   */
   version: string;
   /** ISO 8601 timestamp when backup was created */
   createdAt: string;
   /** Platform where backup was created */
   sourcePlatform: 'darwin' | 'win32' | 'linux';
+  /** Exact package version that produced a new archive; absent in legacy manifests. */
+  producer?: string;
   /** cursor-history version that created the backup */
   cursorHistoryVersion: string;
   /** List of files in the backup with metadata */
   files: BackupFileEntry[];
+  /**
+   * Metadata-only Composer workspace membership used to plan workspace-scoped reads without
+   * extracting conversation databases outside the selected scope. Absent in legacy manifests.
+   */
+  composerWorkspaceInventory?: BackupComposerWorkspaceInventory;
   /** Aggregate statistics for quick display */
   stats: BackupStats;
+}
+
+/** Versioned metadata-only Composer membership carried by new backup manifests. */
+export interface BackupComposerWorkspaceInventory {
+  /**
+   * Inventory schema version, independently validated while the enclosing manifest remains
+   * backward-compatible `1.0.0`.
+   */
+  schemaVersion: 1;
+  /** One canonically ordered entry for every workspace database in the archive. */
+  workspaces: BackupComposerWorkspaceInventoryEntry[];
+}
+
+/** Workspace path and native session UUIDs projected without conversation payloads. */
+export interface BackupComposerWorkspaceInventoryEntry {
+  /** Cursor workspace-storage directory identifier. */
+  workspaceId: string;
+  /** Historical workspace path, or null when workspace metadata was absent/unreadable. */
+  workspacePath: string | null;
+  /** Canonically ordered, unique native Composer session UUIDs in this workspace database. */
+  sessionIds: string[];
+  /** Materialized workspace session IDs that also have a verified shared-global counterpart. */
+  globalCounterpartSessionIds: string[];
+  /**
+   * Canonically ordered UUIDs referenced by selected-composer or view-pane membership metadata,
+   * including sessions whose conversation payload lives only in the shared global database.
+   */
+  linkedGlobalSessionIds: string[];
 }
 
 /**
@@ -419,8 +776,14 @@ export interface BackupConfig {
   outputPath?: string;
   /** Overwrite existing file without prompting */
   force?: boolean;
+  /** Request platform-default shared permissions for the completed archive. */
+  sharedPermissions?: boolean;
   /** Progress callback for UI updates */
   onProgress?: (progress: BackupProgress) => void;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel snapshot/compression work and clean private staging. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -467,6 +830,10 @@ export interface RestoreConfig {
   force?: boolean;
   /** Progress callback for UI updates */
   onProgress?: (progress: RestoreProgress) => void;
+  /** Immutable per-operation Source Read Limits v1 overrides. */
+  sourceReadLimits?: SourceReadLimitsOverride;
+  /** Cooperatively cancel validation/extraction and clean private staging. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -496,7 +863,7 @@ export interface RestoreResult {
   targetPath: string;
   /** Number of files restored */
   filesRestored: number;
-  /** Files with integrity warnings (still restored) */
+  /** Integrity warnings for corrupt entries that were reported and skipped */
   warnings: string[];
   /** Duration in milliseconds */
   durationMs: number;

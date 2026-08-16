@@ -10,7 +10,6 @@
 
 import { Command } from 'commander';
 import pc from 'picocolors';
-import { resolveSessionIdentifiers } from '../../core/storage.js';
 import { migrateSessions } from '../../core/migrate.js';
 import { expandPath } from '../../lib/platform.js';
 import {
@@ -20,6 +19,9 @@ import {
   isNestedPathError,
 } from '../../lib/errors.js';
 import type { MigrationMode } from '../../core/types.js';
+import type { SourceReadLimitsOverride } from '../../core/types.js';
+import { handleCommandError } from '../errors.js';
+import { validateCliSourceLimitOverrides } from '../source-limit-option.js';
 
 interface MigrateSessionOptions {
   dryRun?: boolean;
@@ -41,29 +43,38 @@ export function registerMigrateSessionCommand(program: Command): void {
     .option('-f, --force', 'Proceed even if destination has existing sessions')
     .option('--debug', 'Show detailed path transformation logs')
     .action(async (sessionArg: string, destinationArg: string, options: MigrateSessionOptions) => {
-      const globalOptions = program.opts() as { dataPath?: string; json?: boolean };
-      const dataPath = globalOptions.dataPath;
+      const globalOptions = program.opts() as {
+        dataPath?: string;
+        json?: boolean;
+        workspace?: string;
+        sourceLimit?: SourceReadLimitsOverride;
+      };
+      const dataPath = globalOptions.dataPath ? expandPath(globalOptions.dataPath) : undefined;
       const jsonOutput = globalOptions.json || options.json;
 
       try {
+        const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions.sourceLimit);
         // Expand ~ in destination path
         const destination = expandPath(destinationArg);
 
-        // Resolve session identifiers to IDs
-        const sessionIds = await resolveSessionIdentifiers(sessionArg, dataPath);
+        const selectors = sessionArg.includes(',')
+          ? sessionArg.split(',').map((value) => value.trim())
+          : [sessionArg];
 
         // Determine mode
         const mode: MigrationMode = options.copy ? 'copy' : 'move';
 
         // Perform migration
         const results = await migrateSessions({
-          sessionIds,
+          selectors,
+          workspacePath: globalOptions.workspace,
           destination,
           mode,
           dryRun: options.dryRun ?? false,
           force: options.force ?? false,
           dataPath,
           debug: options.debug ?? false,
+          sourceReadLimits,
         });
 
         // Output results
@@ -79,12 +90,12 @@ export function registerMigrateSessionCommand(program: Command): void {
           process.exit(1);
         }
       } catch (error) {
-        if (jsonOutput) {
-          console.log(JSON.stringify({ error: formatError(error) }, null, 2));
-        } else {
-          console.error(pc.red(formatError(error)));
-        }
-        process.exit(1);
+        const message = formatError(error);
+        handleCommandError(error, {
+          json: jsonOutput,
+          message,
+          legacyJson: { error: message },
+        });
       }
     });
 }

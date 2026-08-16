@@ -13,7 +13,9 @@ function makeStore(over: Partial<StoreSession> = {}): StoreSession {
     workspacePath: '/proj',
     title: null,
     createdAt: new Date(1783737832293),
+    createdAtSource: 'store-meta',
     lastUpdatedAt: new Date(1783737832293),
+    lastUpdatedAtSource: 'store-meta',
     messages: [],
     source: 'transcript',
     transcriptState: 'parsed',
@@ -49,5 +51,28 @@ describe('mapStoreSession', () => {
     const cs = mapStoreSession(makeStore(), 0);
     expect(cs.usage).toBeUndefined();
     expect(cs.activeBranchBubbleIds).toBeUndefined();
+  });
+
+  it('does not replace an unresolved explicit Store parent with the prior message', () => {
+    const cs = mapStoreSession(
+      makeStore({
+        source: 'global',
+        resolvedSource: 'store-transcript',
+        messages: [
+          { ...msg(), id: 'source-first', content: 'first' },
+          { ...msg(), id: 'source-second', content: 'second', parentMessageId: 'missing-source-id' },
+          { ...msg(), id: 'source-third', content: 'third' },
+        ],
+      }),
+      1
+    );
+
+    expect(cs.messages[1]!.parentMessageId).toBeUndefined();
+    expect(cs.messages[2]!.parentMessageId).toBe(cs.messages[1]!.id);
+    expect(cs).toMatchObject({
+      source: 'workspace-fallback',
+      resolution: { state: 'partial', reasonCodes: ['source-partial'] },
+      resolutionState: 'partial',
+    });
   });
 });

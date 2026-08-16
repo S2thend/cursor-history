@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "taggedRelease": "v0.17.0",
+  "fixtureKind": "degraded-store-session",
+  "session": {
+    "id": "00000000-0017-4017-8017-000000000017",
+    "workspace": "/fixture/v017/merged-project",
+    "timestamp": "2024-01-17T00:00:00.000Z",
+    "source": "store-partial",
+    "transcriptState": "partial",
+    "messageCount": 1,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Synthetic recoverable fragment from a degraded v0.17 Store view.",
+        "timestamp": "2024-01-17T00:00:01.000Z",
+        "source": "store"
+      }
+    ],
+    "metadata": { "lastModified": "2024-01-17T00:00:01.000Z" }
+  },
+  "expectedCorrectiveTransition": {
+    "replacementAllowed": false,
+    "completeStoredViewRemainsPinned": true,
+    "requiredAction": "retry-or-manual-review",
+    "claimStoreIdPreservation": false
+  }
+}

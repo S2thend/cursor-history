@@ -3,12 +3,15 @@
  * These tests use real SQLite databases (temp files) to verify driver adapters.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { existsSync, unlinkSync } from 'node:fs';
 import { betterSqlite3Driver } from '../../src/core/database/drivers/better-sqlite3.js';
 import { nodeSqliteDriver } from '../../src/core/database/drivers/node-sqlite.js';
-import type { DatabaseDriver, Database } from '../../src/core/database/types.js';
+import type { DatabaseDriver } from '../../src/core/database/types.js';
+import type { DriverName } from '../../src/core/database/types.js';
+import { parseStoreDb } from '../../src/core/store-stack/store-db.js';
 
 const tempFiles: string[] = [];
 
@@ -39,6 +42,16 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
     it('isAvailable returns true', async () => {
       driver = await getDriver();
       expect(await driver.isAvailable()).toBe(true);
+    });
+
+    it('reports the read and read-write APIs exercised by cursor-history', async () => {
+      driver = await getDriver();
+      const profile = await driver.getCapabilityProfile();
+
+      expect(profile.driver).toBe(driverName);
+      expect(profile.available).toBe(true);
+      expect(profile.capabilities.has('read')).toBe(true);
+      expect(profile.capabilities.has('readWrite')).toBe(true);
     });
 
     it('opens a read-write database and creates table', async () => {
@@ -145,11 +158,20 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
       roDb.close();
     });
 
-    it('backup creates a copy of the database', async () => {
+    it('backup behavior matches the advertised onlineBackup capability', async () => {
       driver = await getDriver();
       await driver.isAvailable();
+      const profile = await driver.getCapabilityProfile();
       const srcPath = tempDbPath();
       const destPath = tempDbPath();
+
+      if (!profile.capabilities.has('onlineBackup')) {
+        await expect(driver.backup(srcPath, destPath)).rejects.toMatchObject({
+          code: 'DATABASE_CAPABILITY_MISSING',
+          details: { driver: driverName, missingCapabilities: ['onlineBackup'] },
+        });
+        return;
+      }
 
       // Create source DB with data
       const srcDb = driver.open(srcPath, { readonly: false });
@@ -166,6 +188,49 @@ function runDriverTests(driverName: string, getDriver: () => Promise<DatabaseDri
       expect(row.name).toBe('backed up');
       destDb.close();
     });
+
+    it('either resolves a real Store snapshot or fails explicitly at the capability boundary', async () => {
+      driver = await getDriver();
+      await driver.isAvailable();
+      const profile = await driver.getCapabilityProfile();
+      const storePath = tempDbPath();
+
+      const leaf = Buffer.from(JSON.stringify({ role: 'user', content: 'real driver store turn' }));
+      const leafHash = createHash('sha256').update(leaf).digest('hex');
+      const root = Buffer.concat([Buffer.from([0x0a, 0x20]), Buffer.from(leafHash, 'hex')]);
+      const rootHash = createHash('sha256').update(root).digest('hex');
+      const db = driver.open(storePath, { readonly: false });
+      db.runSQL('CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)');
+      db.runSQL('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+      db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(leafHash, leaf);
+      db.prepare('INSERT INTO blobs (id, data) VALUES (?, ?)').run(rootHash, root);
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(
+        '0',
+        Buffer.from(
+          JSON.stringify({ latestRootBlobId: rootHash, name: 'Real driver Store fixture' })
+        ).toString('hex')
+      );
+      db.close();
+
+      const read = parseStoreDb(storePath, { sqliteDriver: driverName as DriverName });
+      if (!profile.capabilities.has('onlineBackup')) {
+        await expect(read).rejects.toMatchObject({
+          code: 'DATABASE_CAPABILITY_MISSING',
+          details: {
+            driver: driverName,
+            operation: 'store-snapshot',
+            missingCapabilities: ['onlineBackup'],
+          },
+        });
+        return;
+      }
+
+      await expect(read).resolves.toMatchObject({
+        title: 'Real driver Store fixture',
+        completeness: 'complete',
+        messages: [{ content: 'real driver store turn' }],
+      });
+    });
   });
 }
 
@@ -174,8 +239,16 @@ const betterSqlite3Available = await betterSqlite3Driver.isAvailable();
 if (betterSqlite3Available) {
   runDriverTests('better-sqlite3', async () => betterSqlite3Driver);
 } else {
-  describe.skip('better-sqlite3 (not available)', () => {
-    it('skipped - native bindings not available', () => {});
+  describe('better-sqlite3 unavailable runtime profile', () => {
+    it('executes the capability assertion instead of hiding it behind a skip', async () => {
+      const profile = await betterSqlite3Driver.getCapabilityProfile();
+      expect(profile).toMatchObject({
+        driver: 'better-sqlite3',
+        available: false,
+        capabilities: new Set(),
+      });
+      expect(profile.unavailableReason).toEqual(expect.any(String));
+    });
   });
 }
 
@@ -184,7 +257,15 @@ const nodeSqliteAvailable = await nodeSqliteDriver.isAvailable();
 if (nodeSqliteAvailable) {
   runDriverTests('node:sqlite', async () => nodeSqliteDriver);
 } else {
-  describe.skip('node:sqlite (not available on this Node version)', () => {
-    it('skipped', () => {});
+  describe('node:sqlite unavailable runtime profile', () => {
+    it('executes the capability assertion instead of hiding it behind a skip', async () => {
+      const profile = await nodeSqliteDriver.getCapabilityProfile();
+      expect(profile).toMatchObject({
+        driver: 'node:sqlite',
+        available: false,
+        capabilities: new Set(),
+      });
+      expect(profile.unavailableReason).toEqual(expect.any(String));
+    });
   });
 }

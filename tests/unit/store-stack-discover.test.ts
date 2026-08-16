@@ -5,6 +5,7 @@ import BetterSqlite3 from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { discoverStoreSessions } from '../../src/core/store-stack/discover.js';
+import { SourceEncodingError } from '../../src/core/errors.js';
 
 const ROOT = () => join(process.cwd(), 'tests', 'fixtures', 'store-root');
 const UUID1 = 'aaaaaaaa-0000-0000-0000-000000000001';
@@ -38,6 +39,47 @@ describe('discoverStoreSessions', () => {
 
   it('returns [] for a missing root (no throw — defensive)', async () => {
     expect(await discoverStoreSessions(join(ROOT(), 'does-not-exist'))).toEqual([]);
+  });
+
+  it('orders non-ASCII physical occurrences by Unicode code point, independent of locale', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-store-code-point-order-'));
+    const sessionId = 'cccccccc-0000-0000-0000-000000000003';
+    const bmp = '\u{e000}';
+    const astral = '\u{10000}';
+    try {
+      for (const [hash, title] of [
+        [bmp, 'BMP occurrence'],
+        [astral, 'Astral occurrence'],
+      ] as const) {
+        const sessionDir = join(root, 'chats', hash, sessionId);
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(
+          join(sessionDir, 'meta.json'),
+          JSON.stringify({
+            cwd: `/work/${hash}`,
+            title,
+            hasConversation: true,
+            createdAtMs: 1783000000000,
+            updatedAtMs: 1783000000000,
+          })
+        );
+      }
+
+      const sessions = await discoverStoreSessions(root, { metadataOnly: true });
+
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.title).toBe('BMP occurrence');
+      expect(sessions[0]?.workspaceMemberships?.map(({ workspacePath }) => workspacePath)).toEqual([
+        `/work/${bmp}`,
+        `/work/${astral}`,
+      ]);
+      expect(sessions[0]?.sourceInstances?.map(({ workspacePaths }) => workspacePaths[0])).toEqual([
+        `/work/${bmp}`,
+        `/work/${astral}`,
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('keeps subagent transcripts separate from the canonical main transcript', async () => {
@@ -75,6 +117,70 @@ describe('discoverStoreSessions', () => {
   });
 });
 
+describe('discoverStoreSessions — metadata encoding fidelity', () => {
+  it('retains invalid UTF-8 as a partial diagnostic when a transcript is safe', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-meta-encoding-safe-'));
+    const uuid = 'abababab-0000-0000-0000-000000000001';
+    const diagnostics: unknown[] = [];
+    try {
+      const chatDir = join(root, 'chats', 'hash', uuid);
+      mkdirSync(chatDir, { recursive: true });
+      writeFileSync(join(chatDir, 'meta.json'), Buffer.from([0xff]));
+
+      const transcriptDir = join(root, 'projects', 'project', 'agent-transcripts', uuid);
+      mkdirSync(transcriptDir, { recursive: true });
+      writeFileSync(
+        join(transcriptDir, `${uuid}.jsonl`),
+        `${JSON.stringify({
+          role: 'user',
+          message: { content: [{ type: 'text', text: 'safe transcript' }] },
+        })}\n`
+      );
+
+      const session = (
+        await discoverStoreSessions(root, {
+          onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+        })
+      ).find((item) => item.id === uuid)!;
+
+      expect(session.messages.map((message) => message.content)).toEqual(['safe transcript']);
+      expect(session.resolution).toMatchObject({
+        state: 'partial',
+        reasonCodes: expect.arrayContaining(['source-read-failed']),
+      });
+      expect(session.diagnostics).toEqual([
+        expect.objectContaining({
+          code: 'SOURCE_ENCODING_INVALID',
+          sourceKind: 'jsonl',
+          outcome: 'partial',
+          sessionId: uuid,
+        }),
+      ]);
+      expect(diagnostics).toEqual(session.diagnostics);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('promotes invalid UTF-8 to fatal when metadata is the only contributor', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ch-meta-encoding-fatal-'));
+    const uuid = 'abababab-0000-0000-0000-000000000002';
+    try {
+      const chatDir = join(root, 'chats', 'hash', uuid);
+      mkdirSync(chatDir, { recursive: true });
+      writeFileSync(join(chatDir, 'meta.json'), Buffer.from([0xff]));
+
+      await expect(discoverStoreSessions(root)).rejects.toMatchObject({
+        name: SourceEncodingError.name,
+        code: 'SOURCE_ENCODING_INVALID',
+        details: expect.objectContaining({ outcome: 'fatal' }),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('discoverStoreSessions — metadata before transcript attachment', () => {
   const AUUID = 'eeeeeeee-0000-0000-0000-000000000005';
   const acpCreatedAt = new Date('2026-01-01T00:00:00.000Z');
@@ -103,9 +209,10 @@ describe('discoverStoreSessions — metadata before transcript attachment', () =
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('uses ACP metadata time for session createdAt but not for messages', async () => {
+  it('ignores ACP filesystem time for session createdAt and messages', async () => {
     const session = (await discoverStoreSessions(root)).find((s) => s.id === AUUID);
-    expect(session?.createdAt).toEqual(acpCreatedAt);
+    expect(session?.createdAt).toEqual(new Date(0));
+    expect(session?.createdAtSource).toBe('epoch-unknown');
     // Transcripts carry no per-message timestamp; session createdAt is not
     // copied onto messages.
     expect(session?.messages[0]?.timestamp).toBeUndefined();
@@ -291,7 +398,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
       'store-msg-2',
       'store-msg-3',
     ]);
-    expect(s?.source).toBe('store-complete');
+    expect(s?.source).toBe('global');
+    expect(s?.resolvedSource).toBe('store-db');
     // DB metadata is adopted even though a transcript also exists.
     expect(s?.title).toBe('Store Title');
     expect(s?.messages.some((m) => m.content === 'transcript-1')).toBe(false);
@@ -300,7 +408,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
   it('a complete store.db overrides a usable partial transcript', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === PUUID);
     expect(s?.transcriptState).toBe('partial'); // retained for provenance
-    expect(s?.source).toBe('store-complete');
+    expect(s?.source).toBe('global');
+    expect(s?.resolvedSource).toBe('store-db');
     expect(s?.messages.map((message) => message.content)).toEqual([
       'store-msg-1',
       'store-msg-2',
@@ -315,7 +424,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
 
   it('a partial store.db with messages still wins and reports store-partial', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === FUUID);
-    expect(s?.source).toBe('store-partial');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-db');
     // Only the 1 recoverable DB message; the longer transcript does not override.
     expect(s?.messages).toHaveLength(1);
     expect(s?.messages[0]?.content).toBe('partial-db-msg');
@@ -326,7 +436,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
   it('falls back to transcript messages when store.db yields none, keeping DB metadata', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === EUUID);
     expect(s?.transcriptState).toBe('partial');
-    expect(s?.source).toBe('transcript');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-transcript');
     expect(s?.messages).toHaveLength(1);
     expect(s?.messages[0]?.content).toBe('keep-this-message');
     // DB parsed (metadata-only) → its title is still adopted.
@@ -335,7 +446,8 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
 
   it('falls back to transcript when store.db is unreadable, without adopting DB metadata', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === XUUID);
-    expect(s?.source).toBe('transcript');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-transcript');
     expect(s?.messages).toHaveLength(1);
     expect(s?.messages[0]?.content).toBe('transcript-only-msg');
     // DB failed to parse → its metadata is NOT adopted; chat meta time stands.
@@ -343,17 +455,19 @@ describe('discoverStoreSessions — store.db authoritative (P15)', () => {
     expect(s?.createdAt).toEqual(new Date(1783000000000));
   });
 
-  it('preserves store-complete when an empty store.db has no transcript fallback', async () => {
+  it('represents an expected empty store.db without transcript as degraded metadata', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === NUUID);
-    expect(s?.source).toBe('store-complete');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-metadata');
     expect(s?.transcriptState).toBe('missing');
     expect(s?.messages).toHaveLength(0);
     expect(s?.title).toBe('Store Title');
   });
 
-  it('reports store-partial when store.db fails and no transcript fallback exists', async () => {
+  it('reports degraded metadata when store.db fails and no transcript exists', async () => {
     const s = (await discoverStoreSessions(root)).find((item) => item.id === RUUID);
-    expect(s?.source).toBe('store-partial');
+    expect(s?.source).toBe('workspace-fallback');
+    expect(s?.resolvedSource).toBe('store-metadata');
     expect(s?.transcriptState).toBe('missing');
     expect(s?.messages).toHaveLength(0);
     expect(s?.title).toBeNull();
@@ -440,20 +554,120 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('keeps state, path, and messages from the same best transcript', async () => {
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === UUID);
+  it('keeps the usable transcript while exposing an empty same-UUID replica as failed', async () => {
+    const session = (await discoverStoreSessions(root, { sessionIds: new Set([UUID]) })).find(
+      (item) => item.id === UUID
+    );
     expect(session?.transcriptState).toBe('parsed');
     expect(session?.transcriptPath).toContain('a-good');
     expect(session?.messages.map((message) => message.content)).toEqual(['good']);
-    expect(session?.source).toBe('transcript');
+    expect(session?.source).toBe('workspace-fallback');
+    expect(session?.resolvedSource).toBe('store-transcript');
+    expect(session?.resolution).toMatchObject({
+      state: 'partial',
+      failedSourceRoles: ['store'],
+      reasonCodes: ['source-read-failed'],
+    });
+    expect(session?.sourceInstances).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ representation: 'store-transcript', state: 'contributed' }),
+        expect.objectContaining({ representation: 'store-transcript', state: 'failed' }),
+      ])
+    );
   });
 
-  it('prefers the newer equal-quality duplicate and keeps its transcript-only timestamp', async () => {
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === NEWER_UUID);
-    expect(session?.transcriptPath).toContain('z-new');
-    expect(session?.messages.map((message) => message.content)).toEqual(['new']);
-    expect(session?.createdAt).toEqual(new Date('2026-01-02T00:00:00Z'));
-    expect(session?.lastUpdatedAt).toEqual(new Date('2026-01-02T00:00:00Z'));
+  it('rejects equal-quality divergent transcripts with a typed locator-free ambiguity', async () => {
+    await expect(
+      discoverStoreSessions(root, { sessionIds: new Set([NEWER_UUID]) })
+    ).rejects.toMatchObject({
+      code: 'SESSION_AMBIGUOUS',
+      details: {
+        sessionId: NEWER_UUID,
+        occurrenceCount: 2,
+        occurrenceRefs: [
+          expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+          expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+        ],
+      },
+    });
+  });
+
+  it('rejects divergent parsed transcript replicas even when their message counts differ', async () => {
+    const unequalRoot = mkdtempSync(join(tmpdir(), 'ch-unequal-transcript-replicas-'));
+    const unequalUuid = 'ffffffff-0000-0000-0000-000000000016';
+    const line = (content: string): string =>
+      JSON.stringify({
+        role: 'user',
+        message: { content: [{ type: 'text', text: content }] },
+      });
+    try {
+      const shortDir = join(unequalRoot, 'projects', 'a-short', 'agent-transcripts');
+      const longDir = join(unequalRoot, 'projects', 'z-long', 'agent-transcripts');
+      mkdirSync(shortDir, { recursive: true });
+      mkdirSync(longDir, { recursive: true });
+      writeFileSync(join(shortDir, `${unequalUuid}.jsonl`), `${line('shared')}\n`);
+      writeFileSync(
+        join(longDir, `${unequalUuid}.jsonl`),
+        `${line('shared')}\n${line('additional')}\n`
+      );
+
+      await expect(discoverStoreSessions(unequalRoot)).rejects.toMatchObject({
+        code: 'SESSION_AMBIGUOUS',
+        details: {
+          sessionId: unequalUuid,
+          occurrenceCount: 2,
+          occurrenceRefs: [
+            expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+            expect.stringMatching(/^occurrence:v1:[0-9a-f]{64}$/u),
+          ],
+        },
+      });
+    } finally {
+      rmSync(unequalRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('collapses equivalent transcripts once and retains deterministic occurrence provenance', async () => {
+    const equivalentRoot = mkdtempSync(join(tmpdir(), 'ch-equivalent-transcripts-'));
+    const equivalentUuid = 'ffffffff-0000-0000-0000-000000000015';
+    try {
+      // Deliberately create z before a so filesystem creation order cannot be
+      // mistaken for the canonical replica ordering.
+      for (const project of ['z-copy', 'a-copy']) {
+        const directory = join(equivalentRoot, 'projects', project, 'agent-transcripts');
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(
+          join(directory, `${equivalentUuid}.jsonl`),
+          `${JSON.stringify({
+            role: 'user',
+            message: { content: [{ type: 'text', text: 'equivalent payload' }] },
+          })}\n`
+        );
+      }
+
+      const matches = (await discoverStoreSessions(equivalentRoot)).filter(
+        (item) => item.id === equivalentUuid
+      );
+      expect(matches).toHaveLength(1);
+      expect(matches[0]).toMatchObject({
+        id: equivalentUuid,
+        messages: [expect.objectContaining({ content: 'equivalent payload' })],
+        sourceInstances: [
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-transcript',
+            state: 'contributed',
+          }),
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-transcript',
+            state: 'equivalent-replica',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(equivalentRoot, { recursive: true, force: true });
+    }
   });
 
   it('retains partial transcript messages and provenance when no store.db exists', async () => {
@@ -465,9 +679,12 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
       JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'survives' }] } }) +
         '\n{"role":"assistant"'
     );
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === partialUuid);
+    const session = (
+      await discoverStoreSessions(root, { sessionIds: new Set([partialUuid]) })
+    ).find((item) => item.id === partialUuid);
     expect(session?.transcriptState).toBe('partial');
-    expect(session?.source).toBe('transcript');
+    expect(session?.source).toBe('workspace-fallback');
+    expect(session?.resolvedSource).toBe('store-transcript');
     expect(session?.messages.map((message) => message.content)).toEqual(['survives']);
   });
 
@@ -476,14 +693,17 @@ describe('discoverStoreSessions — transcript provenance and duplicate UUIDs', 
     const dir = join(root, 'acp-sessions', metadataUuid);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'meta.json'), JSON.stringify({ cwd: '/tmp/metadata-only' }));
-    const session = (await discoverStoreSessions(root)).find((item) => item.id === metadataUuid);
+    const session = (
+      await discoverStoreSessions(root, { sessionIds: new Set([metadataUuid]) })
+    ).find((item) => item.id === metadataUuid);
     expect(session?.transcriptState).toBe('missing');
-    expect(session?.source).toBe('store');
+    expect(session?.source).toBe('workspace-fallback');
+    expect(session?.resolvedSource).toBe('store-metadata');
   });
 });
 
 describe('discoverStoreSessions — metadata candidate integrity', () => {
-  it('selects one duplicate UUID metadata candidate atomically', async () => {
+  it('selects equivalent metadata deterministically and retains both occurrences', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ch-metadata-selection-'));
     const uuid = 'ffffffff-0000-0000-0000-000000000011';
     try {
@@ -510,11 +730,27 @@ describe('discoverStoreSessions — metadata candidate integrity', () => {
         })
       );
 
-      const session = (await discoverStoreSessions(root)).find((item) => item.id === uuid);
+      const matches = (await discoverStoreSessions(root)).filter((item) => item.id === uuid);
+      const session = matches[0];
+      expect(matches).toHaveLength(1);
       expect(session).toMatchObject({
+        // Replica reconciliation is additive to the established atomic
+        // metadata-winner policy; it must not rewrite stable scalar output.
         workspacePath: '/workspace/new',
         title: 'New copy',
         chatDir: newDir,
+        sourceInstances: [
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-metadata',
+            state: 'contributed',
+          }),
+          expect.objectContaining({
+            sourceRole: 'store',
+            representation: 'store-metadata',
+            state: 'equivalent-replica',
+          }),
+        ],
       });
       expect(session?.createdAt).toEqual(new Date(1784000000000));
       expect(session?.lastUpdatedAt).toEqual(new Date(1784000001000));

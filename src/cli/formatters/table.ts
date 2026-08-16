@@ -12,9 +12,15 @@ import type {
   TokenUsage,
   SessionUsage,
   ToolCall,
+  SessionDiagnostic,
+  LogicalSessionSummary,
 } from '../../core/types.js';
 import { MESSAGE_TYPES } from '../../core/types.js';
 import { findEmbeddedToolCallIndex } from '../../core/parser.js';
+import {
+  getPublicMessageTimestamp,
+  isDirectMessageTimestampSource,
+} from '../../core/timestamps.js';
 
 /**
  * Check if output supports colors
@@ -119,6 +125,9 @@ function padRight(str: string, width: number): string {
 
 /** Compact fidelity label for the session list. */
 function formatSessionFidelity(session: ChatSessionSummary): string {
+  if (session.resolutionState === 'partial' || session.resolution?.state === 'partial') {
+    return '⚠ partial';
+  }
   switch (session.source) {
     case 'workspace-fallback':
     case 'transcript':
@@ -137,7 +146,7 @@ function formatSessionFidelity(session: ChatSessionSummary): string {
 /**
  * Format sessions list as table
  */
-export function formatSessionsTable(sessions: ChatSessionSummary[], showIds = false): string {
+export function formatSessionsTable(sessions: LogicalSessionSummary[], showIds = false): string {
   if (sessions.length === 0) {
     return pc.yellow('No chat sessions found.');
   }
@@ -164,6 +173,30 @@ export function formatSessionsTable(sessions: ChatSessionSummary[], showIds = fa
   // Rows
   for (const session of sessions) {
     const idx = pc.cyan(padRight(String(session.index), 4));
+    if (session.resolutionState === 'ambiguous') {
+      const date = padRight('—', 12);
+      const msgs = padRight('—', showIds ? 5 : 8);
+      const fidelity = pc.yellow(padRight('⚠ ambiguous', 12));
+      const workspacePath =
+        session.matchedWorkspacePath ??
+        session.canonicalWorkspacePath ??
+        session.indexWorkspacePath ??
+        '(multiple replicas)';
+      const workspaceWidth = showIds ? 25 : 30;
+      const workspace = pc.dim(
+        padRight(truncatePath(workspacePath, workspaceWidth), workspaceWidth)
+      );
+      const preview = `Divergent replicas (${session.occurrenceCount}); content unavailable`;
+      if (showIds) {
+        const composerId = pc.gray(padRight(session.id, 38));
+        lines.push(
+          `${idx} ${date} ${msgs} ${fidelity} ${workspace} ${composerId} ${truncate(preview, 30)}`
+        );
+      } else {
+        lines.push(`${idx} ${date} ${msgs} ${fidelity} ${workspace} ${truncate(preview, 40)}`);
+      }
+      continue;
+    }
     const date = padRight(formatDate(session.createdAt), 12);
     const fidelityLabel = formatSessionFidelity(session);
     const paddedFidelity = padRight(fidelityLabel, 12);
@@ -195,6 +228,18 @@ export function formatSessionsTable(sessions: ChatSessionSummary[], showIds = fa
   );
   if (showIds) {
     lines.push(pc.dim(`Composer IDs can be used with external tools and show/export commands.`));
+  }
+  for (const session of sessions) {
+    if (session.resolutionState === 'ambiguous') continue;
+    const omitted = session.resolution?.omittedSourceRoles ?? [];
+    if (omitted.length === 0) continue;
+    const reasons = session.resolution?.reasonCodes ?? [];
+    lines.push(
+      pc.yellow(
+        `#${session.index} omitted source${omitted.length === 1 ? '' : 's'}: ${omitted.join(', ')}` +
+          (reasons.length > 0 ? ` (${reasons.join(', ')})` : '')
+      )
+    );
   }
 
   return lines.join('\n');
@@ -249,7 +294,10 @@ export function isError(content: string): boolean {
 }
 
 /**
- * Get the type of a message based on its role and content
+ * Classify a message using its role, explicit content marker, and structured tool evidence.
+ *
+ * @param message - Minimal message fields used by the public filter contract.
+ * @returns The primary public message category.
  */
 export function getMessageType(message: {
   role: string;
@@ -273,27 +321,15 @@ function matchesMessageType(
   message: { role: string; content: string; toolCalls?: unknown[] },
   type: MessageType
 ): boolean {
-  const primaryType = getMessageType(message);
-  if (primaryType === type) return true;
-
-  if (type === 'tool' && Array.isArray(message.toolCalls) && message.toolCalls.length > 0) {
-    return true;
-  }
-
-  return (
-    type === 'assistant' &&
-    primaryType === 'tool' &&
-    message.role === 'assistant' &&
-    message.content.trim().length > 0 &&
-    !isToolCall(message.content) &&
-    !isThinking(message.content) &&
-    !isError(message.content)
-  );
+  return getMessageType(message) === type;
 }
 
 /**
- * Filter messages by type
- * Returns all messages if types is empty or contains all types
+ * Filter messages by public category, preserving input order and object identity.
+ *
+ * @param messages - Messages to classify and filter.
+ * @param types - Accepted categories; an empty or complete set returns all messages.
+ * @returns The original array when no filtering is needed, otherwise a filtered array.
  */
 export function filterMessages<T extends { role: string; content: string; toolCalls?: unknown[] }>(
   messages: T[],
@@ -306,8 +342,10 @@ export function filterMessages<T extends { role: string; content: string; toolCa
 }
 
 /**
- * Validate message filter types
- * Returns array of invalid types, or empty array if all are valid
+ * Identify unsupported message filter names.
+ *
+ * @param types - Caller-supplied filter names.
+ * @returns Invalid names in caller order, or an empty array when all names are valid.
  */
 export function validateMessageTypes(types: string[]): string[] {
   return types.filter((t) => !MESSAGE_TYPES.includes(t as MessageType));
@@ -603,7 +641,19 @@ export function formatSessionDetail(
   } else {
     lines.push(`${pc.bold('Messages:')} ${session.messageCount}`);
   }
-  if (session.source === 'workspace-fallback') {
+  if (session.resolution?.state === 'partial') {
+    const omitted = session.resolution.omittedSourceRoles;
+    const failed = session.resolution.failedSourceRoles;
+    const unavailable = [...omitted, ...failed];
+    lines.push(
+      pc.yellow(
+        `⚠ Partial data${unavailable.length > 0 ? ` - unavailable sources: ${unavailable.join(', ')}` : ''}`
+      )
+    );
+    if (session.resolution.reasonCodes.length > 0) {
+      lines.push(pc.dim(`  Reasons: ${session.resolution.reasonCodes.join(', ')}`));
+    }
+  } else if (session.source === 'workspace-fallback') {
     lines.push(pc.yellow('⚠ Partial data - loaded from workspace fallback'));
   } else if (session.source === 'transcript') {
     lines.push(
@@ -643,9 +693,12 @@ export function formatSessionDetail(
   // that distinct structured tool calls / provenance / token data are never
   // hidden. Filtering (--only) selects by type and still renders each match.
   for (const message of session.messages) {
-    // Per-message timestamp is only shown when directly stored. Missing
-    // times are omitted rather than replaced with a fabricated fallback.
-    const timeStr = message.timestamp ? ` ${pc.dim(formatTime(message.timestamp))}` : '';
+    const messageTime = message.timestamp ? getPublicMessageTimestamp(message) : undefined;
+    const timeStr = messageTime
+      ? isDirectMessageTimestampSource(messageTime.timestampSource)
+        ? ` ${pc.dim(formatTime(messageTime.timestamp))}`
+        : ` ${pc.yellow('≈')} ${pc.dim(formatTime(messageTime.timestamp))}`
+      : '';
 
     // Get usage badge for this message (if available)
     const usageBadge = formatUsageBadge(message.model, message.tokenUsage, message.durationMs);
@@ -812,10 +865,44 @@ export function formatExportSuccess(exported: { index: number; path: string }[])
   return lines.join('\n');
 }
 
+/** Format safe continuation diagnostics with an actionable recovery hint. */
+export function formatOperationDiagnostics(diagnostics: readonly SessionDiagnostic[]): string {
+  if (diagnostics.length === 0) return '';
+
+  const lines = [
+    pc.yellow(
+      `Warning: ${diagnostics.length} session diagnostic${diagnostics.length === 1 ? '' : 's'}`
+    ),
+  ];
+  for (const diagnostic of diagnostics) {
+    const subject =
+      diagnostic.sessionId && !diagnostic.message.includes(diagnostic.sessionId)
+        ? `Session ${diagnostic.sessionId}: `
+        : '';
+    lines.push(`  ${pc.yellow('!')} ${subject}${diagnostic.message}`);
+    if ('occurrenceCount' in diagnostic && diagnostic.occurrenceCount !== undefined) {
+      lines.push(pc.dim(`    Physical occurrences: ${diagnostic.occurrenceCount}`));
+    }
+    if (diagnostic.remedy) {
+      lines.push(`    ${pc.bold('Next step:')} ${diagnostic.remedy}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 /**
  * Format empty state message for no history
  */
-export function formatNoHistory(): string {
+export function formatNoHistory(workspacePath?: string): string {
+  if (workspacePath) {
+    return [
+      pc.yellow(`No chat sessions matched workspace: ${workspacePath}`),
+      '',
+      'Run "list --workspaces" to inspect historical workspace paths.',
+      'Retry with the complete path or a longer unambiguous component suffix.',
+    ].join('\n');
+  }
   const lines = [
     pc.yellow('No chat history found.'),
     '',

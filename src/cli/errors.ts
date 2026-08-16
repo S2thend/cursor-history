@@ -2,6 +2,8 @@
  * Error handling utilities and exit codes
  */
 
+import { SessionIntegrityError, type SafeErrorDetails } from '../core/errors.js';
+
 /**
  * CLI exit codes following Unix conventions
  */
@@ -11,9 +13,40 @@ export const ExitCode = {
   USAGE_ERROR: 2, // Invalid arguments
   NOT_FOUND: 3, // Resource not found
   IO_ERROR: 4, // File/database access error
+  INTEGRITY_ERROR: 5, // Released restore checksum/integrity category
 } as const;
 
 export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
+
+/** Stable fallback codes for legacy CLI failures that did not expose a code in v0.17. */
+export const LegacyCliErrorCode = {
+  GENERAL_ERROR: 'CLI_GENERAL_ERROR',
+  USAGE_ERROR: 'CLI_USAGE_ERROR',
+  NOT_FOUND: 'CLI_NOT_FOUND',
+  IO_ERROR: 'CLI_IO_ERROR',
+  UNEXPECTED_ERROR: 'UNEXPECTED_ERROR',
+} as const;
+
+export type LegacyCliErrorCode = (typeof LegacyCliErrorCode)[keyof typeof LegacyCliErrorCode];
+
+/** Existing command-specific JSON fields retained during the v0.17 stderr transition. */
+export type LegacyFatalJson = Readonly<Record<string, unknown>>;
+
+/** Options controlling fatal CLI presentation. */
+export interface HandleErrorOptions {
+  /** Emit one machine-readable fatal object to stderr instead of human text. */
+  readonly json?: boolean;
+}
+
+/** Options for adapting one command-owned legacy JSON failure to shared fatal handling. */
+export interface HandleCommandErrorOptions extends HandleErrorOptions {
+  /** Human-safe message, including any released v0.17 formatting. */
+  readonly message?: string;
+  /** Released category for an untyped legacy error. Typed integrity errors keep their category. */
+  readonly exitCode?: ExitCode;
+  /** Released v0.17 top-level JSON fields to preserve exactly. */
+  readonly legacyJson?: LegacyFatalJson;
+}
 
 /**
  * Custom error class for CLI errors with exit codes
@@ -21,12 +54,144 @@ export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
 export class CliError extends Error {
   constructor(
     message: string,
-    public readonly exitCode: ExitCode = ExitCode.GENERAL_ERROR
+    public readonly exitCode: ExitCode = ExitCode.GENERAL_ERROR,
+    public readonly code?: string,
+    public readonly details?: SafeErrorDetails,
+    /** Locked v0.17 fields that must remain at the top level of fatal JSON. */
+    public readonly legacyJson?: LegacyFatalJson
   ) {
     super(message);
     this.name = 'CliError';
   }
 }
+
+function fallbackCode(exitCode: ExitCode): LegacyCliErrorCode {
+  switch (exitCode) {
+    case ExitCode.USAGE_ERROR:
+      return LegacyCliErrorCode.USAGE_ERROR;
+    case ExitCode.NOT_FOUND:
+      return LegacyCliErrorCode.NOT_FOUND;
+    case ExitCode.IO_ERROR:
+      return LegacyCliErrorCode.IO_ERROR;
+    default:
+      return LegacyCliErrorCode.GENERAL_ERROR;
+  }
+}
+
+/**
+ * Convert any fatal value to the single safe JSON object written by `--json` commands.
+ *
+ * Existing command fields are copied first so the corrective release preserves their
+ * names, types, and values. `code` and safe typed `details` are additive.
+ */
+export function formatFatalJson(error: unknown): string {
+  const cliError = error instanceof SessionIntegrityError ? mapSessionIntegrityError(error) : error;
+
+  if (cliError instanceof CliError) {
+    const envelope: Record<string, unknown> = {
+      ...(cliError.legacyJson ?? { error: cliError.message }),
+    };
+    if (!Object.prototype.hasOwnProperty.call(envelope, 'code')) {
+      envelope['code'] = cliError.code ?? fallbackCode(cliError.exitCode);
+    }
+    // A malformed legacy envelope must not suppress the required human-safe error field.
+    if (typeof envelope['error'] !== 'string' || envelope['error'].length === 0) {
+      envelope['error'] = cliError.message;
+    }
+    if (
+      cliError.details &&
+      Object.keys(cliError.details).length > 0 &&
+      !Object.prototype.hasOwnProperty.call(envelope, 'details')
+    ) {
+      envelope['details'] = cliError.details;
+    }
+    return JSON.stringify(envelope, null, 2);
+  }
+
+  if (cliError instanceof Error) {
+    return JSON.stringify(
+      {
+        error: cliError.message || 'An unexpected error occurred',
+        code: LegacyCliErrorCode.UNEXPECTED_ERROR,
+      },
+      null,
+      2
+    );
+  }
+
+  return JSON.stringify(
+    { error: 'An unexpected error occurred', code: LegacyCliErrorCode.UNEXPECTED_ERROR },
+    null,
+    2
+  );
+}
+
+/** Map a typed core failure to the stable CLI exit category without adding unsafe details. */
+export function mapSessionIntegrityError(error: SessionIntegrityError): CliError {
+  const exitCode =
+    error.code === 'SOURCE_LIMIT_CONFIGURATION_INVALID' ||
+    error.code === 'READ_CONTEXT_OPTIONS_MISMATCH'
+      ? ExitCode.USAGE_ERROR
+      : error.code === 'SOURCE_ENCODING_INVALID' ||
+          error.code === 'SOURCE_LIMIT_EXCEEDED' ||
+          error.code === 'TEMPORARY_ARTIFACT_CLEANUP_FAILED' ||
+          error.code === 'RESTORE_ROLLBACK_INCOMPLETE' ||
+          error.code === 'BACKUP_PUBLISHED_CLEANUP_FAILED' ||
+          error.code === 'BACKUP_PUBLISHED_PERMISSION_FAILED' ||
+          error.code === 'BACKUP_WORKSPACE_SCOPE_METADATA_REQUIRED' ||
+          error.code === 'DATABASE_CAPABILITY_MISSING' ||
+          error.code === 'NO_CAPABLE_DATABASE_DRIVER'
+        ? ExitCode.IO_ERROR
+        : error.code === 'SESSION_SCOPE_MISMATCH'
+          ? ExitCode.NOT_FOUND
+          : ExitCode.GENERAL_ERROR;
+  return new CliError(error.message, exitCode, error.code, error.details);
+}
+
+/**
+ * Route a command-owned failure through the common serializer while retaining typed integrity
+ * codes/details and the command's released top-level JSON fields.
+ */
+export function handleCommandError(error: unknown, options: HandleCommandErrorOptions = {}): never {
+  const mapped =
+    error instanceof SessionIntegrityError
+      ? mapSessionIntegrityError(error)
+      : error instanceof CliError
+        ? error
+        : undefined;
+  const message =
+    options.message ??
+    mapped?.message ??
+    (error instanceof Error ? error.message : 'An unexpected error occurred');
+  const commandError = new CliError(
+    message,
+    mapped?.exitCode ?? options.exitCode ?? ExitCode.GENERAL_ERROR,
+    mapped?.code,
+    mapped?.details,
+    options.legacyJson ?? mapped?.legacyJson
+  );
+  return handleError(commandError, { json: options.json });
+}
+
+/** Closed fatal-category registry used by built-process coverage. */
+export const CLI_FATAL_CATEGORY_REGISTRY = Object.freeze({
+  general: Object.freeze({ exitCode: ExitCode.GENERAL_ERROR }),
+  usage: Object.freeze({ exitCode: ExitCode.USAGE_ERROR }),
+  notFound: Object.freeze({ exitCode: ExitCode.NOT_FOUND }),
+  io: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  integrity: Object.freeze({ exitCode: ExitCode.INTEGRITY_ERROR }),
+  commandLoading: Object.freeze({ exitCode: ExitCode.GENERAL_ERROR }),
+  unexpected: Object.freeze({ exitCode: ExitCode.GENERAL_ERROR }),
+  sourceLimitConfiguration: Object.freeze({ exitCode: ExitCode.USAGE_ERROR }),
+  sourceEncoding: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  sourceLimitExceeded: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  databaseCapability: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  backupPublishedPermission: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  backupPublishedCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  backupWorkspaceScopeMetadata: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  temporaryArtifactCleanup: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+  restoreRollbackIncomplete: Object.freeze({ exitCode: ExitCode.IO_ERROR }),
+});
 
 /**
  * Error for when no Cursor installation is found
@@ -97,17 +262,67 @@ export class NoSearchResultsError extends CliError {
 /**
  * Handle an error and exit with appropriate code
  */
-export function handleError(error: unknown): never {
+export function handleError(error: unknown, options: HandleErrorOptions = {}): never {
+  if (error instanceof SessionIntegrityError) {
+    return handleError(mapSessionIntegrityError(error), options);
+  }
   if (error instanceof CliError) {
-    console.error(error.message);
-    process.exit(error.exitCode);
+    if (options.json) {
+      process.stderr.write(`${formatFatalJson(error)}\n`);
+    } else {
+      console.error(error.message);
+      const candidates = error.details?.['candidates'];
+      if (Array.isArray(candidates) && candidates.every((value) => typeof value === 'string')) {
+        console.error(`Candidates:\n${candidates.map((value) => `  ${value}`).join('\n')}`);
+      }
+      const residualFiles = error.details?.['residualFiles'];
+      if (
+        Array.isArray(residualFiles) &&
+        residualFiles.every((value) => typeof value === 'string')
+      ) {
+        console.error(
+          `Restore residual files:\n${residualFiles.map((value) => `  ${value}`).join('\n')}`
+        );
+      }
+      const residuePaths = error.details?.['residuePaths'];
+      if (Array.isArray(residuePaths) && residuePaths.every((value) => typeof value === 'string')) {
+        console.error(
+          `Private residue paths:\n${residuePaths.map((value) => `  ${value}`).join('\n')}`
+        );
+      }
+      const unverifiedResiduePaths = error.details?.['unverifiedResiduePaths'];
+      if (
+        Array.isArray(unverifiedResiduePaths) &&
+        unverifiedResiduePaths.every((value) => typeof value === 'string') &&
+        unverifiedResiduePaths.length > 0
+      ) {
+        console.error(
+          `Unverified residue paths (do not delete blindly):\n${unverifiedResiduePaths
+            .map((value) => `  ${value}`)
+            .join('\n')}`
+        );
+      }
+      const remedy = error.details?.['remedy'];
+      if (typeof remedy === 'string' && remedy.length > 0) {
+        console.error(`Remedy: ${remedy}`);
+      }
+    }
+    return process.exit(error.exitCode);
   }
 
   if (error instanceof Error) {
-    console.error(`Error: ${error.message}`);
-    process.exit(ExitCode.GENERAL_ERROR);
+    if (options.json) {
+      process.stderr.write(`${formatFatalJson(error)}\n`);
+    } else {
+      console.error(`Error: ${error.message}`);
+    }
+    return process.exit(ExitCode.GENERAL_ERROR);
   }
 
-  console.error('An unexpected error occurred');
-  process.exit(ExitCode.GENERAL_ERROR);
+  if (options.json) {
+    process.stderr.write(`${formatFatalJson(error)}\n`);
+  } else {
+    console.error('An unexpected error occurred');
+  }
+  return process.exit(ExitCode.GENERAL_ERROR);
 }

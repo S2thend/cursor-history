@@ -2,7 +2,17 @@
  * Internal types for the Cursor Store stack backend (src/core/store-stack/).
  * See specs/015-cursor-store-stack/data-model.md.
  */
-import type { Message, TranscriptState } from '../types.js';
+import type {
+  Message,
+  ResolvedSource,
+  SessionDiagnostic,
+  SessionResolution,
+  SessionSourceInstance,
+  WorkspaceMembership,
+  SessionTimestampSource,
+  TranscriptState,
+} from '../types.js';
+import type { SessionMetadataTimestamps } from '../timestamps.js';
 export type { TranscriptState } from '../types.js';
 
 /**
@@ -76,6 +86,35 @@ export interface StoreMetaJson {
  */
 export type StoreDbState = 'missing' | 'failed' | 'empty' | 'partial' | 'complete';
 
+/** Metadata-only expectation fixed before any Store conversation payload read. */
+export type StoreDbExpectation = 'expected' | 'not-expected' | 'unknown';
+
+/** Source-native evidence retained before merge/output order can change. */
+export type StoreMessageIdentityEvidence =
+  | {
+      representation: 'db';
+      leafHash: string;
+      /** Zero-based order of the reachable message leaf in the active Merkle traversal. */
+      traversalOrdinal: number;
+    }
+  | {
+      representation: 'transcript';
+      /** One-based physical nonempty JSONL record number. */
+      sourceLine: number;
+      role: string;
+      content: string;
+      toolActivity: readonly unknown[];
+      sourceRelationships: Readonly<Record<string, unknown>>;
+    };
+
+/** Internal-only evidence; it is never exposed as a public attachment field. */
+export interface StoreRawContentBlockEvidence {
+  readonly representation: 'db' | 'transcript';
+  readonly disposition:
+    'projected-text' | 'projected-tool' | 'projected-attachment' | 'unsupported';
+  readonly raw: unknown;
+}
+
 /**
  * Internal role the transcript played in resolving a session's messages (P15).
  * Diagnostics-only — never serialized.
@@ -101,13 +140,25 @@ export interface StoreSession {
   /** Session title (store.db meta.name when available, else null). */
   title: string | null;
   createdAt: Date;
+  /** Deterministic provenance for the resolved public creation time. */
+  createdAtSource: SessionTimestampSource;
   /**
    * Session-level last-update time. From a valid `updatedAtMs` when
    * present, otherwise `createdAt`. Session metadata only — never copied onto
    * messages.
    */
   lastUpdatedAt: Date;
+  /** Deterministic provenance for the resolved public update time. */
+  lastUpdatedAtSource: SessionTimestampSource;
+  /** Selected source-native store.db metadata retained until projection. */
+  storeDbMetadataTimestamps?: SessionMetadataTimestamps;
+  /** Selected source-native meta.json metadata retained until projection. */
+  storeMetadataTimestamps?: SessionMetadataTimestamps;
   messages: Message[];
+  /** Identity inputs aligned one-to-one with `messages` in source-native order. */
+  messageIdentityEvidence: StoreMessageIdentityEvidence[];
+  /** All retained source-native content blocks, including blocks with no public message. */
+  rawContentBlockEvidence?: StoreRawContentBlockEvidence[];
   /**
    * Backing data for `messages` (P15 — `store.db` is the primary source):
    * - `'store-complete'` / `'store-partial'`: `store.db` supplied the messages
@@ -118,7 +169,20 @@ export interface StoreSession {
    *   title/createdAt).
    * - `'store'`: metadata-only legacy alias (no `store.db` and no transcript).
    */
-  source: 'transcript' | 'store' | 'store-complete' | 'store-partial';
+  source:
+    'global' | 'workspace-fallback' | 'transcript' | 'store' | 'store-complete' | 'store-partial';
+  /** Actual selected Store representation; `source` remains fidelity-only. */
+  resolvedSource?: Exclude<ResolvedSource, 'composer' | 'merged'>;
+  /** Complete/partial selection state and stable reason codes. */
+  resolution?: SessionResolution;
+  /** Metadata-only DB expectation fixed before payload hydration. */
+  storeDbExpectation?: StoreDbExpectation;
+  /** Safe typed parser diagnostics retained for an operation-level observer. */
+  diagnostics?: SessionDiagnostic[];
+  /** Locator-free physical occurrence provenance after same-tier reconciliation. */
+  sourceInstances?: SessionSourceInstance[];
+  /** Verified Store workspace memberships derived from physical occurrences. */
+  workspaceMemberships?: WorkspaceMembership[];
   /** Explicit transcript parse state, retained even when store.db backs messages. */
   transcriptState: TranscriptState;
   /** Path to store.db if present (deep-parse target / fallback). */
@@ -126,4 +190,19 @@ export interface StoreSession {
   /** Debug: raw on-disk locations. */
   chatDir?: string;
   transcriptPath?: string;
+}
+
+/**
+ * Private physical address captured during metadata inventory.  This type is
+ * exported only between core Store/storage modules; it is never part of the
+ * package declarations or a structured result.
+ */
+export interface StorePhysicalOccurrence {
+  /** Exact operation-bound key. It deliberately contains a private locator. */
+  readonly instanceKey: string;
+  readonly logicalSessionId: string;
+  readonly representation: 'store-db' | 'store-transcript' | 'store-metadata';
+  readonly path: string;
+  readonly workspacePath?: string;
+  readonly sourceOrder: number;
 }

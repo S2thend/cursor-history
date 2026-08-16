@@ -45,9 +45,14 @@ describe('Store-stack list (integration)', () => {
     expect(ids).toContain(UUID2);
   });
 
-  it('tags Store sessions with source=transcript (for --json output)', async () => {
+  it('separates legacy fidelity from Store transcript provenance', async () => {
     const result = await listSessions({ limit: 0, all: true }, '/nonexistent-composer-path');
-    expect(result.every((s) => s.source === 'transcript')).toBe(true);
+    expect(
+      result.every((session) => ['global', 'workspace-fallback'].includes(session.source ?? ''))
+    ).toBe(true);
+    expect(result.every((session) => session.source === 'workspace-fallback')).toBe(true);
+    expect(result.every((session) => session.resolvedSource === 'store-metadata')).toBe(true);
+    expect(result.every((session) => session.resolutionState === 'partial')).toBe(true);
   });
 
   it('reads workspacePath from chats meta.json.cwd', async () => {
@@ -61,7 +66,8 @@ describe('Store-stack show / search / export (integration)', () => {
   it('show: getSession returns Store session with parsed messages + tool calls', async () => {
     const s = await getSession(UUID1, '/nonexistent-composer-path');
     expect(s).not.toBeNull();
-    expect(s!.source).toBe('transcript');
+    expect(s!.source).toBe('workspace-fallback');
+    expect(s!.resolvedSource).toBe('store-transcript');
     expect(s!.messages).toHaveLength(2);
     expect(s!.messages[1]!.toolCalls?.[0]?.name).toBe('Read');
   });
