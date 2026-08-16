@@ -40,7 +40,7 @@ export const POLICY_ARTIFACTS = Object.freeze([
 
 export const POLICY_ARTIFACT_SHA256 = Object.freeze({
   'specs/016-harden-session-integrity/spec.md':
-    '28fca33b4531e84981387536670a26bf2be1d59568c62c45a16c7d4a74f5215f',
+    'a16a99756613b792365e4260b6d190fce5099d4d47523e7afe8f133a20de60ee',
   'specs/016-harden-session-integrity/research.md':
     '534c9b4cd14d049c1b8af79d6e7f9ffc5a3c5dedb799ffda8d5221411057740a',
   'specs/016-harden-session-integrity/data-model.md':
@@ -54,7 +54,7 @@ export const POLICY_ARTIFACT_SHA256 = Object.freeze({
   'specs/016-harden-session-integrity/quickstart.md':
     '744d42ecf7a0564af6b136e0655c5100c774c803c3a0057517bac03322316b3e',
   'specs/016-harden-session-integrity/tasks.md':
-    '7f869a3878d4e7f5d2ca107cd4df0444a7e278cf22eb8f7cff74f6eaca70a532',
+    '77187844535aeb11aa07c490fc050a9ad8adcfc1510a90ecebbdae347545084e',
   'docs/compatibility.md': 'e495d70d2bc889ffa94ad1de70ddb0c5dd116b294ab2925d3694ae436a347db0',
 });
 

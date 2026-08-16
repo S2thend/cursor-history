@@ -259,6 +259,32 @@ projection: distinct raw carriers can legitimately project to the same released 
 The T113 harness manifest maps each mutant name to a self-test and must prove that enabling it fails
 certification.
 
+### Equivalent full-corpus path
+
+The bounded sample exists only to bound the cost of the differential, so it may be replaced by an
+equivalent path whenever running the comparison over the whole corpus is feasible. T113 establishes
+three separable properties, and either path is acceptable provided all three are established and the
+attestation records which path produced each:
+
+1. **Per-field equivalence** — every selected value and own-property shape matches the official
+   v0.16 view, classifying only the documented FR-006/FR-024/FR-036 exceptions and failing on any
+   other difference. Running this over every enumerable v0.16 logical session subsumes the bounded
+   sample: each registry predicate the real corpus exercises is then covered by construction, the
+   registry drives reporting rather than selection, and no synthetic-coverage mapping is required
+   for a predicate the corpus actually contains. A predicate the corpus never exercises still
+   requires its deterministic fictional regression and drift-detecting mutation.
+2. **Derivation locality** — the candidate's output for a session derives only from that session's
+   own physical rows, proved by reading isolated projections that contain nothing else.
+3. **Consumer persistence and rollback** — the unchanged consumer's real SQLite chain performs
+   import/repeat and upgrade/repeat with zero session or content mutations, and a forced late
+   transition failure rolls back exactly and retries successfully.
+
+Properties 2 and 3 are structural rather than statistical, so their lanes may use a smaller explicit
+subset than the value comparison; widening them buys repetition, not additional assurance. Property 1
+is the only one whose strength scales with breadth, which is why the full-corpus path is preferred
+whenever its measured cost is acceptable. Record the measured cost and the session count with the
+attestation so the choice is reviewable.
+
 Classification uses only raw source facts and the official v0.16 view. For each v0.16 logical
 session, union the predicates of every physical contributor. Let `requiredObserved` be the union over
 the source. Select at most eight logical sessions. Start with an empty selection and, while predicates
