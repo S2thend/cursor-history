@@ -327,6 +327,57 @@ cursor-history search "api" -n 5
 cursor-history search "error" --context 100
 ```
 
+#### Search coverage and limitations
+
+Search discovers matches in supported local sources available within the current scope. **No
+matches does not prove that a conversation never existed, and a successful search does not certify
+a complete history.** Search reads the discovered sources directly; no persistent search index is
+required.
+
+- **Roots and scope:** Live discovery uses the selected Composer data tree and resolved Store root
+  (including its `chats`, `projects`, and `acp-sessions` sources). See
+  [Where Cursor Stores Data](#where-cursor-stores-data) for defaults and overrides. Other profiles,
+  machines, and Windows/WSL roots require separate configuration and searches. `--workspace`
+  restricts conversation payload reads; `--backup` searches the selected Composer archive.
+  CLI search JSON reports `indexScope` and, when scoped, `indexWorkspacePath`, but does **not**
+  enumerate all searched roots or files.
+- **Unreadable and omitted sources:** Some failures stop the operation; others allow a partial
+  view or skip a source. For example, an unreadable Composer workspace database can be skipped with
+  only a debug log. CLI JSON includes emitted continuation `diagnostics`, such as skipped ambiguous
+  sessions, but these are **not an exhaustive inventory of unreadable stores**. Session detail
+  exposes `resolution` (including omitted/failed source roles and reason codes) and
+  `sourceInstances` for known contributors; even `resolution.state: "complete"` describes that
+  resolved session, not coverage of every possible history location.
+- **Timestamps:** Session detail JSON includes `createdAtSource`, `lastUpdatedAtSource`, and each
+  message's `timestampSource`. These distinguish stored, inferred, and unknown values; they are
+  provenance labels, not confidence scores. CLI search JSON currently includes `createdAt` without
+  its provenance, so inspect the session before treating that value as evidence. A session marked
+  `epoch-unknown` uses the Unix epoch as a placeholder, not an actual conversation date.
+- **Snippets and result limits:** CLI search returns at most 10 matching sessions by default;
+  `-n 0` removes that result limit. Each matching message contributes a snippet around its first
+  match, with `--context` characters on each side (default: 50) and `...` where text is clipped.
+  Terminal output shows only the first snippet per session; JSON includes all generated snippets
+  for returned sessions. There is no explicit `truncated` or `hasMore` field. `count` counts returned
+  sessions, while `matchCount` and `totalMatches` count matches within the generated snippet windows,
+  not every occurrence in the full history.
+- **Source limits:** Snippet clipping is separate from source-reading limits. A source limit failure
+  produces a typed `SOURCE_LIMIT_EXCEEDED` partial diagnostic when a documented safe contributor
+  remains, or a fatal error otherwise; it is not silently labeled complete. See the
+  [Source Read Limits contract](./docs/compatibility.md#source-read-limits-v1).
+
+For automation, retain the root configuration, workspace/backup scope, diagnostics, and exit status
+alongside results. Inspect a hit using its UUID with the same configuration:
+
+```bash
+cursor-history --json search "connection pool" -n 0
+cursor-history --json show "<session-uuid>"
+```
+
+The Node.js `searchSessions()` API already includes the resolved `session` with source and timestamp
+provenance in each result; use `onDiagnostic` to collect emitted continuation diagnostics. Its
+`match` is a complete source line and `context` counts neighboring lines, unlike CLI character
+snippets. Neither interface currently provides the full per-search coverage report described above.
+
 ### Export
 
 ```bash
@@ -514,9 +565,9 @@ update all file paths when moving sessions between workspaces.
 
 When browsing your chat history, you'll see:
 
-- **Complete conversations** - All messages exchanged with Cursor AI
+- **Available conversations** - Messages recovered from the supported sources within the selected scope
 - **Every message rendered** - Each resolved message is shown once in order; consecutive duplicates are not folded, so distinct tool calls, provenance, and token data are never hidden
-- **Timestamps** - Composer sessions retain their historical timestamp recovery and interpolation; Store messages show a time only when Cursor provides a directly mapped turn timestamp
+- **Timestamps** - Resolved messages carry stored, inferred, or unknown provenance; human output marks inferred and unknown times as approximate
 - **Resolved cross-stack sessions** - When one byte-exact UUID exists in Composer and Store, compatible
   Composer identities are preserved while permitted sources produce one provenance-rich resolved
   view. Workspace scope is applied before payload reads: known off-scope sources remain unopened and

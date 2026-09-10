@@ -294,6 +294,25 @@ cursor-history search "api" -n 5
 cursor-history search "error" --context 100
 ```
 
+#### 搜索覆盖范围与限制
+
+搜索用于发现当前范围内可读取的受支持本地来源中的匹配内容。**没有匹配不代表会话从未存在，搜索成功也不代表历史记录完整。** 工具直接读取发现的来源，无需预先建立持久化搜索索引。
+
+- **根目录与范围：** 实时发现使用选定的 Composer 数据目录和解析后的 Store 根目录（包含 `chats`、`projects` 和 `acp-sessions` 来源）。默认路径和覆盖方式见[数据存储位置](#cursor-数据存储位置)。其他配置目录、机器以及 Windows/WSL 根目录需要分别配置并搜索。`--workspace` 限制会话内容的读取范围；`--backup` 搜索指定的 Composer 备份。CLI 搜索 JSON 提供 `indexScope`，限定工作区时还提供 `indexWorkspacePath`，但**不会列出所有搜索过的根目录或文件**。
+- **无法读取或未加载的来源：** 部分失败会终止操作，其他情况可能返回部分视图或跳过来源。例如，无法读取的 Composer 工作区数据库可能被跳过，仅留下调试日志。CLI JSON 会包含已发出的可继续执行的 `diagnostics`，例如跳过歧义会话，但这些信息**不是所有无法读取的存储的完整清单**。会话详情中的 `resolution` 提供未加载或读取失败的来源角色和原因，`sourceInstances` 描述已知来源实例；即使 `resolution.state` 为 `complete`，也只描述该会话的解析视图，不保证覆盖所有可能的历史位置。
+- **时间戳：** 会话详情 JSON 提供 `createdAtSource`、`lastUpdatedAtSource`，以及各消息的 `timestampSource`，区分直接存储、推断和未知来源。这些是溯源标签，不是置信度分数。CLI 搜索 JSON 目前只有 `createdAt`，没有其溯源字段，因此引用时间前应查看会话详情。会话的 `epoch-unknown` 表示使用 Unix 纪元作为占位值，不是真实会话日期。
+- **片段与结果限制：** CLI 默认最多返回 10 个匹配会话，`-n 0` 可取消此结果数量限制。每条匹配消息围绕首次匹配生成片段，两侧各保留 `--context` 指定的字符数（默认 50），裁剪处使用 `...`。终端只显示每个会话的首个片段，JSON 包含所返回会话的所有已生成片段。目前没有显式的 `truncated` 或 `hasMore` 字段。`count` 是返回的会话数；`matchCount` 和 `totalMatches` 统计生成的片段窗口内的匹配次数，不是完整历史中的所有出现次数。
+- **来源读取限制：** 片段裁剪与来源读取限制不同。超限时，若仍有符合约定的安全来源可提供内容，会发出 `SOURCE_LIMIT_EXCEEDED` 部分结果诊断；否则报致命错误，不会静默标记为完整。详见[来源读取限制约定](./compatibility.md#source-read-limits-v1)。
+
+自动化使用时，应随结果保留根目录配置、工作区或备份范围、诊断信息和退出状态。使用相同配置，以 UUID 检查命中的会话：
+
+```bash
+cursor-history --json search "connection pool" -n 0
+cursor-history --json show "<session-uuid>"
+```
+
+Node.js 的 `searchSessions()` API 已在每个结果的 `session` 中提供解析后的会话及来源和时间戳溯源信息，可通过 `onDiagnostic` 收集已发出的可继续执行的诊断。其 `match` 是完整的原始行，`context` 按相邻行数计算，与 CLI 的字符片段不同。目前两种接口都不提供上述完整的单次搜索覆盖报告。
+
 ### 导出
 
 ```bash
@@ -393,9 +412,9 @@ cursor-history --workspace /path/to/project list
 
 浏览聊天历史时，您将看到：
 
-- **完整对话** - 与 Cursor AI 交换的所有消息
+- **可用对话** - 从所选范围内的受支持来源恢复出的消息
 - **逐条渲染消息** - 每条解析出的消息按顺序单独显示一次，连续重复不再折叠，因此不同的工具调用、来源与 token 数据不会被隐藏
-- **时间戳** - 消息有直接存储时间时显示（HH:MM:SS 格式）；没有直接时间的消息不显示时间，而不是用兜底时间填充
+- **时间戳** - 解析后的消息区分直接存储、推断和未知来源；终端将推断和未知来源的时间标记为近似值
 - **跨栈解析会话** - 当同一 UUID 同时存在于 Composer 与 Store 时，cursor-history 保留兼容的 Composer 身份并输出带明确来源的解析视图。读取内容前先应用工作区范围：已知但越界的来源不会被打开，并会使结果明确标为 partial；允许范围内的来源遵循规范的骨干与增强规则，而不是盲目逐字段合并。
 - **AI 工具操作** - 详细查看 Cursor AI 执行的操作：
   - **文件编辑/写入** - 带语法高亮的完整 diff 显示，准确展示更改内容
