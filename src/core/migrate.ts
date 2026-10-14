@@ -47,7 +47,7 @@ import { ensureDriver, selectDatabaseDriver, type DriverName } from './database/
 import type { Database } from './database/types.js';
 import { resolveSourceReadLimits, SqliteSourceReadBudget } from './source-read-limits.js';
 import {
-  forEachBoundedComposerBubbleMetadata,
+  forEachBoundedComposerKeyMetadata,
   forEachBoundedComposerMetadata,
   forEachBoundedComposerValue,
   getBoundedComposerMetadataByKey,
@@ -1105,8 +1105,9 @@ async function findGlobalSessionIdSpellings(
         },
         guard.signal
       );
-      forEachBoundedComposerBubbleMetadata(
+      forEachBoundedComposerKeyMetadata(
         db,
+        'cursorDiskKV',
         'bubbleId:%',
         budget,
         ({ key }) => {

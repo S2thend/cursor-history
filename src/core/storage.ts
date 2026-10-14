@@ -72,14 +72,15 @@ import {
 } from './source-read-limits.js';
 import {
   createComposerSqliteBudget,
-  forEachBoundedComposerBubbleMetadata,
   forEachBoundedComposerBubbleMetadataByExactPrefix,
   forEachBoundedComposerBubbleValueByExactPrefix,
+  forEachBoundedComposerKeyMetadata,
   forEachBoundedComposerMetadata,
   forEachBoundedComposerValue,
   getBoundedComposerMetadataByKey,
   readBoundedComposerValueByKey,
   readFirstBoundedComposerBubbleValueByExactPrefix,
+  readLastBoundedComposerBubbleValueByExactPrefix,
   type ComposerSqliteMetadata,
 } from './composer-sqlite.js';
 import {
@@ -1949,8 +1950,12 @@ function loadGlobalBubbleCounts(
 ): Map<string, number> {
   const counts = new Map<string, number>();
   try {
-    forEachBoundedComposerBubbleMetadata(
+    // Counting consumes only keys. Staying on the covering key index avoids
+    // reading every bubble payload, which on real databases cost roughly 30x
+    // the index-only scan and dominated catalog discovery.
+    forEachBoundedComposerKeyMetadata(
       db,
+      'cursorDiskKV',
       'bubbleId:%',
       budget,
       ({ key }) => {
@@ -1994,8 +1999,9 @@ function loadGlobalComposerIdSpellings(
       },
       signal
     );
-    forEachBoundedComposerBubbleMetadata(
+    forEachBoundedComposerKeyMetadata(
       db,
+      'cursorDiskKV',
       'bubbleId:%',
       budget,
       ({ key }) => admit(key.split(':')[1] ?? ''),
@@ -2064,20 +2070,33 @@ function buildGlobalComposerSummary(
   }
 
   const composerMetadata = composerMetadataTimestamps(composerData);
+  const bubblePrefix = `bubbleId:${composerId}:`;
   let directMessages: Message[] = [];
   let firstBubbleValue: string | null | undefined;
   if (!composerMetadata.createdAt || !composerMetadata.lastUpdatedAt) {
-    const timestampRows: BubbleRow[] = [];
-    forEachBoundedComposerBubbleValueByExactPrefix(
+    // Session creation and update are extrema over directly stored message
+    // times, and Cursor appends bubbles in conversation order. Only the first
+    // and last bubbles can therefore contribute. Reading the whole
+    // conversation here made catalog discovery proportional to total payload
+    // bytes in the global database instead of to the session count.
+    const firstBubble = readFirstBoundedComposerBubbleValueByExactPrefix(
       db,
-      `bubbleId:${composerId}:`,
+      bubblePrefix,
       budget,
-      (row) => {
-        if (firstBubbleValue === undefined) firstBubbleValue = row.value;
-        timestampRows.push({ key: row.key, value: row.value });
-      },
       signal
     );
+    const lastBubble = readLastBoundedComposerBubbleValueByExactPrefix(
+      db,
+      bubblePrefix,
+      budget,
+      signal
+    );
+    firstBubbleValue = firstBubble?.value;
+    const timestampRows: BubbleRow[] = [];
+    if (firstBubble) timestampRows.push({ key: firstBubble.key, value: firstBubble.value });
+    if (lastBubble && lastBubble.key !== firstBubble?.key) {
+      timestampRows.push({ key: lastBubble.key, value: lastBubble.value });
+    }
     directMessages = timestampRows.map((row) => mapBubbleToMessage(row)) as Message[];
   }
   const sessionTimestamps = resolveSessionTimestamps({
@@ -2090,7 +2109,7 @@ function buildGlobalComposerSummary(
   if (options?.includePreview !== false) {
     firstBubbleValue ??= readFirstBoundedComposerBubbleValueByExactPrefix(
       db,
-      `bubbleId:${composerId}:`,
+      bubblePrefix,
       budget,
       signal
     )?.value;

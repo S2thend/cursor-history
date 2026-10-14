@@ -191,6 +191,30 @@ class NodeSqliteStatementWrapper implements Statement {
 }
 
 /**
+ * Make `LIKE` byte-exact so prefix predicates can use the table's `key` index.
+ *
+ * Cursor stores `cursorDiskKV` with `key TEXT UNIQUE`, but SQLite's default
+ * case-insensitive `LIKE` cannot use a `BINARY`-collated index, so
+ * `key LIKE 'bubbleId:%'` became a full table scan. Cursor-history treats
+ * session IDs and Composer keys as byte-exact identity, so byte-exact `LIKE`
+ * matches that contract while letting SQLite run an index range search.
+ *
+ * This is a connection-scoped setting. Failure is non-fatal: reads stay correct
+ * but may fall back to a scan, so opening must never throw because of it.
+ */
+function applyCaseSensitiveLike(db: NodeSqliteDatabase): void {
+  try {
+    if (typeof db.exec === 'function') {
+      db.exec('PRAGMA case_sensitive_like = ON');
+    } else {
+      db.prepare('PRAGMA case_sensitive_like = ON').run();
+    }
+  } catch (error) {
+    debugLog(`node:sqlite could not enable case_sensitive_like: ${String(error)}`);
+  }
+}
+
+/**
  * Wrapper for node:sqlite Database
  *
  * node:sqlite doesn't have native readonly support, so we enforce it
@@ -269,6 +293,7 @@ export const nodeSqliteDriver: DatabaseDriver = {
       throw new Error('node:sqlite is not loaded. Call isAvailable() first.');
     }
     const db = new nodeSqliteModule.DatabaseSync(path, { readOnly: options.readonly });
+    applyCaseSensitiveLike(db);
     debugLog(`Opened database with node:sqlite: ${path} (readonly: ${options.readonly})`);
     return new NodeSqliteDatabaseWrapper(db, options.readonly);
   },
