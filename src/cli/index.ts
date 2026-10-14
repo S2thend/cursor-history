@@ -93,6 +93,10 @@ export const CLI_COMMAND_REGISTRY = Object.freeze({
     sourceReadLimits: true,
     fatalCategories: Object.freeze(['usage', 'io', 'unexpected'] as const),
   }),
+  ui: Object.freeze({
+    sourceReadLimits: true,
+    fatalCategories: Object.freeze(['notFound', 'io', 'unexpected'] as const),
+  }),
 });
 
 /** Root-only failure paths covered independently of subcommand handlers. */
@@ -146,6 +150,7 @@ program
       `  cursor-history --json --workspace /work/a search needle-a\n` +
       `  cursor-history --workspace /work/a --include-cross-workspace-sources show 1\n` +
       `  cursor-history --workspace /work/a migrate-session 1 /work/destination --dry-run\n` +
+      `  cursor-history ui\n` +
       `  cursor-history backup --shared\n`
   );
 
@@ -160,6 +165,7 @@ export async function loadCommands(target: Command = program): Promise<void> {
   const { registerBackupCommand } = await import('./commands/backup.js');
   const { registerRestoreCommand } = await import('./commands/restore.js');
   const { registerListBackupsCommand } = await import('./commands/list-backups.js');
+  const { registerUiCommand } = await import('./commands/ui.js');
 
   registerListCommand(target);
   registerShowCommand(target);
@@ -170,6 +176,7 @@ export async function loadCommands(target: Command = program): Promise<void> {
   registerBackupCommand(target);
   registerRestoreCommand(target);
   registerListBackupsCommand(target);
+  registerUiCommand(target);
 }
 
 function jsonRequested(argv: readonly string[]): boolean {

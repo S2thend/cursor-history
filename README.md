@@ -32,11 +32,14 @@ cursor-history search "authentication"
 cursor-history show 1
 cursor-history export 1
 cursor-history backup
+cursor-history ui
 ```
 
 Requires Node.js 20.x or 22.x–26.x and existing local Cursor history. To try without a permanent install, run `npx cursor-history list --all`.
 
 The numbers in `show` and `export` refer to the list from the same data source and workspace scope; use the session UUID for saved commands. The `backup` command archives Composer databases, not Store databases or transcripts.
+
+`cursor-history ui` opens a local read-only web app for the same data. See [Web UI](#web-ui).
 
 [Comparison](#comparison) · [Installation](#installation) · [Usage](#usage) · [Example output](#example-output) · [Library API](#library-api) · [Roadmap](#roadmap) · [Compatibility and safe upgrades](#compatibility-and-safe-upgrades)
 
@@ -124,6 +127,7 @@ Months of decisions, fixes, prompts, and tool activity may already be on disk. M
 ## Features
 
 - **Dual interface** - Use as CLI tool or import as a library in your Node.js projects
+- **Web UI** - Run `cursor-history ui` for a local, read-only app with the same data: sessions, workspaces, search, export, and a CLI reference (see [Web UI](#web-ui))
 - **List sessions** - View all chat sessions across workspaces
 - **View conversations** - Inspect the content available in each source, including:
   - AI responses with natural language explanations
@@ -408,6 +412,54 @@ cursor-history show 1 --backup ~/backup.zip
 cursor-history search "query" --backup ~/backup.zip
 cursor-history export 1 --backup ~/backup.zip
 ```
+
+### Web UI
+
+If you'd rather browse your history in a window than in the terminal, `ui` serves a local
+read-only web app:
+
+```bash
+# Start the app and open it in your default browser
+cursor-history ui
+
+# Pick a different port, or don't open a browser
+cursor-history ui --port 5000 --no-open
+
+# Browse a backup archive instead of live data
+cursor-history ui --backup ~/cursor-history-backups/backup.zip
+```
+
+The app starts on <http://127.0.0.1:4700/> and gives you:
+
+| Section | What it does |
+| --- | --- |
+| **Sessions** | Every discovered session, newest first. Filter, open, and read the full conversation — messages, tool calls, reasoning blocks, errors, and token usage. |
+| **Workspaces** | Every workspace Cursor has stored history for, with session counts. Click one to scope the whole app to it. |
+| **Search** | Case-insensitive full-text search across message bodies, with highlighted snippets that link to the whole session. |
+| **Commands & options** | A reference for every CLI command and global option, so you don't have to leave the app to remember a flag. |
+
+Session view controls mirror the `show` flags: **Full messages**, **Full tool output**, and
+**Full reasoning** expand what is truncated by default, the `user` / `assistant` / `tool` /
+`thinking` / `error` buttons behave like `--only`, and **Markdown** / **JSON** download the
+session through the same exporters as `cursor-history export`.
+
+Notes and limits:
+
+- **Local only.** The server binds loopback (`127.0.0.1`) and rejects requests whose `Host`
+  header is not local. Your history never leaves the machine.
+- **Read-only.** It reuses the same core read paths as the CLI, so it never writes to your
+  history. `--host <interface>` exists for advanced setups and prints a warning when you leave
+  loopback.
+- **Cached.** Catalog reads are memoized briefly so repeat navigation stays fast. Use the
+  **Reload** button to force a fresh read from disk.
+- **Search cost.** A global search has to read every session, so the first one can take a
+  couple of minutes on a large history; repeat searches are cached. Scoping to a workspace
+  first makes it much faster. This is the same cost as `cursor-history search`.
+- **`ERR_CONNECTION_REFUSED` / "The local server is not running".** The app is served by the
+  `cursor-history ui` process; if that process stops, every request in an already-open tab fails.
+  Restart it and reload the page. If a tab is pointing at an old port (for example `:4791` from a
+  previous run), open the URL the command prints instead — `--port` selects the port, and the
+  default is `4700`.
 
 ### Global Options
 

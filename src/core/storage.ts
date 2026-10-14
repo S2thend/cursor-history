@@ -2790,7 +2790,8 @@ function optionalPathsEqual(left?: string, right?: string): boolean {
   return pathsEqual(left, right);
 }
 
-const UNKNOWN_WORKSPACE_PATH = '(unknown workspace)';
+/** Sentinel path for Store-only sessions with no resolvable workspace folder. */
+export const UNKNOWN_WORKSPACE_PATH = '(unknown workspace)';
 
 /** Compare an already bound full workspace path. Suffix resolution happens before payload I/O. */
 function workspaceFilterMatches(candidatePath: string | undefined, requestedPath: string): boolean {

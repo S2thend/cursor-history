@@ -66,6 +66,9 @@ src/
 │   ├── backup.ts          # createBackup, restoreBackup, openBackupDatabase
 │   ├── parser.ts          # parseChatData, exportToMarkdown, exportToJson
 │   └── types.ts           # ChatSession, Message, Workspace, ToolCall, MigrationMode, etc.
+├── ui/
+│   ├── server.ts          # startUiServer: dependency-free node:http JSON API + static assets
+│   └── public/            # index.html, app.css, app.js (no third-party front-end deps)
 └── lib/
     ├── index.ts           # Library entry point (listSessions, getSession, searchSessions, export*, migrate*, setDriver, getActiveDriver)
     ├── types.ts           # Public library types (Session, Message, SearchResult, MigrateSessionConfig, SqliteDriverName, etc.)
@@ -229,6 +232,30 @@ Tool calls are stored in `toolFormerData`:
 - `isThinking()` - checks for `[Thinking]` marker
 - All markers are set by storage layer based on DB fields
 
+## Local Web UI (`src/ui/`)
+
+`cursor-history ui` starts a loopback-only, read-only HTTP surface over the same `src/core` reads
+the CLI uses. It adds no runtime dependencies: `node:http` serves both a small static front-end
+and a JSON API.
+
+- `startUiServer(options)` → `UiServerHandle` with `url`, `port`, and an idempotent `close()`.
+  Options: `dataPath`, `backupPath`, `host` (default `127.0.0.1`), `port` (default `4700`),
+  `sourceReadLimits`.
+- Routes: `GET /api/status`, `/api/workspaces`, `/api/sessions?workspace&limit&all&cross`,
+  `/api/session?id=`, `/api/search?q&limit&context`, `/api/export?id&format=md|json`, plus `/`,
+  `/index.html`, `/app.css`, `/app.js`. Anything else is `404`; non-GET/HEAD is `405`; a non-local
+  `Host` header is `403`.
+- Long-lived, scope-bound `SessionReadContext`s (max 4, LRU-evicted only when idle) keep repeat
+  navigation fast. Catalog responses are memoized (`CACHE_TTL_MS`, 60s); `?refresh=1` bypasses the
+  memo. The default scope's catalog is warmed in the background after startup.
+- Static assets live in `src/ui/public/` and are copied to `dist/ui/public/` by
+  `npm run build:ui` (`scripts/copy-ui-assets.mjs`), which is part of `npm run build`.
+- The client (`app.js`) is dependency-free and inserts all history as text nodes, never HTML,
+  because conversation content is untrusted. Every session export goes through the same
+  `exportToMarkdown`/`exportToJson` used by the CLI.
+- `ui` is registered in `CLI_COMMAND_REGISTRY` alongside the other commands so the fatal-category
+  and source-limit coverage gates stay closed.
+
 ## Library API (`src/lib/`)
 
 ### Functions
@@ -295,6 +322,10 @@ try {
 | `export [index]` | Export to md/json (--all, -o, -f, --force) |
 | `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f, --debug) |
 | `migrate <source> <dest>` | Move/copy all sessions between workspaces (--copy, --dry-run, -f, --debug) |
+| `backup` | Archive Composer state.vscdb files (--output, --force, --shared) |
+| `restore <archive>` | Verify and restore an archive (--target, --force) |
+| `list-backups` | List known backup archives (--directory) |
+| `ui` (alias `serve`) | Serve a local read-only web app (-p/--port, --host, --no-open, -b/--backup) |
 
 ### Show Command Options
 
@@ -376,6 +407,13 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - Cursor Composer SQLite databases, Cursor Store `store.db`, Store JSONL transcripts, ZIP backup archives, and local filesystem metadata (016-harden-session-integrity)
 
 ## Recent Changes
+- 017-local-web-ui: Added `cursor-history ui` (alias `serve`), a loopback-only read-only local web app over the existing core reads
+  - `src/ui/server.ts` - `startUiServer()` on `node:http` (no new runtime dependencies): `GET /api/status`, `/api/workspaces`, `/api/sessions`, `/api/session`, `/api/search`, `/api/export`, plus static `/`, `/app.css`, `/app.js`. Non-local `Host` → 403, non-GET/HEAD → 405, unknown route → 404
+  - Scope-bound `SessionReadContext`s (max 4, idle-only eviction) + 60s memo on catalog responses (`?refresh=1` bypasses) + background catalog warm-up after startup
+  - `src/ui/public/` - dependency-free SPA (`index.html`, `app.css`, `app.js`) with nav for Sessions, Workspaces, Search, and a Commands & options reference; session view mirrors `show` flags (full messages/tool output/reasoning, `--only` types) and downloads through the same Markdown/JSON exporters
+  - `scripts/copy-ui-assets.mjs` wired as `npm run build:ui` inside `npm run build` so `dist/ui/public/` ships with the package
+  - `tests/integration/ui-server.test.ts` covers status, static assets, workspace/session/search/export shapes, 400/403/404/405 paths, and refresh
+  - Known limit: a global `search` reads every session (same cost as the CLI, ~2 min on a 7.3 GB history); repeats are cached and workspace scoping is much faster
 - 016-harden-session-integrity: Planned v0.16 identity preservation, scoped metadata-first reads, replica-safe addressing/migration, private snapshots, capability-aware SQLite selection, bounded read contexts, and release-blocking compatibility/package tests
 - 015-cursor-store-stack (P01+P02 incremental): Cross-stack merge + no display folding
   - P01: When the same session ID exists in both the Composer (vscdb) and Store (~/.cursor) stacks, the two representations are now field-merged instead of one being discarded. New `src/core/store-stack/merge.ts` performs a deterministic signature-based LCS alignment (role + normalized text + ordered tool signatures [name + normalized params]); matched messages are merged field by field, unmatched messages are preserved at their relative position, and the preferred source supplies the backbone order (never timestamp sorting). Conflict priority is platform-based via `detectPreferredStackSource()` in `src/lib/platform.ts`: WSL prefers Store, Windows/macOS/native Linux prefer Composer, and an explicit `--data-path` that is a Store root selects Store (`detectPlatform()` is unchanged; `isWSL()` is separate). `listSessions` marks collisions `source:'merged'` and merges summary scalars; `getSession` loads both stacks and merges, recomputing `messageCount` while true scalar conflicts such as `lastUpdatedAt` follow the same preferred-source rule. Provenance is additive: `source:'merged'`, `sources:['composer','store']`, `preferredSource`, and per-message `source:'composer'|'store'|'both'`.
