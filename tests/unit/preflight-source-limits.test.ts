@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { canonicalTempDir } from '../helpers/canonical-temp.js';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
@@ -33,7 +33,7 @@ import {
 const roots: string[] = [];
 
 function privateRoot(prefix: string): string {
-  const root = mkdtempSync(join(tmpdir(), prefix));
+  const root = mkdtempSync(join(canonicalTempDir(), prefix));
   if (process.platform !== 'win32') chmodSync(root, 0o700);
   roots.push(root);
   return root;

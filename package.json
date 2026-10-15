@@ -16,9 +16,10 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean-build.mjs && npm run build:esm && npm run build:cjs",
+    "build": "node scripts/clean-build.mjs && npm run build:esm && npm run build:cjs && npm run build:ui",
     "build:esm": "node scripts/generate-package-version.mjs --check && tsc",
     "build:cjs": "node scripts/generate-package-version.mjs --check && tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
+    "build:ui": "node scripts/copy-ui-assets.mjs",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
     "lint": "eslint src/",

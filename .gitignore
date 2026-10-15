@@ -24,6 +24,9 @@ npm-debug.log*
 # Test coverage
 coverage/
 
+# Local agent hook state (not source)
+.cursor/hooks/state/
+
 # Temporary files
 *.tmp
 *.swp

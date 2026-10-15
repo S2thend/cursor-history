@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>cursor-history</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="titlebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">cursor-history</span>
+          <span class="brand-version" id="app-version"></span>
+        </div>
+        <div class="titlebar-meta">
+          <span class="pill" id="data-source">connecting…</span>
+          <button class="btn" id="refresh" type="button" title="Reload from disk (R)">
+            Reload
+          </button>
+        </div>
+      </header>
+
+      <div class="body">
+        <nav class="sidebar" aria-label="Sections">
+          <p class="nav-group">Browse</p>
+          <button class="nav-item" data-route="sessions" type="button">
+            <span class="nav-label">Sessions</span>
+            <span class="nav-hint">All conversations</span>
+          </button>
+          <button class="nav-item" data-route="workspaces" type="button">
+            <span class="nav-label">Workspaces</span>
+            <span class="nav-hint">By project folder</span>
+          </button>
+          <button class="nav-item" data-route="search" type="button">
+            <span class="nav-label">Search</span>
+            <span class="nav-hint">Full-text across sessions</span>
+          </button>
+
+          <p class="nav-group">Reference</p>
+          <button class="nav-item" data-route="about" type="button">
+            <span class="nav-label">Commands &amp; options</span>
+            <span class="nav-hint">What each command does</span>
+          </button>
+
+          <div class="scope-box">
+            <label class="field-label" for="scope">Workspace scope</label>
+            <select id="scope" class="select"></select>
+            <p class="hint" id="scope-hint">
+              Global scope reads every workspace plus Store sessions.
+            </p>
+          </div>
+        </nav>
+
+        <main class="content" id="content" aria-live="polite">
+          <div class="empty-state">
+            <p class="spinner" aria-hidden="true"></p>
+            <p>Reading your Cursor history…</p>
+          </div>
+        </main>
+      </div>
+
+      <footer class="statusbar">
+        <span id="status-left">Ready</span>
+        <span id="status-right"></span>
+      </footer>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

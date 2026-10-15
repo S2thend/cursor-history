@@ -122,6 +122,26 @@ class BetterSqlite3Statement implements Statement {
 }
 
 /**
+ * Make `LIKE` byte-exact so prefix predicates can use the table's `key` index.
+ *
+ * Cursor stores `cursorDiskKV` with `key TEXT UNIQUE`, but SQLite's default
+ * case-insensitive `LIKE` cannot use a `BINARY`-collated index, so
+ * `key LIKE 'bubbleId:%'` became a full table scan. Cursor-history treats
+ * session IDs and Composer keys as byte-exact identity, so byte-exact `LIKE`
+ * matches that contract while letting SQLite run an index range search.
+ *
+ * This is a connection-scoped setting. Failure is non-fatal: reads stay correct
+ * but may fall back to a scan, so opening must never throw because of it.
+ */
+function applyCaseSensitiveLike(db: import('better-sqlite3').Database): void {
+  try {
+    db.pragma('case_sensitive_like = ON');
+  } catch (error) {
+    debugLog(`better-sqlite3 could not enable case_sensitive_like: ${String(error)}`);
+  }
+}
+
+/**
  * Wrapper for better-sqlite3 Database
  */
 class BetterSqlite3Database implements Database {
@@ -170,6 +190,7 @@ export const betterSqlite3Driver: DatabaseDriver = {
       throw new Error('better-sqlite3 is not loaded. Call isAvailable() first.');
     }
     const db = new BetterSqlite3(path, { readonly: options.readonly });
+    applyCaseSensitiveLike(db);
     debugLog(`Opened database with better-sqlite3: ${path} (readonly: ${options.readonly})`);
     return new BetterSqlite3Database(db);
   },

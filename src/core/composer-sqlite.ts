@@ -33,18 +33,51 @@ export interface ComposerSqliteBubbleValue extends ComposerSqliteBubbleMetadata 
   readonly value: string | null;
 }
 
+/**
+ * Derive a half-open key range `[lower, upper)` covering every key matched by a
+ * trailing-`%` LIKE prefix pattern, or null when the pattern is not a simple
+ * literal prefix that a range scan can express.
+ */
+function likePrefixRange(pattern: string): { lower: string; upper: string } | null {
+  if (!pattern.endsWith('%')) return null;
+  const body = pattern.slice(0, -1);
+  if (/[%_\\]/u.test(body)) return null;
+  for (let index = body.length - 1; index >= 0; index--) {
+    const code = body.charCodeAt(index);
+    if (code < 0xffff) {
+      return { lower: body, upper: body.slice(0, index) + String.fromCharCode(code + 1) };
+    }
+  }
+  return null;
+}
+
 /** Escape caller-controlled text for a SQLite LIKE prefix using `\` as ESCAPE. */
 export function sqliteLikeLiteralPrefix(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 }
 
 /**
- * SQLite's `LIKE` operator folds ASCII case by default. Selected-session reads
- * therefore use this byte-prefix predicate instead of LIKE so native Cursor
- * IDs that differ only by case cannot share payload rows.
+ * Escape caller-controlled text for a SQLite GLOB prefix pattern.
+ *
+ * GLOB is case-sensitive, so prefix reads stay byte-exact without depending on
+ * a connection-scoped PRAGMA. Its `*`, `?`, and `[` metacharacters are
+ * bracketed so a native ID that contains them still matches literally.
  */
-function exactBlobPrefixPredicate(qualifiedKey: string): string {
-  return `${qualifiedKey} IS NOT NULL AND substr(CAST(${qualifiedKey} AS BLOB), 1, length(CAST(? AS BLOB))) = CAST(? AS BLOB)`;
+export function sqliteGlobLiteralPrefix(value: string): string {
+  return value.replaceAll('[', '[[]').replaceAll('*', '[*]').replaceAll('?', '[?]');
+}
+
+/**
+ * Byte-exact prefix predicate that can use the `key` index.
+ *
+ * SQLite's `LIKE` folds ASCII case, and the `substr(key, 1, length(?)) = ?`
+ * form previously used to avoid that folding is not indexable: every prefix
+ * read scanned the entire global database (~5.5s per read on a 7.3GB table).
+ * GLOB is case-sensitive by default and, with a literal prefix, plans as a
+ * covering index range search instead of a full table scan.
+ */
+function exactPrefixPredicate(qualifiedKey: string): string {
+  return `${qualifiedKey} IS NOT NULL AND ${qualifiedKey} GLOB ?`;
 }
 
 interface InternalComposerSqliteMetadata extends ComposerSqliteMetadata {
@@ -200,6 +233,19 @@ export function getBoundedComposerMetadataByKey(
   return metadata;
 }
 
+/**
+ * One key from a catalog scan that never materializes payloads.
+ *
+ * Session discovery, bubble counting, and native ID-spelling collection consume
+ * only keys. Selecting just `key` keeps these scans on the covering key index;
+ * referencing `value` in the projection instead forces SQLite to read every
+ * matched payload out of its overflow pages, which made catalog scans
+ * proportional to total payload bytes rather than to key count.
+ */
+export interface ComposerSqliteKey {
+  readonly key: string;
+}
+
 /** Iterate finite row-ID-keyset metadata pages using the operation's page bound. */
 export function forEachBoundedComposerMetadata(
   db: Database,
@@ -239,6 +285,71 @@ export function forEachBoundedComposerMetadata(
     );
     if (legacyInlinePage || rawPage.length < pageRows) break;
     afterRowId = page[page.length - 1]!.rowId;
+  }
+}
+
+/**
+ * Iterate keys under a `LIKE` prefix without projecting or ordering by payload.
+ *
+ * Callers use this only to aggregate keys, so pages are keyset-advanced on the
+ * key itself. That matches the covering key index's native order and lets
+ * SQLite stream the range without the temporary B-tree sort that an
+ * `ORDER BY rowid` page requires. Physical row order is deliberately not
+ * promised, and NULL-valued rows are included because they still carry a key.
+ */
+export function forEachBoundedComposerKeyMetadata(
+  db: Database,
+  table: ComposerKeyValueTable,
+  keyPattern: string,
+  budget: SqliteSourceReadBudget,
+  visit: (metadata: ComposerSqliteKey) => void,
+  signal?: AbortSignal
+): void {
+  const pageRows = budget.limits.sqlitePageRows;
+  const range = likePrefixRange(keyPattern);
+  // A half-open range with exactly one lower-bound parameter lets SQLite bind
+  // the keyset cursor into the index range. Expressing the same bounds as
+  // `key LIKE ? AND key > ?` hides the cursor from the planner, which then
+  // rescans the entire range for every page and makes the scan quadratic:
+  // measured ~14s versus ~0.4s for 153k keys.
+  const firstPage = db.prepare(
+    range
+      ? `SELECT key FROM ${table} WHERE key >= ? AND key < ? ORDER BY key ASC LIMIT ?`
+      : `SELECT key FROM ${table} WHERE key LIKE ? ESCAPE '\\' ORDER BY key ASC LIMIT ?`
+  );
+  const laterPage = db.prepare(
+    range
+      ? `SELECT key FROM ${table} WHERE key > ? AND key < ? ORDER BY key ASC LIMIT ?`
+      : `SELECT key FROM ${table} WHERE key LIKE ? ESCAPE '\\' AND key > ? ORDER BY key ASC LIMIT ?`
+  );
+  let afterKey: string | null = null;
+  while (true) {
+    throwIfAborted(signal);
+    const params: unknown[] = range
+      ? afterKey === null
+        ? [range.lower, range.upper, pageRows]
+        : [afterKey, range.upper, pageRows]
+      : afterKey === null
+        ? [keyPattern, pageRows]
+        : [keyPattern, afterKey, pageRows];
+    const rawPage = (afterKey === null ? firstPage : laterPage).all(...params) as Array<
+      Record<string, unknown>
+    >;
+    if (rawPage.length === 0) break;
+
+    const page: ComposerSqliteKey[] = rawPage.map((row) => {
+      const key = typeof row['key'] === 'string' ? row['key'] : undefined;
+      if (!key) throw new TypeError('SQLite returned Composer metadata without a key');
+      return { key };
+    });
+    budget.admitMetadataPage(page.map(() => 0));
+    for (const metadata of page) {
+      throwIfAborted(signal);
+      visit(metadata);
+    }
+
+    if (rawPage.length < pageRows) break;
+    afterKey = page[page.length - 1]!.key;
   }
 }
 
@@ -293,16 +404,15 @@ export function forEachBoundedComposerBubbleMetadataByExactPrefix(
   signal?: AbortSignal
 ): void {
   const pageRows = budget.limits.sqlitePageRows;
+  const globPrefix = `${sqliteGlobLiteralPrefix(keyPrefix)}*`;
   let afterRowId: number | bigint | null = null;
   while (true) {
     throwIfAborted(signal);
     const rawPage = db
       .prepare(
-        `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactBlobPrefixPredicate('cursorDiskKV.key')} AND (? IS NULL OR cursorDiskKV.rowid > ?) ORDER BY cursorDiskKV.rowid ASC LIMIT ?`
+        `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactPrefixPredicate('cursorDiskKV.key')} AND (? IS NULL OR cursorDiskKV.rowid > ?) ORDER BY cursorDiskKV.rowid ASC LIMIT ?`
       )
-      .all(keyPrefix, keyPrefix, afterRowId, afterRowId, pageRows) as Array<
-      Record<string, unknown>
-    >;
+      .all(globPrefix, afterRowId, afterRowId, pageRows) as Array<Record<string, unknown>>;
     if (rawPage.length === 0) break;
 
     const fallbackBase: number =
@@ -485,9 +595,35 @@ export function readFirstBoundedComposerBubbleValueByExactPrefix(
   throwIfAborted(signal);
   const raw = db
     .prepare(
-      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactBlobPrefixPredicate('cursorDiskKV.key')} ORDER BY cursorDiskKV.rowid ASC LIMIT 1`
+      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactPrefixPredicate('cursorDiskKV.key')} ORDER BY cursorDiskKV.rowid ASC LIMIT 1`
     )
-    .get(keyPrefix, keyPrefix) as Record<string, unknown> | undefined;
+    .get(`${sqliteGlobLiteralPrefix(keyPrefix)}*`) as Record<string, unknown> | undefined;
+  if (!raw) return undefined;
+  const metadata = normalizeBubbleMetadata(raw, keyPrefix);
+  budget.admitMetadataPage([metadata.byteLength]);
+  return readAdmittedComposerBubbleValue(db, metadata, budget, signal);
+}
+
+/**
+ * Read the last nullable global bubble for one exact byte prefix.
+ *
+ * Cursor appends bubbles in conversation order, so the highest physical row ID
+ * under a composer prefix is that conversation's final message. Callers that
+ * need a conversation's time range can therefore read only the first and last
+ * bubbles instead of every payload in between.
+ */
+export function readLastBoundedComposerBubbleValueByExactPrefix(
+  db: Database,
+  keyPrefix: string,
+  budget: SqliteSourceReadBudget,
+  signal?: AbortSignal
+): ComposerSqliteBubbleValue | undefined {
+  throwIfAborted(signal);
+  const raw = db
+    .prepare(
+      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactPrefixPredicate('cursorDiskKV.key')} ORDER BY cursorDiskKV.rowid DESC LIMIT 1`
+    )
+    .get(`${sqliteGlobLiteralPrefix(keyPrefix)}*`) as Record<string, unknown> | undefined;
   if (!raw) return undefined;
   const metadata = normalizeBubbleMetadata(raw, keyPrefix);
   budget.admitMetadataPage([metadata.byteLength]);

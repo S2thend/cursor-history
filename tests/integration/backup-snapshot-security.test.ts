@@ -14,7 +14,7 @@ import {
   truncateSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { canonicalTempDir } from '../helpers/canonical-temp.js';
 import { basename, dirname, join } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 
@@ -366,12 +366,12 @@ function buildZip(
 }
 
 function currentPrivateTempPaths(): string[] {
-  return readdirSync(tmpdir())
+  return readdirSync(canonicalTempDir())
     .filter((name) => ZIP_TEMP_PREFIXES.some((prefix) => name.startsWith(prefix)))
     .filter((name) => {
       try {
         const marker = JSON.parse(
-          readFileSync(join(tmpdir(), name, PRIVATE_TEMP_MARKER_FILENAME), 'utf8')
+          readFileSync(join(canonicalTempDir(), name, PRIVATE_TEMP_MARKER_FILENAME), 'utf8')
         ) as { pid?: unknown };
         return marker.pid === process.pid;
       } catch {
@@ -455,7 +455,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
     openSyncMock.mockImplementation(() => databaseWithClose(vi.fn()));
     openDatabaseMock.mockImplementation(() => databaseWithClose(vi.fn()));
     snapshotPath = undefined;
-    fixtureRoot = mkdtempSync(join(tmpdir(), 'cursor-history-backup-security-test-'));
+    fixtureRoot = mkdtempSync(join(canonicalTempDir(), 'cursor-history-backup-security-test-'));
     archivePath = join(fixtureRoot, 'fixture.zip');
 
     const zip = new JSZip();
@@ -492,7 +492,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
       });
 
       const originalUmask = process.umask();
-      const parentMode = lstatSync(tmpdir()).mode & 0o777;
+      const parentMode = lstatSync(canonicalTempDir()).mode & 0o777;
       let database: Database | undefined;
       try {
         process.umask(0o000);
@@ -510,7 +510,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
       }
 
       expect(process.umask()).toBe(originalUmask);
-      expect(lstatSync(tmpdir()).mode & 0o777).toBe(parentMode);
+      expect(lstatSync(canonicalTempDir()).mode & 0o777).toBe(parentMode);
       expect(existsSync(snapshotPath!)).toBe(false);
       expect(existsSync(dirname(snapshotPath!))).toBe(false);
     }
@@ -1899,7 +1899,7 @@ describe.sequential('backup plaintext snapshot isolation', () => {
             (entry) => !before.includes(entry)
           );
           if (!currentWorkspace) throw new Error('private restore workspace not found');
-          injectedWorkspacePath = join(tmpdir(), currentWorkspace);
+          injectedWorkspacePath = join(canonicalTempDir(), currentWorkspace);
           const markerPath = join(injectedWorkspacePath, PRIVATE_TEMP_MARKER_FILENAME);
           if (!existsSync(markerPath) || lstatSync(markerPath).isDirectory()) return;
           rmSync(markerPath);
