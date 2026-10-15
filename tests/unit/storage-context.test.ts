@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import BetterSqlite3 from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { canonicalTempDir } from '../helpers/canonical-temp.js';
 import { pathToFileURL } from 'node:url';
 import { IoObserverError, type AdapterIoEvent } from '../../src/core/io-observer.js';
+import { getCursorDataPath } from '../../src/lib/platform.js';
 import { storeProjectDirectoryName } from '../../src/core/store-stack/paths.js';
 import { normalizeWorkspacePath } from '../../src/core/workspace-scope.js';
 import * as storage from '../../src/core/storage.js';
@@ -185,7 +186,7 @@ describe('listWorkspaces — aggregates from the resolved session set', () => {
   });
 
   it('counts a duplicate-ID hybrid once in every verified workspace membership', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'ch-workspace-conflict-'));
+    const root = mkdtempSync(join(canonicalTempDir(), 'ch-workspace-conflict-'));
     const previousHome = process.env['HOME'];
     const previousDataPath = process.env['CURSOR_DATA_PATH'];
     const previousStoreRoot = process.env['CURSOR_STORE_ROOT'];
@@ -200,14 +201,10 @@ describe('listWorkspaces — aggregates from the resolved session set', () => {
       process.env['CURSOR_STORE_ROOT'] = storeRoot;
 
       const writeComposerWorkspace = (workspaceId: string, workspacePath: string): void => {
-        const workspaceDir = join(
-          root,
-          '.config',
-          'Cursor',
-          'User',
-          'workspaceStorage',
-          workspaceId
-        );
+        // The Composer root is platform-specific (macOS resolves under
+        // ~/Library/Application Support, Linux under ~/.config). Resolve it through the product's
+        // own resolver so the fixture lands where the code actually looks for it.
+        const workspaceDir = join(getCursorDataPath(), workspaceId);
         mkdirSync(workspaceDir, { recursive: true });
         writeFileSync(
           join(workspaceDir, 'workspace.json'),
@@ -273,7 +270,7 @@ describe('listWorkspaces — aggregates from the resolved session set', () => {
 
 describe('SessionReadContext — one Store discovery per operation', () => {
   it('round-trips a filtered numeric index when global and filtered order conflict', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'ch-workspace-index-'));
+    const root = mkdtempSync(join(canonicalTempDir(), 'ch-workspace-index-'));
     const sessionA = 'aaaaaaaa-0000-0000-0000-000000000013';
     const sessionB = 'bbbbbbbb-0000-0000-0000-000000000014';
     const writeSession = (
@@ -406,7 +403,7 @@ describe('SessionReadContext — one Store discovery per operation', () => {
   });
 
   it('keeps a Composer resolution stable within one context and refreshes in a new context', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'ch-composer-context-'));
+    const root = mkdtempSync(join(canonicalTempDir(), 'ch-composer-context-'));
     const workspaceStorage = join(root, 'User', 'workspaceStorage');
     const workspaceDir = join(workspaceStorage, 'workspace-a');
     const projectPath = join(root, 'project-a');
@@ -474,7 +471,7 @@ describe('SessionReadContext — one Store discovery per operation', () => {
   });
 
   it('projects divergent filtered replicas once and never searches contested payloads', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'ch-composer-duplicate-cache-'));
+    const root = mkdtempSync(join(canonicalTempDir(), 'ch-composer-duplicate-cache-'));
     const workspaceStorage = join(root, 'User', 'workspaceStorage');
     const projectPath = join(root, 'shared-project');
     const sessionId = 'aaaaaaaa-0000-0000-0000-000000000077';
@@ -555,7 +552,7 @@ describe('SessionReadContext — one Store discovery per operation', () => {
   });
 
   it('preserves pure-Composer workspace rows when the same ID exists in distinct workspaces', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'ch-composer-workspace-inventory-'));
+    const root = mkdtempSync(join(canonicalTempDir(), 'ch-composer-workspace-inventory-'));
     const workspaceStorage = join(root, 'User', 'workspaceStorage');
     const sessionId = 'aaaaaaaa-0000-0000-0000-000000000078';
 
@@ -585,6 +582,10 @@ describe('SessionReadContext — one Store discovery per operation', () => {
 
     const projectA = join(root, 'project-a');
     const projectB = join(root, 'project-b');
+    // Isolate the Store stack. Without this the operation also aggregates the developer's real
+    // ~/.cursor store, so the assertion below only holds on a machine with no store installed.
+    const previousStoreRoot = process.env['CURSOR_STORE_ROOT'];
+    process.env['CURSOR_STORE_ROOT'] = join(root, 'store');
     try {
       writeWorkspace('workspace-a', projectA);
       writeWorkspace('workspace-b', projectB);
@@ -599,6 +600,8 @@ describe('SessionReadContext — one Store discovery per operation', () => {
         { id: 'workspace-b', path: projectB, sessionCount: 1 },
       ]);
     } finally {
+      if (previousStoreRoot === undefined) delete process.env['CURSOR_STORE_ROOT'];
+      else process.env['CURSOR_STORE_ROOT'] = previousStoreRoot;
       rmSync(root, { recursive: true, force: true });
     }
   });

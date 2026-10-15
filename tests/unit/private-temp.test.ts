@@ -15,10 +15,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { TemporaryArtifactCleanupError } from '../../src/core/errors.js';
+import { canonicalTempDir } from '../helpers/canonical-temp.js';
 import {
   PRIVATE_TEMP_MARKER_FILENAME,
   createPrivateTempWorkspace,
@@ -31,7 +31,7 @@ import {
 const testParents: string[] = [];
 
 function createParent(mode = 0o751): string {
-  const parent = mkdtempSync(join(tmpdir(), 'cursor-history-private-temp-unit-'));
+  const parent = mkdtempSync(join(canonicalTempDir(), 'cursor-history-private-temp-unit-'));
   if (process.platform !== 'win32') chmodSync(parent, mode);
   testParents.push(parent);
   return parent;
