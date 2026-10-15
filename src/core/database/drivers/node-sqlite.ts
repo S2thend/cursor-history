@@ -19,6 +19,7 @@ import type {
 } from '../types.js';
 import { debugLog } from '../debug.js';
 import { DatabaseCapabilityError, ReadonlyDatabaseError } from '../errors.js';
+import { suppressNodeSqliteExperimentalWarning } from './node-sqlite-warning.js';
 
 // Type definitions for node:sqlite (not yet in @types/node)
 interface NodeSqliteStatement {
@@ -149,6 +150,8 @@ async function loadNodeSqliteProfile(): Promise<DatabaseCapabilityProfile> {
       try {
         // Import availability and API capability are deliberately separate checks. In particular,
         // backup() was added after DatabaseSync on supported Node release lines.
+        // Installed before the import so the experimental warning never reaches stderr.
+        suppressNodeSqliteExperimentalWarning();
         const module = await import('node:sqlite');
         const profile = probeNodeSqliteCapabilities(module);
         if (profile.available) nodeSqliteModule = module as unknown as NodeSqliteModule;
