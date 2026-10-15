@@ -97,6 +97,16 @@ export const CLI_COMMAND_REGISTRY = Object.freeze({
     sourceReadLimits: true,
     fatalCategories: Object.freeze(['notFound', 'io', 'unexpected'] as const),
   }),
+  'export-training': Object.freeze({
+    sourceReadLimits: true,
+    fatalCategories: Object.freeze([
+      'usage',
+      'notFound',
+      'io',
+      'backupWorkspaceScopeMetadata',
+      'unexpected',
+    ] as const),
+  }),
 });
 
 /** Root-only failure paths covered independently of subcommand handlers. */
@@ -166,6 +176,7 @@ export async function loadCommands(target: Command = program): Promise<void> {
   const { registerRestoreCommand } = await import('./commands/restore.js');
   const { registerListBackupsCommand } = await import('./commands/list-backups.js');
   const { registerUiCommand } = await import('./commands/ui.js');
+  const { registerExportTrainingCommand } = await import('./commands/export-training.js');
 
   registerListCommand(target);
   registerShowCommand(target);
@@ -177,6 +188,7 @@ export async function loadCommands(target: Command = program): Promise<void> {
   registerRestoreCommand(target);
   registerListBackupsCommand(target);
   registerUiCommand(target);
+  registerExportTrainingCommand(target);
 }
 
 function jsonRequested(argv: readonly string[]): boolean {

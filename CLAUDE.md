@@ -65,6 +65,7 @@ src/
 │   ├── migrate.ts         # migrateSession, migrateWorkspace, copyBubbleDataInGlobalStorage
 │   ├── backup.ts          # createBackup, restoreBackup, openBackupDatabase
 │   ├── parser.ts          # parseChatData, exportToMarkdown, exportToJson
+│   ├── training.ts        # projectSession: ChatSession → JSONL fine-tuning records (tool calls, redaction, splitting)
 │   └── types.ts           # ChatSession, Message, Workspace, ToolCall, MigrationMode, etc.
 ├── ui/
 │   ├── server.ts          # startUiServer: dependency-free node:http JSON API + static assets
@@ -103,6 +104,7 @@ Both CLI and Library share the same core logic:
 - `src/core/storage.ts` - `listSessions()`, `getSession()`, `searchSessions()`, `findWorkspaceForSession()`, `findWorkspaceByPath()`
 - `src/core/migrate.ts` - `migrateSession()`, `migrateWorkspace()`, `copyBubbleDataInGlobalStorage()`
 - `src/core/parser.ts` - `exportToJson()`, `exportToMarkdown()`
+- `src/core/training.ts` - `projectSession()` (training-data projection + redaction)
 
 **The library adds:**
 - Type conversions (core types → library types)
@@ -256,6 +258,42 @@ and a JSON API.
 - `ui` is registered in `CLI_COMMAND_REGISTRY` alongside the other commands so the fatal-category
   and source-limit coverage gates stay closed.
 
+## Training-Data Export (`src/core/training.ts`, `export-training`)
+
+`cursor-history export-training` projects the same `src/core` reads into a JSONL dataset for
+supervised fine-tuning. It exists because the `export` documents are the wrong shape for training:
+their `content` strings carry display scaffolding (`[Tool: Read File]`, `[Thinking]`, `[Error]`)
+and duplicate data already present in structured `Message.toolCalls`.
+
+- `src/core/training.ts` - `projectSession(session, options)` → `{ records, shareGpt, redaction, dropReason }`.
+  `messages` (OpenAI/HuggingFace chat, default) and `sharegpt` schemas via `serializeTrainingLine`.
+- **Assistant turns are rebuilt from structured data.** `segmentDisplayContent()` splits
+  display-oriented `content` at line-anchored markers; only non-marker text survives as natural
+  language. Structured `toolCalls` become assistant `tool_calls` plus correlated `role: 'tool'`
+  messages carrying `tool_call_id` (no orphans by construction).
+- **Storage contract verified against the real corpus**: `[Thinking]` content is always
+  reasoning-only (23,973/23,973), and tool-marker content never mixes with natural text
+  (0/91,318) and never carries multiple markers. So no natural language is lost by segmenting.
+- **`arguments` are sanitized value-by-value then serialized**, never truncated. Redacting the
+  serialized string corrupted JSON in 225 real cases by deleting a closing quote; sanitizing leaves
+  and re-serializing makes parseable output structural.
+- **Redaction is on by default** (`redactSensitiveText`, `anonymizeHostPaths`): complete and
+  truncated PEM blocks, JWTs, provider key prefixes, and `*_SECRET|TOKEN|PASSWORD|API_KEY` assignments,
+  plus `/Users/<name>` → `/Users/<user>`. A real 721-session history yielded 17,241 redactions
+  (52 private keys, 39 JWTs). Counts are reported per run; `--no-redact` / `--no-anonymize-paths` opt out.
+- **Quality gates**: sessions whose assistant turns are all reasoning-only or degraded placeholders
+  are dropped (`no-usable-content`) so empty assistant targets are never trained; `minUserTurns`
+  is configurable; oversized sessions are split at user-turn boundaries (`maxCharsPerRecord`,
+  default 40,000 chars) so each record keeps a whole agent loop and segments are labelled
+  `metadata.segment = { index, total }`.
+- **Train/validation split** (`--valid-ratio`, `--valid-output`, `--split-seed`): `assignSplit()` is a
+  seeded FNV-1a hash of `baseSessionKey(id)`, so splitting is grouped by *session* (segments never
+  cross the boundary), deterministic across runs, and independent of record order. `deriveValidationPath()`
+  defaults the holdout to `<output>.validation.jsonl`. Both schemas key on the same session id, so
+  `messages` and `sharegpt` variants hold out identical sessions.
+- `export-training` is registered in `CLI_COMMAND_REGISTRY` alongside the other commands so the
+  fatal-category and source-limit coverage gates stay closed.
+
 ## Library API (`src/lib/`)
 
 ### Functions
@@ -320,6 +358,7 @@ try {
 | `show <index>` | Show session by index or composer ID (from list --ids) (-s/--short, -t/--think, -f/--fullread, -e/--error, -o/--only) |
 | `search <query>` | Search across sessions (-n, --context) |
 | `export [index]` | Export to md/json (--all, -o, -f, --force) |
+| `export-training` | Export all sessions as a JSONL fine-tuning dataset (--schema, --max-tool-chars, --system-prompt, --no-redact) |
 | `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f, --debug) |
 | `migrate <source> <dest>` | Move/copy all sessions between workspaces (--copy, --dry-run, -f, --debug) |
 | `backup` | Archive Composer state.vscdb files (--output, --force, --shared) |
@@ -407,6 +446,15 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - Cursor Composer SQLite databases, Cursor Store `store.db`, Store JSONL transcripts, ZIP backup archives, and local filesystem metadata (016-harden-session-integrity)
 
 ## Recent Changes
+- 018-training-dataset-export: Added `cursor-history export-training`, a JSONL exporter that projects resolved sessions into fine-tuning datasets instead of reading documents
+  - `src/core/training.ts` - `projectSession()` builds OpenAI/HuggingFace `messages` records (default) or `sharegpt` records, reconstructing assistant turns from structured `Message.toolCalls` as `tool_calls` + correlated `role: 'tool'` turns; display scaffolding (`[Tool: …]`, `[Thinking]`, `[Error]`) is never trained on
+  - Verified the segmentation contract against a real history: `[Thinking]` content is reasoning-only in 23,973/23,973 cases and tool-marker content never mixes with natural text (0/91,318), so no natural language is lost
+  - Credentials are redacted by default (PEM blocks including truncated ones, JWTs, provider key prefixes, `*_SECRET|TOKEN|PASSWORD|API_KEY` assignments) and home paths rewritten to `/Users/<user>`; a 721-session history produced 17,241 redactions including 52 private keys and 39 JWTs, with per-run totals reported
+  - Tool `arguments` are sanitized value-by-value then serialized rather than redacting the serialized string — the serialized approach corrupted JSON in 225 real cases by deleting a closing quote
+  - Quality gates drop answer-less sessions (`no-usable-content`), honour `--min-user-turns`, and split oversized sessions at user-turn boundaries (`--max-record-chars`, default 40,000) with `metadata.segment` labels; output for 721 sessions was 3,077 records (~221 MB)
+  - Train/validation split grouped by session via `assignSplit()` (seeded hash of the session key), so split segments never leak across sets; `--valid-ratio`, `--valid-output`, `--split-seed`
+  - `tests/unit/training.test.ts` (45 tests) covers segmentation, redaction, JSON-structure safety, splitting, split assignment, drops, and both serializers
+  - Known limit: the projection is only as good as the corpus — a real history is tool-loop heavy (~23 assistant turns per user turn), 43% of sessions read as partial source resolution, and repetitive agent-loop sessions dominate; the record shape is correct for training, but expectations about dataset quality should account for that
 - 017-local-web-ui: Added `cursor-history ui` (alias `serve`), a loopback-only read-only local web app over the existing core reads
   - `src/ui/server.ts` - `startUiServer()` on `node:http` (no new runtime dependencies): `GET /api/status`, `/api/workspaces`, `/api/sessions`, `/api/session`, `/api/search`, `/api/export`, plus static `/`, `/app.css`, `/app.js`. Non-local `Host` → 403, non-GET/HEAD → 405, unknown route → 404
   - Scope-bound `SessionReadContext`s (max 4, idle-only eviction) + 60s memo on catalog responses (`?refresh=1` bypasses) + background catalog warm-up after startup
