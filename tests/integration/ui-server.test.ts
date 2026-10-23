@@ -305,4 +305,74 @@ describe('UI server', () => {
     expect(refreshed.status).toBe(200);
     expect(json<{ count: number }>(refreshed).count).toBe(json<{ count: number }>(first).count);
   });
+  it('refreshes a changed catalog and does not retain stale detail snapshots', async () => {
+    const root = fixtures[0]!;
+    const server = await startServer(root);
+    const scoped = `/api/sessions?workspace=${encodeURIComponent(root.projectA)}`;
+    const before = await httpGet(server.port, scoped);
+    expect(before.status).toBe(200);
+    const extra = {
+      id: 'aaaaaaaa-2222-4333-8444-555555555555',
+      title: 'Added while UI is open',
+      workspacePath: root.projectA,
+      createdAt: 1_750_000_200_000,
+      messages: [{ role: 'user' as const, content: 'fresh source content' }],
+    };
+    writeComposerGlobalSessions(root, [extra]);
+    writeComposerWorkspaceSummary(root, 'workspace-alpha', root.projectA, [extra]);
+    expect((await httpGet(server.port, scoped)).body).toBe(before.body);
+    const after = await httpGet(server.port, `${scoped}&refresh=1`);
+    expect(after.status).toBe(200);
+    expect(json<{ sessions: Array<{ id: string }> }>(after).sessions).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: extra.id })])
+    );
+    const detailPath = `/api/session?id=${extra.id}`;
+    expect((await httpGet(server.port, detailPath)).body).toContain('fresh source content');
+    extra.messages[0]!.content = 'updated source content';
+    writeComposerGlobalSessions(root, [extra]);
+    expect((await httpGet(server.port, detailPath)).body).toContain('updated source content');
+    expect((await httpGet(server.port, `/api/export?id=${extra.id}&format=json`)).body).toContain(
+      'updated source content'
+    );
+  });
+
+  it('shares session and export validation and supports HEAD without a body', async () => {
+    const server = await startServer(fixtures[0]!);
+    for (const route of ['session', 'export']) {
+      expect((await httpGet(server.port, `/api/${route}`)).status).toBe(400);
+      expect((await httpGet(server.port, `/api/${route}?id=absent`)).status).toBe(404);
+    }
+    const head = await httpGet(server.port, '/api/status', { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    expect(head.body).toBe('');
+    expect((await httpGet(server.port, '/toString')).status).toBe(404);
+  });
+
+  it('closes idempotently even while catalog warmup is pending', async () => {
+    const server = await startServer(fixtures[0]!);
+    await Promise.all([server.close(), server.close()]);
+    await server.close();
+  });
+
+  it('evicts old responses after browsing more than the cache capacity', async () => {
+    const root = fixtures[0]!;
+    const server = await startServer(root);
+    const path = '/api/sessions?limit=1';
+    const before = await httpGet(server.port, path);
+    const extra = {
+      id: 'cccccccc-2222-4333-8444-555555555555',
+      title: 'Newest',
+      workspacePath: root.projectA,
+      createdAt: 1_850_000_200_000,
+      messages: [{ role: 'user' as const, content: 'newest content' }],
+    };
+    writeComposerGlobalSessions(root, [extra]);
+    writeComposerWorkspaceSummary(root, 'workspace-alpha', root.projectA, [extra]);
+    expect((await httpGet(server.port, path)).body).toBe(before.body);
+    for (let limit = 2; limit <= 34; limit++) {
+      expect((await httpGet(server.port, `/api/sessions?limit=${limit}`)).status).toBe(200);
+    }
+    const reread = await httpGet(server.port, path);
+    expect(json<{ sessions: Array<{ id: string }> }>(reread).sessions[0]!.id).toBe(extra.id);
+  }, 15_000);
 });

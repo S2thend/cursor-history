@@ -26,8 +26,9 @@ const state = {
   detail: null,
   query: '',
   results: [],
-  /** Timestamp window during which requests bypass the server's memo cache. */
-  refreshWindow: 0,
+  expandText: false,
+  fullOutput: false,
+  fullThinking: false,
 };
 
 const el = (tag, props = {}, children = []) => {
@@ -92,7 +93,6 @@ function renderLoading(label) {
 
 async function api(path, params = {}) {
   const url = new URL(path, window.location.origin);
-  if (Date.now() < state.refreshWindow) url.searchParams.set('refresh', '1');
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null || value === '') continue;
     url.searchParams.set(key, String(value));
@@ -237,8 +237,8 @@ function messageCard(message, options) {
   const showTime = DIRECT_TIMESTAMP_SOURCES.has(message.timestampSource);
   const role = [el('b', { text: ROLE_LABEL[kind] ?? 'Assistant' })];
 
-  if (options.filtered && message.__matchedType) {
-    role.push(el('span', { class: 'badge', text: message.__matchedType }));
+  if (options.matchedType) {
+    role.push(el('span', { class: 'badge', text: options.matchedType }));
   }
   if (showTime) role.push(el('span', { text: formatTime(message.timestamp) }));
   if (message.source) role.push(el('span', { class: 'badge', text: message.source }));
@@ -308,8 +308,6 @@ function sessionRow(session) {
 }
 
 function viewSessions() {
-  const rows = state.sessions.map(sessionRow);
-
   const toolbar = el('div', { class: 'toolbar' }, [
     el('input', {
       class: 'input grow',
@@ -347,7 +345,7 @@ function viewSessions() {
     ]),
   ]);
 
-  const tbody = el('tbody', {}, rows);
+  const tbody = el('tbody');
   const table = el('table', { class: 'table' }, [
     el('thead', {}, [
       el('tr', {}, [
@@ -383,7 +381,7 @@ function viewSessions() {
         text: `${state.workspace ? 'Scoped to one workspace.' : 'All discovered sessions, newest first.'} Click a row to open it.`,
       }),
       toolbar,
-      rows.length === 0
+      state.sessions.length === 0
         ? el('p', {
             class: 'hint',
             text: 'No sessions matched. Try “Show all” or clear the filter.',
@@ -391,7 +389,7 @@ function viewSessions() {
         : table,
     ])
   );
-  statusRight(`${rows.length} of ${state.sessions.length} session(s)`);
+  updateRows();
 }
 
 function viewWorkspaces() {
@@ -534,24 +532,27 @@ function highlight(snippet) {
   return fragment;
 }
 
+function checkbox(label, key, onChange) {
+  return el('label', { class: 'field' }, [
+    el('input', {
+      type: 'checkbox',
+      checked: state[key],
+      onChange: (event) => {
+        state[key] = event.target.checked;
+        onChange();
+      },
+    }),
+    label,
+  ]);
+}
+
 function viewDetail() {
   const session = state.detail;
   const messages = session.messages ?? [];
-  const filtered = state.only.size
-    ? messages.filter((message) => {
-        const types = messageTypes(message);
-        for (const wanted of state.only) {
-          if (types.has(wanted)) {
-            message.__matchedType = wanted;
-            return true;
-          }
-        }
-        return false;
-      })
-    : messages;
+  const selectedType = (message) => [...state.only].find((type) => messageTypes(message).has(type));
+  const filtered = state.only.size ? messages.filter(selectedType) : messages;
 
   const banner = [];
-  if (typeof session.messageCount === 'number' && session.messageCount < 0) banner.push('');
   if (Array.isArray(session.sources) && session.sources.length > 1) {
     banner.push(
       `Merged from ${session.sources.join(' + ')} (preferred: ${session.preferredSource ?? 'n/a'})`
@@ -568,39 +569,11 @@ function viewDetail() {
       text: '← Back',
       onClick: () => navigate('#/sessions'),
     }),
-    el('label', { class: 'field' }, [
-      el('input', {
-        type: 'checkbox',
-        checked: state.expandText,
-        onChange: (event) => {
-          state.expandText = event.target.checked;
-          viewDetail();
-        },
-      }),
-      'Full messages',
-    ]),
-    el('label', { class: 'field' }, [
-      el('input', {
-        type: 'checkbox',
-        checked: state.fullOutput,
-        onChange: (event) => {
-          state.fullOutput = event.target.checked;
-          viewDetail();
-        },
-      }),
-      'Full tool output',
-    ]),
-    el('label', { class: 'field' }, [
-      el('input', {
-        type: 'checkbox',
-        checked: state.fullThinking,
-        onChange: (event) => {
-          state.fullThinking = event.target.checked;
-          viewDetail();
-        },
-      }),
-      'Full reasoning',
-    ]),
+    ...[
+      ['expandText', 'Full messages'],
+      ['fullOutput', 'Full tool output'],
+      ['fullThinking', 'Full reasoning'],
+    ].map(([key, label]) => checkbox(label, key, viewDetail)),
     el('span', { class: 'grow' }),
     el('span', { class: 'field', text: 'Show only:' }),
     ...MESSAGE_TYPES.map((type) =>
@@ -615,18 +588,17 @@ function viewDetail() {
         },
       })
     ),
-    el('button', {
-      class: 'btn small',
-      type: 'button',
-      text: 'Markdown',
-      onClick: () => download(session.id, 'md'),
-    }),
-    el('button', {
-      class: 'btn small',
-      type: 'button',
-      text: 'JSON',
-      onClick: () => download(session.id, 'json'),
-    }),
+    ...[
+      ['md', 'Markdown'],
+      ['json', 'JSON'],
+    ].map(([format, label]) =>
+      el('button', {
+        class: 'btn small',
+        type: 'button',
+        text: label,
+        onClick: () => download(session.id, format),
+      })
+    ),
   ]);
 
   const usage = session.usage;
@@ -672,7 +644,7 @@ function viewDetail() {
           expandText: state.expandText,
           fullOutput: state.fullOutput,
           fullThinking: state.fullThinking,
-          filtered: state.only.size > 0,
+          matchedType: selectedType(message),
         })
       ),
     ])
@@ -830,7 +802,10 @@ function navigate(hash) {
   else window.location.hash = hash;
 }
 
-function route() {
+let viewRequest = 0;
+
+function route({ refresh = false } = {}) {
+  const request = ++viewRequest;
   const hash = window.location.hash || '#/sessions';
   const [, name = 'sessions', arg = ''] = hash.match(/^#\/([^/]*)\/?(.*)$/u) ?? [];
   state.route = name;
@@ -840,11 +815,18 @@ function route() {
   }
 
   if (name === 'workspaces') {
-    ensureWorkspaces().then(viewWorkspaces).catch(showFailure);
+    ensureWorkspaces(refresh)
+      .then(() => {
+        if (request === viewRequest) viewWorkspaces();
+      })
+      .catch((error) => {
+        if (request === viewRequest) showFailure(error);
+      });
     return;
   }
   if (name === 'search') {
-    viewSearch();
+    if (refresh && state.query) runSearch(true);
+    else viewSearch();
     return;
   }
   if (name === 'about') {
@@ -852,13 +834,20 @@ function route() {
     return;
   }
   if (name === 'session') {
-    loadDetail(decodeURIComponent(arg));
+    loadDetail(decodeURIComponent(arg), refresh);
     return;
   }
-  loadSessions();
+  loadSessions(refresh);
 }
 
 function showFailure(error) {
+  if (error.scope) {
+    renderError('Not in this workspace', error.message, () => {
+      setScope('');
+      route();
+    });
+    return;
+  }
   if (error.offline) {
     renderError('The local server is not running', error.message, () => {
       window.location.reload();
@@ -870,89 +859,78 @@ function showFailure(error) {
   statusLeft('Error');
 }
 
-async function ensureWorkspaces() {
-  if (state.workspaces.length > 0) return;
-  const body = await api('/api/workspaces');
+async function ensureWorkspaces(refresh = false) {
+  if (!refresh && state.workspaces.length > 0) return;
+  const body = await api('/api/workspaces', { refresh: refresh ? 1 : undefined });
   state.workspaces = body.workspaces ?? [];
   populateScope();
 }
 
-async function loadSessions() {
-  renderLoading('Reading sessions…');
-  statusLeft('Reading sessions…');
+/** Only the latest navigation may render; late results cannot replace another scope. */
+async function loadView(path, params, label, apply) {
+  const request = ++viewRequest;
+  renderLoading(`${label}…`);
+  statusLeft(`${label}…`);
   const started = performance.now();
   try {
-    const body = await api('/api/sessions', {
+    const body = await api(path, params);
+    if (request !== viewRequest) return;
+    apply(body);
+    statusLeft(`${label} finished in ${Math.round(performance.now() - started)} ms`);
+  } catch (error) {
+    if (request === viewRequest) showFailure(error);
+  }
+}
+
+function loadSessions(refresh = false) {
+  return loadView(
+    '/api/sessions',
+    {
       workspace: state.workspace,
       limit: 200,
       all: state.showAll ? 1 : undefined,
       cross: state.cross ? 1 : undefined,
-    });
-    state.sessions = body.sessions ?? [];
-    viewSessions();
-    statusLeft(
-      `Loaded ${state.sessions.length} session(s) in ${Math.round(performance.now() - started)} ms`
-    );
-  } catch (error) {
-    showFailure(error);
-  }
-}
-
-async function loadDetail(id) {
-  renderLoading('Reading session…');
-  statusLeft('Reading session…');
-  const started = performance.now();
-  try {
-    const session = await api('/api/session', { id, workspace: state.workspace });
-    state.detail = session;
-    viewDetail();
-    statusLeft(`Opened session in ${Math.round(performance.now() - started)} ms`);
-  } catch (error) {
-    if (error.scope) {
-      // The session exists somewhere, just not under the active scope.
-      render(
-        el('div', { class: 'error-state' }, [
-          el('h2', { class: 'page-title', text: 'Not in this workspace' }),
-          el('p', { text: error.message }),
-          el('button', {
-            class: 'btn',
-            type: 'button',
-            text: 'Search all workspaces',
-            onClick: () => {
-              setScope('');
-              loadDetail(id);
-            },
-          }),
-        ])
-      );
-      statusLeft('Out of scope');
-      return;
+      refresh: refresh ? 1 : undefined,
+    },
+    'Reading sessions',
+    (body) => {
+      state.sessions = body.sessions ?? [];
+      viewSessions();
     }
-    showFailure(error);
-  }
+  );
 }
 
-async function runSearch() {
-  renderLoading('Searching…');
-  const started = performance.now();
-  const ticker = setInterval(() => {
-    statusLeft(`Searching… ${Math.round((performance.now() - started) / 1000)}s`);
-  }, 500);
-  statusLeft('Searching…');
-  try {
-    const body = await api('/api/search', {
+function loadDetail(id, refresh = false) {
+  return loadView(
+    '/api/session',
+    {
+      id,
+      workspace: state.workspace,
+      refresh: refresh ? 1 : undefined,
+    },
+    'Reading session',
+    (session) => {
+      state.detail = session;
+      viewDetail();
+    }
+  );
+}
+
+function runSearch(refresh = false) {
+  return loadView(
+    '/api/search',
+    {
       q: state.query,
       workspace: state.workspace,
       limit: 200,
-    });
-    state.results = body.results ?? [];
-    viewSearch();
-    statusLeft(`Search finished in ${Math.round(performance.now() - started)} ms`);
-  } catch (error) {
-    showFailure(error);
-  } finally {
-    clearInterval(ticker);
-  }
+      refresh: refresh ? 1 : undefined,
+    },
+    'Searching',
+    (body) => {
+      state.results = body.results ?? [];
+      viewSearch();
+    }
+  );
 }
 
 function download(id, format) {
@@ -983,6 +961,7 @@ function populateScope() {
 }
 
 function setScope(workspace) {
+  viewRequest += 1;
   state.workspace = workspace;
   state.sessions = [];
   state.detail = null;
@@ -1018,11 +997,11 @@ async function bootstrap() {
 }
 
 document.getElementById('refresh').addEventListener('click', () => {
-  state.refreshWindow = Date.now() + 2000;
   state.workspaces = [];
   state.detail = null;
   state.results = [];
-  route();
+  ensureWorkspaces(true).catch(() => undefined);
+  route({ refresh: true });
 });
 document.getElementById('scope').addEventListener('change', (event) => {
   setScope(event.target.value);

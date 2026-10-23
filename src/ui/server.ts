@@ -11,15 +11,15 @@
  * - Operations are deduplicated and cached. The underlying reads are stateless,
  *   so a long-lived process can answer repeat navigation without re-reading the
  *   database.
- * - Each operation reuses a scope-bound `SessionReadContext`, which caches
- *   workspace discovery and recently resolved sessions for that scope.
+ * - Each operation owns a scoped read context and disposes it afterwards, so
+ *   refreshing cannot reuse a stale catalog or retain decoded conversations.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, normalize } from 'node:path';
+import { join } from 'node:path';
 import {
   createSessionReadContext,
   getSession as getCoreSession,
@@ -90,18 +90,12 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
  */
 const CACHE_TTL_MS = 60_000;
 
-/** Maximum scope-bound read contexts retained at once. */
-const MAX_CONTEXTS = 4;
+/** Bound retained responses as well as their lifetime. */
+const MAX_CACHED_RESPONSES = 32;
 
-interface CachedValue<T> {
+interface CachedValue {
   at: number;
-  value: T;
-}
-
-interface ScopedContext {
-  context: SessionReadContext;
-  lastUsed: number;
-  inFlight: number;
+  value: unknown;
 }
 
 /**
@@ -114,88 +108,57 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
   const host = options.host ?? DEFAULT_UI_HOST;
   const requestedPort = options.port ?? DEFAULT_UI_PORT;
 
-  const contexts = new Map<string, ScopedContext>();
-  const catalogCache = new Map<string, CachedValue<unknown>>();
+  const catalogCache = new Map<string, CachedValue>();
   const inFlight = new Map<string, Promise<unknown>>();
   const diagnostics: SessionDiagnostic[] = [];
 
-  function scopeKey(workspacePath?: string): string {
-    return workspacePath ?? '';
-  }
-
-  /**
-   * Get (or create) the read context bound to one workspace scope.
-   *
-   * Contexts cache workspace discovery and resolved sessions, so reusing them is
-   * what keeps repeat navigation fast. Eviction skips contexts with active
-   * operations rather than cancelling a request in progress.
-   */
-  function acquireContext(workspacePath?: string): ScopedContext {
-    const key = scopeKey(workspacePath);
-    const existing = contexts.get(key);
-    if (existing) {
-      existing.lastUsed = Date.now();
-      existing.inFlight += 1;
-      return existing;
-    }
-
+  /** Reuse discovery within an operation, then release its snapshots and payloads. */
+  async function withContext<T>(
+    workspacePath: string | undefined,
+    run: (context: SessionReadContext) => Promise<T>,
+    includeCrossWorkspaceSources = false
+  ): Promise<T> {
     const context = createSessionReadContext({
       dataPath: options.dataPath,
       backupPath: options.backupPath,
-      ...(workspacePath ? { workspacePath } : {}),
-      resolvedSessionCapacity: 24,
+      workspacePath,
+      includeCrossWorkspaceSources,
+      resolvedSessionCapacity: 0,
       sourceReadLimits: options.sourceReadLimits,
       onDiagnostic: (diagnostic) => {
         diagnostics.push(diagnostic);
-        if (diagnostics.length > 200) diagnostics.splice(0, diagnostics.length - 200);
+        if (diagnostics.length > 200) diagnostics.shift();
       },
     });
-    const scoped: ScopedContext = { context, lastUsed: Date.now(), inFlight: 1 };
-    contexts.set(key, scoped);
-    void evictContexts();
-    return scoped;
-  }
-
-  function releaseContext(scoped: ScopedContext): void {
-    scoped.inFlight = Math.max(0, scoped.inFlight - 1);
-  }
-
-  async function evictContexts(): Promise<void> {
-    if (contexts.size <= MAX_CONTEXTS) return;
-    const idle = [...contexts.entries()]
-      .filter(([, scoped]) => scoped.inFlight === 0)
-      .sort((a, b) => a[1].lastUsed - b[1].lastUsed);
-    while (contexts.size > MAX_CONTEXTS && idle.length > 0) {
-      const [key, scoped] = idle.shift()!;
-      contexts.delete(key);
-      await scoped.context.dispose();
-    }
-  }
-
-  /** Run one read against its scope-bound context, releasing it afterwards. */
-  async function withContext<T>(
-    workspacePath: string | undefined,
-    run: (context: SessionReadContext) => Promise<T>
-  ): Promise<T> {
-    const scoped = acquireContext(workspacePath);
     try {
-      return await run(scoped.context);
+      return await run(context);
     } finally {
-      releaseContext(scoped);
+      await context.dispose();
     }
   }
 
   /** Memoize an operation by cache key, deduplicating concurrent callers. */
   async function cached<T>(key: string, run: () => Promise<T>, bypass = false): Promise<T> {
-    const hit = catalogCache.get(key) as CachedValue<T> | undefined;
-    if (!bypass && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+    for (const [cachedKey, entry] of catalogCache) {
+      if (Date.now() - entry.at >= CACHE_TTL_MS) catalogCache.delete(cachedKey);
+    }
+    const hit = catalogCache.get(key);
+    if (!bypass && hit) {
+      catalogCache.delete(key);
+      catalogCache.set(key, hit);
+      return hit.value as T;
+    }
 
     const pending = inFlight.get(key) as Promise<T> | undefined;
     if (pending) return pending;
 
     const promise = run()
       .then((value) => {
+        catalogCache.delete(key);
         catalogCache.set(key, { at: Date.now(), value });
+        while (catalogCache.size > MAX_CACHED_RESPONSES) {
+          catalogCache.delete(catalogCache.keys().next().value!);
+        }
         return value;
       })
       .finally(() => {
@@ -218,19 +181,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     limit: number,
     includeCrossWorkspaceSources: boolean
   ) {
-    return withContext(workspacePath, (context) =>
-      listSessionSummaries(
-        {
-          limit,
-          all,
-          ...(workspacePath ? { workspacePath } : {}),
-          ...(includeCrossWorkspaceSources ? { includeCrossWorkspaceSources: true } : {}),
-          sourceReadLimits: options.sourceReadLimits,
-        },
-        options.dataPath,
-        options.backupPath,
-        context
-      )
+    return withContext(
+      workspacePath,
+      (context) =>
+        listSessionSummaries(
+          {
+            limit,
+            all,
+            ...(workspacePath ? { workspacePath } : {}),
+            ...(includeCrossWorkspaceSources ? { includeCrossWorkspaceSources: true } : {}),
+            sourceReadLimits: options.sourceReadLimits,
+          },
+          options.dataPath,
+          options.backupPath,
+          context
+        ),
+      includeCrossWorkspaceSources
     );
   }
 
@@ -246,8 +212,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
   });
 
   async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
-
     if (!hostAllowed(request)) {
       sendJson(response, 403, { error: 'Requests are only accepted from the local host.' });
       return;
@@ -257,7 +221,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
       return;
     }
 
-    const asset = STATIC_ASSETS[normalize(url.pathname)];
+    const url = new URL(request.url ?? '/', 'http://localhost');
+    const asset = Object.hasOwn(STATIC_ASSETS, url.pathname)
+      ? STATIC_ASSETS[url.pathname]
+      : undefined;
     if (asset) {
       await serveAsset(response, asset);
       return;
@@ -319,7 +286,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
       }
       case 'workspaces': {
         const workspaces = await cached(
-          `workspaces:${scopeKey(workspace)}`,
+          JSON.stringify(['workspaces', workspace]),
           () => loadWorkspaces(workspace),
           refresh
         );
@@ -339,7 +306,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
         const cross = url.searchParams.get('cross') === '1' && Boolean(workspace);
         const limit = clampInt(url.searchParams.get('limit'), 20, 1, 5000);
         const sessions = await cached(
-          `sessions:${scopeKey(workspace)}:${all ? 'all' : limit}:${cross ? 'cross' : 'scoped'}`,
+          JSON.stringify(['sessions', workspace, all, limit, cross]),
           () => loadSessions(workspace, all, limit, cross),
           refresh
         );
@@ -350,7 +317,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
         });
         return;
       }
-      case 'session': {
+      case 'session':
+      case 'export': {
         const id = url.searchParams.get('id');
         if (!id) {
           sendJson(response, 400, { error: 'A session "id" query parameter is required.' });
@@ -368,7 +336,23 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
           });
           return;
         }
-        sendJson(response, 200, session);
+        if (route === 'export') {
+          const format = url.searchParams.get('format') === 'json' ? 'json' : 'md';
+          const body = format === 'json' ? exportToJson(session) : exportToMarkdown(session);
+          const filename = `${sanitizeFilename(session.title ?? session.id)}.${format}`;
+          response.writeHead(200, {
+            'content-type':
+              format === 'json'
+                ? 'application/json; charset=utf-8'
+                : 'text/markdown; charset=utf-8',
+            'content-disposition': `attachment; filename="${filename}"`,
+            'cache-control': 'no-store',
+            'x-content-type-options': 'nosniff',
+          });
+          response.end(body);
+        } else {
+          sendJson(response, 200, session);
+        }
         return;
       }
       case 'search': {
@@ -380,7 +364,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
         const limit = clampInt(url.searchParams.get('limit'), 200, 1, 5000);
         const contextChars = clampInt(url.searchParams.get('context'), 120, 0, 4000);
         const results = await cached(
-          `search:${scopeKey(workspace)}:${limit}:${contextChars}:${query}`,
+          JSON.stringify(['search', workspace, limit, contextChars, query]),
           () =>
             withContext(workspace, (context) =>
               searchSessions(
@@ -403,34 +387,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
           count: results.length,
           results: results.map(toSearchDto),
         });
-        return;
-      }
-      case 'export': {
-        const id = url.searchParams.get('id');
-        const format = url.searchParams.get('format') === 'json' ? 'json' : 'md';
-        if (!id) {
-          sendJson(response, 400, { error: 'A session "id" query parameter is required.' });
-          return;
-        }
-        const session = await withContext(workspace, (context) =>
-          getCoreSession(id, options.dataPath, options.backupPath, context)
-        );
-        if (!session) {
-          sendJson(response, 404, { error: `Session ${id} was not found in this data source.` });
-          return;
-        }
-        const workspacePath = session.workspacePath;
-        const body =
-          format === 'json'
-            ? exportToJson(session, workspacePath)
-            : exportToMarkdown(session, workspacePath);
-        const filename = `${sanitizeFilename(session.title ?? session.id)}.${format === 'json' ? 'json' : 'md'}`;
-        response.writeHead(200, {
-          'content-type':
-            format === 'json' ? 'application/json; charset=utf-8' : 'text/markdown; charset=utf-8',
-          'content-disposition': `attachment; filename="${filename}"`,
-        });
-        response.end(body);
         return;
       }
       default:
@@ -458,26 +414,31 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
    */
   async function warmCatalog(): Promise<void> {
     await Promise.allSettled([
-      cached('workspaces:', () => loadWorkspaces(undefined)),
-      cached('sessions::200:scoped', () => loadSessions(undefined, false, 200, false)),
+      cached(JSON.stringify(['workspaces', undefined]), () => loadWorkspaces(undefined)),
+      cached(JSON.stringify(['sessions', undefined, false, 200, false]), () =>
+        loadSessions(undefined, false, 200, false)
+      ),
     ]);
   }
 
   const port = boundPort();
   const displayHost = host.includes(':') ? `[${host}]` : host;
 
-  void warmCatalog();
+  const warming = warmCatalog();
+  let closing: Promise<void> | undefined;
 
   return {
     url: `http://${displayHost}:${port}/`,
     port,
-    async close() {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-      const pending = [...contexts.values()];
-      contexts.clear();
-      await Promise.all(pending.map((scoped) => scoped.context.dispose().catch(() => undefined)));
+    close() {
+      closing ??= (async () => {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+        await warming;
+        catalogCache.clear();
+      })();
+      return closing;
     },
   };
 }
