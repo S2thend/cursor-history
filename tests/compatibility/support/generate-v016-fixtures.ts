@@ -9,6 +9,7 @@
  */
 
 import BetterSqlite3 from 'better-sqlite3';
+import { detectSensitiveText } from '../../../src/core/sensitive-data.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, relative, resolve } from 'node:path';
@@ -632,16 +633,6 @@ const SENSITIVE_PATTERNS = Object.freeze([
   { rule: 'workspace-checkout-path', expression: /\/workspaces\/[A-Za-z0-9._-]+/gi },
   { rule: 'email-address', expression: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi },
   { rule: 'ipv4-address', expression: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g },
-  { rule: 'private-key', expression: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
-  { rule: 'openai-key', expression: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
-  { rule: 'github-token', expression: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g },
-  { rule: 'aws-access-key', expression: /\bAKIA[A-Z0-9]{16}\b/g },
-  { rule: 'bearer-token', expression: /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi },
-  {
-    rule: 'credential-assignment',
-    expression:
-      /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*["']?[^\s,"']{6,}/gi,
-  },
   { rule: 'machine-hostname', expression: /\b(?:DESKTOP-[A-Z0-9]+|[A-Za-z0-9-]+\.local)\b/g },
 ]);
 
@@ -655,7 +646,11 @@ export function scanSyntheticFixtureBytes(
   allowedUuidValues: readonly string[] = [V016_SYNTHETIC_SESSION_ID]
 ): FixtureSafetyIssue[] {
   const text = bytes.toString('utf8');
-  const issues: FixtureSafetyIssue[] = [];
+  const issues: FixtureSafetyIssue[] = detectSensitiveText(text).map(({ rule, text: match }) => ({
+    artifact,
+    rule,
+    evidence: match.slice(0, 80),
+  }));
   for (const { rule, expression } of SENSITIVE_PATTERNS) {
     expression.lastIndex = 0;
     for (const match of text.matchAll(expression)) {

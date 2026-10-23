@@ -70,15 +70,16 @@ describe('segmentDisplayContent', () => {
 
 describe('redactSensitiveText', () => {
   it('redacts complete PEM private keys', () => {
-    const pem =
-      '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----';
+    const pem = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----';
     const result = redactSensitiveText(`key=${pem}`);
     expect(result.text).toBe('key=[REDACTED_PRIVATE_KEY]');
     expect(result.counts.privateKey).toBe(1);
   });
 
   it('redacts truncated PEM blocks without an end marker', () => {
-    const result = redactSensitiveText('JWT_PRIVATE_KEY=-----BEGIN PRIVATE KEY----- MIIEvgIBADANBg');
+    const result = redactSensitiveText(
+      'JWT_PRIVATE_KEY=-----BEGIN PRIVATE KEY----- MIIEvgIBADANBg'
+    );
     expect(result.text).not.toContain('MIIEvgIBADANBg');
     expect(result.counts.privateKey).toBe(1);
   });
@@ -90,7 +91,8 @@ describe('redactSensitiveText', () => {
   });
 
   it('redacts JWTs and provider API keys', () => {
-    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk';
+    const jwt =
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk';
     const result = redactSensitiveText(`token=${jwt} key=ghp_abcdefghijklmnopqrstuvwxyz`);
     expect(result.text).not.toContain('eyJhbGciOiJIUzI1NiJ9');
     expect(result.text).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz');
@@ -190,7 +192,7 @@ describe('projectSession', () => {
   it('scrubs secrets and host paths from every field, including tool arguments', () => {
     const result = projectSession(
       session([
-        message({ role: 'user', content: 'deploy', }),
+        message({ role: 'user', content: 'deploy' }),
         message({
           role: 'assistant',
           content: 'ok',
@@ -435,6 +437,24 @@ describe('projectSession', () => {
   });
 });
 
+it('redacts sensitive display metadata while preserving native session identity', () => {
+  const input = session([
+    message({ role: 'user', content: 'q' }),
+    message({ role: 'assistant', content: 'a' }),
+  ]);
+  input.title = 'Debug API_KEY=secret-value-123 in /Users/alice/project';
+  const result = projectSession(input);
+  expect(result.records[0]!.metadata.title).toBe(
+    'Debug API_KEY=[REDACTED] in /Users/<user>/project'
+  );
+  expect(result.records[0]!.id).toBe(input.id);
+  expect(result.shareGpt[0]!.metadata).toEqual(result.records[0]!.metadata);
+  expect(input.title).toContain('secret-value-123');
+  expect(
+    projectSession(input, { redact: false, anonymizePaths: false }).records[0]!.metadata.title
+  ).toBe(input.title);
+});
+
 describe('toShareGpt', () => {
   it('maps roles and inlines tool calls', () => {
     const conversations = toShareGpt([
@@ -454,9 +474,9 @@ describe('toShareGpt', () => {
   });
 
   it('throws on an unhandled role rather than silently dropping it', () => {
-    expect(() =>
-      toShareGpt([{ role: 'bogus' as 'user', content: 'x' }])
-    ).toThrow(/Unhandled training role/);
+    expect(() => toShareGpt([{ role: 'bogus' as 'user', content: 'x' }])).toThrow(
+      /Unhandled training role/
+    );
   });
 });
 

@@ -13,6 +13,8 @@
  */
 
 import type { ChatSession, Message, ToolCall } from './types.js';
+import { anonymizeHostPaths, redactSensitiveText, type RedactionCounts } from './sensitive-data.js';
+export { anonymizeHostPaths, redactSensitiveText, type RedactionCounts } from './sensitive-data.js';
 
 /** Serialized assistant tool call in the OpenAI function-calling shape. */
 export interface TrainingToolCall {
@@ -40,10 +42,7 @@ export interface TrainingMessage {
 
 /** Why a session (or segment) was excluded from the export. */
 export type TrainingDropReason =
-  | 'no-user-turn'
-  | 'empty'
-  | 'no-usable-content'
-  | 'below-min-user-turns';
+  'no-user-turn' | 'empty' | 'no-usable-content' | 'below-min-user-turns';
 
 export interface TrainingRecordMetadata {
   title: string | null;
@@ -71,13 +70,6 @@ export interface ShareGptRecord {
   id: string;
   conversations: Array<{ from: 'system' | 'human' | 'gpt' | 'tool'; value: string }>;
   metadata: TrainingRecordMetadata;
-}
-
-export interface RedactionCounts {
-  privateKey: number;
-  jwt: number;
-  apiKey: number;
-  secretAssignment: number;
 }
 
 export interface TrainingExportOptions {
@@ -174,85 +166,6 @@ export function naturalLanguageOf(content: string): string {
     .map((segment) => segment.text)
     .join('\n\n')
     .trim();
-}
-
-const REDACTION_PATTERNS: ReadonlyArray<{
-  field: keyof RedactionCounts;
-  pattern: RegExp;
-  replacement: string;
-}> = Object.freeze([
-  {
-    field: 'privateKey',
-    // Complete PEM block.
-    pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-    replacement: '[REDACTED_PRIVATE_KEY]',
-  },
-  {
-    field: 'privateKey',
-    // Truncated / unterminated PEM header (common in diffs, logs and escaped
-    // JSON strings). Consumes the base64-ish body, including `\n` escape
-    // sequences, and an optional trailing END marker.
-    pattern:
-      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\\A-Za-z0-9+/=]{0,20000}(?:-+END [A-Z0-9 ]*PRIVATE KEY-----)?/g,
-    replacement: '[REDACTED_PRIVATE_KEY]',
-  },
-  {
-    field: 'jwt',
-    pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-    replacement: '[REDACTED_JWT]',
-  },
-  {
-    field: 'apiKey',
-    pattern: /\b(?:sk|ghp|gho|ghs|ghr|github_pat|glpat|npm|xoxb|xoxp|xoxa|xoxr|AKIA|ASIA|AIza)[-_A-Za-z0-9]{12,}\b/g,
-    replacement: '[REDACTED_API_KEY]',
-  },
-  {
-    field: 'secretAssignment',
-    // FOO_SECRET=..., API_KEY: "...", PASSWORD=..., *_TOKEN=...
-    pattern:
-      /\b([A-Za-z0-9_]*(?:SECRET|PASSWORD|PASSWD|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|TOKEN|CREDENTIALS?)[A-Za-z0-9_]*)(\s*[:=]\s*)(["']?)([^\s"',;]{6,})\3/gi,
-    replacement: '$1$2$3[REDACTED]$3',
-  },
-]);
-
-/**
- * Redact credentials from a text block.
- *
- * Returns the scrubbed text plus per-category hit counts so callers can report
- * what was removed instead of silently altering the data.
- */
-export function redactSensitiveText(text: string): { text: string; counts: RedactionCounts } {
-  const counts: RedactionCounts = {
-    privateKey: 0,
-    jwt: 0,
-    apiKey: 0,
-    secretAssignment: 0,
-  };
-  let output = text;
-  for (const { field, pattern, replacement } of REDACTION_PATTERNS) {
-    const hasBackreference = /\$\d/.test(replacement);
-    output = output.replace(pattern, (...args: unknown[]) => {
-      counts[field] += 1;
-      if (!hasBackreference) return replacement;
-      // Only the secret-assignment pattern uses backreferences; expand $1..$9
-      // from the captured groups so the variable name is preserved.
-      return replacement.replace(/\$(\d)/g, (_, index: string) => String(args[Number(index)] ?? ''));
-    });
-  }
-  return { text: output, counts };
-}
-
-/** Replace absolute host home paths with a stable placeholder. */
-export function anonymizeHostPaths(text: string): string {
-  return (
-    text
-      .replace(/\/Users\/[A-Za-z0-9._-]+/g, '/Users/<user>')
-      .replace(/\/home\/[A-Za-z0-9._-]+/g, '/home/<user>')
-      // JSON-escaped Windows paths (doubled backslashes) must be handled before
-      // the plain form so the escaped case is not partially rewritten.
-      .replace(/[A-Za-z]:\\\\Users\\\\[A-Za-z0-9._-]+/g, 'C:\\\\Users\\\\<user>')
-      .replace(/[A-Za-z]:\\Users\\[A-Za-z0-9._-]+/g, 'C:\\Users\\<user>')
-  );
 }
 
 /** Truncate to `limit` characters, appending an explicit marker. */
@@ -538,8 +451,8 @@ export function projectSession(
     messages.push(...built.messages);
 
     const metadata: TrainingRecordMetadata = {
-      title: session.title,
-      workspace,
+      title: session.title === null ? null : sanitize(session.title, context),
+      workspace: workspace === null ? null : sanitize(workspace, context),
       createdAt: session.createdAt.toISOString(),
       lastUpdatedAt: session.lastUpdatedAt.toISOString(),
       messageCount: flat.length,
@@ -655,11 +568,7 @@ export function baseSessionKey(id: string): string {
  * across runs and independent of record ordering; `seed` allows alternate folds
  * without changing the data.
  */
-export function assignSplit(
-  id: string,
-  validRatio: number,
-  seed = 42
-): 'train' | 'validation' {
+export function assignSplit(id: string, validRatio: number, seed = 42): 'train' | 'validation' {
   if (!(validRatio > 0)) return 'train';
   if (validRatio >= 1) return 'validation';
   const key = `${seed}:${baseSessionKey(id)}`;
