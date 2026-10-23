@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Local read-only Web UI (`ui`/`serve`) and JSONL training export (`export-training`).
+- Shared credential detection/redaction and home-path anonymization for training exports and
+  fixture safety scans, including training display metadata and Bearer tokens.
+- Real-SQLite differential regressions for released prefix semantics on both available drivers,
+  including future/noncanonical identifiers, Unicode, NUL, unknown payload fields and bounded reads.
+
+### Fixed
+
+- UI refresh uses fresh scoped reads; response caching has a finite cap, shutdown is idempotent,
+  and late browser responses cannot replace the active view. Session/export lookups and repeated
+  browser controls share their implementations.
+- Composer prefix reads retain the byte-exact fallback for NUL-containing prefixes; catalog
+  timestamps retain extrema across all valid message times instead of sampling physical endpoints.
+
 ## [0.18.0] - 2026-08-13
 
 This is the corrective release following v0.17.0. Its canonical compatibility and migration

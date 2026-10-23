@@ -104,7 +104,8 @@ Both CLI and Library share the same core logic:
 - `src/core/storage.ts` - `listSessions()`, `getSession()`, `searchSessions()`, `findWorkspaceForSession()`, `findWorkspaceByPath()`
 - `src/core/migrate.ts` - `migrateSession()`, `migrateWorkspace()`, `copyBubbleDataInGlobalStorage()`
 - `src/core/parser.ts` - `exportToJson()`, `exportToMarkdown()`
-- `src/core/training.ts` - `projectSession()` (training-data projection + redaction)
+- `src/core/training.ts` - `projectSession()` (training-data projection)
+- `src/core/sensitive-data.ts` - shared credential detection/redaction and host-path anonymization; fixture scanning keeps additional privacy checks
 
 **The library adds:**
 - Type conversions (core types → library types)
@@ -247,9 +248,9 @@ and a JSON API.
   `/api/session?id=`, `/api/search?q&limit&context`, `/api/export?id&format=md|json`, plus `/`,
   `/index.html`, `/app.css`, `/app.js`. Anything else is `404`; non-GET/HEAD is `405`; a non-local
   `Host` header is `403`.
-- Long-lived, scope-bound `SessionReadContext`s (max 4, LRU-evicted only when idle) keep repeat
-  navigation fast. Catalog responses are memoized (`CACHE_TTL_MS`, 60s); `?refresh=1` bypasses the
-  memo. The default scope's catalog is warmed in the background after startup.
+- Each read owns and disposes its scoped `SessionReadContext`; decoded sessions are not retained
+  between requests. Catalog/search responses use a 60-second, 32-entry LRU cache with concurrent
+  request deduplication. `?refresh=1` reads fresh source data. The default catalog warms at startup.
 - Static assets live in `src/ui/public/` and are copied to `dist/ui/public/` by
   `npm run build:ui` (`scripts/copy-ui-assets.mjs`), which is part of `npm run build`.
 - The client (`app.js`) is dependency-free and inserts all history as text nodes, never HTML,
@@ -457,7 +458,7 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
   - Known limit: the projection is only as good as the corpus — a real history is tool-loop heavy (~23 assistant turns per user turn), 43% of sessions read as partial source resolution, and repetitive agent-loop sessions dominate; the record shape is correct for training, but expectations about dataset quality should account for that
 - 017-local-web-ui: Added `cursor-history ui` (alias `serve`), a loopback-only read-only local web app over the existing core reads
   - `src/ui/server.ts` - `startUiServer()` on `node:http` (no new runtime dependencies): `GET /api/status`, `/api/workspaces`, `/api/sessions`, `/api/session`, `/api/search`, `/api/export`, plus static `/`, `/app.css`, `/app.js`. Non-local `Host` → 403, non-GET/HEAD → 405, unknown route → 404
-  - Scope-bound `SessionReadContext`s (max 4, idle-only eviction) + 60s memo on catalog responses (`?refresh=1` bypasses) + background catalog warm-up after startup
+  - Per-operation scoped `SessionReadContext`s + bounded 32-entry/60s response cache (`?refresh=1` bypasses) + background catalog warm-up after startup
   - `src/ui/public/` - dependency-free SPA (`index.html`, `app.css`, `app.js`) with nav for Sessions, Workspaces, Search, and a Commands & options reference; session view mirrors `show` flags (full messages/tool output/reasoning, `--only` types) and downloads through the same Markdown/JSON exporters
   - `scripts/copy-ui-assets.mjs` wired as `npm run build:ui` inside `npm run build` so `dist/ui/public/` ships with the package
   - `tests/integration/ui-server.test.ts` covers status, static assets, workspace/session/search/export shapes, 400/403/404/405 paths, and refresh

@@ -80,7 +80,6 @@ import {
   getBoundedComposerMetadataByKey,
   readBoundedComposerValueByKey,
   readFirstBoundedComposerBubbleValueByExactPrefix,
-  readLastBoundedComposerBubbleValueByExactPrefix,
   type ComposerSqliteMetadata,
 } from './composer-sqlite.js';
 import {
@@ -120,6 +119,7 @@ import {
 } from './io-observer.js';
 import {
   isValidTimestamp,
+  isDirectMessageTimestampSource,
   resolveMessageTimestamps,
   resolveSessionTimestamps,
   type ResolvedSessionTimestamps,
@@ -2074,30 +2074,28 @@ function buildGlobalComposerSummary(
   let directMessages: Message[] = [];
   let firstBubbleValue: string | null | undefined;
   if (!composerMetadata.createdAt || !composerMetadata.lastUpdatedAt) {
-    // Session creation and update are extrema over directly stored message
-    // times, and Cursor appends bubbles in conversation order. Only the first
-    // and last bubbles can therefore contribute. Reading the whole
-    // conversation here made catalog discovery proportional to total payload
-    // bytes in the global database instead of to the session count.
-    const firstBubble = readFirstBoundedComposerBubbleValueByExactPrefix(
+    // Preserve extrema over every direct timestamp, retaining only two messages.
+    // Physical endpoints may have no timestamp or may not contain the extrema.
+    let earliest: Message | undefined;
+    let latest: Message | undefined;
+    forEachBoundedComposerBubbleValueByExactPrefix(
       db,
       bubblePrefix,
       budget,
+      (row) => {
+        if (firstBubbleValue === undefined) firstBubbleValue = row.value;
+        const message = mapBubbleToMessage(row) as Message;
+        if (
+          !isValidTimestamp(message.timestamp) ||
+          !isDirectMessageTimestampSource(message.timestampSource)
+        )
+          return;
+        if (!earliest || message.timestamp < earliest.timestamp!) earliest = message;
+        if (!latest || message.timestamp > latest.timestamp!) latest = message;
+      },
       signal
     );
-    const lastBubble = readLastBoundedComposerBubbleValueByExactPrefix(
-      db,
-      bubblePrefix,
-      budget,
-      signal
-    );
-    firstBubbleValue = firstBubble?.value;
-    const timestampRows: BubbleRow[] = [];
-    if (firstBubble) timestampRows.push({ key: firstBubble.key, value: firstBubble.value });
-    if (lastBubble && lastBubble.key !== firstBubble?.key) {
-      timestampRows.push({ key: lastBubble.key, value: lastBubble.value });
-    }
-    directMessages = timestampRows.map((row) => mapBubbleToMessage(row)) as Message[];
+    directMessages = earliest && latest ? [earliest, latest] : [];
   }
   const sessionTimestamps = resolveSessionTimestamps({
     view: 'composer-backed',

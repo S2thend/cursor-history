@@ -437,7 +437,9 @@ Each record looks like:
 - **Noise is removed**: workspace memberships, source instances and identity bookkeeping are
   replaced by a small `metadata` block suitable for training and later filtering.
 
-> **Credentials are redacted by default.** Chat history contains secrets that were pasted into
+> **Credentials are redacted by default**, including session titles and tool parameters. Shared
+> credential rules also drive the synthetic-fixture scanner; its additional email/IP/hostname checks
+> are fixture-only checks, not a promise of complete export anonymization. Chat history contains secrets that were pasted into
 > terminal output, diffs and `.env` reads. Verified against a real 721-session history, the default
 > pass removed 17,058 credentials — including 42 private keys, 38 JWTs and thousands of API keys —
 > and rewrote home-directory paths to `/Users/<user>`. Review the redaction totals printed after
@@ -543,8 +545,8 @@ Notes and limits:
 - **Read-only.** It reuses the same core read paths as the CLI, so it never writes to your
   history. `--host <interface>` exists for advanced setups and prints a warning when you leave
   loopback.
-- **Cached.** Catalog reads are memoized briefly so repeat navigation stays fast. Use the
-  **Reload** button to force a fresh read from disk.
+- **Cached.** Catalog and search responses use a 60-second cache capped at 32 entries. Use the
+  **Reload** button to read current data; each operation releases its read context afterwards.
 - **Search cost.** A global search has to read every session, so the first one can take a
   couple of minutes on a large history; repeat searches are cached. Scoping to a workspace
   first makes it much faster. This is the same cost as `cursor-history search`.

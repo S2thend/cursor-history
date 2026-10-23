@@ -76,8 +76,22 @@ export function sqliteGlobLiteralPrefix(value: string): string {
  * GLOB is case-sensitive by default and, with a literal prefix, plans as a
  * covering index range search instead of a full table scan.
  */
-function exactPrefixPredicate(qualifiedKey: string): string {
-  return `${qualifiedKey} IS NOT NULL AND ${qualifiedKey} GLOB ?`;
+function exactPrefixPredicate(
+  qualifiedKey: string,
+  prefix: string
+): { sql: string; params: string[] } {
+  // SQLite GLOB stops at NUL; native identifiers must remain byte-exact even
+  // for future/noncanonical text. Preserve the released predicate in that case.
+  if (prefix.includes('\0')) {
+    return {
+      sql: `${qualifiedKey} IS NOT NULL AND substr(CAST(${qualifiedKey} AS BLOB), 1, length(CAST(? AS BLOB))) = CAST(? AS BLOB)`,
+      params: [prefix, prefix],
+    };
+  }
+  return {
+    sql: `${qualifiedKey} IS NOT NULL AND ${qualifiedKey} GLOB ?`,
+    params: [`${sqliteGlobLiteralPrefix(prefix)}*`],
+  };
 }
 
 interface InternalComposerSqliteMetadata extends ComposerSqliteMetadata {
@@ -404,15 +418,15 @@ export function forEachBoundedComposerBubbleMetadataByExactPrefix(
   signal?: AbortSignal
 ): void {
   const pageRows = budget.limits.sqlitePageRows;
-  const globPrefix = `${sqliteGlobLiteralPrefix(keyPrefix)}*`;
+  const predicate = exactPrefixPredicate('cursorDiskKV.key', keyPrefix);
   let afterRowId: number | bigint | null = null;
   while (true) {
     throwIfAborted(signal);
     const rawPage = db
       .prepare(
-        `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactPrefixPredicate('cursorDiskKV.key')} AND (? IS NULL OR cursorDiskKV.rowid > ?) ORDER BY cursorDiskKV.rowid ASC LIMIT ?`
+        `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${predicate.sql} AND (? IS NULL OR cursorDiskKV.rowid > ?) ORDER BY cursorDiskKV.rowid ASC LIMIT ?`
       )
-      .all(globPrefix, afterRowId, afterRowId, pageRows) as Array<Record<string, unknown>>;
+      .all(...predicate.params, afterRowId, afterRowId, pageRows) as Array<Record<string, unknown>>;
     if (rawPage.length === 0) break;
 
     const fallbackBase: number =
@@ -592,12 +606,13 @@ export function readFirstBoundedComposerBubbleValueByExactPrefix(
   budget: SqliteSourceReadBudget,
   signal?: AbortSignal
 ): ComposerSqliteBubbleValue | undefined {
+  const predicate = exactPrefixPredicate('cursorDiskKV.key', keyPrefix);
   throwIfAborted(signal);
   const raw = db
     .prepare(
-      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactPrefixPredicate('cursorDiskKV.key')} ORDER BY cursorDiskKV.rowid ASC LIMIT 1`
+      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${predicate.sql} ORDER BY cursorDiskKV.rowid ASC LIMIT 1`
     )
-    .get(`${sqliteGlobLiteralPrefix(keyPrefix)}*`) as Record<string, unknown> | undefined;
+    .get(...predicate.params) as Record<string, unknown> | undefined;
   if (!raw) return undefined;
   const metadata = normalizeBubbleMetadata(raw, keyPrefix);
   budget.admitMetadataPage([metadata.byteLength]);
@@ -607,10 +622,8 @@ export function readFirstBoundedComposerBubbleValueByExactPrefix(
 /**
  * Read the last nullable global bubble for one exact byte prefix.
  *
- * Cursor appends bubbles in conversation order, so the highest physical row ID
- * under a composer prefix is that conversation's final message. Callers that
- * need a conversation's time range can therefore read only the first and last
- * bubbles instead of every payload in between.
+ * This is physical row-ID order only, not chronological order. Session time
+ * extrema must consider all valid directly stored message timestamps.
  */
 export function readLastBoundedComposerBubbleValueByExactPrefix(
   db: Database,
@@ -618,12 +631,13 @@ export function readLastBoundedComposerBubbleValueByExactPrefix(
   budget: SqliteSourceReadBudget,
   signal?: AbortSignal
 ): ComposerSqliteBubbleValue | undefined {
+  const predicate = exactPrefixPredicate('cursorDiskKV.key', keyPrefix);
   throwIfAborted(signal);
   const raw = db
     .prepare(
-      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${exactPrefixPredicate('cursorDiskKV.key')} ORDER BY cursorDiskKV.rowid DESC LIMIT 1`
+      `SELECT CAST(cursorDiskKV.rowid AS TEXT) AS rowId, key, COALESCE(length(CAST(value AS BLOB)), 0) AS byteLength, value IS NULL AS valueIsNull FROM cursorDiskKV WHERE ${predicate.sql} ORDER BY cursorDiskKV.rowid DESC LIMIT 1`
     )
-    .get(`${sqliteGlobLiteralPrefix(keyPrefix)}*`) as Record<string, unknown> | undefined;
+    .get(...predicate.params) as Record<string, unknown> | undefined;
   if (!raw) return undefined;
   const metadata = normalizeBubbleMetadata(raw, keyPrefix);
   budget.admitMetadataPage([metadata.byteLength]);
