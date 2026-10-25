@@ -77,6 +77,8 @@
     "LICENSE",
     "CHANGELOG.md",
     "docs/compatibility.md",
+    "docs/training.md",
+    "examples/training",
     "docs/release-verification.md",
     "docs/logo.png",
     "docs/readme-banner.png",

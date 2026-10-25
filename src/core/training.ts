@@ -12,6 +12,19 @@
  * structured fields and keeps only the natural-language remainder of `content`.
  */
 
+import {
+  toShareGptRecord,
+  validateToolDefinitions,
+  type TrainingSchema,
+  type TrainingToolDefinition,
+} from './training-formats.js';
+export {
+  toShareGpt,
+  toTrl,
+  convertTrainingRecord,
+  serializeTrainingLine,
+} from './training-formats.js';
+
 import type { ChatSession, Message, ToolCall } from './types.js';
 import { anonymizeHostPaths, redactSensitiveText, type RedactionCounts } from './sensitive-data.js';
 export { anonymizeHostPaths, redactSensitiveText, type RedactionCounts } from './sensitive-data.js';
@@ -63,6 +76,8 @@ export interface TrainingRecord {
   schema: 'cursor-history-training/v1';
   metadata: TrainingRecordMetadata;
   messages: TrainingMessage[];
+  /** Explicit caller-supplied tool definitions; never inferred from calls. */
+  tools?: TrainingToolDefinition[];
 }
 
 /** ShareGPT-style record, offered for trainers that require that shape. */
@@ -73,8 +88,10 @@ export interface ShareGptRecord {
 }
 
 export interface TrainingExportOptions {
-  /** Output schema. Defaults to `messages` (OpenAI / HuggingFace chat). */
-  schema?: 'messages' | 'sharegpt';
+  /** Output profile. Defaults to `messages`; projection is shared by all formats. */
+  schema?: TrainingSchema;
+  /** Available function JSON schemas, sanitized with the conversation. */
+  toolDefinitions?: TrainingToolDefinition[];
   /** Include `Message.thinking` / `[Thinking]` segments. Defaults to true. */
   includeReasoning?: boolean;
   /** Emit structured tool calls as assistant `tool_calls` + `tool` turns. Defaults to true. */
@@ -95,7 +112,7 @@ export interface TrainingExportOptions {
   systemPrompt?: string;
 }
 
-const DEFAULT_OPTIONS: Required<Omit<TrainingExportOptions, 'systemPrompt'>> = {
+const DEFAULT_OPTIONS: Required<Omit<TrainingExportOptions, 'systemPrompt' | 'toolDefinitions'>> = {
   schema: 'messages',
   includeReasoning: true,
   includeToolCalls: true,
@@ -175,7 +192,7 @@ export function truncateWithMarker(text: string, limit: number): string {
 }
 
 interface SanitizeContext {
-  options: Required<Omit<TrainingExportOptions, 'systemPrompt'>>;
+  options: Required<Omit<TrainingExportOptions, 'systemPrompt' | 'toolDefinitions'>>;
   counts: RedactionCounts;
 }
 
@@ -417,6 +434,12 @@ export function projectSession(
     secretAssignment: 0,
   };
   const context: SanitizeContext = { options: resolved, counts };
+  const tools =
+    resolved.includeToolCalls && resolved.toolDefinitions !== undefined
+      ? validateToolDefinitions(
+          sanitizeJsonValue(validateToolDefinitions(resolved.toolDefinitions), context)
+        )
+      : undefined;
 
   const groups = groupByUserTurns(session.messages);
   const slices = packGroups(groups, resolved.maxCharsPerRecord);
@@ -463,61 +486,21 @@ export function projectSession(
     };
 
     const id = slices.length > 1 ? `${session.id}#${sliceIndex + 1}` : session.id;
-    records.push({
+    const record: TrainingRecord = {
       id,
       schema: 'cursor-history-training/v1',
       metadata,
       messages,
-    });
-    shareGpt.push({
-      id,
-      conversations: toShareGpt(messages),
-      metadata,
-    });
+      ...(tools !== undefined ? { tools } : {}),
+    };
+    records.push(record);
+    shareGpt.push(toShareGptRecord(record));
   });
 
   if (records.length === 0) {
     return { records, shareGpt, redaction: counts, dropReason: firstDrop ?? 'empty' };
   }
   return { records, shareGpt, redaction: counts };
-}
-
-/** Flatten training turns into the ShareGPT `conversations` shape. */
-export function toShareGpt(messages: readonly TrainingMessage[]): ShareGptRecord['conversations'] {
-  const conversations: ShareGptRecord['conversations'] = [];
-  for (const message of messages) {
-    switch (message.role) {
-      case 'system':
-        conversations.push({ from: 'system', value: message.content });
-        break;
-      case 'user':
-        conversations.push({ from: 'human', value: message.content });
-        break;
-      case 'assistant': {
-        const parts: string[] = [];
-        if (message.reasoning_content) {
-          parts.push(`[reasoning]\n${message.reasoning_content}`);
-        }
-        if (message.content.trim().length > 0) parts.push(message.content);
-        for (const call of message.tool_calls ?? []) {
-          parts.push(`[tool_call] ${call.function.name} ${call.function.arguments}`);
-        }
-        conversations.push({ from: 'gpt', value: parts.join('\n\n') });
-        break;
-      }
-      case 'tool':
-        conversations.push({
-          from: 'tool',
-          value: `[tool_result${message.status ? ` ${message.status}` : ''}]\n${message.content}`,
-        });
-        break;
-      default: {
-        const exhaustive: never = message.role;
-        throw new Error(`Unhandled training role: ${String(exhaustive)}`);
-      }
-    }
-  }
-  return conversations;
 }
 
 /** Add two redaction tallies. */
@@ -528,22 +511,6 @@ export function mergeRedactionCounts(a: RedactionCounts, b: RedactionCounts): Re
     apiKey: a.apiKey + b.apiKey,
     secretAssignment: a.secretAssignment + b.secretAssignment,
   };
-}
-
-/** Serialize a record as a single JSONL line. */
-export function serializeTrainingLine(
-  record: TrainingRecord | ShareGptRecord,
-  schema: 'messages' | 'sharegpt'
-): string {
-  if (schema === 'sharegpt') {
-    const shareGptRecord = record as ShareGptRecord;
-    return JSON.stringify({
-      id: shareGptRecord.id,
-      conversations: shareGptRecord.conversations,
-      metadata: shareGptRecord.metadata,
-    });
-  }
-  return JSON.stringify(record);
 }
 
 export const TRAINING_DEFAULT_OPTIONS = DEFAULT_OPTIONS;

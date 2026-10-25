@@ -267,7 +267,14 @@ their `content` strings carry display scaffolding (`[Tool: Read File]`, `[Thinki
 and duplicate data already present in structured `Message.toolCalls`.
 
 - `src/core/training.ts` - `projectSession(session, options)` → `{ records, shareGpt, redaction, dropReason }`.
-  `messages` (OpenAI/HuggingFace chat, default) and `sharegpt` schemas via `serializeTrainingLine`.
+  Existing `messages` (default, string arguments) and `sharegpt` outputs stay compatible.
+- `src/core/training-formats.ts` owns `convertTrainingRecord`, `toShareGpt`, `toTrl`, validation
+  and JSONL serialization. Legacy imports from `training.ts` remain re-exported. `--schema trl`
+  emits object arguments and `tools`; `--tools-file` supplies definitions (never inferred),
+  sanitized by the shared projection. Use `--no-tools` for text-only TRL.
+- `examples/training/train.py` templates/tokenizes JSONL before Arrow ingestion to avoid nested
+  schema coercion; checks context length and supports validation-only `--check` and TRL SFT.
+  Python is optional and is not a Node runtime dependency. See `docs/training.md`.
 - **Assistant turns are rebuilt from structured data.** `segmentDisplayContent()` splits
   display-oriented `content` at line-anchored markers; only non-marker text survives as natural
   language. Structured `toolCalls` become assistant `tool_calls` plus correlated `role: 'tool'`
@@ -290,8 +297,7 @@ and duplicate data already present in structured `Message.toolCalls`.
 - **Train/validation split** (`--valid-ratio`, `--valid-output`, `--split-seed`): `assignSplit()` is a
   seeded FNV-1a hash of `baseSessionKey(id)`, so splitting is grouped by *session* (segments never
   cross the boundary), deterministic across runs, and independent of record order. `deriveValidationPath()`
-  defaults the holdout to `<output>.validation.jsonl`. Both schemas key on the same session id, so
-  `messages` and `sharegpt` variants hold out identical sessions.
+  defaults the holdout to `<output>.validation.jsonl`. All three profiles key on the same session id and hold out identical sessions.
 - `export-training` is registered in `CLI_COMMAND_REGISTRY` alongside the other commands so the
   fatal-category and source-limit coverage gates stay closed.
 

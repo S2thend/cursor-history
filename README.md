@@ -18,6 +18,8 @@ Cursor conversations can be spread across workspaces, IDE databases, Agent trans
 
 Search conversation content across workspaces, inspect messages and available tool activity, and export to Markdown or JSON. Back up and restore Composer history, or migrate supported Composer sessions when projects move.
 
+**Turn your Cursor coding history into reusable training datasets.** Export multi-turn conversations as messages or ShareGPT JSONL, or use the TRL profile for structured tool calls and a runnable Hugging Face SFT workflow. [Training guide](./docs/training.md).
+
 **Already have months of Cursor history? No prior capture or indexing setup is required.** Search runs locally, with no embeddings or API key.
 
 **Prefer an MCP server interface?** Connect [cursor-history-mcp](https://github.com/S2thend/cursor-history-mcp#quick-start) to expose history as MCP tools. Agents can also call this project's CLI or Node.js API directly—choose the interface that fits your workflow. The packages release independently; check [MCP storage compatibility and release information](https://github.com/S2thend/cursor-history-mcp#compatibility).
@@ -33,6 +35,7 @@ cursor-history show 1
 cursor-history export 1
 cursor-history backup
 cursor-history ui
+cursor-history export-training --schema trl --no-tools --no-reasoning -o sft.jsonl
 ```
 
 Requires Node.js 20.x or 22.x–26.x and existing local Cursor history. To try without a permanent install, run `npx cursor-history list --all`.
@@ -51,6 +54,7 @@ Choose `cursor-history` when you want to find, inspect, preserve, and reuse Curs
 
 - **Multiple Cursor sources, one interface** — Read supported Composer, Agent transcript, Store / CLI, and ACP sources.
 - **From search to preservation** — Search conversation content across workspaces, inspect available diffs and tool activity, and export Markdown or JSON. Back up and restore Composer data, or preview eligible Composer migrations with `--dry-run`.
+- **Reuse real coding conversations for fine-tuning** — Export messages, ShareGPT or TRL datasets with shared credential redaction, structured tool calls, and reproducible session-level train/validation splits. [Prepare a dataset and train with TRL](./docs/training.md).
 - **Ready for your workflow** — Use the Node.js API in your own tools, connect the separate [MCP companion](https://github.com/S2thend/cursor-history-mcp#compatibility), or follow the [WSL configuration](#where-cursor-stores-data) to read Windows-side or WSL-local Store data.
 
 | Dimension | **cursor-history (this project)** | [deja-vu](https://github.com/vshulcz/deja-vu) | [cursaves](https://github.com/Callum-Ward/cursaves) | [johnlindquist/cursor-history](https://github.com/johnlindquist/cursor-history) |
@@ -352,18 +356,33 @@ cursor-history export 1 --force
 
 ### Export a fine-tuning dataset
 
-`export --all --format json` produces one human-readable document per session. That shape is
-wrong for training: the `content` strings carry display scaffolding (`[Tool: Read File]`,
-`[Thinking]`, `[Error]`), and the same file contents appear twice — once flattened into `content`
-and once in the structured `toolCalls`.
+Turn local coding conversations into reusable SFT datasets. `export-training` rebuilds assistant
+turns from structured history, removes display-only tool scaffolding, redacts recognized secrets,
+and keeps every session's segments together in train/validation splits.
 
-`export-training` emits a single **JSONL** file in the standard OpenAI / HuggingFace chat
-`messages` shape, rebuilding assistant turns from structured data. Each line is a self-contained
-conversation with metadata:
+Three profiles share the same extraction and sanitization pipeline:
+
+| Profile | Conversation shape | Tool arguments | Use |
+|---------|--------------------|----------------|-----|
+| `messages` (default) | `messages` with `role/content` | JSON string | General interchange; preserves the existing export contract |
+| `trl` | `messages` with `role/content`, plus `tools` | JSON object | Hugging Face chat templates and the included TRL SFT example |
+| `sharegpt` | `conversations` with `from/value` | Text extension | Compatibility with existing ShareGPT workflows |
+
+The TRL profile validates tool definitions and call/result correlations. It requires your actual
+function schemas via `--tools-file`, or `--no-tools` for text-only conversations. **Definitions are
+never guessed from historical calls.** See the [training guide](./docs/training.md) for model-template
+requirements, the Python example, and the precise compatibility boundary.
 
 ```bash
 # Write an agent-training dataset
 cursor-history export-training -o ./training/dataset.jsonl
+
+# Text-only TRL SFT dataset; no tool schemas needed
+cursor-history export-training --schema trl --no-tools --no-reasoning -o ./sft.jsonl
+
+# Tool-calling TRL dataset: provide the definitions used by your agent
+cursor-history export-training --schema trl --tools-file ./tools.json \
+  --no-reasoning -o ./agent.jsonl
 
 # ShareGPT shape for trainers that require `conversations`
 cursor-history export-training -o ./dataset.sharegpt.jsonl --schema sharegpt
@@ -380,7 +399,7 @@ cursor-history --workspace /path/to/project export-training -o ./dataset.jsonl
 cursor-history export-training -o ./training/dataset.jsonl --valid-ratio 0.05
 ```
 
-Each record looks like:
+The default `messages` profile retains this record shape:
 
 ```json
 {"id":"<session-id>","schema":"cursor-history-training/v1",
@@ -398,7 +417,8 @@ Each record looks like:
 | Option | Default | Purpose |
 |--------|---------|---------|
 | `-o, --output <path>` | `./cursor-history-training.jsonl` | Output file |
-| `--schema <messages\|sharegpt>` | `messages` | Record shape |
+| `--schema <messages\|sharegpt\|trl>` | `messages` | Output profile |
+| `--tools-file <path>` | – | JSON array of function definitions; required for TRL with tools, optional for messages |
 | `--max-tool-chars <n>` | `4000` | Truncate long tool results (`0` = unlimited) |
 | `--max-user-chars <n>` | `8000` | Truncate long user messages (`0` = unlimited) |
 | `--max-record-chars <n>` | `40000` | Split larger sessions at user-turn boundaries |
@@ -419,10 +439,10 @@ Each record looks like:
   `content` is kept; `[Tool: …]` scaffolding is discarded and replaced by real `tool_calls` plus
   correlated `role: "tool"` turns. Tool results always carry the `tool_call_id` they answer, so no
   orphan results are emitted.
-- **Tool call `arguments` are always parseable JSON.** Parameters are sanitized value-by-value and
+- **Tool call `arguments` are JSON strings in messages and objects in TRL.** Parameters are sanitized value-by-value and
   then serialized, so a redaction can never delete a closing quote and corrupt the JSON (which
   would break trainers that parse `arguments`). They are never truncated.
-- **Reasoning** is emitted as a separate `reasoning_content` field, never mixed into `content`.
+- **Reasoning** stays in `reasoning_content` for messages/TRL; the target chat template must support it. Use `--no-reasoning` otherwise. ShareGPT preserves the existing textual `[reasoning]` extension.
 - **Answer-less sessions are skipped.** A record whose assistant turns are all reasoning-only or
   degraded placeholders would teach a model to emit nothing, so it is refused and counted.
 - **Oversized sessions are split at user-turn boundaries**, so each record still contains a complete
@@ -432,7 +452,7 @@ Each record looks like:
   *sessions*, not records: every segment of a session lands in the same split, so a conversation's
   later turns are never trained on while its earlier turns are held out. Assignment is a seeded hash
   of the session id, so it is stable across runs, independent of record order, and reproducible for
-  a given `--split-seed`. Both schemas use the same key, so `messages` and `sharegpt` variants hold
+  a given `--split-seed`. All three profiles use the same key, so their variants hold
   out the **same** sessions.
 - **Noise is removed**: workspace memberships, source instances and identity bookkeeping are
   replaced by a small `metadata` block suitable for training and later filtering.
@@ -443,7 +463,7 @@ Each record looks like:
 > terminal output, diffs and `.env` reads. Verified against a real 721-session history, the default
 > pass removed 17,058 credentials — including 42 private keys, 38 JWTs and thousands of API keys —
 > and rewrote home-directory paths to `/Users/<user>`. Review the redaction totals printed after
-> each run, and keep `--redact` on unless you are certain the output stays private.
+> each run, and leave redaction enabled unless you are certain the output stays private.
 
 ### Migrate Sessions
 

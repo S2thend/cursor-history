@@ -2,14 +2,15 @@
  * Export-training command - project chat sessions into fine-tuning datasets.
  *
  * Unlike `export` (one document per session), this command streams every
- * selected session into a single JSONL dataset using the standard
- * OpenAI / HuggingFace chat `messages` shape, with structured `tool_calls`.
+ * selected session into a JSONL dataset using shared messages, ShareGPT or TRL
+ * format adapters over the same sanitized projection.
  */
 
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { once } from 'node:events';
+import { finished } from 'node:stream/promises';
 import { dirname } from 'node:path';
 import type { WriteStream } from 'node:fs';
 import { getSession, listSessionSummaries, createSessionReadContext } from '../../core/storage.js';
@@ -22,6 +23,11 @@ import {
   type TrainingDropReason,
   type RedactionCounts,
 } from '../../core/training.js';
+import {
+  validateToolDefinitions,
+  type TrainingSchema,
+  type TrainingToolDefinition,
+} from '../../core/training-formats.js';
 import { handleCommandError, CliError, ExitCode, FileExistsError } from '../errors.js';
 import { expandPath, contractPath } from '../../lib/platform.js';
 import type { ChatSessionSummary, SourceReadLimitsOverride } from '../../core/types.js';
@@ -37,6 +43,7 @@ import { adaptScopedBackupReadError } from '../backup-read-error.js';
 interface ExportTrainingOptions {
   output?: string;
   schema?: string;
+  toolsFile?: string;
   maxToolChars?: string;
   maxUserChars?: string;
   maxRecordChars?: string;
@@ -68,13 +75,17 @@ function parsePositiveInt(raw: string | undefined, fallback: number, flag: strin
   if (raw === undefined) return fallback;
   const value = Number.parseInt(raw, 10);
   if (!Number.isFinite(value) || value < 0) {
-    throw new CliError(`Invalid value for ${flag}: ${raw}. Expected a non-negative integer.`, ExitCode.USAGE_ERROR);
+    throw new CliError(
+      `Invalid value for ${flag}: ${raw}. Expected a non-negative integer.`,
+      ExitCode.USAGE_ERROR
+    );
   }
   return value;
 }
 
 /** Write a chunk, awaiting drain so large datasets do not balloon memory. */
 async function writeChunk(stream: WriteStream, chunk: string): Promise<void> {
+  if (stream.errored) throw stream.errored;
   if (!stream.write(chunk)) {
     await once(stream, 'drain');
   }
@@ -85,10 +96,21 @@ export function registerExportTrainingCommand(program: Command): void {
     .command('export-training')
     .description('Export all sessions as a JSONL dataset for fine-tuning an AI agent')
     .option('-o, --output <path>', 'Output .jsonl file', DEFAULTS.output)
-    .option('--schema <schema>', 'Record schema: messages (OpenAI/HF chat) or sharegpt', DEFAULTS.schema)
+    .option(
+      '--schema <schema>',
+      'Export profile: messages, sharegpt, or trl (HF object arguments)',
+      DEFAULTS.schema
+    )
+    .option(
+      '--tools-file <path>',
+      'JSON array of function schemas (required for TRL unless --no-tools)'
+    )
     .option('--max-tool-chars <n>', 'Max characters kept per tool result (0 = unlimited)')
     .option('--max-user-chars <n>', 'Max characters kept per user message (0 = unlimited)')
-    .option('--max-record-chars <n>', 'Split sessions larger than this many characters at user turns')
+    .option(
+      '--max-record-chars <n>',
+      'Split sessions larger than this many characters at user turns'
+    )
     .option('--min-user-turns <n>', 'Skip records with fewer user turns than this')
     .option(
       '--valid-ratio <r>',
@@ -103,6 +125,10 @@ export function registerExportTrainingCommand(program: Command): void {
     .option('--system-prompt <text>', 'System prompt prepended to every record')
     .option('--system-prompt-file <path>', 'Read the system prompt from a file')
     .option('--force', 'Overwrite an existing output file')
+    .addHelpText(
+      'after',
+      `\nExamples:\n  cursor-history export-training -o dataset.jsonl\n  cursor-history export-training --schema trl --no-tools --no-reasoning -o sft.jsonl\n  cursor-history export-training --schema trl --tools-file tools.json -o agent.jsonl\n  cursor-history export-training --schema sharegpt -o sharegpt.jsonl\n`
+    )
     .action(async (options: ExportTrainingOptions, command: Command) => {
       const globalOptions = command.parent?.opts() as {
         json?: boolean;
@@ -118,13 +144,37 @@ export function registerExportTrainingCommand(program: Command): void {
 
       try {
         const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
-        const schema: 'messages' | 'sharegpt' =
-          options.schema === 'sharegpt' ? 'sharegpt' : 'messages';
-        if (options.schema !== undefined && options.schema !== 'sharegpt' && options.schema !== 'messages') {
+        const requestedSchema = options.schema ?? DEFAULTS.schema;
+        if (!['messages', 'sharegpt', 'trl'].includes(requestedSchema)) {
           throw new CliError(
-            `Unknown --schema: ${options.schema}. Expected "messages" or "sharegpt".`,
+            `Unknown --schema: ${requestedSchema}. Expected "messages", "sharegpt" or "trl".`,
             ExitCode.USAGE_ERROR
           );
+        }
+        const schema = requestedSchema as TrainingSchema;
+        if (options.toolsFile !== undefined && (options.tools === false || schema === 'sharegpt')) {
+          throw new CliError(
+            '--tools-file requires tools enabled and --schema messages or trl.',
+            ExitCode.USAGE_ERROR
+          );
+        }
+        if (schema === 'trl' && options.tools !== false && options.toolsFile === undefined) {
+          throw new CliError(
+            'TRL tool export requires --tools-file <path>. For text-only SFT, use --no-tools.',
+            ExitCode.USAGE_ERROR
+          );
+        }
+        let toolDefinitions: TrainingToolDefinition[] | undefined;
+        if (options.toolsFile !== undefined) {
+          const text = readFileSync(expandPath(options.toolsFile), 'utf-8').replace(/^\uFEFF/, '');
+          try {
+            toolDefinitions = validateToolDefinitions(JSON.parse(text));
+          } catch (error) {
+            throw new CliError(
+              `Invalid --tools-file: ${error instanceof Error ? error.message : String(error)}`,
+              ExitCode.USAGE_ERROR
+            );
+          }
         }
 
         const systemPrompt =
@@ -164,16 +214,29 @@ export function registerExportTrainingCommand(program: Command): void {
 
         const projectionOptions = {
           schema,
+          ...(toolDefinitions !== undefined ? { toolDefinitions } : {}),
           includeToolCalls: options.tools !== false,
           includeReasoning: options.reasoning !== false,
-          maxToolResultChars: parsePositiveInt(options.maxToolChars, DEFAULTS.maxToolChars, '--max-tool-chars'),
-          maxUserChars: parsePositiveInt(options.maxUserChars, DEFAULTS.maxUserChars, '--max-user-chars'),
+          maxToolResultChars: parsePositiveInt(
+            options.maxToolChars,
+            DEFAULTS.maxToolChars,
+            '--max-tool-chars'
+          ),
+          maxUserChars: parsePositiveInt(
+            options.maxUserChars,
+            DEFAULTS.maxUserChars,
+            '--max-user-chars'
+          ),
           maxCharsPerRecord: parsePositiveInt(
             options.maxRecordChars,
             DEFAULTS.maxRecordChars,
             '--max-record-chars'
           ),
-          minUserTurns: parsePositiveInt(options.minUserTurns, DEFAULTS.minUserTurns, '--min-user-turns'),
+          minUserTurns: parsePositiveInt(
+            options.minUserTurns,
+            DEFAULTS.minUserTurns,
+            '--min-user-turns'
+          ),
           redact: options.redact !== false,
           anonymizePaths: options.anonymizePaths !== false,
           ...(systemPrompt ? { systemPrompt } : {}),
@@ -198,12 +261,17 @@ export function registerExportTrainingCommand(program: Command): void {
         let bytesWritten = 0;
         const splitCounts: Record<'train' | 'validation', number> = { train: 0, validation: 0 };
         const streams = new Map<'train' | 'validation', WriteStream>();
+        const streamCompletions: Promise<void>[] = [];
 
         const streamFor = (split: 'train' | 'validation'): WriteStream => {
           const existing = streams.get(split);
           if (existing) return existing;
           const target = split === 'validation' ? validationPath! : outputPath;
           const created = createWriteStream(target, { encoding: 'utf-8' });
+          const completion = finished(created);
+          // Observe errors immediately; propagate them when finalizing all outputs.
+          void completion.catch(() => {});
+          streamCompletions.push(completion);
           streams.set(split, created);
           return created;
         };
@@ -237,7 +305,13 @@ export function registerExportTrainingCommand(program: Command): void {
 
           for (const summary of sessions) {
             try {
-              const session = await getSession(summary.id, expanded, undefined, context, summary.index);
+              const session = await getSession(
+                summary.id,
+                expanded,
+                undefined,
+                context,
+                summary.index
+              );
               if (!session) continue;
               sessionsScanned += 1;
 
@@ -254,8 +328,16 @@ export function registerExportTrainingCommand(program: Command): void {
                 const record =
                   schema === 'sharegpt' ? projection.shareGpt[index]! : projection.records[index]!;
                 const split = assignSplit(record.id, validRatio, splitSeed);
+                let line: string;
+                try {
+                  line = `${serializeTrainingLine(record, schema)}\n`;
+                } catch (error) {
+                  throw new CliError(
+                    error instanceof Error ? error.message : String(error),
+                    ExitCode.USAGE_ERROR
+                  );
+                }
                 const stream = streamFor(split);
-                const line = `${serializeTrainingLine(record, schema)}\n`;
                 await writeChunk(stream, line);
                 recordsWritten += 1;
                 splitCounts[split] += 1;
@@ -264,20 +346,24 @@ export function registerExportTrainingCommand(program: Command): void {
             } catch (error) {
               if (!(error instanceof SessionAmbiguityError)) throw error;
               diagnosticCollector.onDiagnostic(
-                createSessionAmbiguityDiagnostic(error.details.sessionId, error.details.occurrenceRefs)
+                createSessionAmbiguityDiagnostic(
+                  error.details.sessionId,
+                  error.details.occurrenceRefs
+                )
               );
             } finally {
               context.releaseSession(summary.id);
             }
           }
         } finally {
-          for (const stream of streams.values()) {
-            stream.end();
+          try {
+            for (const stream of streams.values()) stream.end();
+            // Both splits can finish in the same tick. Their listeners were registered
+            // at creation, so neither completion can be missed while awaiting the other.
+            await Promise.all(streamCompletions);
+          } finally {
+            await context.dispose();
           }
-          for (const stream of streams.values()) {
-            await once(stream, 'finish');
-          }
-          await context.dispose();
         }
 
         const result = {
@@ -286,7 +372,9 @@ export function registerExportTrainingCommand(program: Command): void {
           schema,
           sessionsScanned,
           recordsWritten,
-          ...(validRatio > 0 ? { split: { ratio: validRatio, seed: splitSeed, counts: splitCounts } } : {}),
+          ...(validRatio > 0
+            ? { split: { ratio: validRatio, seed: splitSeed, counts: splitCounts } }
+            : {}),
           bytesWritten,
           dropped: drops,
           redaction,

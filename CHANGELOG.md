@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Explicit TRL training export (`--schema trl`) with object-valued tool arguments, validated
+  function definitions (`--tools-file`), and correlated tool responses. Optional definitions also
+  work with the default messages profile; existing messages and ShareGPT exports stay compatible.
+- Reusable training-format adapters and a Python TRL SFT example that tokenizes before Arrow
+  ingestion, checks context limits, and supports preprocessing-only validation. Training workflows
+  are now featured in the English and Chinese documentation.
 - Local read-only Web UI (`ui`/`serve`) and JSONL training export (`export-training`).
 - Shared credential detection/redaction and home-path anonymization for training exports and
   fixture safety scans, including training display metadata and Bearer tokens.
@@ -14,6 +20,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Training export waits for both output streams reliably when train and validation finish together,
+  and observes stream errors before reporting success.
 - UI refresh uses fresh scoped reads; response caching has a finite cap, shutdown is idempotent,
   and late browser responses cannot replace the active view. Session/export lookups and repeated
   browser controls share their implementations.
