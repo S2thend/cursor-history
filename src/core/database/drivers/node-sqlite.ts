@@ -19,6 +19,7 @@ import type {
 } from '../types.js';
 import { debugLog } from '../debug.js';
 import { DatabaseCapabilityError, ReadonlyDatabaseError } from '../errors.js';
+import { suppressNodeSqliteExperimentalWarning } from './node-sqlite-warning.js';
 
 // Type definitions for node:sqlite (not yet in @types/node)
 interface NodeSqliteStatement {
@@ -149,6 +150,8 @@ async function loadNodeSqliteProfile(): Promise<DatabaseCapabilityProfile> {
       try {
         // Import availability and API capability are deliberately separate checks. In particular,
         // backup() was added after DatabaseSync on supported Node release lines.
+        // Installed before the import so the experimental warning never reaches stderr.
+        suppressNodeSqliteExperimentalWarning();
         const module = await import('node:sqlite');
         const profile = probeNodeSqliteCapabilities(module);
         if (profile.available) nodeSqliteModule = module as unknown as NodeSqliteModule;
@@ -187,6 +190,30 @@ class NodeSqliteStatementWrapper implements Statement {
       changes: Number(result.changes),
       lastInsertRowid: result.lastInsertRowid,
     };
+  }
+}
+
+/**
+ * Make `LIKE` byte-exact so prefix predicates can use the table's `key` index.
+ *
+ * Cursor stores `cursorDiskKV` with `key TEXT UNIQUE`, but SQLite's default
+ * case-insensitive `LIKE` cannot use a `BINARY`-collated index, so
+ * `key LIKE 'bubbleId:%'` became a full table scan. Cursor-history treats
+ * session IDs and Composer keys as byte-exact identity, so byte-exact `LIKE`
+ * matches that contract while letting SQLite run an index range search.
+ *
+ * This is a connection-scoped setting. Failure is non-fatal: reads stay correct
+ * but may fall back to a scan, so opening must never throw because of it.
+ */
+function applyCaseSensitiveLike(db: NodeSqliteDatabase): void {
+  try {
+    if (typeof db.exec === 'function') {
+      db.exec('PRAGMA case_sensitive_like = ON');
+    } else {
+      db.prepare('PRAGMA case_sensitive_like = ON').run();
+    }
+  } catch (error) {
+    debugLog(`node:sqlite could not enable case_sensitive_like: ${String(error)}`);
   }
 }
 
@@ -269,6 +296,7 @@ export const nodeSqliteDriver: DatabaseDriver = {
       throw new Error('node:sqlite is not loaded. Call isAvailable() first.');
     }
     const db = new nodeSqliteModule.DatabaseSync(path, { readOnly: options.readonly });
+    applyCaseSensitiveLike(db);
     debugLog(`Opened database with node:sqlite: ${path} (readonly: ${options.readonly})`);
     return new NodeSqliteDatabaseWrapper(db, options.readonly);
   },

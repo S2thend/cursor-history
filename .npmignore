@@ -36,3 +36,6 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Python bytecode from optional training examples
+__pycache__/

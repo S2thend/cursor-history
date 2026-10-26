@@ -65,7 +65,11 @@ src/
 │   ├── migrate.ts         # migrateSession, migrateWorkspace, copyBubbleDataInGlobalStorage
 │   ├── backup.ts          # createBackup, restoreBackup, openBackupDatabase
 │   ├── parser.ts          # parseChatData, exportToMarkdown, exportToJson
+│   ├── training.ts        # projectSession: ChatSession → JSONL fine-tuning records (tool calls, redaction, splitting)
 │   └── types.ts           # ChatSession, Message, Workspace, ToolCall, MigrationMode, etc.
+├── ui/
+│   ├── server.ts          # startUiServer: dependency-free node:http JSON API + static assets
+│   └── public/            # index.html, app.css, app.js (no third-party front-end deps)
 └── lib/
     ├── index.ts           # Library entry point (listSessions, getSession, searchSessions, export*, migrate*, setDriver, getActiveDriver)
     ├── types.ts           # Public library types (Session, Message, SearchResult, MigrateSessionConfig, SqliteDriverName, etc.)
@@ -100,6 +104,8 @@ Both CLI and Library share the same core logic:
 - `src/core/storage.ts` - `listSessions()`, `getSession()`, `searchSessions()`, `findWorkspaceForSession()`, `findWorkspaceByPath()`
 - `src/core/migrate.ts` - `migrateSession()`, `migrateWorkspace()`, `copyBubbleDataInGlobalStorage()`
 - `src/core/parser.ts` - `exportToJson()`, `exportToMarkdown()`
+- `src/core/training.ts` - `projectSession()` (training-data projection)
+- `src/core/sensitive-data.ts` - shared credential detection/redaction and host-path anonymization; fixture scanning keeps additional privacy checks
 
 **The library adds:**
 - Type conversions (core types → library types)
@@ -229,6 +235,82 @@ Tool calls are stored in `toolFormerData`:
 - `isThinking()` - checks for `[Thinking]` marker
 - All markers are set by storage layer based on DB fields
 
+## Local Web UI (`src/ui/`)
+
+`cursor-history ui` starts a loopback-only, read-only HTTP surface over the same `src/core` reads
+the CLI uses. It adds no runtime dependencies: `node:http` serves both a small static front-end
+and a JSON API.
+
+- `startUiServer(options)` → `UiServerHandle` with `url`, `port`, and an idempotent `close()`.
+  Options: `dataPath`, `backupPath`, `host` (default `127.0.0.1`), `port` (default `4700`),
+  `sourceReadLimits`.
+- Routes: `GET /api/status`, `/api/workspaces`, `/api/sessions?workspace&limit&all&cross`,
+  `/api/session?id=`, `/api/search?q&limit&context`, `/api/export?id&format=md|json`, plus `/`,
+  `/index.html`, `/app.css`, `/app.js`. Anything else is `404`; non-GET/HEAD is `405`; a non-local
+  `Host` header is `403`.
+- Each read owns and disposes its scoped `SessionReadContext`; decoded sessions are not retained
+  between requests. Catalog/search responses use a 60-second, 32-entry LRU cache with concurrent
+  request deduplication. `?refresh=1` reads fresh source data. The default catalog warms at startup.
+- Static assets live in `src/ui/public/` and are copied to `dist/ui/public/` by
+  `npm run build:ui` (`scripts/copy-ui-assets.mjs`), which is part of `npm run build`.
+- The client (`app.js`) is dependency-free and inserts all history as text nodes, never HTML,
+  because conversation content is untrusted. Every session export goes through the same
+  `exportToMarkdown`/`exportToJson` used by the CLI.
+- `ui` is registered in `CLI_COMMAND_REGISTRY` alongside the other commands so the fatal-category
+  and source-limit coverage gates stay closed.
+
+## Training-Data Export (`src/core/training.ts`, `export-training`)
+
+`cursor-history export-training` projects the same `src/core` reads into a JSONL dataset for
+supervised fine-tuning. It exists because the `export` documents are the wrong shape for training:
+their `content` strings carry display scaffolding (`[Tool: Read File]`, `[Thinking]`, `[Error]`)
+and duplicate data already present in structured `Message.toolCalls`.
+
+- `src/core/training.ts` - `projectSession(session, options)` → `{ records, shareGpt, redaction, dropReason }`.
+  Existing `messages` (default, string arguments) and `sharegpt` outputs stay compatible.
+- `src/core/training-formats.ts` owns `convertTrainingRecord`, `toShareGpt`, `toTrl`, validation
+  and JSONL serialization. Legacy imports from `training.ts` remain re-exported. `--schema trl`
+  emits object arguments and `tools`; `--tools-file` supplies definitions (never inferred),
+  sanitized by the shared projection. Use `--no-tools` for text-only TRL.
+- `examples/training/train.py` templates/tokenizes JSONL before Arrow ingestion to avoid nested
+  schema coercion; checks context length and supports validation-only `--check` and TRL SFT.
+  Python is optional and is not a Node runtime dependency. See `docs/training.md`.
+- **Assistant turns are rebuilt from structured data.** `segmentDisplayContent()` splits
+  display-oriented `content` at line-anchored markers; only non-marker text survives as natural
+  language. Structured `toolCalls` become assistant `tool_calls` plus correlated `role: 'tool'`
+  messages carrying `tool_call_id` (no orphans by construction).
+- **Storage contract verified against the real corpus**: `[Thinking]` content is always
+  reasoning-only (23,973/23,973), and tool-marker content never mixes with natural text
+  (0/91,318) and never carries multiple markers. So no natural language is lost by segmenting.
+- **`arguments` are sanitized value-by-value then serialized**, never truncated. Redacting the
+  serialized string corrupted JSON in 225 real cases by deleting a closing quote; sanitizing leaves
+  and re-serializing makes parseable output structural.
+- **Redaction is on by default** (`redactSensitiveText`, `anonymizeHostPaths`): complete and
+  truncated PEM blocks, JWTs, provider key prefixes, and `*_SECRET|TOKEN|PASSWORD|API_KEY` assignments,
+  plus `/Users/<name>` → `/Users/<user>`. A real 721-session history yielded 17,241 redactions
+  (52 private keys, 39 JWTs). Counts are reported per run; `--no-redact` / `--no-anonymize-paths` opt out.
+- **Quality gates**: sessions whose assistant turns are all reasoning-only or degraded placeholders
+  are dropped (`no-usable-content`) so empty assistant targets are never trained; `minUserTurns`
+  is configurable; oversized sessions are split at user-turn boundaries (`maxCharsPerRecord`,
+  default 40,000 chars) so each record keeps a whole agent loop and segments are labelled
+  `metadata.segment = { index, total }`.
+- **Train/validation split** (`--valid-ratio`, `--valid-output`, `--split-seed`): `assignSplit()` is a
+  seeded FNV-1a hash of `baseSessionKey(id)`, so splitting is grouped by *session* (segments never
+  cross the boundary), deterministic across runs, and independent of record order. `deriveValidationPath()`
+  defaults the holdout to `<output>.validation.jsonl`. All three profiles key on the same session id and hold out identical sessions.
+- Training output publication uses `StagedOutputs`: private sibling streams, finish before publish,
+  no-clobber links or force replacement, and rollback of earlier files on publication errors.
+  Empty successful splits are explicit empty files. Per-file atomic, not a crash-atomic file set.
+- `training-quality.ts` provides numeric tallies; projection counts truncations at the actual
+  operation and retains counts only for emitted records (source sessions count all reads).
+  `--report` persists the CLI summary. `shareGpt` is lazy/memoized; CLI converts one record at a time.
+- `cli/progress.ts` writes throttled stderr updates; default only for human TTYs, explicit
+  `--progress`/`--no-progress` override. JSON stdout stays clean.
+- Only tag-triggered `npm-publish.yml` runs the pinned, CPU-only local-tokenizer TRL smoke as a
+  source-quality gate. No PR or branch-push CI.
+- `export-training` is registered in `CLI_COMMAND_REGISTRY` alongside the other commands so the
+  fatal-category and source-limit coverage gates stay closed.
+
 ## Library API (`src/lib/`)
 
 ### Functions
@@ -293,8 +375,13 @@ try {
 | `show <index>` | Show session by index or composer ID (from list --ids) (-s/--short, -t/--think, -f/--fullread, -e/--error, -o/--only) |
 | `search <query>` | Search across sessions (-n, --context) |
 | `export [index]` | Export to md/json (--all, -o, -f, --force) |
+| `export-training` | Export all sessions as a JSONL fine-tuning dataset (--schema, --max-tool-chars, --system-prompt, --no-redact) |
 | `migrate-session <session> <dest>` | Move/copy session(s) to workspace (--copy, --dry-run, -f, --debug) |
 | `migrate <source> <dest>` | Move/copy all sessions between workspaces (--copy, --dry-run, -f, --debug) |
+| `backup` | Archive Composer state.vscdb files (--output, --force, --shared) |
+| `restore <archive>` | Verify and restore an archive (--target, --force) |
+| `list-backups` | List known backup archives (--directory) |
+| `ui` (alias `serve`) | Serve a local read-only web app (-p/--port, --host, --no-open, -b/--backup) |
 
 ### Show Command Options
 
@@ -376,6 +463,22 @@ Edit `extractBubbleText()` in `src/core/storage.ts`. Priority matters:
 - Cursor Composer SQLite databases, Cursor Store `store.db`, Store JSONL transcripts, ZIP backup archives, and local filesystem metadata (016-harden-session-integrity)
 
 ## Recent Changes
+- 018-training-dataset-export: Added `cursor-history export-training`, a JSONL exporter that projects resolved sessions into fine-tuning datasets instead of reading documents
+  - `src/core/training.ts` - `projectSession()` builds OpenAI/HuggingFace `messages` records (default) or `sharegpt` records, reconstructing assistant turns from structured `Message.toolCalls` as `tool_calls` + correlated `role: 'tool'` turns; display scaffolding (`[Tool: …]`, `[Thinking]`, `[Error]`) is never trained on
+  - Verified the segmentation contract against a real history: `[Thinking]` content is reasoning-only in 23,973/23,973 cases and tool-marker content never mixes with natural text (0/91,318), so no natural language is lost
+  - Credentials are redacted by default (PEM blocks including truncated ones, JWTs, provider key prefixes, `*_SECRET|TOKEN|PASSWORD|API_KEY` assignments) and home paths rewritten to `/Users/<user>`; a 721-session history produced 17,241 redactions including 52 private keys and 39 JWTs, with per-run totals reported
+  - Tool `arguments` are sanitized value-by-value then serialized rather than redacting the serialized string — the serialized approach corrupted JSON in 225 real cases by deleting a closing quote
+  - Quality gates drop answer-less sessions (`no-usable-content`), honour `--min-user-turns`, and split oversized sessions at user-turn boundaries (`--max-record-chars`, default 40,000) with `metadata.segment` labels; output for 721 sessions was 3,077 records (~221 MB)
+  - Train/validation split grouped by session via `assignSplit()` (seeded hash of the session key), so split segments never leak across sets; `--valid-ratio`, `--valid-output`, `--split-seed`
+  - `tests/unit/training.test.ts` (45 tests) covers segmentation, redaction, JSON-structure safety, splitting, split assignment, drops, and both serializers
+  - Known limit: the projection is only as good as the corpus — a real history is tool-loop heavy (~23 assistant turns per user turn), 43% of sessions read as partial source resolution, and repetitive agent-loop sessions dominate; the record shape is correct for training, but expectations about dataset quality should account for that
+- 017-local-web-ui: Added `cursor-history ui` (alias `serve`), a loopback-only read-only local web app over the existing core reads
+  - `src/ui/server.ts` - `startUiServer()` on `node:http` (no new runtime dependencies): `GET /api/status`, `/api/workspaces`, `/api/sessions`, `/api/session`, `/api/search`, `/api/export`, plus static `/`, `/app.css`, `/app.js`. Non-local `Host` → 403, non-GET/HEAD → 405, unknown route → 404
+  - Per-operation scoped `SessionReadContext`s + bounded 32-entry/60s response cache (`?refresh=1` bypasses) + background catalog warm-up after startup
+  - `src/ui/public/` - dependency-free SPA (`index.html`, `app.css`, `app.js`) with nav for Sessions, Workspaces, Search, and a Commands & options reference; session view mirrors `show` flags (full messages/tool output/reasoning, `--only` types) and downloads through the same Markdown/JSON exporters
+  - `scripts/copy-ui-assets.mjs` wired as `npm run build:ui` inside `npm run build` so `dist/ui/public/` ships with the package
+  - `tests/integration/ui-server.test.ts` covers status, static assets, workspace/session/search/export shapes, 400/403/404/405 paths, and refresh
+  - Known limit: a global `search` reads every session (same cost as the CLI, ~2 min on a 7.3 GB history); repeats are cached and workspace scoping is much faster
 - 016-harden-session-integrity: Planned v0.16 identity preservation, scoped metadata-first reads, replica-safe addressing/migration, private snapshots, capability-aware SQLite selection, bounded read contexts, and release-blocking compatibility/package tests
 - 015-cursor-store-stack (P01+P02 incremental): Cross-stack merge + no display folding
   - P01: When the same session ID exists in both the Composer (vscdb) and Store (~/.cursor) stacks, the two representations are now field-merged instead of one being discarded. New `src/core/store-stack/merge.ts` performs a deterministic signature-based LCS alignment (role + normalized text + ordered tool signatures [name + normalized params]); matched messages are merged field by field, unmatched messages are preserved at their relative position, and the preferred source supplies the backbone order (never timestamp sorting). Conflict priority is platform-based via `detectPreferredStackSource()` in `src/lib/platform.ts`: WSL prefers Store, Windows/macOS/native Linux prefer Composer, and an explicit `--data-path` that is a Store root selects Store (`detectPlatform()` is unchanged; `isWSL()` is separate). `listSessions` marks collisions `source:'merged'` and merges summary scalars; `getSession` loads both stacks and merges, recomputing `messageCount` while true scalar conflicts such as `lastUpdatedAt` follow the same preferred-source rule. Provenance is additive: `source:'merged'`, `sources:['composer','store']`, `preferredSource`, and per-message `source:'composer'|'store'|'both'`.

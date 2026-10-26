@@ -1,0 +1,14 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Read a file in the current project.",
+      "parameters": {
+        "type": "object",
+        "properties": {"targetFile": {"type": "string"}},
+        "required": ["targetFile"]
+      }
+    }
+  }
+]

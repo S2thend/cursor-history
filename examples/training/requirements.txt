@@ -1,0 +1,4 @@
+# Install PyTorch separately for your CPU/CUDA platform; see docs/training.md.
+trl==1.16.0
+transformers==5.20.2
+datasets==5.1.0

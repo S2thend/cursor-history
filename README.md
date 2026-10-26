@@ -18,6 +18,8 @@ Cursor conversations can be spread across workspaces, IDE databases, Agent trans
 
 Search conversation content across workspaces, inspect messages and available tool activity, and export to Markdown or JSON. Back up and restore Composer history, or migrate supported Composer sessions when projects move.
 
+**Turn your Cursor coding history into reusable training datasets.** Export multi-turn conversations as messages or ShareGPT JSONL, or use the TRL profile for structured tool calls and a runnable Hugging Face SFT workflow. [Training guide](./docs/training.md).
+
 **Already have months of Cursor history? No prior capture or indexing setup is required.** Search runs locally, with no embeddings or API key.
 
 **Prefer an MCP server interface?** Connect [cursor-history-mcp](https://github.com/S2thend/cursor-history-mcp#quick-start) to expose history as MCP tools. Agents can also call this project's CLI or Node.js API directly—choose the interface that fits your workflow. The packages release independently; check [MCP storage compatibility and release information](https://github.com/S2thend/cursor-history-mcp#compatibility).
@@ -32,11 +34,15 @@ cursor-history search "authentication"
 cursor-history show 1
 cursor-history export 1
 cursor-history backup
+cursor-history ui
+cursor-history export-training --schema trl --no-tools --no-reasoning -o sft.jsonl
 ```
 
 Requires Node.js 20.x or 22.x–26.x and existing local Cursor history. To try without a permanent install, run `npx cursor-history list --all`.
 
 The numbers in `show` and `export` refer to the list from the same data source and workspace scope; use the session UUID for saved commands. The `backup` command archives Composer databases, not Store databases or transcripts.
+
+`cursor-history ui` opens a local read-only web app for the same data. See [Web UI](#web-ui).
 
 [Comparison](#comparison) · [Installation](#installation) · [Usage](#usage) · [Example output](#example-output) · [Library API](#library-api) · [Roadmap](#roadmap) · [Compatibility and safe upgrades](#compatibility-and-safe-upgrades)
 
@@ -48,6 +54,7 @@ Choose `cursor-history` when you want to find, inspect, preserve, and reuse Curs
 
 - **Multiple Cursor sources, one interface** — Read supported Composer, Agent transcript, Store / CLI, and ACP sources.
 - **From search to preservation** — Search conversation content across workspaces, inspect available diffs and tool activity, and export Markdown or JSON. Back up and restore Composer data, or preview eligible Composer migrations with `--dry-run`.
+- **Reuse real coding conversations for fine-tuning** — Export messages, ShareGPT or TRL datasets with shared credential redaction, structured tool calls, and reproducible session-level train/validation splits. [Prepare a dataset and train with TRL](./docs/training.md).
 - **Ready for your workflow** — Use the Node.js API in your own tools, connect the separate [MCP companion](https://github.com/S2thend/cursor-history-mcp#compatibility), or follow the [WSL configuration](#where-cursor-stores-data) to read Windows-side or WSL-local Store data.
 
 | Dimension | **cursor-history (this project)** | [deja-vu](https://github.com/vshulcz/deja-vu) | [cursaves](https://github.com/Callum-Ward/cursaves) | [johnlindquist/cursor-history](https://github.com/johnlindquist/cursor-history) |
@@ -124,6 +131,7 @@ Months of decisions, fixes, prompts, and tool activity may already be on disk. M
 ## Features
 
 - **Dual interface** - Use as CLI tool or import as a library in your Node.js projects
+- **Web UI** - Run `cursor-history ui` for a local, read-only app with the same data: sessions, workspaces, search, export, and a CLI reference (see [Web UI](#web-ui))
 - **List sessions** - View all chat sessions across workspaces
 - **View conversations** - Inspect the content available in each source, including:
   - AI responses with natural language explanations
@@ -397,6 +405,125 @@ cursor-history export --all -o ./exports/
 cursor-history export 1 --force
 ```
 
+### Export a fine-tuning dataset
+
+Turn local coding conversations into reusable SFT datasets. `export-training` rebuilds assistant
+turns from structured history, removes display-only tool scaffolding, redacts recognized secrets,
+and keeps every session's segments together in train/validation splits.
+
+Three profiles share the same extraction and sanitization pipeline:
+
+| Profile | Conversation shape | Tool arguments | Use |
+|---------|--------------------|----------------|-----|
+| `messages` (default) | `messages` with `role/content` | JSON string | General interchange; preserves the existing export contract |
+| `trl` | `messages` with `role/content`, plus `tools` | JSON object | Hugging Face chat templates and the included TRL SFT example |
+| `sharegpt` | `conversations` with `from/value` | Text extension | Compatibility with existing ShareGPT workflows |
+
+The TRL profile validates tool definitions and call/result correlations. It requires your actual
+function schemas via `--tools-file`, or `--no-tools` for text-only conversations. **Definitions are
+never guessed from historical calls.** See the [training guide](./docs/training.md) for model-template
+requirements, the Python example, and the precise compatibility boundary.
+
+```bash
+# Write an agent-training dataset
+cursor-history export-training -o ./training/dataset.jsonl
+
+# Text-only TRL SFT dataset; no tool schemas needed
+cursor-history export-training --schema trl --no-tools --no-reasoning -o ./sft.jsonl
+
+# Tool-calling TRL dataset: provide the definitions used by your agent
+cursor-history export-training --schema trl --tools-file ./tools.json \
+  --no-reasoning -o ./agent.jsonl
+
+# ShareGPT shape for trainers that require `conversations`
+cursor-history export-training -o ./dataset.sharegpt.jsonl --schema sharegpt
+
+# Give the agent a system prompt and keep tool output short
+cursor-history export-training -o ./dataset.jsonl \
+  --system-prompt-file ./agent-system-prompt.md \
+  --max-tool-chars 1500
+
+# Limit to one workspace
+cursor-history --workspace /path/to/project export-training -o ./dataset.jsonl
+
+# Hold out 5% of sessions as a validation split (writes dataset.validation.jsonl too)
+cursor-history export-training -o ./training/dataset.jsonl --valid-ratio 0.05
+```
+
+The default `messages` profile retains this record shape:
+
+```json
+{"id":"<session-id>","schema":"cursor-history-training/v1",
+ "metadata":{"title":"Fix the auth bug","workspace":"my-project","createdAt":"2026-01-02T03:04:05.000Z",
+             "lastUpdatedAt":"2026-01-02T04:05:06.000Z","messageCount":31,
+             "sources":["composer"],"resolvedSource":"composer","resolutionState":"complete"},
+ "messages":[
+   {"role":"user","content":"Please fix the auth bug."},
+   {"role":"assistant","content":"","tool_calls":[
+     {"id":"call_1","type":"function",
+      "function":{"name":"read_file","arguments":"{\"targetFile\":\"/Users/<user>/project/auth.ts\"}"}}]},
+   {"role":"tool","tool_call_id":"call_1","content":"...","status":"completed"}]}
+```
+
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `-o, --output <path>` | `./cursor-history-training.jsonl` | Output file |
+| `--schema <messages\|sharegpt\|trl>` | `messages` | Output profile |
+| `--tools-file <path>` | – | JSON array of function definitions; required for TRL with tools, optional for messages |
+| `--report <path>` | – | Save quality counters, split statistics and redaction totals as JSON |
+| `--progress` / `--no-progress` | Auto on human TTYs | Enable/disable stderr progress, including redirected logs |
+| `--max-tool-chars <n>` | `4000` | Truncate long tool results (`0` = unlimited) |
+| `--max-user-chars <n>` | `8000` | Truncate long user messages (`0` = unlimited) |
+| `--max-record-chars <n>` | `40000` | Split larger sessions at user-turn boundaries |
+| `--min-user-turns <n>` | `1` | Skip records with fewer user turns |
+| `--valid-ratio <r>` | – | Hold out this fraction (0–1) of **sessions** as a validation split |
+| `--valid-output <path>` | `<output>.validation.jsonl` | Validation split path |
+| `--split-seed <n>` | `42` | Seed for deterministic split assignment |
+| `--system-prompt <text>` | – | System prompt prepended to every record |
+| `--system-prompt-file <path>` | – | Read the system prompt from a file |
+| `--no-redact` | redaction **on** | Keep credentials in the output (not recommended) |
+| `--no-anonymize-paths` | anonymization **on** | Keep absolute home paths as-is |
+| `--no-tools` | tools **on** | Drop structured tool calls and results |
+| `--no-reasoning` | reasoning **on** | Drop assistant reasoning traces |
+
+Progress shows discovery, session counts, records and skips on stderr. Use `--progress` with
+`--json` or redirected output; `--no-progress` disables it. `--report ./quality.json` saves the
+summary, including partial sources, failed/missing tool results, truncations and dropped segments.
+All outputs are staged before replacement, preserving prior files on extraction/write failures;
+successful empty splits replace stale content. See [output integrity and quality](./docs/training.md#progress-output-integrity-and-quality-reports).
+
+**How the projection behaves**
+
+- **Assistant turns are rebuilt from structured data.** Only the natural-language remainder of
+  `content` is kept; `[Tool: …]` scaffolding is discarded and replaced by real `tool_calls` plus
+  correlated `role: "tool"` turns. Tool results always carry the `tool_call_id` they answer, so no
+  orphan results are emitted.
+- **Tool call `arguments` are JSON strings in messages and objects in TRL.** Parameters are sanitized value-by-value and
+  then serialized, so a redaction can never delete a closing quote and corrupt the JSON (which
+  would break trainers that parse `arguments`). They are never truncated.
+- **Reasoning** stays in `reasoning_content` for messages/TRL; the target chat template must support it. Use `--no-reasoning` otherwise. ShareGPT preserves the existing textual `[reasoning]` extension.
+- **Answer-less sessions are skipped.** A record whose assistant turns are all reasoning-only or
+  degraded placeholders would teach a model to emit nothing, so it is refused and counted.
+- **Oversized sessions are split at user-turn boundaries**, so each record still contains a complete
+  agent loop (ask → tool calls → answer) and never an answer without its context. Segments are
+  labelled `metadata.segment = { index, total }`.
+- **The train/validation split is grouped by session.** `--valid-ratio 0.05` holds out 5% of
+  *sessions*, not records: every segment of a session lands in the same split, so a conversation's
+  later turns are never trained on while its earlier turns are held out. Assignment is a seeded hash
+  of the session id, so it is stable across runs, independent of record order, and reproducible for
+  a given `--split-seed`. All three profiles use the same key, so their variants hold
+  out the **same** sessions.
+- **Noise is removed**: workspace memberships, source instances and identity bookkeeping are
+  replaced by a small `metadata` block suitable for training and later filtering.
+
+> **Credentials are redacted by default**, including session titles and tool parameters. Shared
+> credential rules also drive the synthetic-fixture scanner; its additional email/IP/hostname checks
+> are fixture-only checks, not a promise of complete export anonymization. Chat history contains secrets that were pasted into
+> terminal output, diffs and `.env` reads. Verified against a real 721-session history, the default
+> pass removed 17,058 credentials — including 42 private keys, 38 JWTs and thousands of API keys —
+> and rewrote home-directory paths to `/Users/<user>`. Review the redaction totals printed after
+> each run, and leave redaction enabled unless you are certain the output stays private.
+
 ### Migrate Sessions
 
 Migration supports eligible Composer sessions. Store-only, merged-source, and ambiguous sessions are rejected; use `--dry-run` to preview a migration.
@@ -459,6 +586,54 @@ cursor-history show 1 --backup ~/backup.zip
 cursor-history search "query" --backup ~/backup.zip
 cursor-history export 1 --backup ~/backup.zip
 ```
+
+### Web UI
+
+If you'd rather browse your history in a window than in the terminal, `ui` serves a local
+read-only web app:
+
+```bash
+# Start the app and open it in your default browser
+cursor-history ui
+
+# Pick a different port, or don't open a browser
+cursor-history ui --port 5000 --no-open
+
+# Browse a backup archive instead of live data
+cursor-history ui --backup ~/cursor-history-backups/backup.zip
+```
+
+The app starts on <http://127.0.0.1:4700/> and gives you:
+
+| Section | What it does |
+| --- | --- |
+| **Sessions** | Every discovered session, newest first. Filter, open, and read the full conversation — messages, tool calls, reasoning blocks, errors, and token usage. |
+| **Workspaces** | Every workspace Cursor has stored history for, with session counts. Click one to scope the whole app to it. |
+| **Search** | Case-insensitive full-text search across message bodies, with highlighted snippets that link to the whole session. |
+| **Commands & options** | A reference for every CLI command and global option, so you don't have to leave the app to remember a flag. |
+
+Session view controls mirror the `show` flags: **Full messages**, **Full tool output**, and
+**Full reasoning** expand what is truncated by default, the `user` / `assistant` / `tool` /
+`thinking` / `error` buttons behave like `--only`, and **Markdown** / **JSON** download the
+session through the same exporters as `cursor-history export`.
+
+Notes and limits:
+
+- **Local only.** The server binds loopback (`127.0.0.1`) and rejects requests whose `Host`
+  header is not local. Your history never leaves the machine.
+- **Read-only.** It reuses the same core read paths as the CLI, so it never writes to your
+  history. `--host <interface>` exists for advanced setups and prints a warning when you leave
+  loopback.
+- **Cached.** Catalog and search responses use a 60-second cache capped at 32 entries. Use the
+  **Reload** button to read current data; each operation releases its read context afterwards.
+- **Search cost.** A global search has to read every session, so the first one can take a
+  couple of minutes on a large history; repeat searches are cached. Scoping to a workspace
+  first makes it much faster. This is the same cost as `cursor-history search`.
+- **`ERR_CONNECTION_REFUSED` / "The local server is not running".** The app is served by the
+  `cursor-history ui` process; if that process stops, every request in an already-open tab fails.
+  Restart it and reload the page. If a tab is pointing at an old port (for example `:4791` from a
+  previous run), open the URL the command prints instead — `--port` selects the port, and the
+  default is `4700`.
 
 ### Global Options
 

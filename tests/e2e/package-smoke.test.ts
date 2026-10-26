@@ -53,7 +53,7 @@ function copyDeclarationPackage(name: string): string {
 function prepareIsolatedPackageSource(): string {
   const sourceRoot = join(temporaryRoot, 'isolated-package-source');
   mkdirSync(sourceRoot, { recursive: true });
-  for (const directory of ['src', 'scripts', 'docs']) {
+  for (const directory of ['src', 'scripts', 'docs', 'examples']) {
     cpSync(join(repositoryRoot, directory), join(sourceRoot, directory), { recursive: true });
   }
   for (const filename of [

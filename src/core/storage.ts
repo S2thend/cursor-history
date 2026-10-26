@@ -72,9 +72,9 @@ import {
 } from './source-read-limits.js';
 import {
   createComposerSqliteBudget,
-  forEachBoundedComposerBubbleMetadata,
   forEachBoundedComposerBubbleMetadataByExactPrefix,
   forEachBoundedComposerBubbleValueByExactPrefix,
+  forEachBoundedComposerKeyMetadata,
   forEachBoundedComposerMetadata,
   forEachBoundedComposerValue,
   getBoundedComposerMetadataByKey,
@@ -119,6 +119,7 @@ import {
 } from './io-observer.js';
 import {
   isValidTimestamp,
+  isDirectMessageTimestampSource,
   resolveMessageTimestamps,
   resolveSessionTimestamps,
   type ResolvedSessionTimestamps,
@@ -1949,8 +1950,12 @@ function loadGlobalBubbleCounts(
 ): Map<string, number> {
   const counts = new Map<string, number>();
   try {
-    forEachBoundedComposerBubbleMetadata(
+    // Counting consumes only keys. Staying on the covering key index avoids
+    // reading every bubble payload, which on real databases cost roughly 30x
+    // the index-only scan and dominated catalog discovery.
+    forEachBoundedComposerKeyMetadata(
       db,
+      'cursorDiskKV',
       'bubbleId:%',
       budget,
       ({ key }) => {
@@ -1994,8 +1999,9 @@ function loadGlobalComposerIdSpellings(
       },
       signal
     );
-    forEachBoundedComposerBubbleMetadata(
+    forEachBoundedComposerKeyMetadata(
       db,
+      'cursorDiskKV',
       'bubbleId:%',
       budget,
       ({ key }) => admit(key.split(':')[1] ?? ''),
@@ -2064,21 +2070,32 @@ function buildGlobalComposerSummary(
   }
 
   const composerMetadata = composerMetadataTimestamps(composerData);
+  const bubblePrefix = `bubbleId:${composerId}:`;
   let directMessages: Message[] = [];
   let firstBubbleValue: string | null | undefined;
   if (!composerMetadata.createdAt || !composerMetadata.lastUpdatedAt) {
-    const timestampRows: BubbleRow[] = [];
+    // Preserve extrema over every direct timestamp, retaining only two messages.
+    // Physical endpoints may have no timestamp or may not contain the extrema.
+    let earliest: Message | undefined;
+    let latest: Message | undefined;
     forEachBoundedComposerBubbleValueByExactPrefix(
       db,
-      `bubbleId:${composerId}:`,
+      bubblePrefix,
       budget,
       (row) => {
         if (firstBubbleValue === undefined) firstBubbleValue = row.value;
-        timestampRows.push({ key: row.key, value: row.value });
+        const message = mapBubbleToMessage(row) as Message;
+        if (
+          !isValidTimestamp(message.timestamp) ||
+          !isDirectMessageTimestampSource(message.timestampSource)
+        )
+          return;
+        if (!earliest || message.timestamp < earliest.timestamp!) earliest = message;
+        if (!latest || message.timestamp > latest.timestamp!) latest = message;
       },
       signal
     );
-    directMessages = timestampRows.map((row) => mapBubbleToMessage(row)) as Message[];
+    directMessages = earliest && latest ? [earliest, latest] : [];
   }
   const sessionTimestamps = resolveSessionTimestamps({
     view: 'composer-backed',
@@ -2090,7 +2107,7 @@ function buildGlobalComposerSummary(
   if (options?.includePreview !== false) {
     firstBubbleValue ??= readFirstBoundedComposerBubbleValueByExactPrefix(
       db,
-      `bubbleId:${composerId}:`,
+      bubblePrefix,
       budget,
       signal
     )?.value;
@@ -2771,7 +2788,8 @@ function optionalPathsEqual(left?: string, right?: string): boolean {
   return pathsEqual(left, right);
 }
 
-const UNKNOWN_WORKSPACE_PATH = '(unknown workspace)';
+/** Sentinel path for Store-only sessions with no resolvable workspace folder. */
+export const UNKNOWN_WORKSPACE_PATH = '(unknown workspace)';
 
 /** Compare an already bound full workspace path. Suffix resolution happens before payload I/O. */
 function workspaceFilterMatches(candidatePath: string | undefined, requestedPath: string): boolean {

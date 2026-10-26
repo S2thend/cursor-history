@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   SOURCE_READ_LIMITS_V1_DEFAULTS,
+  decodeDeterministicUtf8,
   resolveSourceReadLimits,
   sourceLimitDimension,
 } from '../../src/core/source-read-limits.js';
-import { SourceLimitConfigurationError } from '../../src/core/errors.js';
+import { SourceEncodingError, SourceLimitConfigurationError } from '../../src/core/errors.js';
 
 describe('Source Read Limits v1', () => {
   it('freezes the exact inclusive defaults', () => {
@@ -62,6 +63,25 @@ describe('Source Read Limits v1', () => {
     ]) {
       expect(() => resolveSourceReadLimits(value)).toThrow(SourceLimitConfigurationError);
     }
+  });
+
+  it('preserves an interior U+FEFF in SQLite cells but rejects a second JSONL BOM', () => {
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    const sqliteCell = Buffer.concat([Buffer.from('{"text":"'), bom, Buffer.from('"}')]);
+    const decoded = decodeDeterministicUtf8(sqliteCell, 'sqlite', 'fatal');
+    expect(decoded.text).toBe('{"text":"\uFEFF"}');
+    expect(decoded.hadBom).toBe(false);
+
+    const leadingBomCell = Buffer.concat([bom, Buffer.from('{"text":"ok"}')]);
+    expect(decodeDeterministicUtf8(leadingBomCell, 'sqlite', 'fatal')).toMatchObject({
+      text: '{"text":"ok"}',
+      hadBom: true,
+    });
+
+    const jsonlSecondBom = Buffer.concat([bom, bom, Buffer.from('{"x":1}')]);
+    expect(() => decodeDeterministicUtf8(jsonlSecondBom, 'jsonl', 'fatal')).toThrowError(
+      SourceEncodingError
+    );
   });
 
   it('maps every bound to its exact source kind and unit', () => {

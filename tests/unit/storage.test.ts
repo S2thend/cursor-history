@@ -158,6 +158,42 @@ function createWorkspaceDbWithPointers(
   };
 }
 
+/** Marker for the index-only global catalog scan, which never projects `value`. */
+const KEY_ONLY_CATALOG_SQL_MARKER = 'ORDER BY key ASC';
+
+/**
+ * Rows for the index-only key catalog scan. Payloads are never read, and the
+ * range cursor is honoured so the production keyset pagination terminates.
+ */
+function keyOnlyCatalogRows(sql: string, keys: () => string[]) {
+  const build = (args: unknown[]) => {
+    const last = args[args.length - 1];
+    const pageSize = typeof last === 'number' && last > 0 ? last : 256;
+    const isRange = sql.includes('key < ?');
+    const exclusive = sql.includes('key > ?');
+    const lower = String(args[0] ?? '');
+    if (!isRange) {
+      const prefix = lower.replace(/%$/u, '');
+      return keys()
+        .filter((key) => key.startsWith(prefix))
+        .sort()
+        .slice(0, pageSize)
+        .map((key) => ({ key }));
+    }
+    const upper = String(args[1] ?? '');
+    return keys()
+      .filter((key) => (exclusive ? key > lower : key >= lower) && key < upper)
+      .sort()
+      .slice(0, pageSize)
+      .map((key) => ({ key }));
+  };
+  return {
+    get: vi.fn((...args: unknown[]) => build(args)[0]),
+    all: vi.fn((...args: unknown[]) => build(args)),
+    run: vi.fn(),
+  };
+}
+
 function createGlobalDbForComposerMap(
   composerMap: Record<
     string,
@@ -173,12 +209,21 @@ function createGlobalDbForComposerMap(
         return { get: vi.fn(() => ({ name: 'cursorDiskKV' })), all: vi.fn(() => []), run: vi.fn() };
       }
 
+      if (sql.includes(KEY_ONLY_CATALOG_SQL_MARKER)) {
+        return keyOnlyCatalogRows(sql, () =>
+          Object.entries(composerMap).flatMap(([composerId, entry]) => [
+            `composerData:${composerId}`,
+            ...entry.bubbles.map((_, index) => `bubbleId:${composerId}:${index}`),
+          ])
+        );
+      }
+
       if (
         sql.includes('length(CAST(value AS BLOB))') &&
-        (sql.includes('WHERE key LIKE ?') || sql.includes('substr(CAST(cursorDiskKV.key AS BLOB)'))
+        (sql.includes('WHERE key LIKE ?') || sql.includes('substr(CAST(cursorDiskKV.key AS BLOB)') || sql.includes('GLOB ?'))
       ) {
         const matchingRows = (pattern?: string) => {
-          const prefix = String(pattern ?? '').replace(/%$/u, '');
+          const prefix = String(pattern ?? '').replace(/[%*]$/u, '');
           return Object.entries(composerMap).flatMap(([composerId, entry]) => {
             const rows = [
               {
@@ -313,7 +358,7 @@ function createGlobalDb(
         return {
           get: vi.fn((pattern?: string) => ({
             count: bubbleRows.filter(({ key }) =>
-              key.startsWith(String(pattern).replace(/%$/u, ''))
+              key.startsWith(String(pattern).replace(/[%*]$/u, ''))
             ).length,
           })),
           all: vi.fn(() => []),
@@ -3347,10 +3392,18 @@ describe('getGlobalSession', () => {
             run: vi.fn(),
           };
         }
+        if (sql.includes(KEY_ONLY_CATALOG_SQL_MARKER)) {
+          return keyOnlyCatalogRows(sql, () => [
+            'composerData:g1',
+            'bubbleId:g1:b1',
+            'bubbleId:g1:b-null',
+            'bubbleId:g1:b2',
+          ]);
+        }
         if (
           sql.includes('length(CAST(value AS BLOB))') &&
           (sql.includes('WHERE key LIKE ?') ||
-            sql.includes('substr(CAST(cursorDiskKV.key AS BLOB)'))
+            sql.includes('substr(CAST(cursorDiskKV.key AS BLOB)') || sql.includes('GLOB ?'))
         ) {
           const matchingRows = (pattern?: string) =>
             String(pattern).startsWith('composerData:')
@@ -3603,6 +3656,13 @@ describe('listGlobalSessions (with data)', () => {
             all: vi.fn(() => []),
             run: vi.fn(),
           };
+        }
+        if (sql.includes(KEY_ONLY_CATALOG_SQL_MARKER)) {
+          return keyOnlyCatalogRows(sql, () => [
+            'composerData:g1',
+            'bubbleId:g1:b1',
+            'bubbleId:g1:b2',
+          ]);
         }
         if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
           const matchingRows = (pattern?: string) =>
@@ -4543,11 +4603,14 @@ describe('getSession debug logging', () => {
             run: vi.fn(),
           };
         }
-        if (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?')) {
+        if (
+          sql.includes(KEY_ONLY_CATALOG_SQL_MARKER) ||
+          (sql.includes('length(CAST(value AS BLOB))') && sql.includes('WHERE key LIKE ?'))
+        ) {
           return {
             get: vi.fn(),
             all: vi.fn((pattern?: string) => {
-              if (pattern !== 'bubbleId:%') return [];
+              if (!String(pattern ?? '').startsWith('bubbleId:')) return [];
               throw new Error('query failed');
             }),
             run: vi.fn(),

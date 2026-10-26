@@ -167,9 +167,14 @@ export function assertSourceReadLimit(
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 
 /**
- * Decode deterministic UTF-8. Exactly one leading BOM is accepted and
- * removed; a BOM anywhere else is rejected rather than becoming identity-
- * changing U+FEFF content. Invalid bytes are never replacement-decoded.
+ * Decode deterministic UTF-8. Exactly one leading BOM is accepted and removed;
+ * invalid bytes are never replacement-decoded.
+ *
+ * A JSONL transcript is a byte stream whose framing is BOM-sensitive, so a
+ * second BOM after the leading one is rejected as mixed-encoding framing. A
+ * SQLite cell has no such framing: U+FEFF there is an ordinary, valid Unicode
+ * scalar (Cursor chat content legitimately contains it), so an interior BOM
+ * must be preserved rather than treated as an encoding error.
  */
 export function decodeDeterministicUtf8(
   value: Uint8Array,
@@ -184,7 +189,7 @@ export function decodeDeterministicUtf8(
   }
   const hadBom = startsWithBom;
   if (hadBom) bytes = bytes.subarray(3);
-  if (bytes.indexOf(UTF8_BOM) >= 0) {
+  if (sourceKind === 'jsonl' && bytes.indexOf(UTF8_BOM) >= 0) {
     throw new SourceEncodingError(sourceKind, outcome);
   }
 

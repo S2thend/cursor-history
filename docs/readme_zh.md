@@ -18,6 +18,8 @@ Cursor 对话可能分散在不同工作区、IDE 数据库、Agent transcript�
 
 跨工作区搜索对话正文，查看消息及来源中可用的工具活动，导出为 Markdown 或 JSON。备份和恢复 Composer 历史，或在项目移动时迁移受支持的 Composer 会话。
 
+**把 Cursor 编程历史转化为可复用的训练数据。** 支持 messages、ShareGPT 和 TRL 导出，保留结构化工具调用，提供默认凭据脱敏、按会话划分的训练/验证集，以及可运行的 Hugging Face SFT 示例。[训练数据指南](./training.md)。
+
 **已经积累了几个月的 Cursor 历史？无需提前采集，也无需预先建立索引。** 搜索在本地运行，不需要嵌入模型或 API key。
 
 **希望通过 MCP 接入？** 使用 [cursor-history-mcp](https://github.com/S2thend/cursor-history-mcp#quick-start) 将历史能力暴露为 MCP 工具。Agent 也可以直接调用本项目的 CLI 或 Node.js API，按工作流选择合适的接口即可。两个包独立发布，请查看 [MCP 存储兼容范围与发布说明](https://github.com/S2thend/cursor-history-mcp#compatibility)。
@@ -48,6 +50,7 @@ cursor-history backup
 
 - **多种 Cursor 来源，一个接口** — 读取受支持的 Composer、Agent transcript、Store / CLI 和 ACP 数据。
 - **从搜索到保存** — 跨工作区搜索会话正文，查看可用的 diff 和工具活动，导出 Markdown 或 JSON；备份恢复 Composer 数据，并用 `--dry-run` 预览符合条件的 Composer 会话迁移。
+- **复用真实编程对话进行微调** — messages、ShareGPT 与 TRL 共用会话提取和脱敏逻辑；TRL 模式将工具参数输出为对象，并校验工具定义及调用/结果关联。[导出与训练示例](./training.md)。
 - **融入现有工作流** — 在自己的工具中使用 Node.js API，连接独立的 [MCP 配套项目](https://github.com/S2thend/cursor-history-mcp#compatibility)，或按 [WSL 配置](#cursor-数据存储位置)读取 Windows 侧或 WSL 内的 Store 数据。
 
 | 维度 | **cursor-history（本项目）** | [deja-vu](https://github.com/vshulcz/deja-vu) | [cursaves](https://github.com/Callum-Ward/cursaves) | [johnlindquist/cursor-history](https://github.com/johnlindquist/cursor-history) |
@@ -75,6 +78,38 @@ Cursor 的 [Agent CLI](https://cursor.com/docs/cli/reference/parameters) 提供 
 | 备份或恢复 Composer 历史 | `cursor-history backup` / `cursor-history restore`（[用法](#备份与恢复)） |
 | 将受支持的 Composer 会话移动到另一工作区 | `cursor-history migrate-session`（[用法](#迁移会话)） |
 | 在自己的应用中使用历史记录 | [Node.js API](#库-api) |
+
+## 导出训练数据
+
+```bash
+# 通用 messages 格式（默认）；保留 ShareGPT 兼容选项
+cursor-history export-training -o dataset.jsonl
+cursor-history export-training --schema sharegpt -o sharegpt.jsonl
+
+# 纯对话 TRL 数据，无需工具定义
+cursor-history export-training --schema trl --no-tools --no-reasoning -o sft.jsonl
+
+# 工具调用训练：提供实际使用的函数 JSON Schema
+cursor-history export-training --schema trl --tools-file tools.json \
+  --no-reasoning --valid-ratio 0.05 -o agent.jsonl
+```
+
+`messages` 的工具参数是 JSON 字符串，`trl` 则是 JSON 对象，并附带 `tools` 定义。
+ShareGPT 保留 `conversations/from/value`，其 `[tool_call]` 等文本标记属于本项目扩展。
+工具定义不会从历史调用中猜测；如果缺失，请提供 `--tools-file` 或使用 `--no-tools`。
+
+配套 [Python 示例](../examples/training/train.py) 先逐条应用目标模型的聊天模板，再构建
+训练数据集，避免不同工具参数被 Arrow 改写或因类型不一致而加载失败。支持 `--check`
+仅验证加载和分词。模板必须支持你保留的工具调用和 reasoning 字段；格式兼容不保证训练质量。
+完整环境配置与运行方式见[训练数据指南](./training.md)。
+
+交互终端会在 stderr 显示扫描、已处理会话、记录数及跳过数量；`--progress` 可用于日志和
+`--json` 模式，`--no-progress` 可关闭。`--report quality.json` 保存来源完整性、工具失败或
+缺少结果、截断和丢弃分段等计数。所有输出先写入临时文件，成功后再替换；处理或写入失败
+会保留已有文件，空验证集也会写成空文件，避免误用上次的数据。
+
+TRL 的自动验证只加入现有的 **publish 工作流**，推送 `v*` 标签时运行并阻止验证失败的发布；
+不新增 PR 或普通分支 push 检查。
 
 ## 支持多代 Cursor 存储和不同使用界面
 

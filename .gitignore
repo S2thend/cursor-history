@@ -24,6 +24,9 @@ npm-debug.log*
 # Test coverage
 coverage/
 
+# Local agent hook state (not source)
+.cursor/hooks/state/
+
 # Temporary files
 *.tmp
 *.swp
@@ -33,3 +36,8 @@ coverage/
 # P2 store.db investigation temp files
 tmp_store_real.db*
 tmp_*.db
+
+# Optional Python training examples
+!examples/training/requirements.txt
+.venv-training/
+__pycache__/
