@@ -8,11 +8,11 @@
 
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { once } from 'node:events';
-import { finished } from 'node:stream/promises';
-import { dirname } from 'node:path';
-import type { WriteStream } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { StagedOutputs } from '../../core/staged-output.js';
+import { createTrainingQuality, addTrainingQuality } from '../../core/training-quality.js';
+import { createProgress } from '../progress.js';
 import { getSession, listSessionSummaries, createSessionReadContext } from '../../core/storage.js';
 import {
   projectSession,
@@ -44,6 +44,8 @@ interface ExportTrainingOptions {
   output?: string;
   schema?: string;
   toolsFile?: string;
+  report?: string;
+  progress?: boolean;
   maxToolChars?: string;
   maxUserChars?: string;
   maxRecordChars?: string;
@@ -83,14 +85,6 @@ function parsePositiveInt(raw: string | undefined, fallback: number, flag: strin
   return value;
 }
 
-/** Write a chunk, awaiting drain so large datasets do not balloon memory. */
-async function writeChunk(stream: WriteStream, chunk: string): Promise<void> {
-  if (stream.errored) throw stream.errored;
-  if (!stream.write(chunk)) {
-    await once(stream, 'drain');
-  }
-}
-
 export function registerExportTrainingCommand(program: Command): void {
   program
     .command('export-training')
@@ -124,7 +118,10 @@ export function registerExportTrainingCommand(program: Command): void {
     .option('--no-reasoning', 'Drop assistant reasoning/thinking text')
     .option('--system-prompt <text>', 'System prompt prepended to every record')
     .option('--system-prompt-file <path>', 'Read the system prompt from a file')
-    .option('--force', 'Overwrite an existing output file')
+    .option('--report <path>', 'Save export summary and quality counters as JSON')
+    .option('--progress', 'Show progress on stderr, including when redirected or using --json')
+    .option('--no-progress', 'Disable progress (default: enabled on human-readable terminals)')
+    .option('--force', 'Replace existing outputs only after the complete export succeeds')
     .addHelpText(
       'after',
       `\nExamples:\n  cursor-history export-training -o dataset.jsonl\n  cursor-history export-training --schema trl --no-tools --no-reasoning -o sft.jsonl\n  cursor-history export-training --schema trl --tools-file tools.json -o agent.jsonl\n  cursor-history export-training --schema sharegpt -o sharegpt.jsonl\n`
@@ -142,6 +139,10 @@ export function registerExportTrainingCommand(program: Command): void {
       const workspaceFilter = globalOptions?.workspace;
       const includeCrossWorkspaceSources = globalOptions?.includeCrossWorkspaceSources ?? false;
 
+      const progress = createProgress(
+        options.progress ?? (!useJson && process.stderr.isTTY === true)
+      );
+      let outputs: StagedOutputs | undefined;
       try {
         const sourceReadLimits = validateCliSourceLimitOverrides(globalOptions?.sourceLimit);
         const requestedSchema = options.schema ?? DEFAULTS.schema;
@@ -182,7 +183,8 @@ export function registerExportTrainingCommand(program: Command): void {
             ? readFileSync(expandPath(options.systemPromptFile), 'utf-8').trim()
             : options.systemPrompt?.trim();
 
-        const outputPath = expandPath(options.output ?? DEFAULTS.output);
+        const outputPath = resolve(expandPath(options.output ?? DEFAULTS.output));
+        const reportPath = options.report ? resolve(expandPath(options.report)) : undefined;
         const validRatio =
           options.validRatio === undefined ? 0 : Number.parseFloat(options.validRatio);
         if (!Number.isFinite(validRatio) || validRatio < 0 || validRatio > 1) {
@@ -194,22 +196,19 @@ export function registerExportTrainingCommand(program: Command): void {
         const splitSeed = parsePositiveInt(options.splitSeed, 42, '--split-seed');
         const validationPath =
           validRatio > 0
-            ? expandPath(options.validOutput ?? deriveValidationPath(outputPath))
+            ? resolve(expandPath(options.validOutput ?? deriveValidationPath(outputPath)))
             : undefined;
-        if (validationPath !== undefined && validationPath === outputPath) {
+        const targets = [outputPath, validationPath, reportPath].filter(
+          (path): path is string => path !== undefined
+        );
+        if (new Set(targets).size !== targets.length) {
           throw new CliError(
-            'Validation output must differ from the training output.',
+            'Training, validation and report output paths must differ.',
             ExitCode.USAGE_ERROR
           );
         }
-        for (const path of [outputPath, validationPath]) {
-          if (path !== undefined && existsSync(path) && !options.force) {
-            throw new FileExistsError(path);
-          }
-        }
-        const outputDir = dirname(outputPath);
-        if (outputDir !== '.' && !existsSync(outputDir)) {
-          mkdirSync(outputDir, { recursive: true });
+        for (const path of targets) {
+          if (existsSync(path) && !options.force) throw new FileExistsError(path);
         }
 
         const projectionOptions = {
@@ -260,23 +259,19 @@ export function registerExportTrainingCommand(program: Command): void {
         let sessionsScanned = 0;
         let bytesWritten = 0;
         const splitCounts: Record<'train' | 'validation', number> = { train: 0, validation: 0 };
-        const streams = new Map<'train' | 'validation', WriteStream>();
-        const streamCompletions: Promise<void>[] = [];
-
-        const streamFor = (split: 'train' | 'validation'): WriteStream => {
-          const existing = streams.get(split);
-          if (existing) return existing;
-          const target = split === 'validation' ? validationPath! : outputPath;
-          const created = createWriteStream(target, { encoding: 'utf-8' });
-          const completion = finished(created);
-          // Observe errors immediately; propagate them when finalizing all outputs.
-          void completion.catch(() => {});
-          streamCompletions.push(completion);
-          streams.set(split, created);
-          return created;
-        };
+        const quality = createTrainingQuality();
+        let sessionsDiscovered = 0;
+        let processed = 0;
+        let skippedAmbiguous = 0;
+        let missingSessions = 0;
+        let droppedSessions = 0;
+        const updateProgress = (total: number): void =>
+          progress.update(
+            `Exporting ${processed}/${total} sessions | ${recordsWritten} records | ${skippedAmbiguous + missingSessions + droppedSessions} skipped`
+          );
 
         try {
+          progress.update('Scanning sessions...', true);
           const logicalSessions = await listSessionSummaries(
             {
               limit: 0,
@@ -294,8 +289,10 @@ export function registerExportTrainingCommand(program: Command): void {
             throw new CliError('No sessions to export.', ExitCode.NOT_FOUND);
           }
 
+          sessionsDiscovered = logicalSessions.length;
           for (const summary of logicalSessions) {
             if (summary.resolutionState === 'ambiguous') {
+              skippedAmbiguous += 1;
               diagnosticCollector.onDiagnostic(createAmbiguousSessionDiagnostic(summary));
             }
           }
@@ -303,6 +300,11 @@ export function registerExportTrainingCommand(program: Command): void {
             (summary): summary is ChatSessionSummary => summary.resolutionState !== 'ambiguous'
           );
 
+          outputs = await StagedOutputs.create(targets, options.force);
+          progress.update(
+            `Exporting 0/${sessions.length} sessions | 0 records | ${skippedAmbiguous} skipped`,
+            true
+          );
           for (const summary of sessions) {
             try {
               const session = await getSession(
@@ -312,21 +314,24 @@ export function registerExportTrainingCommand(program: Command): void {
                 context,
                 summary.index
               );
-              if (!session) continue;
+              if (!session) {
+                missingSessions += 1;
+                continue;
+              }
               sessionsScanned += 1;
 
               const projection = projectSession(session, projectionOptions);
               redaction = mergeRedactionCounts(redaction, projection.redaction);
+              addTrainingQuality(quality, projection.quality);
 
               if (projection.records.length === 0) {
+                droppedSessions += 1;
                 const reason: TrainingDropReason = projection.dropReason ?? 'empty';
                 drops[reason] = (drops[reason] ?? 0) + 1;
                 continue;
               }
 
-              for (let index = 0; index < projection.records.length; index += 1) {
-                const record =
-                  schema === 'sharegpt' ? projection.shareGpt[index]! : projection.records[index]!;
+              for (const record of projection.records) {
                 const split = assignSplit(record.id, validRatio, splitSeed);
                 let line: string;
                 try {
@@ -337,14 +342,14 @@ export function registerExportTrainingCommand(program: Command): void {
                     ExitCode.USAGE_ERROR
                   );
                 }
-                const stream = streamFor(split);
-                await writeChunk(stream, line);
+                await outputs.write(split === 'validation' ? validationPath! : outputPath, line);
                 recordsWritten += 1;
                 splitCounts[split] += 1;
                 bytesWritten += Buffer.byteLength(line, 'utf-8');
               }
             } catch (error) {
               if (!(error instanceof SessionAmbiguityError)) throw error;
+              skippedAmbiguous += 1;
               diagnosticCollector.onDiagnostic(
                 createSessionAmbiguityDiagnostic(
                   error.details.sessionId,
@@ -353,17 +358,12 @@ export function registerExportTrainingCommand(program: Command): void {
               );
             } finally {
               context.releaseSession(summary.id);
+              processed += 1;
+              updateProgress(sessions.length);
             }
           }
         } finally {
-          try {
-            for (const stream of streams.values()) stream.end();
-            // Both splits can finish in the same tick. Their listeners were registered
-            // at creation, so neither completion can be missed while awaiting the other.
-            await Promise.all(streamCompletions);
-          } finally {
-            await context.dispose();
-          }
+          await context.dispose();
         }
 
         const result = {
@@ -371,7 +371,11 @@ export function registerExportTrainingCommand(program: Command): void {
           ...(validationPath ? { validationOutput: contractPath(validationPath) } : {}),
           schema,
           sessionsScanned,
+          sessionsDiscovered,
+          skippedSessions: { ambiguous: skippedAmbiguous, missing: missingSessions },
           recordsWritten,
+          quality,
+          ...(reportPath ? { report: contractPath(reportPath) } : {}),
           ...(validRatio > 0
             ? { split: { ratio: validRatio, seed: splitSeed, counts: splitCounts } }
             : {}),
@@ -381,6 +385,16 @@ export function registerExportTrainingCommand(program: Command): void {
           diagnostics: diagnosticCollector.diagnostics,
         };
 
+        progress.update('Finalizing export files...', true);
+        if (reportPath) await outputs!.write(reportPath, `${JSON.stringify(result, null, 2)}\n`);
+        await outputs!.commit();
+        await outputs!.dispose();
+        outputs = undefined;
+        progress.update(
+          `Export complete: ${recordsWritten} records; ${skippedAmbiguous + missingSessions + droppedSessions} sessions skipped.`,
+          true
+        );
+        progress.finish();
         if (useJson) {
           console.log(JSON.stringify(result, null, 2));
         } else {
@@ -388,6 +402,12 @@ export function registerExportTrainingCommand(program: Command): void {
             pc.green(`Wrote ${recordsWritten} training record(s) to ${contractPath(outputPath)}`),
             pc.dim(`Schema: ${schema} | Sessions scanned: ${sessionsScanned}`),
           ];
+          lines.push(
+            `Quality: ${quality.partialSourceSessions} partial-source sessions, ${quality.unknownSourceSessions} unknown-source sessions; ` +
+              `${quality.failedToolCalls} failed, ${quality.cancelledToolCalls} cancelled tool calls; ${quality.missingToolResults} missing results; ` +
+              `${quality.truncatedUserMessages + quality.truncatedToolResults + quality.truncatedSystemPrompts} truncated texts; ${quality.droppedSegments} dropped segments.`
+          );
+          if (reportPath) lines.push(`Quality report: ${contractPath(reportPath)}`);
           if (validationPath) {
             lines.push(
               pc.green(
@@ -422,7 +442,16 @@ export function registerExportTrainingCommand(program: Command): void {
           console.log(lines.join('\n'));
         }
       } catch (error) {
-        handleCommandError(adaptScopedBackupReadError(error, false), { json: useJson });
+        let failure = error;
+        try {
+          await outputs?.dispose();
+        } catch (cleanupError) {
+          failure = new Error(
+            `Export failed: ${error instanceof Error ? error.message : String(error)}; cleanup failed: ${String(cleanupError)}`
+          );
+        }
+        progress.finish();
+        handleCommandError(adaptScopedBackupReadError(failure, false), { json: useJson });
       }
     });
 }

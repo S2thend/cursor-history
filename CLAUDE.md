@@ -298,6 +298,16 @@ and duplicate data already present in structured `Message.toolCalls`.
   seeded FNV-1a hash of `baseSessionKey(id)`, so splitting is grouped by *session* (segments never
   cross the boundary), deterministic across runs, and independent of record order. `deriveValidationPath()`
   defaults the holdout to `<output>.validation.jsonl`. All three profiles key on the same session id and hold out identical sessions.
+- Training output publication uses `StagedOutputs`: private sibling streams, finish before publish,
+  no-clobber links or force replacement, and rollback of earlier files on publication errors.
+  Empty successful splits are explicit empty files. Per-file atomic, not a crash-atomic file set.
+- `training-quality.ts` provides numeric tallies; projection counts truncations at the actual
+  operation and retains counts only for emitted records (source sessions count all reads).
+  `--report` persists the CLI summary. `shareGpt` is lazy/memoized; CLI converts one record at a time.
+- `cli/progress.ts` writes throttled stderr updates; default only for human TTYs, explicit
+  `--progress`/`--no-progress` override. JSON stdout stays clean.
+- Only tag-triggered `npm-publish.yml` runs the pinned, CPU-only local-tokenizer TRL smoke as a
+  source-quality gate. No PR or branch-push CI.
 - `export-training` is registered in `CLI_COMMAND_REGISTRY` alongside the other commands so the
   fatal-category and source-limit coverage gates stay closed.
 

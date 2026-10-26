@@ -419,6 +419,8 @@ The default `messages` profile retains this record shape:
 | `-o, --output <path>` | `./cursor-history-training.jsonl` | Output file |
 | `--schema <messages\|sharegpt\|trl>` | `messages` | Output profile |
 | `--tools-file <path>` | – | JSON array of function definitions; required for TRL with tools, optional for messages |
+| `--report <path>` | – | Save quality counters, split statistics and redaction totals as JSON |
+| `--progress` / `--no-progress` | Auto on human TTYs | Enable/disable stderr progress, including redirected logs |
 | `--max-tool-chars <n>` | `4000` | Truncate long tool results (`0` = unlimited) |
 | `--max-user-chars <n>` | `8000` | Truncate long user messages (`0` = unlimited) |
 | `--max-record-chars <n>` | `40000` | Split larger sessions at user-turn boundaries |
@@ -432,6 +434,12 @@ The default `messages` profile retains this record shape:
 | `--no-anonymize-paths` | anonymization **on** | Keep absolute home paths as-is |
 | `--no-tools` | tools **on** | Drop structured tool calls and results |
 | `--no-reasoning` | reasoning **on** | Drop assistant reasoning traces |
+
+Progress shows discovery, session counts, records and skips on stderr. Use `--progress` with
+`--json` or redirected output; `--no-progress` disables it. `--report ./quality.json` saves the
+summary, including partial sources, failed/missing tool results, truncations and dropped segments.
+All outputs are staged before replacement, preserving prior files on extraction/write failures;
+successful empty splits replace stale content. See [output integrity and quality](./docs/training.md#progress-output-integrity-and-quality-reports).
 
 **How the projection behaves**
 

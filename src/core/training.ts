@@ -25,6 +25,12 @@ export {
   serializeTrainingLine,
 } from './training-formats.js';
 
+import {
+  createTrainingQuality,
+  addTrainingQuality,
+  type TrainingQuality,
+} from './training-quality.js';
+
 import type { ChatSession, Message, ToolCall } from './types.js';
 import { anonymizeHostPaths, redactSensitiveText, type RedactionCounts } from './sensitive-data.js';
 export { anonymizeHostPaths, redactSensitiveText, type RedactionCounts } from './sensitive-data.js';
@@ -191,6 +197,17 @@ export function truncateWithMarker(text: string, limit: number): string {
   return `${text.slice(0, limit)}\n[... truncated ${text.length - limit} chars]`;
 }
 
+/** Count actual truncations before adding display markers; source text may contain identical markers. */
+function truncateTrainingText(
+  text: string,
+  limit: number,
+  quality: TrainingQuality,
+  field: 'truncatedUserMessages' | 'truncatedToolResults' | 'truncatedSystemPrompts'
+): string {
+  if (limit > 0 && text.length > limit) quality[field] += 1;
+  return truncateWithMarker(text, limit);
+}
+
 interface SanitizeContext {
   options: Required<Omit<TrainingExportOptions, 'systemPrompt' | 'toolDefinitions'>>;
   counts: RedactionCounts;
@@ -258,6 +275,7 @@ function reasoningCandidates(message: Message): string[] {
 
 interface BuildResult {
   messages: TrainingMessage[];
+  quality: TrainingQuality;
   dropReason?: TrainingDropReason;
 }
 
@@ -273,6 +291,7 @@ function buildTrainingMessages(
   context: SanitizeContext
 ): BuildResult {
   const output: TrainingMessage[] = [];
+  const quality = createTrainingQuality();
   let callCounter = 0;
 
   const nextCallId = (): string => {
@@ -282,9 +301,11 @@ function buildTrainingMessages(
 
   for (const message of messages) {
     if (message.role === 'user') {
-      const text = truncateWithMarker(
+      const text = truncateTrainingText(
         sanitize(message.content.trim(), context),
-        context.options.maxUserChars
+        context.options.maxUserChars,
+        quality,
+        'truncatedUserMessages'
       );
       if (text.length > 0) {
         output.push({ role: 'user', content: text });
@@ -318,10 +339,16 @@ function buildTrainingMessages(
           arguments: JSON.stringify(sanitizeJsonValue(call.params ?? {}, context)),
         },
       });
+      quality.toolCalls += 1;
+      if (call.status === 'error') quality.failedToolCalls += 1;
+      if (call.status === 'cancelled') quality.cancelledToolCalls += 1;
+      if (call.error == null && call.result == null) quality.missingToolResults += 1;
       const rawResult = call.error ?? call.result ?? '';
-      const content = truncateWithMarker(
+      const content = truncateTrainingText(
         sanitize(typeof rawResult === 'string' ? rawResult : JSON.stringify(rawResult), context),
-        context.options.maxToolResultChars
+        context.options.maxToolResultChars,
+        quality,
+        'truncatedToolResults'
       );
       results.push({ id, content, status: call.status });
     }
@@ -347,10 +374,10 @@ function buildTrainingMessages(
       message.role === 'assistant' &&
       (message.content.trim().length > 0 || (message.tool_calls?.length ?? 0) > 0)
   );
-  if (output.length === 0) return { messages: output, dropReason: 'empty' };
-  if (!hasUser) return { messages: output, dropReason: 'no-user-turn' };
-  if (!hasAssistantText) return { messages: output, dropReason: 'no-usable-content' };
-  return { messages: output };
+  if (output.length === 0) return { messages: output, quality, dropReason: 'empty' };
+  if (!hasUser) return { messages: output, quality, dropReason: 'no-user-turn' };
+  if (!hasAssistantText) return { messages: output, quality, dropReason: 'no-usable-content' };
+  return { messages: output, quality };
 }
 
 /** Split messages into coherent slices that each begin at a user turn. */
@@ -410,7 +437,9 @@ function packGroups(
 
 export interface SessionProjectionResult {
   records: TrainingRecord[];
+  /** Lazy compatibility view; materialized once only when accessed. */
   shareGpt: ShareGptRecord[];
+  quality: TrainingQuality;
   redaction: RedactionCounts;
   dropReason?: TrainingDropReason;
 }
@@ -447,19 +476,25 @@ export function projectSession(
   const sources = session.sources ?? (session.workspaceId === 'store' ? ['store'] : ['composer']);
 
   const records: TrainingRecord[] = [];
-  const shareGpt: ShareGptRecord[] = [];
+  let shareGpt: ShareGptRecord[] | undefined;
+  const quality = createTrainingQuality();
+  const state = session.resolution?.state ?? session.resolutionState;
+  if (state === 'partial') quality.partialSourceSessions = 1;
+  else if (state !== 'complete') quality.unknownSourceSessions = 1;
   let firstDrop: TrainingDropReason | undefined;
 
   slices.forEach((slice, sliceIndex) => {
     const flat = slice.groups.flat();
     const built = buildTrainingMessages(flat, context);
     if (built.dropReason) {
+      quality.droppedSegments += 1;
       firstDrop ??= built.dropReason;
       return;
     }
 
     const userTurns = built.messages.filter((message) => message.role === 'user').length;
     if (userTurns < resolved.minUserTurns) {
+      quality.droppedSegments += 1;
       firstDrop ??= 'below-min-user-turns';
       return;
     }
@@ -468,7 +503,12 @@ export function projectSession(
     if (resolved.systemPrompt && resolved.systemPrompt.trim().length > 0) {
       messages.push({
         role: 'system',
-        content: truncateWithMarker(sanitize(resolved.systemPrompt.trim(), context), 8000),
+        content: truncateTrainingText(
+          sanitize(resolved.systemPrompt.trim(), context),
+          8000,
+          built.quality,
+          'truncatedSystemPrompts'
+        ),
       });
     }
     messages.push(...built.messages);
@@ -494,13 +534,19 @@ export function projectSession(
       ...(tools !== undefined ? { tools } : {}),
     };
     records.push(record);
-    shareGpt.push(toShareGptRecord(record));
+    built.quality.emittedRecords = 1;
+    addTrainingQuality(quality, built.quality);
   });
 
-  if (records.length === 0) {
-    return { records, shareGpt, redaction: counts, dropReason: firstDrop ?? 'empty' };
-  }
-  return { records, shareGpt, redaction: counts };
+  return {
+    records,
+    get shareGpt() {
+      return (shareGpt ??= records.map(toShareGptRecord));
+    },
+    quality,
+    redaction: counts,
+    ...(records.length === 0 ? { dropReason: firstDrop ?? 'empty' } : {}),
+  };
 }
 
 /** Add two redaction tallies. */

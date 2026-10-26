@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
@@ -146,6 +146,102 @@ describe('training format CLI', () => {
     expect(result.timedOut).toBe(false);
     expect(result.status).not.toBe(0);
     expect(result.stdout + result.stderr).toMatch(/directory|EISDIR/i);
+  });
+
+  it('preserves all old outputs after a failure following a valid staged record', async () => {
+    writeStoreTranscript(fixture, 'late-error', 'late-error', [
+      { role: 'user', message: { content: [{ type: 'text', text: 'First question' }] } },
+      { role: 'assistant', message: { content: [{ type: 'text', text: 'First answer' }] } },
+      { role: 'user', message: { content: [{ type: 'text', text: 'Second question' }] } },
+      {
+        role: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'undefined_tool', input: {} }] },
+      },
+    ]);
+    const output = join(fixture.root, 'train.jsonl');
+    const validation = join(fixture.root, 'train.validation.jsonl');
+    const report = join(fixture.root, 'report.json');
+    for (const path of [output, validation, report]) writeFileSync(path, `old ${path}`);
+    const result = await run([
+      '--schema',
+      'trl',
+      '--tools-file',
+      toolsPath,
+      '--max-record-chars',
+      '1',
+      '--valid-ratio',
+      '0.5',
+      '--force',
+      '-o',
+      output,
+      '--report',
+      report,
+      '--progress',
+    ]);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain('undefined_tool');
+    for (const path of [output, validation, report])
+      expect(readFileSync(path, 'utf8')).toBe(`old ${path}`);
+    expect(
+      readdirSync(fixture.root).some((name) => name.startsWith('.cursor-history-export-'))
+    ).toBe(false);
+    expect(result.stderr).not.toContain('Export complete');
+  });
+
+  it('replaces stale empty splits and saves the same quality report returned as JSON', async () => {
+    const output = join(fixture.root, 'train.jsonl');
+    const report = join(fixture.root, 'reports', 'quality.json');
+    writeFileSync(output, 'stale training data');
+    const result = await run([
+      '-o',
+      output,
+      '--force',
+      '--valid-ratio',
+      '1',
+      '--report',
+      report,
+      '--max-user-chars',
+      '2',
+      '--progress',
+    ]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(readFileSync(output, 'utf8')).toBe('');
+    const summary = JSON.parse(result.stdout);
+    expect(JSON.parse(readFileSync(report, 'utf8'))).toEqual(summary);
+    expect(summary.quality.emittedRecords).toBe(6);
+    expect(summary.quality.truncatedUserMessages).toBe(12);
+    expect(summary.quality.toolCalls).toBe(6);
+    expect(summary.quality.missingToolResults).toBe(6);
+    expect(summary.split.counts).toEqual({ train: 0, validation: 6 });
+    expect(result.stderr).toContain('Scanning sessions');
+    expect(result.stderr).toContain('Exporting 0/6');
+    expect(result.stderr).toContain('Finalizing export files');
+    expect(result.stderr).toContain('Export complete');
+    expect(result.stderr).not.toContain('\x1b');
+  });
+
+  it.each([[], ['--no-progress'], ['--progress', '--no-progress']])(
+    'keeps JSON mode quiet by default or when disabled: %j',
+    async (...flags) => {
+      const result = await run(['-o', join(fixture.root, 'quiet.jsonl'), ...flags]);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(JSON.parse(result.stdout).recordsWritten).toBe(6);
+    }
+  );
+
+  it('rejects a report path alias without changing the original file', async () => {
+    const output = join(fixture.root, 'train.jsonl');
+    writeFileSync(output, 'original');
+    const result = await run([
+      '-o',
+      output,
+      '--force',
+      '--report',
+      join(fixture.root, '.', 'train.jsonl'),
+    ]);
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(output, 'utf8')).toBe('original');
   });
 
   it.each(['not json', '{}', '[]'])(

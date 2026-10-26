@@ -143,6 +143,17 @@ function unsafeReleaseBypasses(source: string): string[] {
   ]) {
     if (!sourceQualityJob.includes(command)) failures.push(`source quality skips ${command}`);
   }
+  for (const command of [
+    "python-version: '3.13'",
+    'python -m pip install torch==2.14.1+cpu --index-url https://download.pytorch.org/whl/cpu',
+    'python -m pip install torch==2.14.1+cpu -r examples/training/requirements.txt',
+    'node tests/trl/export-fixture.mjs "$RUNNER_TEMP/cursor-history-trl.jsonl"',
+    'python tests/trl/smoke.py "$RUNNER_TEMP/cursor-history-trl.jsonl"',
+    "HF_HUB_OFFLINE: '1'",
+  ]) {
+    if (!sourceQualityJob.includes(command))
+      failures.push(`source quality skips TRL check: ${command}`);
+  }
   if (/\bnpm\s+(?:ci|test|run\s+(?:typecheck|lint|format:check|build))\b/u.test(runtimeJob)) {
     failures.push('minimum runtime executes unsupported source tooling');
   }
@@ -744,6 +755,27 @@ describe('npm publication workflow', () => {
     expect(unaddressedUpload).not.toBe(source);
     expect(unsafeReleaseBypasses(unaddressedUpload)).toContain(
       'package upload is not checksum-addressed'
+    );
+  });
+});
+
+describe('training verification is publish-only', () => {
+  it('keeps the sole workflow tag-triggered, without PR or branch-push checks', () => {
+    const source = workflow();
+    expect(source).toContain("on:\n  push:\n    tags:\n      - 'v*'");
+    expect(source).not.toMatch(
+      /^  (pull_request|pull_request_target|workflow_dispatch|schedule):/m
+    );
+    expect(source).not.toMatch(/^    branches:/m);
+  });
+
+  it('rejects removal of the real TRL training check from the release gate', () => {
+    const mutation = workflow().replace(
+      'python tests/trl/smoke.py "$RUNNER_TEMP/cursor-history-trl.jsonl"',
+      'echo skipped'
+    );
+    expect(unsafeReleaseBypasses(mutation).some((failure) => failure.includes('TRL check'))).toBe(
+      true
     );
   });
 });

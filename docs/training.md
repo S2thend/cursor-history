@@ -57,8 +57,54 @@ Tool descriptions and schema strings pass through the same credential/path sanit
 conversation text. Review them before training.
 
 A missing tool definition produces an actionable error. Supply that definition or choose
-`--no-tools`; a failed streaming export may leave partial output from earlier records, so rerun
-with `--force` after correcting the input.
+`--no-tools`, then rerun. A handled extraction or write failure leaves existing output files intact.
+
+## Progress, output integrity and quality reports
+
+```bash
+cursor-history export-training --schema trl --tools-file ./tools.json \
+  --valid-ratio 0.05 --report ./training/quality.json -o ./training/agent.jsonl
+
+# Keep stdout as one JSON summary while following progress on stderr.
+cursor-history --json export-training --schema trl --no-tools --no-reasoning \
+  --progress --report ./training/quality.json -o ./training/sft.jsonl
+```
+
+Progress starts with session discovery, then shows processed/total sessions, emitted records and
+skipped sessions, followed by finalization. It appears automatically on human-readable terminals;
+`--progress` enables newline-delimited updates in redirected logs or JSON mode, and `--no-progress`
+disables it. Updates are throttled and never include conversation content. Successful `--json`
+stdout remains a single JSON object; fatal errors retain the CLI's existing stderr format.
+
+The human summary and JSON `quality` object report:
+
+| Counter | Scope |
+| --- | --- |
+| `partialSourceSessions`, `unknownSourceSessions` | All read sessions, including subsequently dropped sessions; based on explicit resolution state |
+| `emittedRecords`, `droppedSegments` | Kept records and rejected user-turn segments |
+| `toolCalls`, `failedToolCalls`, `cancelledToolCalls` | Tool calls in emitted records only |
+| `missingToolResults` | Emitted calls with neither a stored result nor error; an explicit empty result is not missing |
+| `truncatedUserMessages`, `truncatedToolResults`, `truncatedSystemPrompts` | Actual length-limit operations on emitted records, after sanitization |
+
+`--report <path>` saves the same JSON summary returned by `--json`, including split counts,
+redaction totals, quality and diagnostics. `bytesWritten` counts the JSONL data, excluding the
+report itself. Counts describe observations; they do not automatically
+remove failed tool calls or incomplete sources. Existing record metadata and tool statuses remain
+available for downstream filtering. Source text that happens to contain a truncation marker does
+not count as an exporter truncation. A zero limit disables user/tool text truncation.
+
+All selected outputs (train, validation and optional report) are written to private sibling files
+first. Only after extraction and writing succeed are complete files published. `--force` replaces
+existing files at that point; without it, an output created by another process is never overwritten.
+Handled publication errors roll back earlier files; if rollback itself fails, the error reports
+retained recovery files. Individual file replacement is atomic, but multiple files are not a
+crash-atomic transaction. Abrupt termination may leave private staging directories. Concurrent
+writers targeting the same forced outputs are not a supported workflow.
+
+A successful empty split is written as an empty file, including with `--force`, so an old validation
+or training file cannot masquerade as the new split. Output paths must be distinct regular files;
+symlink output targets are rejected. ShareGPT conversion is performed only when selected; the
+legacy projection's `shareGpt` property remains available as a lazy, memoized compatibility view.
 
 ## Run the TRL example
 
@@ -82,7 +128,7 @@ python examples/training/train.py ./training/agent.jsonl \
 ```
 
 Use `--validation ./training/agent.validation.jsonl` when that split contains records. With small
-datasets, hashing may assign no sessions to one split; empty splits are not usable for training.
+datasets, hashing may assign no sessions to one split; empty splits are written as empty files and are not usable for training.
 The seed and assignment are shared by all three formats. `--valid-ratio` is a per-session hash
 threshold, so the observed fraction need not be exact.
 
@@ -124,6 +170,11 @@ python tests/trl/smoke.py /tmp/cursor-history-trl.jsonl
 # Optional: download only the real Qwen tokenizer/template for the same CPU test
 python tests/trl/smoke.py /tmp/cursor-history-trl.jsonl --tokenizer Qwen/Qwen2.5-0.5B-Instruct
 ```
+
+The existing **Publish to NPM** workflow runs the local-tokenizer smoke test with pinned CPU
+PyTorch/TRL dependencies before packaging. It triggers only for `v*` tags; there is no PR or
+ordinary branch-push CI added by this feature. Model downloads are disabled during the smoke test.
+A failed training check blocks publication through the existing source-quality dependency.
 
 The smoke test uses synthetic exported conversations, a local tokenizer and a tiny randomly
 initialized model. It checks tool schema/argument preservation, preprocessing and a CPU training

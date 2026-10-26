@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Training export quality counters and optional `--report` JSON, plus throttled stderr progress
+  with `--progress` / `--no-progress`. Existing JSON stdout remains machine-readable.
+- Pinned CPU TRL smoke verification in the existing tag-triggered publish workflow only.
 - Explicit TRL training export (`--schema trl`) with object-valued tool arguments, validated
   function definitions (`--tools-file`), and correlated tool responses. Optional definitions also
   work with the default messages profile; existing messages and ShareGPT exports stay compatible.
@@ -20,6 +23,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Training exports stage every output before publication, roll back handled publication failures,
+  and replace empty splits explicitly. Failed extraction/writes preserve existing files.
+- ShareGPT conversion is lazy and memoized for legacy callers; CLI exports convert only the chosen
+  format instead of eagerly allocating an unused ShareGPT copy.
 - Training export waits for both output streams reliably when train and validation finish together,
   and observes stream errors before reporting success.
 - UI refresh uses fresh scoped reads; response caching has a finite cap, shutdown is idempotent,
