@@ -44,7 +44,7 @@ inventory remains readable.
 
 The official release candidate is the artifact produced by the tag-triggered
 `.github/workflows/npm-publish.yml` workflow, not a tarball packed on a maintainer workstation. After
-T114 passes, tag that exact frozen revision with `v0.18.0` (the `v` prefix plus the current
+T114 passes, tag that exact frozen revision with `v0.19.0` (the `v` prefix plus the current
 `package.json` version) and start the workflow. Leave the protected publish job unapproved until the
 private T115 verification below passes. Wait for source validation, every runtime-candidate job, and
 the full package verification before treating the candidate as eligible for approval.
